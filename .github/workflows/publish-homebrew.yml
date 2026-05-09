@@ -1,0 +1,99 @@
+name: Publish Homebrew Formula
+
+# Updates the zsass formula in nihen/homebrew-tap whenever a GitHub
+# Release is published. The release.yml workflow attaches archives +
+# .sha256 sidecars; this job reads those sidecars and rewrites
+# Formula/zsass.rb in the tap repo.
+#
+# Requires repo secret HOMEBREW_TAP_TOKEN: a token (PAT or fine-grained)
+# with `contents: write` on nihen/homebrew-tap. The job is a no-op when
+# the secret is absent so the first-time introduction does not fail.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version to publish (e.g. 0.1.0)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve target version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            raw="${{ github.event.inputs.version }}"
+          else
+            raw="${{ github.event.release.tag_name }}"
+          fi
+          version="${raw#v}"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::Unexpected version '${raw}' (need semver)"
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check tap token availability
+        id: token
+        shell: bash
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [[ -z "${HOMEBREW_TAP_TOKEN}" ]]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set; skipping tap update."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Checkout zsass (renderer source)
+        if: steps.token.outputs.skip != 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          path: zsass
+
+      - name: Checkout nihen/homebrew-tap
+        if: steps.token.outputs.skip != 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          repository: nihen/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Render formula
+        if: steps.token.outputs.skip != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p homebrew-tap/Formula
+          zsass/scripts/render-homebrew-formula.sh "${VERSION}" \
+            --output homebrew-tap/Formula/zsass.rb
+
+      - name: Commit and push
+        if: steps.token.outputs.skip != 'true'
+        shell: bash
+        working-directory: homebrew-tap
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- Formula/zsass.rb; then
+            echo "Formula already up to date; nothing to commit."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formula/zsass.rb
+          git commit -m "zsass ${VERSION}"
+          git push origin HEAD
