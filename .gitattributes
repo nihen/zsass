@@ -1,0 +1,40 @@
+# Keep line endings sane across release archives and Windows checkouts.
+* text=auto eol=lf
+
+# Shell / POSIX scripts must always be LF, even on Windows.
+*.sh    text eol=lf
+*.bash  text eol=lf
+*.zsh   text eol=lf
+*.fish  text eol=lf
+
+# PowerShell wants CRLF.
+*.ps1   text eol=crlf
+*.psm1  text eol=crlf
+*.psd1  text eol=crlf
+
+# Source / docs / config: explicit text + LF.
+*.zig   text eol=lf
+*.zon   text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.toml  text eol=lf
+*.scss  text eol=lf
+*.sass  text eol=lf
+*.css   text eol=lf
+
+# Binary blobs that should never be normalized.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.tar   binary
+*.tar.gz binary
+*.tgz   binary
+*.zip   binary
+
+# Submodule / lockfile content - leave as-is.
+tests/sass-spec/** -text
+*.hrx -text

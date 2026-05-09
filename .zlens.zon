@@ -1,0 +1,71 @@
+.{
+    // Freeze the current cross-module import graph so future dependency creep
+    // shows up as a boundary violation. `rules` and `deny` use named entries
+    // because the current zlens parser reads struct fields rather than arrays.
+    .rules = .{
+        .frontend = .{
+            .from = "src/frontend/",
+            .deny = .{
+                .api = "src/api.zig",
+                .main = "src/main.zig",
+                .builtin = "src/builtin/",
+                .color = "src/color/",
+                .ir = "src/ir/",
+                .resolve = "src/resolve/",
+                .selector = "src/selector/",
+            },
+        },
+        .color = .{
+            .from = "src/color/",
+            .deny = .{
+                .api = "src/api.zig",
+                .main = "src/main.zig",
+                .builtin = "src/builtin/",
+                .frontend = "src/frontend/",
+                .ir = "src/ir/",
+                .resolve = "src/resolve/",
+                .selector = "src/selector/",
+            },
+        },
+        .selector = .{
+            .from = "src/selector/",
+            .deny = .{
+                .api = "src/api.zig",
+                .main = "src/main.zig",
+                .builtin = "src/builtin/",
+                .color = "src/color/",
+                .ir = "src/ir/",
+                .resolve = "src/resolve/",
+            },
+        },
+        .builtin = .{
+            .from = "src/builtin/",
+            .deny = .{
+                .api = "src/api.zig",
+                .main = "src/main.zig",
+                .frontend = "src/frontend/",
+            },
+        },
+        .ir = .{
+            .from = "src/ir/",
+            .deny = .{
+                .api = "src/api.zig",
+                .main = "src/main.zig",
+                .color = "src/color/",
+            },
+        },
+        .resolve = .{
+            .from = "src/resolve/",
+            .deny = .{
+                .api = "src/api.zig",
+                .main = "src/main.zig",
+            },
+        },
+        .runtime = .{
+            .from = "src/runtime/",
+            .deny = .{
+                .main = "src/main.zig",
+            },
+        },
+    },
+}

@@ -1,0 +1,12 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/nihen/zsass/security/advisories/new
+    about: |
+      Use a private security advisory for vulnerabilities. Do not file
+      a public issue. See SECURITY.md for details.
+  - name: sass-spec upstream
+    url: https://github.com/sass/sass-spec
+    about: |
+      If a behavior is wrong in upstream sass-spec itself (or in
+      dart-sass), report it there. zsass tracks the spec.

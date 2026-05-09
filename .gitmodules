@@ -1,0 +1,3 @@
+[submodule "tests/sass-spec"]
+	path = tests/sass-spec
+	url = https://github.com/sass/sass-spec.git

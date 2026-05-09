@@ -1,0 +1,52 @@
+# Copy this into .github/workflows/zsass.yml (or similar) to gate SCSS builds with zsass.
+name: zsass-style-check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Edit these if your project needs different install paths or inputs.
+env:
+  ZSASS_INSTALL_PREFIX: ${{ github.workspace }}/.zsass
+  ZSASS_GLOBAL_CACHE_DIR: ${{ runner.temp }}/zsass-cache
+  # Colon-delimited input:output pairs (one per line) that --check will validate.
+  ZSASS_CHECK_TARGETS: |
+    src/styles/app.scss:dist/styles/app.css
+
+jobs:
+  sass:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0 # Matches build.zig.zon .minimum_zig_version.
+
+      - name: Cache Zig artifacts and the installed CLI
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ZSASS_GLOBAL_CACHE_DIR }}
+            ${{ env.ZSASS_INSTALL_PREFIX }}/bin/zsass
+          key: zsass-${{ runner.os }}-${{ hashFiles('build.zig', 'build.zig.zon', 'scripts/install_cli.sh') }}
+
+      - name: Build & install zsass
+        run: scripts/install_cli.sh --prefix "${ZSASS_INSTALL_PREFIX}" --optimize ReleaseFast
+
+      - name: Run zsass --check across your entrypoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZSASS_BIN="${ZSASS_INSTALL_PREFIX}/bin/zsass"
+          [[ -x "$ZSASS_BIN" ]] || { echo "zsass binary missing at $ZSASS_BIN" >&2; exit 1; }
+          while IFS= read -r pair; do
+            [[ -z "$pair" ]] && continue
+            echo "::group::zsass --check $pair"
+            "$ZSASS_BIN" --check "$pair"
+            echo "::endgroup::"
+          done <<<"${ZSASS_CHECK_TARGETS}"
+
+      - name: Optional API smoke test
+        run: zig build api-smoke
