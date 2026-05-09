@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.1 (2026-05-10)
+
+### Documentation
+- Overhaul `--help` output: document `<input_dir>:<output_dir>`
+  directory mode, drop silently-noop flags from the visible options,
+  regroup flags into Diagnostics / Source maps / Input syntax / Build
+  behavior sections, and list `ZSASS_CSS_CACHE_STRICT` in the
+  Environment block.
+- Regenerate bash/zsh/fish completion scripts to cover the full public
+  flag set with value-enum completion (and fix a malformed
+  `--dry-run=json` entry in the fish script).
+- Add a directory-compilation example to `docs/cli.md`.
+
+### Removed
+- Drop the unimplemented `--exec` dispatch (the bytecode runner was
+  never wired up and only ever exited 64).
+
 ## 0.1.0 (2026-05-10)
 
 Initial public release.
