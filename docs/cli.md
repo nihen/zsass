@@ -99,6 +99,15 @@ Both helpers can also write shell completion scripts:
   ```bash
   zsass src/app.scss:dist/app.css src/admin.scss:dist/admin.css
   ```
+- Compile a whole tree by pointing the pair at directories:
+  ```bash
+  zsass src/styles:dist/css
+  ```
+  When the left side of an `input:output` pair is a directory, zsass walks it
+  recursively, mirrors the structure under the output directory, compiles every
+  `.scss`/`.sass` file (skipping `_partial.*` files), and rewrites the
+  extension to `.css`. Directory and single-file pairs can be mixed in one
+  invocation.
 - Pipe input from another tool while keeping relative imports working:
   ```bash
   cat src/app.scss | zsass --stdin --stdin-filepath src/app.scss -o dist/app.css
