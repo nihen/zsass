@@ -76,6 +76,18 @@ If you would rather audit the installer first, the scripts live at
 [`scripts/install.sh`](scripts/install.sh) /
 [`scripts/install.ps1`](scripts/install.ps1).
 
+### Homebrew (macOS / Linux)
+
+```bash
+brew install nihen/tap/zsass
+```
+
+The formula lives in [`nihen/homebrew-tap`](https://github.com/nihen/homebrew-tap)
+and is regenerated on every release by
+[`.github/workflows/publish-homebrew.yml`](.github/workflows/publish-homebrew.yml).
+Each upgrade reuses the same SHA256 sidecars that the release workflow
+publishes alongside the archives.
+
 ### Manual download
 
 Each release publishes `tar.gz` archives for Linux x86_64 / aarch64 and
