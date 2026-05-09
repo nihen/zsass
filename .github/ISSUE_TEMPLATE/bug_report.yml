@@ -1,0 +1,78 @@
+name: Bug report
+description: Report a behavior bug or sass-spec / dart-sass incompatibility.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Before submitting, please check that the
+        same input is not already broken in upstream `sass-spec` - if it
+        is, that is likely a missing-feature issue rather than a
+        regression. For security-sensitive issues, please use the
+        private channels in [SECURITY.md](https://github.com/nihen/zsass/blob/main/SECURITY.md)
+        instead of this form.
+
+  - type: input
+    id: zsass-version
+    attributes:
+      label: zsass version
+      description: Output of `zsass --version`.
+      placeholder: "zsass 0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform / OS
+      description: e.g. `Ubuntu 24.04 x86_64`, `macOS 15.4 aarch64`, `Windows 11 x86_64`.
+    validations:
+      required: true
+
+  - type: input
+    id: dart-sass-version
+    attributes:
+      label: dart-sass version compared against (optional)
+      description: If you are reporting a divergence from dart-sass, paste `sass --version` output.
+      placeholder: "1.77.0 compiled with dart2js 3.4.0"
+
+  - type: textarea
+    id: input-scss
+    attributes:
+      label: Input (.scss / .sass)
+      description: A minimal reproducer. 5-15 lines is usually enough.
+      render: scss
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command(s) you ran
+      description: Include all flags. If using the embedding API instead, paste the Zig snippet.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual output (zsass)
+      description: Either CSS output or full error text. Include `stderr` for crashes.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected output
+      description: What dart-sass produces, or what the spec says should happen.
+      render: shell
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+      description: Stack traces, screenshots, links to related sass-spec entries, etc.

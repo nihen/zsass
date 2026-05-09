@@ -1,0 +1,203 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Default to read-only. Only the publish job needs `contents: write` (to
+# create the release) and `id-token: write` (for sigstore keyless signing).
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux-gnu
+            runs_on: ubuntu-latest
+            asset_os: linux
+            asset_arch: x86_64
+            archive_ext: tar.gz
+          - target: aarch64-linux-gnu
+            runs_on: ubuntu-latest
+            asset_os: linux
+            asset_arch: aarch64
+            archive_ext: tar.gz
+          - target: aarch64-macos
+            runs_on: macos-latest
+            asset_os: macos
+            asset_arch: aarch64
+            archive_ext: tar.gz
+          - target: x86_64-macos
+            runs_on: macos-latest
+            asset_os: macos
+            asset_arch: x86_64
+            archive_ext: tar.gz
+          - target: x86_64-windows-gnu
+            runs_on: ubuntu-latest
+            asset_os: windows
+            asset_arch: x86_64
+            archive_ext: zip
+            exe_suffix: .exe
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          submodules: recursive
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29  # v2
+        with:
+          version: 0.16.0
+
+      - name: Build (${{ matrix.target }})
+        run: |
+          zig build \
+            -Doptimize=ReleaseFast \
+            -Dtarget=${{ matrix.target }} \
+            --prefix zig-out
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          package_version="$(awk -F '"' '/^[[:space:]]*\.version[[:space:]]*=/{print $2; exit}' build.zig.zon)"
+          if [ -z "${package_version}" ]; then
+            echo "Unable to read .version from build.zig.zon" >&2
+            exit 1
+          fi
+          if [ "${tag_version}" != "${package_version}" ]; then
+            echo "Release tag v${tag_version} does not match build.zig.zon version ${package_version}" >&2
+            exit 1
+          fi
+          version="${package_version}"
+          name="zsass-v${version}-${{ matrix.asset_os }}-${{ matrix.asset_arch }}"
+          stage_dir="dist/${name}"
+          mkdir -p "${stage_dir}"
+          cp "zig-out/bin/zsass${{ matrix.exe_suffix }}" "${stage_dir}/"
+          cp LICENSE README.md CHANGELOG.md "${stage_dir}/"
+          if [ "${{ matrix.archive_ext }}" = "zip" ]; then
+            (cd dist && zip -r "${name}.zip" "${name}")
+            asset="dist/${name}.zip"
+          else
+            asset="dist/${name}.tar.gz"
+            tar -C dist -czf "${asset}" "${name}"
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum "$(basename "${asset}")" > "$(basename "${asset}").sha256")
+          else
+            (cd dist && shasum -a 256 "$(basename "${asset}")" > "$(basename "${asset}").sha256")
+          fi
+          rm -rf "${stage_dir}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: dist-${{ matrix.asset_os }}-${{ matrix.asset_arch }}
+          path: |
+            dist/zsass-v*-${{ matrix.asset_os }}-${{ matrix.asset_arch }}.${{ matrix.archive_ext }}
+            dist/zsass-v*-${{ matrix.asset_os }}-${{ matrix.asset_arch }}.${{ matrix.archive_ext }}.sha256
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Sign and publish release
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+      id-token: write    # required for sigstore keyless signing (cosign sign-blob)
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Verify the full asset set is present
+        # Refuse to publish a partial release. If even one matrix leg
+        # failed to upload, abort here before any GitHub Release is
+        # created or any signature is generated.
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          expected=(
+            "zsass-${tag}-linux-x86_64.tar.gz"
+            "zsass-${tag}-linux-aarch64.tar.gz"
+            "zsass-${tag}-macos-x86_64.tar.gz"
+            "zsass-${tag}-macos-aarch64.tar.gz"
+            "zsass-${tag}-windows-x86_64.zip"
+          )
+          ls -la dist/
+          missing=0
+          for f in "${expected[@]}"; do
+            if [ ! -f "dist/${f}" ]; then
+              echo "::error::Missing release archive: ${f}"
+              missing=$((missing + 1))
+            fi
+            if [ ! -f "dist/${f}.sha256" ]; then
+              echo "::error::Missing checksum: ${f}.sha256"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "${missing}" -gt 0 ]; then
+            echo "::error::${missing} expected file(s) missing; aborting publish to avoid partial release."
+            exit 1
+          fi
+          echo "All ${#expected[@]} archives + checksums present."
+
+      - name: Cross-check checksums
+        # Re-verify every .sha256 sidecar against its archive so a corrupt
+        # download from build.upload-artifact / publish.download-artifact
+        # is caught before signing.
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          for sha in zsass-v*.sha256; do
+            sha256sum -c "${sha}"
+          done
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9  # v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Sign each artifact (sigstore keyless)
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(zsass-v*.tar.gz zsass-v*.zip)
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::error::No archives found to sign"
+            exit 1
+          fi
+          for asset in "${archives[@]}"; do
+            cosign sign-blob --yes \
+              --output-signature "${asset}.sig" \
+              --output-certificate "${asset}.pem" \
+              "${asset}"
+          done
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        with:
+          files: |
+            dist/zsass-v*.tar.gz
+            dist/zsass-v*.zip
+            dist/zsass-v*.sha256
+            dist/zsass-v*.sig
+            dist/zsass-v*.pem
+          fail_on_unmatched_files: true
+          generate_release_notes: true

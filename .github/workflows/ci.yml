@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Default to read-only on every job. Nothing in CI needs to write to the repo
+# or mint OIDC tokens; release.yml is where elevated permissions live.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: ${{ matrix.os }} / zig ${{ matrix.zig }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            zig: '0.16.0'
+            experimental: false
+            run_spec: true
+            run_fmt: true
+          - os: macos-latest
+            zig: '0.16.0'
+            experimental: false
+            run_spec: false
+            run_fmt: false
+          - os: windows-latest
+            zig: '0.16.0'
+            experimental: false
+            run_spec: false
+            run_fmt: false
+          # NOTE: a `zig master` forward-compat canary used to live here
+          # with `experimental: true` / `continue-on-error: true`. It
+          # was removed because the zig language itself keeps shifting
+          # in ways unrelated to zsass (breaking syntax tweaks,
+          # whitespace rules around `*`, error-union changes, ...) and
+          # the noisy red dot on every commit was net-negative. Re-add
+          # locally with `zig build -Doptimize=Debug` against a fresh
+          # zig master before bumping the `minimum_zig_version` floor.
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          # sass-spec submodule is only needed by the spec test step.
+          submodules: ${{ matrix.run_spec && 'recursive' || '' }}
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29  # v2
+        with:
+          version: ${{ matrix.zig }}
+
+      - name: Check formatting
+        if: matrix.run_fmt
+        run: zig fmt --check src/ tests/spec_runner.zig examples/ build.zig
+
+      - name: Build
+        run: zig build
+
+      - name: Unit tests
+        run: zig build unit-test
+
+      - name: Spec tests
+        if: matrix.run_spec
+        run: zig build spec
+
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck on every shipped shell script
+        # All scripts/*.sh now pass shellcheck cleanly under the default
+        # severity threshold; the bench / realworld helpers picked up
+        # explicit `# shellcheck disable=...` directives where the
+        # warnings were intentional (e.g. `source "$env"` for fixture
+        # configs and `SUITE_DIR` consumed by post-loop reporting).
+        run: |
+          shellcheck scripts/*.sh
+
+  ps-lint:
+    name: PowerShell Script Analyzer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Run PSScriptAnalyzer on installer scripts
+        shell: pwsh
+        run: |
+          Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
+          # `Invoke-ScriptAnalyzer -Path` only takes a single value in
+          # some PowerShell versions, so analyse each script in turn and
+          # accumulate the issue list. We only block on Error-severity
+          # findings: the installer intentionally uses `Write-Host` to
+          # surface human-readable progress on Windows terminals
+          # (Severity = Warning), which is fine for an interactive
+          # installer and is suppressed in PSScriptAnalyzer 1.21+ via
+          # explicit rule include lists; the simpler `-Severity Error`
+          # filter keeps the gate meaningful without flagging
+          # intentional UX choices.
+          $issues = @()
+          $issues += Invoke-ScriptAnalyzer -Path scripts/install.ps1 -Severity Error
+          $issues += Invoke-ScriptAnalyzer -Path scripts/install_cli.ps1 -Severity Error
+          if ($issues.Count -gt 0) {
+            $issues | Format-Table -AutoSize
+            throw "PSScriptAnalyzer found $($issues.Count) error-severity issue(s)."
+          }
+          Write-Host 'PSScriptAnalyzer: clean (errors only; warnings reviewed manually)'
+
+  release-drift-check:
+    name: build-release.sh / release.yml drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Compare target lists
+        # Target triple lists in scripts/build-release.sh and
+        # .github/workflows/release.yml must stay in sync. Asset filenames
+        # are intentionally different - see scripts/build-release.sh header.
+        run: |
+          set -euo pipefail
+          script_targets=$(awk '/^targets=\(/{flag=1; next} /^\)/{flag=0} flag' scripts/build-release.sh \
+            | tr -d '"' | awk '{print $1}' | grep -v '^$' | sort -u)
+          yml_targets=$(awk '/- target: /{print $3}' .github/workflows/release.yml | sort -u)
+          if [ "$script_targets" != "$yml_targets" ]; then
+            echo "::error::Target lists differ between scripts/build-release.sh and .github/workflows/release.yml"
+            echo "--- scripts/build-release.sh ---"
+            echo "$script_targets"
+            echo "--- .github/workflows/release.yml ---"
+            echo "$yml_targets"
+            exit 1
+          fi
+          echo "Target lists match: $(echo "$script_targets" | tr '\n' ' ')"

@@ -1,0 +1,55 @@
+name: Feature request
+description: Suggest a new feature, CLI flag, or embedding-API addition.
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. zsass aims to stay behaviorally
+        compatible with dart-sass, so features that diverge from
+        upstream Sass behavior need an extra-strong motivation. If you
+        are reporting a missing built-in or syntax that exists in
+        dart-sass, please use the bug report template instead.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the use case. Concrete scenarios beat abstract requirements.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Sketch the user-visible behavior. CLI flag spelling, embedding-API signature, error messages.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing flags, work-arounds, or feature-flag designs you have already weighed.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface does this affect?
+      multiple: true
+      options:
+        - CLI binary
+        - Embedding API (@import("zsass"))
+        - Build / install scripts
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+      description: Links to dart-sass issues, sass-spec entries, related PRs.

@@ -1,0 +1,17 @@
+.{
+    .name = .zsass,
+    .version = "0.1.0",
+    .fingerprint = 0x88c1aba572d9a0b5,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "docs",
+        "examples",
+        "scripts",
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE",
+    },
+}

@@ -1,0 +1,14 @@
+@use "sass:color";
+
+$gap: 0.75rem;
+$brand: #25c2a0;
+
+@mixin card($border) {
+  .card {
+    padding: $gap;
+    border: 2px solid $border;
+    background: color.scale($border, $lightness: 80%);
+  }
+}
+
+@include card($brand);
