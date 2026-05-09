@@ -1,9 +1,5 @@
-//! zsass driver -- bytecode VM entry point (formerly `zsass-bc-poc`).
-//!
-//! Usage:
-//!   zsass <input.scss> <output.css>
-//!   zsass --compile-only <input.scss>
-//!   zsass --exec <input.bc> <output.css>
+//! zsass driver -- CLI entry point. See the `USAGE` constant below for the
+//! full surface advertised by `--help`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -36,76 +32,79 @@ comptime {
 const USAGE =
     \\Usage: zsass [options] <input.scss> [output.css]
     \\       zsass [options] <input.scss>:<output.css> [more-pairs...]
+    \\       zsass [options] <input_dir>:<output_dir> [more-pairs...]
     \\       zsass [options] --stdin [-o output.css]
     \\
+    \\Use "-" as input to read from stdin, and "-" as output (or omit) to write to stdout.
+    \\Directory pairs walk the input tree recursively, mirror the structure under the
+    \\output directory, compile every .scss/.sass file, and skip _partial.* files.
+    \\
     \\Options:
-    \\  --style, -s <expanded|compressed>  Output style (default: expanded)
-    \\  -I, --load-path <path>      Add load path (repeatable)
-    \\  -C, --chdir <dir>           Change working directory before resolving paths
-    \\  -o, --output <path>         Write CSS to file
-    \\  --stdin                     Read from stdin
-    \\  --stdin-filepath <path>     Virtual path for stdin source
-    \\  --[no-]stdin                Read from stdin / require file input
-    \\  -v, -V, --version[=text|json] Print version
-    \\  --info[=text|json]          Print build information
-    \\  --completions <bash|zsh|fish> Print shell completion script
-    \\  -h, --help                  Print this help
+    \\  -s, --style <expanded|compressed>      Output style (default: expanded)
+    \\  -I, --load-path <path>                 Add load path (repeatable)
+    \\  -C, --chdir <dir>                      Change working directory before resolving paths
+    \\  -o, --output <path>                    Write CSS to file
+    \\  --stdin                                Read SCSS from stdin
+    \\  --stdin-filepath <path>                Virtual path for stdin source
+    \\  -i, --interactive                      Run interactive SassScript REPL (stdin lines)
+    \\  -v, -V, --version[=text|json]          Print version
+    \\  --info[=text|json]                     Print build information
+    \\  --completions <bash|zsh|fish>          Print shell completion script
+    \\  -h, --help                             Print this help
     \\
-    \\  -q, --[no-]quiet            Suppress @warn and @debug output
-    \\  --[no-]verbose              Show all warnings including duplicates
-    \\  --[no-]quiet-deps           Suppress warnings from dependencies
-    \\  --silence-deprecation=<id>[,<id>...]
-    \\                              Suppress specific deprecation warnings. Repeatable.
-    \\  --future-deprecation=<id>[,<id>...]
-    \\                              Opt in to future deprecation warnings. Repeatable.
-    \\  --fatal-deprecation=<id|version>[,...]
-    \\                              Treat specific deprecations as errors. Repeatable.
+    \\Diagnostics:
+    \\  -q, --[no-]quiet                       Suppress @warn and @debug output
+    \\  --[no-]verbose                         Show all warnings including duplicates
+    \\  --silence-deprecation <id>[,...]       Suppress specific deprecation warnings (repeatable)
+    \\  --future-deprecation <id>[,...]        Opt in to future deprecation warnings (repeatable)
+    \\  --fatal-deprecation <id|version>[,...] Treat specific deprecations as errors (repeatable)
+    \\  -c, --[no-]color                       Force / disable ANSI color in diagnostics
+    \\  --[no-]unicode                         Use / disable Unicode glyphs in diagnostics
+    \\  --[no-]trace                           Print full call stack on @error
+    \\  --[no-]error-css                       Emit error as CSS on failure
+    \\                                         (default: on for file output, off for stdout)
     \\
-    \\  --source-map                Generate source maps (default: on for file, off for stdout)
-    \\  --source-map=<inline|file|off> Explicit map mode
-    \\  --source-map-file <path>    Override source map output path
-    \\  --source-map-url <path|url> Override sourceMappingURL comment in trailing CSS comment
-    \\  --source-map-urls <relative|absolute> Source paths in `.map` JSON (default: relative)
-    \\  --[no-]embed-source-map     Embed source map contents in CSS
-    \\  --[no-]embed-sources        Include sourcesContent in source map
-    \\  --no-source-map             Disable source map generation
+    \\Source maps:
+    \\  --source-map[=inline|file|off]         Generate source maps
+    \\                                         (default: file when writing to a file, off for stdout)
+    \\  --no-source-map                        Alias for --source-map=off
+    \\  --embed-source-map                     Alias for --source-map=inline
+    \\  --[no-]embed-sources                   Include sourcesContent in source map
+    \\  --source-map-file <path>               Override source map output path
+    \\  --source-map-url <path|url>            Override URL written in trailing /*# sourceMappingURL=... */
+    \\  --source-map-urls <relative|absolute>  Source paths in `.map` JSON (default: relative)
     \\
-    \\  --charset                   Enable @charset "UTF-8" emission (default)
-    \\  --no-charset                Disable @charset "UTF-8" emission
-    \\  --plain-css                 Treat input as CSS
-    \\  --scss                      Re-enable SCSS evaluation (default)
-    \\  --indented                  Force indented (.sass) syntax
-    \\  --no-indented               Force SCSS syntax
-    \\  -c, --[no-]color            Force / disable ANSI color in diagnostics
-    \\  --[no-]unicode              Use / disable Unicode glyphs in diagnostics
-    \\  --[no-]trace                Print full call stack on @error
-    \\  --error-css                 Emit error as CSS on failure (default for file output)
-    \\  --no-error-css              Disable error CSS (default for stdout)
+    \\Input syntax:
+    \\  --plain-css                            Treat input as CSS
+    \\  --scss                                 Force SCSS syntax (default)
+    \\  --indented / --no-indented             Force indented (.sass) syntax / force SCSS syntax
+    \\  --[no-]charset                         Emit @charset "UTF-8" for non-ASCII output (default: on)
     \\
-    \\  --watch, -w                 Recompile on changes (polling; use --poll with --watch)
-    \\  --[no-]poll                 Polling vs native watcher (--no-poll unsupported; requires --watch)
-    \\  --update                    Recompile only when output is not older than input
-    \\  --stop-on-error / --no-stop-on-error (batch behavior)
-    \\  -i, --interactive           Run interactive SassScript REPL (stdin lines)
-    \\
-    \\  --check / --dry-run         Compile without writing files
-    \\  --compile-only <input>      Parse/resolve/compile only
-    \\  --list-load-paths           Print resolved load paths
-    \\  --env-report                Emit env report as JSON
+    \\Build behavior:
+    \\  -w, --watch                            Recompile on changes
+    \\  --poll                                 Use polling watcher (requires --watch)
+    \\  --update                               Recompile only when output is older than input
+    \\  --check, --dry-run                     Compile without writing files
+    \\  --dry-run=json                         Print resolved compile targets as JSON
+    \\  --compile-only <input>                 Parse/resolve/compile only (no VM/emit phase)
+    \\  --list-load-paths                      Print resolved load paths and exit
+    \\  --env-report[=json]                    Emit env report as JSON
     \\
     \\Dev/observation:
-    \\  --phase-timer               Print per-phase timing
-    \\  --dump-bc                   Disassemble bytecode
-    \\  --opcode-histogram          Print opcode frequency
-    \\  --trace-diff <reference>    Diff output against reference CSS
+    \\  --phase-timer                          Print per-phase timing (per entry; aggregated in batch)
+    \\  --dump-bc                              Disassemble bytecode
+    \\  --opcode-histogram                     Print opcode frequency
+    \\  --trace-diff <reference>               Diff output against reference CSS (requires file output)
     \\
-    \\Use \"--\" before filenames to stop parsing options when paths begin with \"-\".
+    \\Use "--" before filenames to stop parsing options when paths begin with "-".
+    \\All `--flag value` options also accept `--flag=value`.
     \\
     \\Environment:
-    \\  SASS_PATH                   Platform path-delimited load paths
-    \\  ZSASS_TRACE_SLOT            Enable per-slot VM tracing
-    \\  ZSASS_CSS_CACHE             Set to \"0\" or \"false\" to disable CSS cache
-    \\  ZSASS_CSS_CACHE_DIR         Override CSS cache directory
+    \\  SASS_PATH                Platform path-delimited load paths (`:`, or `;` on Windows)
+    \\  ZSASS_CSS_CACHE          Set to "0" or "false" to disable the internal CSS cache
+    \\  ZSASS_CSS_CACHE_DIR      Override CSS cache directory
+    \\  ZSASS_CSS_CACHE_STRICT   Set to "1"/"true" to force per-source SHA-256 recheck on cache hits
+    \\  ZSASS_TRACE_SLOT         Enable per-slot VM tracing (developer-only)
     \\
 ;
 
@@ -588,12 +587,51 @@ const bash_completion_script =
     \\    COMPREPLY=()
     \\    cur="${COMP_WORDS[COMP_CWORD]}"
     \\    prev="${COMP_WORDS[COMP_CWORD-1]}"
-    \\    opts="--help -h --version -v -V --interactive -i --style --source-map --no-source-map --source-map-file --source-map-url --source-map-urls --embed-source-map --no-embed-source-map --embed-sources --no-embed-sources --charset --no-charset --plain-css --scss --indented --no-indented --quiet -q --no-quiet --verbose --no-verbose --update --quiet-deps --no-quiet-deps --stop-on-error --no-stop-on-error --silence-deprecation --future-deprecation --fatal-deprecation --color -c --no-color --unicode --no-unicode --error-css --no-error-css --watch -w --poll --no-poll --trace --no-trace --stdin --stdin-filepath --chdir -C --load-path -I --output -o --list-load-paths --env-report --dry-run --dry-run=json --check --completions"
-    \\    if [[ "$prev" == "--completions" ]]; then
-    \\        COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
-    \\        return 0
-    \\    fi
-    \\    COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+    \\    opts="-h --help -v -V --version --info --completions -i --interactive --stdin --stdin-filepath -s --style -I --load-path -C --chdir -o --output -q --quiet --no-quiet --verbose --no-verbose --silence-deprecation --future-deprecation --fatal-deprecation -c --color --no-color --unicode --no-unicode --trace --no-trace --error-css --no-error-css --source-map --no-source-map --embed-source-map --embed-sources --no-embed-sources --source-map-file --source-map-url --source-map-urls --plain-css --scss --indented --no-indented --charset --no-charset -w --watch --poll --update --check --dry-run --compile-only --list-load-paths --env-report --phase-timer --dump-bc --opcode-histogram --trace-diff"
+    \\
+    \\    case "$prev" in
+    \\        --completions)
+    \\            COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
+    \\            return 0 ;;
+    \\        -s|--style)
+    \\            COMPREPLY=( $(compgen -W "expanded compressed" -- "$cur") )
+    \\            return 0 ;;
+    \\        --source-map-urls)
+    \\            COMPREPLY=( $(compgen -W "relative absolute" -- "$cur") )
+    \\            return 0 ;;
+    \\        -I|--load-path|-C|--chdir)
+    \\            COMPREPLY=( $(compgen -d -- "$cur") )
+    \\            return 0 ;;
+    \\        -o|--output|--stdin-filepath|--source-map-file|--source-map-url|--compile-only|--trace-diff)
+    \\            COMPREPLY=( $(compgen -f -- "$cur") )
+    \\            return 0 ;;
+    \\    esac
+    \\
+    \\    case "$cur" in
+    \\        --style=*)
+    \\            COMPREPLY=( $(compgen -W "expanded compressed" -- "${cur#*=}") )
+    \\            return 0 ;;
+    \\        --source-map=*)
+    \\            COMPREPLY=( $(compgen -W "inline file off" -- "${cur#*=}") )
+    \\            return 0 ;;
+    \\        --source-map-urls=*)
+    \\            COMPREPLY=( $(compgen -W "relative absolute" -- "${cur#*=}") )
+    \\            return 0 ;;
+    \\        --info=*|--version=*)
+    \\            COMPREPLY=( $(compgen -W "text json" -- "${cur#*=}") )
+    \\            return 0 ;;
+    \\        --dry-run=*|--env-report=*)
+    \\            COMPREPLY=( $(compgen -W "json" -- "${cur#*=}") )
+    \\            return 0 ;;
+    \\        --completions=*)
+    \\            COMPREPLY=( $(compgen -W "bash zsh fish" -- "${cur#*=}") )
+    \\            return 0 ;;
+    \\        -*)
+    \\            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+    \\            return 0 ;;
+    \\    esac
+    \\
+    \\    COMPREPLY=( $(compgen -f -- "$cur") )
     \\}
     \\complete -F _zsass_cli_completions zsass
 ;
@@ -604,21 +642,59 @@ const zsh_completion_script =
     \\    _arguments -s -S -C \
     \\      '(-h --help)'{-h,--help}'[Print help text]' \
     \\      '(-v -V --version)'{-v,-V,--version}'[Print version information]' \
+    \\      '--info[Print build information]' \
+    \\      '--completions[Print completion script]:shell:(bash zsh fish)' \
     \\      '(-i --interactive)'{-i,--interactive}'[Run interactive REPL]' \
+    \\      '--stdin[Read SCSS from stdin]' \
+    \\      '--stdin-filepath[Virtual path for stdin source]:path:_files' \
+    \\      '(-s --style)'{-s,--style}'[Output style]:style:(expanded compressed)' \
     \\      '*'{-I,--load-path}'[Add load path]:dir:_directories' \
-    \\      '(-o --output)'{-o,--output}'[Write CSS to file]:file:_files' \
     \\      '(-C --chdir)'{-C,--chdir}'[Change working directory]:dir:_directories' \
-    \\      '--stdin[Read from stdin]' \
-    \\      '--stdin-filepath[Virtual path for stdin]:path:_files' \
-    \\      '--source-map-file[Override source map path]:file:_files' \
+    \\      '(-o --output)'{-o,--output}'[Write CSS to file]:file:_files' \
+    \\      '(-q --quiet)'{-q,--quiet}'[Suppress @warn and @debug output]' \
+    \\      '--no-quiet[Re-enable @warn and @debug output]' \
+    \\      '--verbose[Show all warnings including duplicates]' \
+    \\      '--no-verbose[Suppress duplicate warnings]' \
+    \\      '*--silence-deprecation=[Suppress specific deprecation warnings]:ids:' \
+    \\      '*--future-deprecation=[Opt in to future deprecation warnings]:ids:' \
+    \\      '*--fatal-deprecation=[Treat specific deprecations as errors]:ids:' \
+    \\      '(-c --color)'{-c,--color}'[Force ANSI color in diagnostics]' \
+    \\      '--no-color[Disable ANSI color in diagnostics]' \
+    \\      '--unicode[Enable Unicode glyphs in diagnostics]' \
+    \\      '--no-unicode[Disable Unicode glyphs in diagnostics]' \
+    \\      '--trace[Print full call stack on @error]' \
+    \\      '--no-trace[Suppress full call stack on @error]' \
+    \\      '--error-css[Emit error as CSS on failure]' \
+    \\      '--no-error-css[Disable error CSS]' \
+    \\      '--source-map[Generate source maps]' \
+    \\      '--source-map=-[Generate source maps with explicit mode]:mode:(inline file off)' \
+    \\      '--no-source-map[Disable source map generation]' \
+    \\      '--embed-source-map[Embed source map contents in CSS]' \
+    \\      '--embed-sources[Include sourcesContent in source map]' \
+    \\      '--no-embed-sources[Exclude sourcesContent from source map]' \
+    \\      '--source-map-file[Override source map output path]:file:_files' \
     \\      '--source-map-url[Override sourceMappingURL]:url:' \
     \\      '--source-map-urls[Source map URL mode]:mode:(relative absolute)' \
-    \\      '--list-load-paths[List resolved load paths]' \
-    \\      '--env-report[Emit env report as JSON]' \
+    \\      '--plain-css[Treat input as CSS]' \
+    \\      '--scss[Force SCSS syntax (default)]' \
+    \\      '--indented[Force indented (.sass) syntax]' \
+    \\      '--no-indented[Force SCSS syntax]' \
+    \\      '--charset[Emit @charset for non-ASCII output (default)]' \
+    \\      '--no-charset[Disable @charset emission]' \
+    \\      '(-w --watch)'{-w,--watch}'[Recompile on changes]' \
+    \\      '--poll[Use polling watcher (requires --watch)]' \
+    \\      '--update[Recompile only when output is older than input]' \
     \\      '--check[Compile without writing output]' \
-    \\      '--dry-run[Alias for --check]' \
-    \\      '--dry-run=json[Print expanded compile targets as JSON]' \
-    \\      '--completions[Print completion script]:shell:(bash zsh fish)' \
+    \\      '--dry-run[Compile without writing output]' \
+    \\      '--dry-run=json[Print resolved compile targets as JSON]' \
+    \\      '--compile-only[Parse/resolve/compile only]:input:_files' \
+    \\      '--list-load-paths[Print resolved load paths]' \
+    \\      '--env-report[Emit env report as JSON]' \
+    \\      '--env-report=json[Emit env report as JSON]' \
+    \\      '--phase-timer[Print per-phase timing]' \
+    \\      '--dump-bc[Disassemble bytecode]' \
+    \\      '--opcode-histogram[Print opcode frequency]' \
+    \\      '--trace-diff[Diff output against reference CSS]:reference:_files' \
     \\      '*:input file:_files -g "*.{scss,sass,css}"'
     \\}
     \\_zsass "$@"
@@ -629,18 +705,56 @@ const fish_completion_script =
     \\complete -c zsass -s h -l help -d "Print help text"
     \\complete -c zsass -s v -l version -d "Print version information"
     \\complete -c zsass -s V -d "Alias for --version"
+    \\complete -c zsass -l info -d "Print build information"
+    \\complete -c zsass -l completions -d "Print completion script" -x -a "bash zsh fish"
     \\complete -c zsass -s i -l interactive -d "Run interactive SCSS REPL"
+    \\complete -c zsass -l stdin -d "Read SCSS from stdin"
+    \\complete -c zsass -l stdin-filepath -d "Virtual path for stdin source" -r -a "(__fish_complete_path)"
+    \\complete -c zsass -s s -l style -d "Output style" -x -a "expanded compressed"
     \\complete -c zsass -s I -l load-path -d "Add load path" -r -a "(__fish_complete_directories)"
-    \\complete -c zsass -s o -l output -d "Write CSS to file" -r -a "(__fish_complete_path)"
     \\complete -c zsass -s C -l chdir -d "Change working directory" -r -a "(__fish_complete_directories)"
-    \\complete -c zsass -l stdin -d "Read from stdin"
-    \\complete -c zsass -l stdin-filepath -d "Virtual path for stdin" -r -a "(__fish_complete_path)"
-    \\complete -c zsass -l list-load-paths -d "List resolved load paths"
-    \\complete -c zsass -l env-report -d "Emit env report as JSON"
+    \\complete -c zsass -s o -l output -d "Write CSS to file" -r -a "(__fish_complete_path)"
+    \\complete -c zsass -s q -l quiet -d "Suppress @warn and @debug output"
+    \\complete -c zsass -l no-quiet -d "Re-enable @warn and @debug output"
+    \\complete -c zsass -l verbose -d "Show all warnings including duplicates"
+    \\complete -c zsass -l no-verbose -d "Suppress duplicate warnings"
+    \\complete -c zsass -l silence-deprecation -d "Suppress specific deprecation warnings" -x
+    \\complete -c zsass -l future-deprecation -d "Opt in to future deprecation warnings" -x
+    \\complete -c zsass -l fatal-deprecation -d "Treat specific deprecations as errors" -x
+    \\complete -c zsass -s c -l color -d "Force ANSI color in diagnostics"
+    \\complete -c zsass -l no-color -d "Disable ANSI color in diagnostics"
+    \\complete -c zsass -l unicode -d "Enable Unicode glyphs in diagnostics"
+    \\complete -c zsass -l no-unicode -d "Disable Unicode glyphs in diagnostics"
+    \\complete -c zsass -l trace -d "Print full call stack on @error"
+    \\complete -c zsass -l no-trace -d "Suppress full call stack on @error"
+    \\complete -c zsass -l error-css -d "Emit error as CSS on failure"
+    \\complete -c zsass -l no-error-css -d "Disable error CSS"
+    \\complete -c zsass -l source-map -d "Generate source maps (use =mode for explicit)" -x -a "inline file off"
+    \\complete -c zsass -l no-source-map -d "Disable source map generation"
+    \\complete -c zsass -l embed-source-map -d "Embed source map contents in CSS"
+    \\complete -c zsass -l embed-sources -d "Include sourcesContent in source map"
+    \\complete -c zsass -l no-embed-sources -d "Exclude sourcesContent from source map"
+    \\complete -c zsass -l source-map-file -d "Override source map output path" -r -a "(__fish_complete_path)"
+    \\complete -c zsass -l source-map-url -d "Override sourceMappingURL"
+    \\complete -c zsass -l source-map-urls -d "Source map URL mode" -x -a "relative absolute"
+    \\complete -c zsass -l plain-css -d "Treat input as CSS"
+    \\complete -c zsass -l scss -d "Force SCSS syntax (default)"
+    \\complete -c zsass -l indented -d "Force indented (.sass) syntax"
+    \\complete -c zsass -l no-indented -d "Force SCSS syntax"
+    \\complete -c zsass -l charset -d "Emit @charset for non-ASCII output (default)"
+    \\complete -c zsass -l no-charset -d "Disable @charset emission"
+    \\complete -c zsass -s w -l watch -d "Recompile on changes"
+    \\complete -c zsass -l poll -d "Use polling watcher (requires --watch)"
+    \\complete -c zsass -l update -d "Recompile only when output is older than input"
     \\complete -c zsass -l check -d "Compile without writing output"
-    \\complete -c zsass -l dry-run -d "Alias for --check"
-    \\complete -c zsass -l dry-run=json -d "Print expanded compile targets as JSON"
-    \\complete -c zsass -l completions -d "Print completion script" -r -a "bash zsh fish"
+    \\complete -c zsass -l dry-run -d "Compile without writing output (use =json to print targets as JSON)"
+    \\complete -c zsass -l compile-only -d "Parse/resolve/compile only" -r -a "(__fish_complete_path)"
+    \\complete -c zsass -l list-load-paths -d "Print resolved load paths"
+    \\complete -c zsass -l env-report -d "Emit env report as JSON"
+    \\complete -c zsass -l phase-timer -d "Print per-phase timing"
+    \\complete -c zsass -l dump-bc -d "Disassemble bytecode"
+    \\complete -c zsass -l opcode-histogram -d "Print opcode frequency"
+    \\complete -c zsass -l trace-diff -d "Diff output against reference CSS" -r -a "(__fish_complete_path)"
 ;
 
 const RunOpts = struct {
@@ -894,11 +1008,6 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(exitCodeForError(err));
         };
         return;
-    }
-
-    if (std.mem.eql(u8, first, "--exec")) {
-        cliErrPrint("--exec: not implemented yet\n", .{});
-        std.process.exit(EX_USAGE);
     }
 
     var opts: RunOpts = .{};
