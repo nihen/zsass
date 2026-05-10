@@ -2264,10 +2264,14 @@ fn pathStillFresh(path: []const u8, prev_mtime: i96) bool {
     return st.mtime.nanoseconds == prev_mtime;
 }
 
-fn collectWatchedPaths(
+/// Rebuild a single job's watched-path snapshot (input file plus its
+/// recorded `@import` dependency chain). Each job has its own list so a
+/// change in one entry's deps does not force unrelated entries to
+/// recompile -- matching dart-sass's per-input rebuild behavior.
+fn collectWatchedPathsForJob(
     allocator: std.mem.Allocator,
-    jobs: []const FileJob,
-    deps_per_job: []const WatchDeps,
+    job: FileJob,
+    deps: WatchDeps,
     out: *std.ArrayListUnmanaged(WatchedPath),
 ) !void {
     // Build the new snapshot in a staging list. If any allocation fails
@@ -2280,18 +2284,35 @@ fn collectWatchedPaths(
         staged.deinit(allocator);
     }
 
-    for (jobs, 0..) |job, i| {
-        try addWatchedPath(allocator, &staged, job.input_path);
-        var k: usize = 0;
-        while (k < deps_per_job[i].count()) : (k += 1) {
-            try addWatchedPath(allocator, &staged, deps_per_job[i].pathAt(k));
-        }
+    try addWatchedPath(allocator, &staged, job.input_path);
+    var k: usize = 0;
+    while (k < deps.count()) : (k += 1) {
+        try addWatchedPath(allocator, &staged, deps.pathAt(k));
     }
 
     // Commit: replace the previous snapshot atomically.
     for (out.items) |w| allocator.free(w.path);
     out.deinit(allocator);
     out.* = staged;
+}
+
+/// Stat each job's watched paths and mark the ones whose mtime changed
+/// since `collectWatchedPathsForJob` last recorded them. Returns true if
+/// any job is dirty, so callers can `continue` the poll loop without
+/// scanning the dirty array a second time. `out_dirty.len` must equal
+/// `per_job_watched.len`.
+fn computeDirtyJobs(
+    per_job_watched: []const std.ArrayListUnmanaged(WatchedPath),
+    out_dirty: []bool,
+) bool {
+    std.debug.assert(per_job_watched.len == out_dirty.len);
+    var any = false;
+    for (per_job_watched, 0..) |w, i| {
+        const dirty = anyWatchedPathChanged(w.items);
+        out_dirty[i] = dirty;
+        if (dirty) any = true;
+    }
+    return any;
 }
 
 fn addWatchedPath(
@@ -2358,15 +2379,34 @@ fn runWatchLoop(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
     // implementation announces itself.
     writeStdoutAll("\nzsass is watching for changes. Press Ctrl-C to stop.\n\n");
 
-    var watched: std.ArrayListUnmanaged(WatchedPath) = .empty;
-    defer freeWatchedPaths(allocator, &watched);
-    try collectWatchedPaths(allocator, jobs, deps_per_job, &watched);
+    // Per-job watched-path snapshots. dart-sass's watcher recompiles
+    // only the entries whose own input or transitive `@import` chain
+    // touched disk; tracking each job's dependency closure separately
+    // is what lets us mirror that. A shared header naturally appears
+    // in every importing job's list, so a change to it dirties every
+    // dependent at once -- still matching dart-sass.
+    var per_job_watched = try allocator.alloc(std.ArrayListUnmanaged(WatchedPath), jobs.len);
+    defer {
+        for (per_job_watched) |*w| freeWatchedPaths(allocator, w);
+        allocator.free(per_job_watched);
+    }
+    for (per_job_watched) |*w| w.* = .empty;
+    for (jobs, 0..) |job, i| {
+        collectWatchedPathsForJob(allocator, job, deps_per_job[i], &per_job_watched[i]) catch |e| {
+            cliErrPrint("zsass-watch: failed to collect watch list: {s}\n", .{@errorName(e)});
+        };
+    }
+
+    const dirty = try allocator.alloc(bool, jobs.len);
+    defer allocator.free(dirty);
 
     while (true) {
         sleepPollMs(100);
-        if (!anyWatchedPathChanged(watched.items)) continue;
+        if (!computeDirtyJobs(per_job_watched, dirty)) continue;
 
         for (jobs, 0..) |job, i| {
+            if (!dirty[i]) continue;
+
             var local_opts = job.opts;
             local_opts.watch_out_deps = &deps_per_job[i];
             if (runEnd2End(allocator, job.input_path, job.output_path, local_opts)) |_| {
@@ -2377,14 +2417,15 @@ fn runWatchLoop(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
                 // the diagnostic and keep polling.
                 printUserFacingError(err, job.input_path);
             }
+
+            // Refresh just this job's watched list so newly added imports
+            // start being watched, removed ones stop, and the touched
+            // input file's fresh mtime is recorded. Untouched jobs keep
+            // their existing snapshots.
+            collectWatchedPathsForJob(allocator, job, deps_per_job[i], &per_job_watched[i]) catch |e| {
+                cliErrPrint("zsass-watch: failed to refresh watch list: {s}\n", .{@errorName(e)});
+            };
         }
-        // Refresh the watched-path set so newly added imports start being
-        // watched and removed ones stop. Failure here is handled the same
-        // way the previous initial collect was: every path that fails
-        // gets a sentinel mtime so the next poll triggers a rebuild.
-        collectWatchedPaths(allocator, jobs, deps_per_job, &watched) catch |e| {
-            cliErrPrint("zsass-watch: failed to refresh watch list: {s}\n", .{@errorName(e)});
-        };
     }
 }
 
@@ -3532,6 +3573,59 @@ test "buildJobOrderByFileSize sorts larger files first" {
 // shape `[YYYY-MM-DD HH:MM:SS]` (21 ASCII bytes) is what dart-sass emits and
 // downstream tooling may grep for; zero-padding and bracket placement must
 // not regress.
+// dart-sass parity for the watcher: a change to one entry's input or to
+// a header in its `@import` chain must dirty *that* entry alone (or every
+// entry whose chain pulls in the header). Previously the watcher kept a
+// single deduplicated path list and rebuilt the entire batch on any
+// mtime tick, which forced unrelated entries to recompile every time the
+// user edited one file.
+//
+// `computeDirtyJobs` is the per-job change-detection step the watch loop
+// runs each poll. The test builds three independent watched-path lists
+// against real files, touches one of them, and asserts only that index's
+// dirty bit flips. Reverting to the old "dirty = anyChange across the
+// flat list" loop would either flag every job or none, both of which
+// fail the assertions below.
+test "computeDirtyJobs marks only jobs whose own watched path changed" {
+    var td = std.testing.tmpDir(.{});
+    defer td.cleanup();
+
+    const allocator = std.testing.allocator;
+    const sub = td.sub_path[0..];
+
+    const paths = [_][]const u8{ "a.scss", "b.scss", "c.scss" };
+    var abs_paths: [3][]u8 = undefined;
+    for (paths, 0..) |name, idx| {
+        abs_paths[idx] = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/{s}", .{ sub, name });
+        try writeFileAll(abs_paths[idx], ".x{}\n");
+    }
+    defer for (abs_paths) |p| allocator.free(p);
+
+    var per_job_watched: [3]std.ArrayListUnmanaged(WatchedPath) = .{ .empty, .empty, .empty };
+    defer for (&per_job_watched) |*w| freeWatchedPaths(allocator, w);
+    for (abs_paths, 0..) |p, i| try addWatchedPath(allocator, &per_job_watched[i], p);
+
+    var dirty: [3]bool = .{ false, false, false };
+    try std.testing.expect(!computeDirtyJobs(&per_job_watched, &dirty));
+    try std.testing.expectEqual(false, dirty[0]);
+    try std.testing.expectEqual(false, dirty[1]);
+    try std.testing.expectEqual(false, dirty[2]);
+
+    // Brief sleep so the rewrite below produces a strictly newer mtime
+    // than the snapshot the initial `addWatchedPath` recorded. ext4 / APFS
+    // / NTFS all expose at least millisecond mtime resolution, so a few
+    // ms is plenty of separation. `sleepPollMs` is the same helper the
+    // watch loop uses, so it works under whatever Io backend the test
+    // runner has installed.
+    sleepPollMs(20);
+    try writeFileAll(abs_paths[1], ".x-changed{}\n");
+
+    try std.testing.expect(computeDirtyJobs(&per_job_watched, &dirty));
+    try std.testing.expectEqual(false, dirty[0]);
+    try std.testing.expectEqual(true, dirty[1]);
+    try std.testing.expectEqual(false, dirty[2]);
+}
+
 test "formatWatchTimestamp matches the dart-sass `[YYYY-MM-DD HH:MM:SS]` shape" {
     var buf: [32]u8 = undefined;
 
