@@ -10,7 +10,11 @@ const zsass_io = @import("io.zig");
 pub fn stderrPrint(comptime fmt: []const u8, args: anytype) void {
     var buf: [8192]u8 = undefined;
     var err_file = std.Io.File.stderr();
-    var w = err_file.writer(zsass_io.io, buf[0..]);
+    // Streaming (write(2)) honors the kernel stdio file position so
+    // back-to-back diagnostic prints append. The default `writer(...)`
+    // initializes positional with `pos = 0`, which silently rewinds when
+    // stderr is redirected to a regular file.
+    var w = err_file.writerStreaming(zsass_io.io, buf[0..]);
     w.interface.print(fmt, args) catch return;
     w.interface.flush() catch return;
 }
@@ -36,7 +40,8 @@ pub fn unicodeDiagnosticsEnabled() bool {
 fn eprint(comptime fmt: []const u8, args: anytype) void {
     var buf: [16384]u8 = undefined;
     var err_file = std.Io.File.stderr();
-    var w = err_file.writer(zsass_io.io, buf[0..]);
+    // See `stderrPrint` -- positional mode rewinds on regular files.
+    var w = err_file.writerStreaming(zsass_io.io, buf[0..]);
     w.interface.print(fmt, args) catch return;
     w.interface.flush() catch return;
 }

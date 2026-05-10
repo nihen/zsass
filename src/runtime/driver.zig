@@ -23,6 +23,14 @@ const syntax_override_mod = @import("syntax_override.zig");
 
 const zsass_io_mod = @import("io.zig");
 
+// Used only to format `[YYYY-MM-DD HH:MM:SS]` timestamps for the watch
+// loop's "Compiled X to Y." line, matching dart-sass output. Includes
+// the local TZ-aware breakdown which Zig's std does not currently
+// expose. zsass already links libc on every supported target.
+const c_time = @cImport({
+    @cInclude("time.h");
+});
+
 comptime {
     _ = observe_mod.PhaseTimer;
     _ = observe_mod.disassemble;
@@ -113,7 +121,10 @@ const SourceMapMode = enum { off, file, @"inline", auto };
 fn cliErrPrint(comptime fmt: []const u8, args: anytype) void {
     var buf: [65536]u8 = undefined;
     var err_file = std.Io.File.stderr();
-    var w = err_file.writer(zsass_io_mod.io, buf[0..]);
+    // See `writeStderrAll` for why streaming is required: positional
+    // writes silently rewind to offset 0 when stderr is redirected to a
+    // regular file, so back-to-back error prints overwrite each other.
+    var w = err_file.writerStreaming(zsass_io_mod.io, buf[0..]);
     w.interface.print(fmt, args) catch return;
     w.interface.flush() catch return;
 }
@@ -1995,7 +2006,12 @@ fn runCompileOnlyWithLoadPaths(allocator: std.mem.Allocator, input_path: []const
 fn writeStderrAll(io: std.Io, bytes: []const u8) !void {
     var err_file = std.Io.File.stderr();
     var err_buf: [2048]u8 = undefined;
-    var err_w = err_file.writer(io, err_buf[0..]);
+    // Streaming (write(2)) honors the kernel's stdio file position so
+    // subsequent calls append. The default `writer(...)` initializes in
+    // positional (pwrite) mode at `pos = 0`, which silently rewinds when
+    // stderr is redirected to a regular file -- previous calls' bytes get
+    // overwritten and only the last write survives.
+    var err_w = err_file.writerStreaming(io, err_buf[0..]);
     try err_w.interface.writeAll(bytes);
     try err_w.interface.flush();
 }
@@ -2003,9 +2019,76 @@ fn writeStderrAll(io: std.Io, bytes: []const u8) !void {
 fn writeStdoutAll(bytes: []const u8) void {
     var out_file = std.Io.File.stdout();
     var out_buf: [1024]u8 = undefined;
-    var out_w = out_file.writer(zsass_io_mod.io, out_buf[0..]);
+    // See `writeStderrAll` -- positional mode rewinds on regular files.
+    var out_w = out_file.writerStreaming(zsass_io_mod.io, out_buf[0..]);
     out_w.interface.writeAll(bytes) catch return;
     out_w.interface.flush() catch return;
+}
+
+/// Writes a fixed `[YYYY-MM-DD HH:MM:SS]` (21 bytes) into `buf` using the
+/// supplied broken-down components. Split out from `currentLocalTimestamp`
+/// so the formatting is testable without mocking wall-clock time.
+fn formatWatchTimestamp(
+    buf: []u8,
+    year: u32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+) []const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "[{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}]",
+        .{ year, month, day, hour, minute, second },
+    ) catch unreachable;
+}
+
+/// Returns a slice into `buf` holding the current local time formatted as
+/// `[YYYY-MM-DD HH:MM:SS]`. The watch loop uses this to prefix per-file
+/// "Compiled X to Y." lines for dart-sass parity. `buf` must be at least
+/// 21 bytes.
+fn currentLocalTimestamp(buf: []u8) []const u8 {
+    // `time(NULL)` + `localtime` is the lowest-common-denominator libc
+    // path: POSIX, glibc/musl, mingw, and the MSVC CRT all expose it
+    // under that exact name. The reentrant variants split into
+    // `localtime_r` (POSIX) vs `localtime_s` (MSVC, with reversed
+    // arguments) and `@cImport` does not surface either reliably across
+    // every windows-host CI the project ships to. The watch loop calls
+    // this from a single thread and the formatted result is copied out
+    // immediately, so the static-buffer aliasing that motivates the
+    // reentrant variants does not bite us here.
+    var now: c_time.time_t = c_time.time(null);
+    const tm_ptr = c_time.localtime(&now) orelse {
+        return formatWatchTimestamp(buf, 1970, 1, 1, 0, 0, 0);
+    };
+    return formatWatchTimestamp(
+        buf,
+        @as(u32, @intCast(tm_ptr.*.tm_year + 1900)),
+        @as(u32, @intCast(tm_ptr.*.tm_mon + 1)),
+        @as(u32, @intCast(tm_ptr.*.tm_mday)),
+        @as(u32, @intCast(tm_ptr.*.tm_hour)),
+        @as(u32, @intCast(tm_ptr.*.tm_min)),
+        @as(u32, @intCast(tm_ptr.*.tm_sec)),
+    );
+}
+
+/// Emits the dart-sass-compatible per-file watch line on stdout:
+/// `[YYYY-MM-DD HH:MM:SS] Compiled <input> to <output>.\n`. dart-sass
+/// uses stdout for these (errors stay on stderr); paths longer than
+/// `path_buf` cause the line to be silently dropped, mirroring the
+/// other "best effort" stdout writes in this file.
+fn writeWatchCompiledLine(input_path: []const u8, output_path: []const u8) void {
+    var ts_buf: [32]u8 = undefined;
+    const ts = currentLocalTimestamp(&ts_buf);
+
+    var path_buf: [4096]u8 = undefined;
+    const line = std.fmt.bufPrint(
+        &path_buf,
+        "{s} Compiled {s} to {s}.\n",
+        .{ ts, input_path, output_path },
+    ) catch return;
+    writeStdoutAll(line);
 }
 
 fn printBuildInfo(format: BuildInfoFormat) void {
@@ -2256,16 +2339,24 @@ fn runWatchLoop(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
 
     // Initial compile: collect deps for each job (errors print but never
     // tear down the watcher; the user typically saves the file again
-    // with the fix in place).
+    // with the fix in place). Successful compiles emit the dart-sass
+    // `[YYYY-MM-DD HH:MM:SS] Compiled X to Y.` line on stdout; errors go
+    // through `printUserFacingError` (stderr) without a "Compiled" line.
     for (jobs, 0..) |job, i| {
         var local_opts = job.opts;
         local_opts.watch_out_deps = &deps_per_job[i];
-        runEnd2End(allocator, job.input_path, job.output_path, local_opts) catch |err| {
+        if (runEnd2End(allocator, job.input_path, job.output_path, local_opts)) |_| {
+            writeWatchCompiledLine(job.input_path, job.output_path);
+        } else |err| {
             printUserFacingError(err, job.input_path);
-        };
+        }
     }
 
-    try writeStderrAll(zsass_io_mod.io, "\nSass is watching for changes. Press Ctrl-C to stop.\n\n");
+    // dart-sass writes the watcher banner to stdout (the per-file
+    // "Compiled" lines do too); previous zsass versions used stderr.
+    // Wording uses "zsass" rather than dart-sass's "Sass" so the
+    // implementation announces itself.
+    writeStdoutAll("\nzsass is watching for changes. Press Ctrl-C to stop.\n\n");
 
     var watched: std.ArrayListUnmanaged(WatchedPath) = .empty;
     defer freeWatchedPaths(allocator, &watched);
@@ -2278,12 +2369,14 @@ fn runWatchLoop(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
         for (jobs, 0..) |job, i| {
             var local_opts = job.opts;
             local_opts.watch_out_deps = &deps_per_job[i];
-            runEnd2End(allocator, job.input_path, job.output_path, local_opts) catch |err| {
+            if (runEnd2End(allocator, job.input_path, job.output_path, local_opts)) |_| {
+                writeWatchCompiledLine(job.input_path, job.output_path);
+            } else |err| {
                 // Sass / IO errors must NOT terminate the watcher: the user
                 // typically saves the file again with the fix in place. Print
                 // the diagnostic and keep polling.
                 printUserFacingError(err, job.input_path);
-            };
+            }
         }
         // Refresh the watched-path set so newly added imports start being
         // watched and removed ones stop. Failure here is handled the same
@@ -3433,6 +3526,30 @@ test "buildJobOrderByFileSize sorts larger files first" {
     try std.testing.expectEqual(@as(usize, 1), order[0]);
     try std.testing.expectEqual(@as(usize, 2), order[1]);
     try std.testing.expectEqual(@as(usize, 0), order[2]);
+}
+
+// Pure formatting check for the watch-loop "Compiled X to Y." prefix. The
+// shape `[YYYY-MM-DD HH:MM:SS]` (21 ASCII bytes) is what dart-sass emits and
+// downstream tooling may grep for; zero-padding and bracket placement must
+// not regress.
+test "formatWatchTimestamp matches the dart-sass `[YYYY-MM-DD HH:MM:SS]` shape" {
+    var buf: [32]u8 = undefined;
+
+    try std.testing.expectEqualStrings(
+        "[2026-05-10 20:15:28]",
+        formatWatchTimestamp(&buf, 2026, 5, 10, 20, 15, 28),
+    );
+
+    // Zero-padding stays in place for single-digit components.
+    try std.testing.expectEqualStrings(
+        "[2026-01-02 03:04:05]",
+        formatWatchTimestamp(&buf, 2026, 1, 2, 3, 4, 5),
+    );
+
+    // Sanity: the produced string is exactly 21 bytes, which is what
+    // `currentLocalTimestamp`'s 32-byte stack buffer is sized against.
+    const ts = formatWatchTimestamp(&buf, 1999, 12, 31, 23, 59, 59);
+    try std.testing.expectEqual(@as(usize, 21), ts.len);
 }
 
 // Regression: in batch mode (`jobs.len > 1`, parallel worker pool), a worker
