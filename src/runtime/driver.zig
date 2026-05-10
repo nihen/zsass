@@ -1779,6 +1779,10 @@ fn compileFiles(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
     }
 
     for (threads) |thread| thread.join();
+    // Threads are now joined; suppress the spawn-bail errdefer so a later
+    // `return first.err` does not double-join (which trips the std.Thread
+    // ESRCH unreachable in the join wrapper).
+    started = 0;
     if (shared.first_err) |first| {
         printUserFacingError(first.err, first.input_path);
         // Surface the original error type so the top-level CLI's
@@ -3402,4 +3406,70 @@ test "buildJobOrderByFileSize sorts larger files first" {
     try std.testing.expectEqual(@as(usize, 1), order[0]);
     try std.testing.expectEqual(@as(usize, 2), order[1]);
     try std.testing.expectEqual(@as(usize, 0), order[2]);
+}
+
+// Regression: in batch mode (`jobs.len > 1`, parallel worker pool), a worker
+// that failed compilation set `shared.first_err`, the main thread joined every
+// thread normally, then `return first.err` re-fired the spawn-bail `errdefer`,
+// which joined the same handles a second time. `pthread_join` returned ESRCH
+// and tripped the std.Thread `unreachable`, surfacing as `segmentation fault
+// (core dumped)` after the user-facing diagnostic had already been printed.
+//
+// The test reproduces the multi-thread path with one failing entry and asserts
+// `compileFiles` returns the original error tag instead of aborting. Without
+// the `started = 0` reset on the post-join return path the unit-test binary
+// panics here.
+test "compileFiles batch with one failing job does not double-join" {
+    // The worker pool spawns std.Thread instances and goes through
+    // `zsass_io_mod.io` for filesystem I/O. The default
+    // `Threaded.global_single_threaded` does not support concurrency, so
+    // tests that drive the multi-thread path must install a real
+    // threaded I/O instance (mirroring what `main()` does).
+    var threaded = std.Io.Threaded.init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const saved_io = zsass_io_mod.io;
+    defer zsass_io_mod.io = saved_io;
+    zsass_io_mod.io = threaded.io();
+
+    var td = std.testing.tmpDir(.{});
+    defer td.cleanup();
+
+    const allocator = std.testing.allocator;
+    const sub = td.sub_path[0..];
+
+    const ok1_in = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ok1.scss", .{sub});
+    defer allocator.free(ok1_in);
+    const ok2_in = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ok2.scss", .{sub});
+    defer allocator.free(ok2_in);
+    const ok3_in = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ok3.scss", .{sub});
+    defer allocator.free(ok3_in);
+    const bad_in = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/bad.scss", .{sub});
+    defer allocator.free(bad_in);
+
+    try writeFileAll(ok1_in, ".a{color:red}\n");
+    try writeFileAll(ok2_in, ".b{color:blue}\n");
+    try writeFileAll(ok3_in, ".c{color:green}\n");
+    try writeFileAll(bad_in, "@import \"definitely-missing-stylesheet\";\n");
+
+    const ok1_out = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ok1.css", .{sub});
+    defer allocator.free(ok1_out);
+    const ok2_out = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ok2.css", .{sub});
+    defer allocator.free(ok2_out);
+    const ok3_out = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ok3.css", .{sub});
+    defer allocator.free(ok3_out);
+    const bad_out = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/bad.css", .{sub});
+    defer allocator.free(bad_out);
+
+    // No source map / no error CSS keeps the side effects minimal and
+    // independent of test process cwd quirks.
+    const opts: RunOpts = .{ .source_map_mode = .off, .error_css_enabled = false };
+
+    const jobs = [_]FileJob{
+        .{ .input_path = ok1_in, .output_path = ok1_out, .opts = opts },
+        .{ .input_path = ok2_in, .output_path = ok2_out, .opts = opts },
+        .{ .input_path = ok3_in, .output_path = ok3_out, .opts = opts },
+        .{ .input_path = bad_in, .output_path = bad_out, .opts = opts },
+    };
+
+    try std.testing.expectError(error.SassError, compileFiles(allocator, &jobs));
 }
