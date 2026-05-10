@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.0 (2026-05-11)
+
+### Removed
+- Drop non-spec `sass:string` / `sass:math` members
+  (`string.string`, `string.contains`, `string.replace`, `math.exp`,
+  `math.sign`, `math.mod`, `math.rem`) and the legacy globals
+  `str-contains` / `str-replace`. Dart Sass treats every one of these
+  as undefined; zsass now matches. CSS Values L4 globals
+  (`mod()`, `rem()`, `exp()`, `sign()`) still resolve as bare names
+  (#14).
+
 ## 0.2.0 (2026-05-10)
 
 ### Added
