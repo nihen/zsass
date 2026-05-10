@@ -11,7 +11,6 @@ const InternId = shared.InternId;
 const badArity = shared.badArity;
 const expectArity = shared.expectArity;
 const internString = shared.internString;
-const valueToCssString = shared.valueToCssString;
 const bindNamedOrPositionalArgsStrict = shared.bindNamedOrPositionalArgsStrict;
 const reportArgumentTypeMismatch = shared.reportArgumentTypeMismatch;
 
@@ -374,43 +373,6 @@ pub fn string_index(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
     return Value.numberUnitless(@floatFromInt(cp_idx));
 }
 
-pub fn string_replace(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    const bound = try bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{ "string", "substring", "replacement" }, 3);
-    const source_v = bound[0].?;
-    const needle_v = bound[1].?;
-    const replacement_v = bound[2].?;
-
-    var source_decoded = try decodeStringArgForOps(ctx, "string", source_v);
-    defer source_decoded.deinit(ctx.allocator);
-    var needle_decoded = try decodeStringArgForOps(ctx, "substring", needle_v);
-    defer needle_decoded.deinit(ctx.allocator);
-    var replacement_decoded = try decodeStringArgForOps(ctx, "replacement", replacement_v);
-    defer replacement_decoded.deinit(ctx.allocator);
-
-    const source = source_decoded.bytes;
-    const needle = needle_decoded.bytes;
-    const replacement = replacement_decoded.bytes;
-    if (needle.len == 0) {
-        return source_v;
-    }
-
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    defer out.deinit(ctx.allocator);
-
-    var start: usize = 0;
-    while (std.mem.findPos(u8, source, start, needle)) |pos| {
-        try out.appendSlice(ctx.allocator, source[start..pos]);
-        try out.appendSlice(ctx.allocator, replacement);
-        start = pos + needle.len;
-    }
-    try out.appendSlice(ctx.allocator, source[start..]);
-
-    const replaced = try out.toOwnedSlice(ctx.allocator);
-    defer ctx.allocator.free(replaced);
-    const id = try internString(ctx, replaced);
-    return Value.string(id, source_v.stringQuoted(ctx.string_flags_pool.items));
-}
-
 pub fn string_insert(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
     const bound = try bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{ "string", "insert", "index" }, 3);
     const base_v = bound[0].?;
@@ -667,22 +629,6 @@ pub fn string_unique_id(ctx: *BuiltinContext, args: []const Value) BuiltinError!
     };
     const id = try internString(ctx, raw);
     return Value.string(id, false);
-}
-
-pub fn string_string(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
-    try expectArity(args, 1);
-    const css = try valueToCssString(ctx, args[0]);
-    defer ctx.allocator.free(css);
-    const id = try internString(ctx, css);
-    return Value.string(id, true);
-}
-
-pub fn string_contains(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
-    if (args.len < 2) return Value.false_v;
-    if (!args[0].isString() or !args[1].isString()) return Value.false_v;
-    const hay = ctx.intern_pool.get(args[0].stringIntern());
-    const needle = ctx.intern_pool.get(args[1].stringIntern());
-    return if (std.mem.find(u8, hay, needle) != null) Value.true_v else Value.false_v;
 }
 
 test "utf8 helpers count and offsets for multibyte scalars" {
