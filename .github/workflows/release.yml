@@ -4,11 +4,22 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name (e.g. v0.2.0)'
+        required: true
 
 # Default to read-only. Only the publish job needs `contents: write` (to
 # create the release) and `id-token: write` (for sigstore keyless signing).
 permissions:
   contents: read
+
+# `inputs.tag` carries the dispatched tag when the auto-tag workflow
+# kicks this off; on a normal `push: tags` run we fall back to
+# `github.ref_name` (which already equals the tag).
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -48,6 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
+          ref: ${{ env.TAG }}
           submodules: recursive
 
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29  # v2
@@ -65,7 +77,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag_version="${GITHUB_REF_NAME#v}"
+          tag_version="${TAG#v}"
           package_version="$(awk -F '"' '/^[[:space:]]*\.version[[:space:]]*=/{print $2; exit}' build.zig.zon)"
           if [ -z "${package_version}" ]; then
             echo "Unable to read .version from build.zig.zon" >&2
@@ -114,6 +126,8 @@ jobs:
       id-token: write    # required for sigstore keyless signing (cosign sign-blob)
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ env.TAG }}
 
       - name: Download all build artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
@@ -129,7 +143,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          tag="${TAG}"
           expected=(
             "zsass-${tag}-linux-x86_64.tar.gz"
             "zsass-${tag}-linux-aarch64.tar.gz"
@@ -193,6 +207,7 @@ jobs:
       - name: Upload to release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
+          tag_name: ${{ env.TAG }}
           files: |
             dist/zsass-v*.tar.gz
             dist/zsass-v*.zip
@@ -201,3 +216,72 @@ jobs:
             dist/zsass-v*.pem
           fail_on_unmatched_files: true
           generate_release_notes: true
+
+  homebrew:
+    name: Update homebrew-tap formula
+    runs-on: ubuntu-latest
+    needs: publish
+    # Co-locating the tap update in the same workflow as `publish` is
+    # what makes the chain self-driving: the previous standalone
+    # workflow listened for `release: published`, but releases minted
+    # by GITHUB_TOKEN never propagate that event so it only ever ran
+    # via manual workflow_dispatch.
+    steps:
+      - name: Check tap token availability
+        id: token
+        shell: bash
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [[ -z "${HOMEBREW_TAP_TOKEN}" ]]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set; skipping tap update."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Checkout zsass (renderer source)
+        if: steps.token.outputs.skip != 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ env.TAG }}
+          path: zsass
+
+      - name: Checkout nihen/homebrew-tap
+        if: steps.token.outputs.skip != 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          repository: nihen/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Render formula
+        if: steps.token.outputs.skip != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ env.TAG }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          mkdir -p homebrew-tap/Formula
+          zsass/scripts/render-homebrew-formula.sh "${version}" \
+            --output homebrew-tap/Formula/zsass.rb
+
+      - name: Commit and push
+        if: steps.token.outputs.skip != 'true'
+        shell: bash
+        working-directory: homebrew-tap
+        env:
+          VERSION: ${{ env.TAG }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formula/zsass.rb
+          if git diff --cached --quiet -- Formula/zsass.rb; then
+            echo "Formula already up to date; nothing to commit."
+            exit 0
+          fi
+          git commit -m "zsass ${version}"
+          git push origin HEAD

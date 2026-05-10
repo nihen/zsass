@@ -1,17 +1,15 @@
 name: Publish Homebrew Formula
 
-# Updates the zsass formula in nihen/homebrew-tap whenever a GitHub
-# Release is published. The release.yml workflow attaches archives +
-# .sha256 sidecars; this job reads those sidecars and rewrites
-# Formula/zsass.rb in the tap repo.
+# Manual fallback for re-rendering the zsass formula in
+# nihen/homebrew-tap (e.g. to recover from a failed tap push without
+# cutting a fresh release). The standard chain runs as the `homebrew`
+# job inside release.yml; that path is preferred for normal releases.
 #
 # Requires repo secret HOMEBREW_TAP_TOKEN: a token (PAT or fine-grained)
 # with `contents: write` on nihen/homebrew-tap. The job is a no-op when
 # the secret is absent so the first-time introduction does not fail.
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       version:
