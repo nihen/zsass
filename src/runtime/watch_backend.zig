@@ -117,11 +117,19 @@ fn freeBindings(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(File
 }
 
 fn splitDirAndBasename(path: []const u8) struct { dir: []const u8, base: []const u8 } {
-    const sep_idx = std.mem.lastIndexOfAny(u8, path, "/\\") orelse {
-        return .{ .dir = ".", .base = path };
+    return .{
+        .dir = std.fs.path.dirname(path) orelse ".",
+        .base = std.fs.path.basename(path),
     };
-    const dir = if (sep_idx == 0) "/" else path[0..sep_idx];
-    return .{ .dir = dir, .base = path[sep_idx + 1 ..] };
+}
+
+fn sleepIgnoringCancel(timeout_ms: u32) void {
+    const dur = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms));
+    zsass_io.io.sleep(dur, .awake) catch |err| switch (err) {
+        // The watch loop runs again on the next tick, so a missed
+        // sleep is not fatal -- log at debug level and fall through.
+        error.Canceled => std.log.debug("watch_backend: sleep canceled", .{}),
+    };
 }
 
 // =============================================================================
@@ -168,13 +176,11 @@ const LinuxInotify = struct {
             freeBindings(allocator, &entry.value_ptr.bindings);
             allocator.free(entry.value_ptr.dir_path);
         }
-        // Free internal storage and reset to empty so the maps are
-        // safe to keep using -- the watch loop calls clearWatches
-        // every rebuild and immediately re-adds entries.
-        self.dirs.deinit(allocator);
-        self.dirs = .empty;
-        self.dir_lookup.deinit(allocator);
-        self.dir_lookup = .empty;
+        // Reuse the underlying buckets across rebuilds; only the entry
+        // count resets so the next batch of `addWatchedFile` calls can
+        // reuse the existing capacity.
+        self.dirs.clearRetainingCapacity();
+        self.dir_lookup.clearRetainingCapacity();
     }
 
     pub fn addWatchedFile(
@@ -349,6 +355,9 @@ const DarwinKqueue = struct {
             .data = 0,
             .udata = job_index,
         }};
+        // SAFETY: nevents = 0 means kevent never reads from the
+        // eventlist pointer; passing `undefined` is the canonical way
+        // to call kevent in pure-registration mode.
         const reg_rc = std.c.kevent(self.kq, &changes, 1, undefined, 0, null);
         if (reg_rc < 0) return error.Unexpected;
 
@@ -369,6 +378,9 @@ const DarwinKqueue = struct {
             .sec = @intCast(timeout_ms / 1000),
             .nsec = @intCast((timeout_ms % 1000) * std.time.ns_per_ms),
         };
+        // SAFETY: nchanges = 0 means kevent never reads from the
+        // changelist pointer; passing `undefined` is the canonical
+        // way to call kevent in pure-wait mode.
         const rc = std.c.kevent(self.kq, undefined, 0, &events, events.len, &ts);
         if (rc < 0) return error.Unexpected;
         if (rc == 0) return false;
@@ -516,16 +528,17 @@ const win_api = struct {
 };
 
 const WindowsRdcw = struct {
-    dirs: std.ArrayListUnmanaged(*DirState) = .empty,
-    /// canonical directory path -> index in `dirs`.
-    dir_lookup: std.StringHashMapUnmanaged(usize) = .empty,
+    /// canonical directory path -> per-directory state. The string key
+    /// shares the allocation with `DirState.dir_path` so teardown frees
+    /// it once via the value iterator below.
+    dirs: std.StringHashMapUnmanaged(*DirState) = .empty,
 
     const DirState = struct {
         dir_path: []u8,
         handle: win_api.HANDLE,
         completion: win_api.HANDLE,
         overlapped: win_api.OVERLAPPED,
-        buffer: [4096]u8 align(4) = undefined,
+        buffer: [4096]u8 align(4),
         bindings: std.ArrayListUnmanaged(FileBinding) = .empty,
         pending: bool = false,
     };
@@ -540,7 +553,9 @@ const WindowsRdcw = struct {
     }
 
     pub fn clearWatches(self: *WindowsRdcw, allocator: std.mem.Allocator) void {
-        for (self.dirs.items) |d| {
+        var it = self.dirs.valueIterator();
+        while (it.next()) |d_ptr| {
+            const d = d_ptr.*;
             if (d.pending) {
                 _ = win_api.CancelIoEx(d.handle, &d.overlapped);
                 _ = win_api.WaitForSingleObject(d.completion, win_api.INFINITE);
@@ -551,9 +566,7 @@ const WindowsRdcw = struct {
             allocator.free(d.dir_path);
             allocator.destroy(d);
         }
-        self.dirs.clearAndFree(allocator);
-        self.dir_lookup.deinit(allocator);
-        self.dir_lookup = .empty;
+        self.dirs.clearRetainingCapacity();
     }
 
     pub fn addWatchedFile(
@@ -564,8 +577,8 @@ const WindowsRdcw = struct {
     ) !void {
         const split = splitDirAndBasename(path);
 
-        const dir_state: *DirState = if (self.dir_lookup.get(split.dir)) |idx|
-            self.dirs.items[idx]
+        const dir_state: *DirState = if (self.dirs.get(split.dir)) |existing|
+            existing
         else blk: {
             const dir_dup = try allocator.dupe(u8, split.dir);
             errdefer allocator.free(dir_dup);
@@ -575,8 +588,8 @@ const WindowsRdcw = struct {
 
             const handle = try openDirectoryHandle(split.dir);
             errdefer _ = win_api.CloseHandle(handle);
-            const completion_opt = win_api.CreateEventW(null, 1, 0, null);
-            const completion = completion_opt orelse return error.Unexpected;
+            const completion = win_api.CreateEventW(null, 1, 0, null) orelse
+                return error.Unexpected;
             errdefer _ = win_api.CloseHandle(completion);
 
             new_state.* = .{
@@ -584,13 +597,13 @@ const WindowsRdcw = struct {
                 .handle = handle,
                 .completion = completion,
                 .overlapped = .{},
+                // SAFETY: only ever written by ReadDirectoryChangesW
+                // and read up to the kernel-reported `bytes_returned`.
+                .buffer = undefined,
             };
             new_state.overlapped.hEvent = completion;
 
-            try self.dirs.append(allocator, new_state);
-            errdefer _ = self.dirs.pop();
-
-            try self.dir_lookup.put(allocator, dir_dup, self.dirs.items.len - 1);
+            try self.dirs.put(allocator, dir_dup, new_state);
             try issueRead(new_state);
             break :blk new_state;
         };
@@ -647,18 +660,23 @@ const WindowsRdcw = struct {
         timeout_ms: u32,
         out_dirty: []bool,
     ) !bool {
-        if (self.dirs.items.len == 0) {
-            // Nothing registered yet -- the watch loop is between
-            // collect passes. A bare `Sleep(timeout_ms)` keeps the
-            // thread quiescent without spinning.
-            const dur = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms));
-            zsass_io.io.sleep(dur, .awake) catch {};
+        if (self.dirs.count() == 0) {
+            // Nothing registered yet -- watch loop is between collect
+            // passes. Block for the timeout so we don't spin.
+            sleepIgnoringCancel(timeout_ms);
             return false;
         }
 
         var handles_buf: [64]win_api.HANDLE = undefined;
-        const cap = @min(self.dirs.items.len, handles_buf.len);
-        for (self.dirs.items[0..cap], 0..) |d, i| handles_buf[i] = d.completion;
+        var dirs_buf: [64]*DirState = undefined;
+        var cap: usize = 0;
+        var it = self.dirs.valueIterator();
+        while (it.next()) |d_ptr| {
+            if (cap >= handles_buf.len) break;
+            dirs_buf[cap] = d_ptr.*;
+            handles_buf[cap] = d_ptr.*.completion;
+            cap += 1;
+        }
 
         const wait_rc = win_api.WaitForMultipleObjectsEx(
             @intCast(cap),
@@ -672,7 +690,7 @@ const WindowsRdcw = struct {
         const idx: usize = @intCast(wait_rc - win_api.WAIT_OBJECT_0);
         if (idx >= cap) return false;
 
-        const d = self.dirs.items[idx];
+        const d = dirs_buf[idx];
         var bytes_returned: win_api.DWORD = 0;
         if (win_api.GetOverlappedResult(d.handle, &d.overlapped, &bytes_returned, 0) == 0) {
             d.pending = false;
@@ -765,8 +783,7 @@ const Polling = struct {
         timeout_ms: u32,
         out_dirty: []bool,
     ) !bool {
-        const dur = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms));
-        zsass_io.io.sleep(dur, .awake) catch {};
+        sleepIgnoringCancel(timeout_ms);
         var any = false;
         for (self.paths.items) |*e| {
             const st = std.Io.Dir.cwd().statFile(zsass_io.io, e.path, .{}) catch {
