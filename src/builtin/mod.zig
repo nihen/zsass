@@ -96,31 +96,32 @@ fn identifierEqSassCase(raw: []const u8, expected: []const u8) bool {
 }
 
 fn resolveCssMathLegacyGlobal(name: []const u8) ?Id {
-    const mappings = [_]struct { query: []const u8, module: []const u8, builtin: []const u8 }{
-        .{ .query = "abs", .module = "math", .builtin = "abs" },
-        .{ .query = "min", .module = "math", .builtin = "min" },
-        .{ .query = "max", .module = "math", .builtin = "max" },
-        .{ .query = "clamp", .module = "math", .builtin = "clamp" },
-        .{ .query = "hypot", .module = "math", .builtin = "hypot" },
-        .{ .query = "sqrt", .module = "math", .builtin = "sqrt" },
-        .{ .query = "pow", .module = "math", .builtin = "pow" },
-        .{ .query = "log", .module = "math", .builtin = "log" },
-        .{ .query = "sin", .module = "math", .builtin = "sin" },
-        .{ .query = "cos", .module = "math", .builtin = "cos" },
-        .{ .query = "tan", .module = "math", .builtin = "tan" },
-        .{ .query = "asin", .module = "math", .builtin = "asin" },
-        .{ .query = "acos", .module = "math", .builtin = "acos" },
-        .{ .query = "atan", .module = "math", .builtin = "atan" },
-        .{ .query = "atan2", .module = "math", .builtin = "atan2" },
-        .{ .query = "exp", .module = "math", .builtin = "exp" },
-        .{ .query = "sign", .module = "math", .builtin = "sign" },
-        .{ .query = "mod", .module = "math", .builtin = "mod" },
-        .{ .query = "rem", .module = "math", .builtin = "rem" },
+    // CSS Values L4 math globals. `exp`/`sign`/`mod`/`rem` reach the dispatch
+    // ids directly because they are deliberately not exposed as `sass:math`
+    // members (matching dart-sass), so `resolve("math", ...)` cannot find them.
+    const mappings = [_]struct { query: []const u8, id: Id }{
+        .{ .query = "abs", .id = 0 },
+        .{ .query = "min", .id = 4 },
+        .{ .query = "max", .id = 5 },
+        .{ .query = "clamp", .id = 110 },
+        .{ .query = "hypot", .id = 21 },
+        .{ .query = "sqrt", .id = 11 },
+        .{ .query = "pow", .id = 12 },
+        .{ .query = "log", .id = 13 },
+        .{ .query = "sin", .id = 14 },
+        .{ .query = "cos", .id = 15 },
+        .{ .query = "tan", .id = 16 },
+        .{ .query = "asin", .id = 17 },
+        .{ .query = "acos", .id = 18 },
+        .{ .query = "atan", .id = 19 },
+        .{ .query = "atan2", .id = 20 },
+        .{ .query = "exp", .id = 105 },
+        .{ .query = "sign", .id = 106 },
+        .{ .query = "mod", .id = 107 },
+        .{ .query = "rem", .id = 108 },
     };
     inline for (mappings) |entry| {
-        if (shared.identifierEq(name, entry.query)) {
-            return resolve(entry.module, entry.builtin);
-        }
+        if (shared.identifierEq(name, entry.query)) return entry.id;
     }
     return null;
 }
@@ -135,9 +136,6 @@ pub fn resolveLegacyGlobal(name: []const u8) ?Id {
     // Sass identifiers treat `_` and `-` equivalently and are ASCII case insensitive.
     // The legacy global alias below is a Sass-only name that does not conflict with CSS function names, so
     //Normalize comparison using `shared.identifierEq` (e.g. `map_get`  ->  `map.get`).
-    if (shared.identifierEq(name, "str-contains")) {
-        return resolve("string", "contains");
-    }
     if (shared.identifierEq(name, "index")) {
         return resolve("list", "index");
     }
@@ -179,7 +177,6 @@ pub fn resolveLegacyGlobal(name: []const u8) ?Id {
     if (shared.identifierEq(name, "str-length")) return resolve("string", "length");
     if (shared.identifierEq(name, "str-insert")) return resolve("string", "insert");
     if (shared.identifierEq(name, "str-index")) return resolve("string", "index");
-    if (shared.identifierEq(name, "str-replace")) return resolve("string", "replace");
     if (shared.identifierEq(name, "str-split")) return resolve("string", "split");
     if (shared.identifierEq(name, "selector-append")) return resolve("selector", "append");
     if (shared.identifierEq(name, "selector-nest")) return resolve("selector", "nest");
@@ -278,10 +275,6 @@ fn buildResolveTable() []const ResolveRow {
         .{ .m = "math", .n = "atan", .id = 19 },
         .{ .m = "math", .n = "atan2", .id = 20 },
         .{ .m = "math", .n = "hypot", .id = 21 },
-        .{ .m = "math", .n = "exp", .id = 105 },
-        .{ .m = "math", .n = "sign", .id = 106 },
-        .{ .m = "math", .n = "mod", .id = 107 },
-        .{ .m = "math", .n = "rem", .id = 108 },
         .{ .m = "math", .n = "random", .id = 109 },
         .{ .m = "math", .n = "clamp", .id = 110 },
         // legacy global aliases (via resolveLegacyGlobal)
@@ -300,9 +293,6 @@ fn buildResolveTable() []const ResolveRow {
         .{ .m = "string", .n = "quote", .id = 29 },
         .{ .m = "string", .n = "unquote", .id = 30 },
         .{ .m = "string", .n = "unique-id", .id = 31 },
-        .{ .m = "string", .n = "string", .id = 118 },
-        .{ .m = "string", .n = "contains", .id = 119 },
-        .{ .m = "string", .n = "replace", .id = 120 },
         .{ .m = "selector", .n = "append", .id = 32 },
         .{ .m = "selector", .n = "nest", .id = 33 },
         .{ .m = "selector", .n = "parse", .id = 34 },
@@ -503,9 +493,6 @@ pub fn dispatch(ctx: *BuiltinContext, id: Id, args: []const Value, arg_names: []
         29 => string.string_quote(ctx, args),
         30 => string.string_unquote(ctx, args),
         31 => string.string_unique_id(ctx, args),
-        118 => string.string_string(ctx, args),
-        119 => string.string_contains(ctx, args),
-        120 => string.string_replace(ctx, args, arg_names),
         32 => selector.selector_append(ctx, args),
         33 => selector.selector_nest(ctx, args),
         34 => selector.selector_parse(ctx, args, arg_names),
@@ -592,8 +579,13 @@ test "resolveLegacyGlobal: css math names are case-insensitive" {
     try testing.expectEqual(resolve("math", "max"), resolveLegacyGlobal("MaX"));
     try testing.expectEqual(resolve("math", "clamp"), resolveLegacyGlobal("ClAmP"));
     try testing.expectEqual(resolve("math", "hypot"), resolveLegacyGlobal("hYpOt"));
-    try testing.expectEqual(resolve("math", "mod"), resolveLegacyGlobal("MoD"));
-    try testing.expectEqual(resolve("math", "rem"), resolveLegacyGlobal("ReM"));
+    // mod/rem/exp/sign exist only as bare CSS L4 globals, not as sass:math members.
+    try testing.expectEqual(@as(?Id, null), resolve("math", "mod"));
+    try testing.expectEqual(@as(?Id, null), resolve("math", "rem"));
+    try testing.expectEqual(@as(?Id, 107), resolveLegacyGlobal("MoD"));
+    try testing.expectEqual(@as(?Id, 108), resolveLegacyGlobal("ReM"));
+    try testing.expectEqual(@as(?Id, 105), resolveLegacyGlobal("ExP"));
+    try testing.expectEqual(@as(?Id, 106), resolveLegacyGlobal("SiGn"));
 }
 
 test "resolveLegacyGlobal: scale keeps CSS transform passthrough" {
