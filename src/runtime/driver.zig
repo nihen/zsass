@@ -1611,7 +1611,10 @@ pub fn main(init: std.process.Init) !void {
     }
 
     compileFiles(allocator, jobs.items) catch |err| {
-        cliErrPrint("error: {}\n", .{err});
+        // compileFiles already wrote a user-facing diagnostic for every
+        // failed job (each worker prints its own). Just propagate the
+        // exit code so OOM / internal-error tags don't collapse to
+        // EX_DATAERR.
         std.process.exit(exitCodeForError(err));
     };
 }
@@ -1662,7 +1665,13 @@ fn compileFiles(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
 
     if (jobs.len == 1) {
         const job = jobs[order[0]];
-        return runEnd2End(allocator, job.input_path, job.output_path, job.opts);
+        runEnd2End(allocator, job.input_path, job.output_path, job.opts) catch |err| {
+            // Match the multi-job path: emit the user-facing diagnostic
+            // before bubbling the error tag up for exit-code mapping.
+            printUserFacingError(err, job.input_path);
+            return err;
+        };
+        return;
     }
 
     const cpu_count = std.Thread.getCpuCount() catch 4;
@@ -1682,6 +1691,13 @@ fn compileFiles(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
         phase_aggregator: ?*PhaseAggregator,
         next_index: usize = 0,
         mutex: std.Io.Mutex = .init,
+        // Serializes per-worker user-facing error printing so stderr frames
+        // from different threads do not interleave.
+        print_mutex: std.Io.Mutex = .init,
+        // Set by the first worker that fails; used only to surface the
+        // original error tag to the top-level CLI (exitCodeForError /
+        // EX_DATAERR vs EX_SOFTWARE mapping). Workers print their own
+        // user-facing diagnostic before recording it.
         first_err: ?struct { err: anyerror, input_path: []const u8 } = null,
         stop: bool = false,
     };
@@ -1751,7 +1767,6 @@ fn compileFiles(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
                         defer state.mutex.unlock(zsass_io_mod.io);
 
                         if (state.stop) break :blk null;
-                        if (state.first_err != null) break :blk null;
                         if (state.next_index >= state.order.len) break :blk null;
 
                         const slot = state.next_index;
@@ -1761,15 +1776,26 @@ fn compileFiles(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
                     const job = maybe_job orelse return;
                     const arena_alloc = arena.allocator();
                     runEnd2EndWithPool(arena_alloc, job.input_path, job.output_path, job.opts, &shared_pool, state.source_cache, &local_ast_cache, state.phase_aggregator, &persistent_state) catch |err| {
+                        // Print this job's user-facing error in the worker
+                        // thread (the diagnostic context lives in
+                        // thread-local error_state). Serialize stderr
+                        // writes across workers so source frames don't
+                        // interleave. Match dart-sass: keep compiling the
+                        // remaining files instead of bailing on first
+                        // failure.
+                        state.print_mutex.lockUncancelable(zsass_io_mod.io);
+                        printUserFacingError(err, job.input_path);
+                        state.print_mutex.unlock(zsass_io_mod.io);
+
                         state.mutex.lockUncancelable(zsass_io_mod.io);
-                        defer state.mutex.unlock(zsass_io_mod.io);
                         if (state.first_err == null) {
                             state.first_err = .{
                                 .err = err,
                                 .input_path = job.input_path,
                             };
                         }
-                        return;
+                        state.mutex.unlock(zsass_io_mod.io);
+                        // fall through to arena reset and pull next job
                     };
                     _ = arena.reset(.retain_capacity);
                 }
@@ -1784,10 +1810,11 @@ fn compileFiles(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
     // ESRCH unreachable in the join wrapper).
     started = 0;
     if (shared.first_err) |first| {
-        printUserFacingError(first.err, first.input_path);
-        // Surface the original error type so the top-level CLI's
-        // exitCodeForError(err) maps OOM / internal errors to
-        // EX_SOFTWARE rather than collapsing everything to EX_DATAERR.
+        // Workers already wrote the user-facing diagnostic for every
+        // failed job. Re-surface the first error tag so the top-level
+        // CLI's exitCodeForError(err) keeps the OOM / internal-error
+        // mapping correct (EX_SOFTWARE) rather than collapsing
+        // everything to EX_DATAERR.
         return first.err;
     }
 
@@ -3472,4 +3499,91 @@ test "compileFiles batch with one failing job does not double-join" {
     };
 
     try std.testing.expectError(error.SassError, compileFiles(allocator, &jobs));
+}
+
+// dart-sass parity: when one entry in a batch fails, the worker pool must keep
+// pulling and compiling the remaining inputs instead of bailing as soon as the
+// first error is recorded. The previous fail-fast behavior left OK entries
+// past `worker_count` unprocessed -- their output `.css` files were never
+// written.
+//
+// To make the regression observable, the test queues many more OK jobs than
+// the worker pool can run in parallel and makes the failing entry the largest
+// (so `buildJobOrderByFileSize` schedules it first). With fail-fast the OK
+// files past the initial parallel batch never get a chance to run; with the
+// new behavior every OK output is produced.
+test "compileFiles batch continues processing after one entry fails" {
+    var threaded = std.Io.Threaded.init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const saved_io = zsass_io_mod.io;
+    defer zsass_io_mod.io = saved_io;
+    zsass_io_mod.io = threaded.io();
+
+    var td = std.testing.tmpDir(.{});
+    defer td.cleanup();
+
+    const allocator = std.testing.allocator;
+    const sub = td.sub_path[0..];
+
+    // Way more OK jobs than typical CPU counts so plenty of OK entries land
+    // beyond the initial parallel batch under old fail-fast behavior.
+    const ok_count: usize = 24;
+
+    const ok_in_paths = try allocator.alloc([]u8, ok_count);
+    defer {
+        for (ok_in_paths) |p| allocator.free(p);
+        allocator.free(ok_in_paths);
+    }
+    const ok_out_paths = try allocator.alloc([]u8, ok_count);
+    defer {
+        for (ok_out_paths) |p| allocator.free(p);
+        allocator.free(ok_out_paths);
+    }
+
+    for (0..ok_count) |i| {
+        ok_in_paths[i] = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ok{d:0>2}.scss", .{ sub, i });
+        ok_out_paths[i] = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ok{d:0>2}.css", .{ sub, i });
+        try writeFileAll(ok_in_paths[i], ".a{color:red}\n");
+    }
+
+    const bad_in = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/bad.scss", .{sub});
+    defer allocator.free(bad_in);
+    const bad_out = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/bad.css", .{sub});
+    defer allocator.free(bad_out);
+
+    // Pad the failing entry so it's strictly the largest input. This forces
+    // the worker pool to pull it first via `buildJobOrderByFileSize`, so its
+    // failure is recorded before any other worker has a chance to drain its
+    // queue. Under the old fail-fast behavior that means later OK entries
+    // never start.
+    var bad_buf: std.ArrayList(u8) = .empty;
+    defer bad_buf.deinit(allocator);
+    try bad_buf.appendSlice(allocator, "/* ");
+    try bad_buf.appendNTimes(allocator, 'a', 1024);
+    try bad_buf.appendSlice(allocator, " */\n@import \"definitely-missing-stylesheet\";\n");
+    try writeFileAll(bad_in, bad_buf.items);
+
+    const opts: RunOpts = .{ .source_map_mode = .off, .error_css_enabled = false };
+
+    var jobs: std.ArrayListUnmanaged(FileJob) = .empty;
+    defer jobs.deinit(allocator);
+    try jobs.ensureTotalCapacity(allocator, ok_count + 1);
+    jobs.appendAssumeCapacity(.{ .input_path = bad_in, .output_path = bad_out, .opts = opts });
+    for (0..ok_count) |i| {
+        jobs.appendAssumeCapacity(.{ .input_path = ok_in_paths[i], .output_path = ok_out_paths[i], .opts = opts });
+    }
+
+    try std.testing.expectError(error.SassError, compileFiles(allocator, jobs.items));
+
+    // Every OK output must exist with non-empty content. Under the old
+    // fail-fast worker loop only ~`cpu_count` OK entries got that far; the
+    // tail of the batch was skipped entirely.
+    for (ok_out_paths) |path| {
+        const got = readFileToStringAlloc(allocator, path) catch |err| {
+            std.debug.print("missing OK output {s}: {}\n", .{ path, err });
+            return error.TestExpectedAllOkOutputs;
+        };
+        defer allocator.free(got);
+        try std.testing.expect(got.len > 0);
+    }
 }
