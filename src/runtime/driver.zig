@@ -2027,8 +2027,7 @@ fn writeStdoutAll(bytes: []const u8) void {
 }
 
 /// Writes a fixed `[YYYY-MM-DD HH:MM:SS]` (21 bytes) into `buf` using the
-/// supplied broken-down components. Split out from `currentLocalTimestamp`
-/// so the formatting is testable without mocking wall-clock time.
+/// supplied broken-down components. Buf must be at least 21 bytes.
 fn formatWatchTimestamp(
     buf: []u8,
     year: u32,
@@ -2038,11 +2037,14 @@ fn formatWatchTimestamp(
     minute: u32,
     second: u32,
 ) []const u8 {
+    // The format always produces exactly 21 ASCII bytes; the only way
+    // `bufPrint` can fail is `NoSpaceLeft`, which means the caller
+    // passed too small a buffer. Treat that as a contract violation.
     return std.fmt.bufPrint(
         buf,
         "[{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}]",
         .{ year, month, day, hour, minute, second },
-    ) catch unreachable;
+    ) catch |err| std.debug.panic("formatWatchTimestamp: {s}", .{@errorName(err)});
 }
 
 /// Returns a slice into `buf` holding the current local time formatted as
@@ -2074,11 +2076,8 @@ fn currentLocalTimestamp(buf: []u8) []const u8 {
     );
 }
 
-/// Emits the dart-sass-compatible per-file watch line on stdout:
-/// `[YYYY-MM-DD HH:MM:SS] Compiled <input> to <output>.\n`. dart-sass
-/// uses stdout for these (errors stay on stderr); paths longer than
-/// `path_buf` cause the line to be silently dropped, mirroring the
-/// other "best effort" stdout writes in this file.
+/// Emits `[YYYY-MM-DD HH:MM:SS] Compiled <input> to <output>.\n` on stdout
+/// (dart-sass parity). Lines that exceed `path_buf` are silently dropped.
 fn writeWatchCompiledLine(input_path: []const u8, output_path: []const u8) void {
     var ts_buf: [32]u8 = undefined;
     const ts = currentLocalTimestamp(&ts_buf);
@@ -2250,11 +2249,8 @@ fn runWatchLoop(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
     }
     for (deps_per_job) |*d| d.* = .{ .allocator = allocator };
 
-    // Initial compile: collect deps for each job (errors print but never
-    // tear down the watcher; the user typically saves the file again
-    // with the fix in place). Successful compiles emit the dart-sass
-    // `[YYYY-MM-DD HH:MM:SS] Compiled X to Y.` line on stdout; errors go
-    // through `printUserFacingError` (stderr) without a "Compiled" line.
+    // Initial compile pass; failures are surfaced but never tear the
+    // watcher down so the user can save the fix and try again.
     for (jobs, 0..) |job, i| {
         var local_opts = job.opts;
         local_opts.watch_out_deps = &deps_per_job[i];
@@ -2265,16 +2261,8 @@ fn runWatchLoop(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
         }
     }
 
-    // dart-sass writes the watcher banner to stdout (the per-file
-    // "Compiled" lines do too); previous zsass versions used stderr.
-    // Wording uses "zsass" rather than dart-sass's "Sass" so the
-    // implementation announces itself.
     writeStdoutAll("\nzsass is watching for changes. Press Ctrl-C to stop.\n\n");
 
-    // Native FS watcher (inotify on Linux, kqueue on macOS / *BSD,
-    // ReadDirectoryChangesW on Windows; mtime-poll fallback elsewhere).
-    // Replaces the previous mtime-poll loop so the process blocks on
-    // the kernel event source instead of waking 10 times a second.
     var watcher = try watch_backend_mod.WatchBackend.init(allocator);
     defer watcher.deinit(allocator);
     populateWatcher(&watcher, allocator, jobs, deps_per_job) catch |e| {
@@ -2300,18 +2288,13 @@ fn runWatchLoop(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
             if (runEnd2End(allocator, job.input_path, job.output_path, local_opts)) |_| {
                 writeWatchCompiledLine(job.input_path, job.output_path);
             } else |err| {
-                // Sass / IO errors must NOT terminate the watcher: the user
-                // typically saves the file again with the fix in place. Print
-                // the diagnostic and keep polling.
                 printUserFacingError(err, job.input_path);
             }
         }
 
-        // Re-register watches against the freshly-collected dep sets so
-        // newly added `@import` targets start being observed and removed
-        // ones stop. Clearing everything is simpler than book-keeping
-        // per-job diffs and the watcher is cheap to re-prime; the
-        // backends de-duplicate identical (path, job) pairs internally.
+        // Clearing everything is simpler than book-keeping per-job diffs
+        // when an `@import` is added or removed; the backends dedupe
+        // identical (path, job) pairs internally.
         watcher.clearWatches(allocator);
         populateWatcher(&watcher, allocator, jobs, deps_per_job) catch |e| {
             cliErrPrint("zsass-watch: failed to refresh watches: {s}\n", .{@errorName(e)});
@@ -2555,7 +2538,12 @@ fn runEnd2EndWithPool(
         // path) so the in-loop `WatchDeps.append` does not regrow the
         // ArrayList each iteration. The byte buffer still grows lazily
         // because path lengths are not known up front.
-        deps_out.offsets.ensureTotalCapacity(deps_out.allocator, program_ptr.modules.len) catch {};
+        // OOM here would only mean we miss the pre-allocation; the
+        // append loop below still works one item at a time, so swallow
+        // the error rather than abort a successful compile.
+        deps_out.offsets.ensureTotalCapacity(deps_out.allocator, program_ptr.modules.len) catch |err| switch (err) {
+            error.OutOfMemory => {},
+        };
         for (program_ptr.modules) |mod| {
             if (mod.module_path.len == 0) continue;
             // `<stdin>` is virtual; never put it in the dep list.
