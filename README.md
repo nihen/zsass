@@ -6,46 +6,38 @@
 [![Zig 0.16+](https://img.shields.io/badge/zig-0.16%2B-orange.svg)](https://ziglang.org/)
 [![sass-spec](https://img.shields.io/badge/sass--spec-13885%2F13885-brightgreen.svg)](https://github.com/sass/sass-spec)
 
-A Zig implementation of the Sass compiler, designed for speed and native
-Zig ergonomics. Built around a small Rule IR and a single-pass writer;
-no external libsass / dart-sass runtime required.
+A clean-room Sass compiler written in Zig for native and Zig
+build-tooling workflows. zsass provides a standalone CLI and an
+embeddable Zig API, with no Dart Sass or libsass runtime dependency.
 
-> Clean-room implementation: zsass was written without reading the Dart Sass
-> source. Behavior is verified against the official `sass-spec` suite and the
-> `sass` CLI's observable output only.
+## Status
 
-### sass-spec compatibility
+zsass is an early v0.1 clean-room Sass compiler written in Zig.
 
-This release passes the upstream `sass-spec` suite vendored at the
-submodule pin in `tests/sass-spec`: **13,885 / 13,885 cases pass, 6
-skipped** (see `tests/sass-spec/.gitmodules` for the exact commit and
-`tests/spec_runner.zig` for the runner). Compatibility is validated
-against that suite and the official `sass` CLI's observable output;
-behavior outside cases the suite covers may diverge from dart-sass.
-Re-run with `zig build test` after updating the submodule to verify the
-current pin yourself.
+Dart Sass is already fast and mature. zsass is not positioned as a
+revolutionary speedup or a universal drop-in replacement. The goal is
+to provide a native, embeddable Sass implementation that fits naturally
+into Zig and native build-tooling workflows.
 
-## Performance vs dart-sass
+zsass passes the pinned `sass-spec` suite used in this repository, but
+this is not a full compatibility guarantee. Real-world stylesheets may
+still expose differences from Dart Sass. If you find a divergence,
+please open a [compatibility report](.github/ISSUE_TEMPLATE/compatibility_report.yml)
+with a minimal SCSS reproducer.
 
-Wall-clock time compiling the upstream `sass-spec` suite end-to-end
-(`scripts/bench.sh`, ReleaseFast, batch mode, single process). Lower
-`ratio` is better; values under `1.00x` mean zsass finished faster than
-the Dart implementation.
+## Who is this for?
 
-| Suite (entries) | zsass | dart-sass | ratio |
-| --- | ---: | ---: | ---: |
-| sass-spec (~13400) | 3865 ms | 10323 ms | **0.37x** |
+zsass may be interesting if you:
 
-`sass-spec` is the only suite shipped with this repository (vendored as
-a submodule under `tests/sass-spec`), which makes it the easiest number
-to reproduce; private real-world bundles tend to follow the same
-ordering on our setup.
+- want a Sass compiler that can be built and embedded from Zig;
+- want a standalone native binary for build pipelines;
+- are building native CSS tooling;
+- are interested in compiler implementation techniques;
+- want to test real-world Sass compatibility against a clean-room
+  implementation.
 
-*Measured on 2026-05-08, Linux x86_64 (zsass ReleaseFast vs
-`sass --no-source-map` from the bundled dart-sass release).* Numbers
-will drift as both compilers evolve and depend on CPU / OS / Zig
-optimize mode -- rerun `scripts/bench.sh` on your machine for current
-values.
+If you only need a mature, widely deployed Sass compiler today,
+Dart Sass remains the default recommendation.
 
 ## Install
 
@@ -218,6 +210,37 @@ aggregated `perf` counters via `zsass.dumpProfile()` (no-op otherwise).
 See [docs/api.md](docs/api.md) for the full embedding surface and
 [examples/](examples/) for runnable samples.
 
+## sass-spec compatibility
+
+This release passes the upstream `sass-spec` suite vendored at the
+submodule pin in `tests/sass-spec`: **13,885 / 13,885 cases pass, 6
+skipped** (see `tests/sass-spec/.gitmodules` for the exact commit and
+`tests/spec_runner.zig` for the runner). This validates behavior
+against the cases the suite covers; outside that, real-world
+stylesheets may still diverge from Dart Sass. Re-run with
+`zig build test` after updating the submodule to verify the pin
+yourself, and please file a [compatibility report](.github/ISSUE_TEMPLATE/compatibility_report.yml)
+if you hit a divergence.
+
+## Benchmarks
+
+zsass ships reproducible benchmark scripts. On the benchmark set used
+in this repository it is competitive with Dart Sass and faster in some
+cases, but performance depends on workload, machine, and build mode.
+Treat the numbers as a starting point and rerun on your own setup.
+
+Wall-clock time compiling the upstream `sass-spec` suite end-to-end
+(`scripts/bench.sh`, ReleaseFast, batch mode, single process):
+
+| Suite (entries) | zsass | dart-sass | ratio |
+| --- | ---: | ---: | ---: |
+| sass-spec (~13400) | 3865 ms | 10323 ms | 0.37x |
+
+Measured on 2026-05-08, Linux x86_64 (zsass ReleaseFast vs
+`sass --no-source-map` from the bundled dart-sass release). Numbers
+will drift as both compilers evolve and depend on CPU / OS / Zig
+optimize mode.
+
 ## Development
 
 ```bash
@@ -298,6 +321,17 @@ Pipeline:
               -> VM (appends Rule IR) -> Writer (1-pass + optional source map)
               -> CSS (+ .map)
 ```
+
+## Provenance and clean-room policy
+
+zsass follows a clean-room policy: Dart Sass source code, vendored
+copies, decompiled artifacts, and AI-generated derivatives of Dart Sass
+source must not be used. Behavior is validated through `sass-spec`,
+[Sass documentation](https://sass-lang.com/documentation), and the
+observable output of the official `sass` CLI.
+
+AI coding assistants may be used as part of the development workflow;
+the maintainer is responsible for code review, tests, and releases.
 
 ## License
 

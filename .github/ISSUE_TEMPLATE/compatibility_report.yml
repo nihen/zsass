@@ -1,0 +1,71 @@
+name: Compatibility report
+description: Report a real-world divergence between zsass output and Dart Sass.
+title: "[compat] "
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form when zsass produces different output than the
+        official `sass` CLI on the same input. zsass passes the pinned
+        `sass-spec` suite but does not claim full compatibility, and
+        real-world divergence reports are very welcome. A minimal
+        reproducer (5-15 lines if possible) helps a lot.
+
+  - type: textarea
+    id: input-scss
+    attributes:
+      label: Input SCSS
+      description: Minimal reproducer.
+      render: scss
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected output (Dart Sass)
+      description: Output from the official `sass` CLI on the same input.
+      render: css
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: zsass output
+      description: Either CSS output or full error text. Include `stderr` if it failed.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command used
+      description: Exact zsass and `sass` invocations, including all flags.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: zsass-version
+    attributes:
+      label: zsass version / commit
+      description: Output of `zsass --version`, or a commit SHA if you built from source.
+      placeholder: "zsass 0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: dart-sass-version
+    attributes:
+      label: Dart Sass version
+      description: Output of `sass --version`.
+      placeholder: "1.77.0 compiled with dart2js 3.4.0"
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything else that helps - related sass-spec entries, suspected feature, source-map differences, etc.
