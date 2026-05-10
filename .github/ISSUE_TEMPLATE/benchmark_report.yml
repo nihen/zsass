@@ -1,0 +1,52 @@
+name: Benchmark report
+description: Share zsass benchmark numbers from your machine.
+title: "[bench] "
+labels: ["benchmark"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        zsass benchmark numbers depend heavily on workload, machine, and
+        build mode, so reports from other environments are valuable.
+        Please run `scripts/bench.sh` (or describe your own setup) and
+        paste the result here. This is not a triage form for
+        regressions - file a bug report for those.
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Fill in everything you have:
+        - OS:
+        - CPU:
+        - Zig version:
+        - zsass commit:
+        - Dart Sass version:
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: Exact benchmark invocation (`scripts/bench.sh`, custom hyperfine run, etc.).
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: result
+    attributes:
+      label: Result
+      description: Raw output / numbers. A table or hyperfine summary is fine.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Caveats, unusual workload characteristics, anything worth flagging alongside the numbers.
