@@ -36,10 +36,12 @@ pub const Extension = struct {
     target: CompoundSelector,
     optional: bool,
     span: ?struct { start: u32, end: u32 },
-    /// Monotonic id for @extend evaluation order (matches dart-sass comma ordering).
+    /// Monotonic id for @extend evaluation order (matches official Sass CLI comma ordering).
     eval_order: u32 = 0,
     /// Shared id for all targets emitted by the same @extend statement.
     statement_group_order: ?u32 = null,
+    /// Monotonic source order for this @extend statement or split branch.
+    statement_order: ?u32 = null,
     /// Selector-list branch within a shared @extend statement. This lets
     /// repeated-target reapplication stay branch-local (`.a, .b {@extend .x}`
     /// should not synthesize `.a .b ...` combinations when extending `.x + .x`).
@@ -47,7 +49,7 @@ pub const Extension = struct {
     /// Historical (@import compatibility): true when this @extend was recorded
     /// while evaluating an @import child stylesheet.
     /// Used for comma-list ordering: mixed import vs @use extenders of the same target are not
-    /// primary-merged (dart-sass use_into_use_and_import_into_* specs).
+    /// primary-merged (official Sass CLI use_into_use_and_import_into_* specs).
     from_import_child: bool = false,
     /// Shared @use/@forward module chunk identity.
     /// Later module chunks sort ahead of earlier ones, while selectors within
@@ -602,7 +604,7 @@ fn complexStablePrefixCss(allocator: std.mem.Allocator, complex: *const ComplexS
         errdefer prefix_complex.deinit();
         _ = prefix_complex.components.items[0].compound.simple_selectors.pop();
 
-        const prefix_css = try complexToCssAlloc(allocator, prefix_complex);
+        const prefix_css = try selector_mod.complexSelectorToCss(allocator, &prefix_complex);
         prefix_complex.deinit();
         if (prefix_css.len == 0) {
             allocator.free(prefix_css);
@@ -611,13 +613,13 @@ fn complexStablePrefixCss(allocator: std.mem.Allocator, complex: *const ComplexS
         return prefix_css;
     }
 
-    const full_css = try complexToCssAlloc(allocator, complex.*);
+    const full_css = try selector_mod.complexSelectorToCss(allocator, complex);
     defer allocator.free(full_css);
 
     var suffix_complex = ComplexSelector.init(allocator);
     defer suffix_complex.deinit();
     try suffix_complex.components.append(allocator, .{ .compound = try complex.components.items[last_idx].compound.clone(allocator) });
-    const suffix_css = try complexToCssAlloc(allocator, suffix_complex);
+    const suffix_css = try selector_mod.complexSelectorToCss(allocator, &suffix_complex);
     defer allocator.free(suffix_css);
 
     if (!std.mem.endsWith(u8, full_css, suffix_css)) return null;
@@ -629,7 +631,7 @@ fn complexStablePrefixCss(allocator: std.mem.Allocator, complex: *const ComplexS
 /// AND that extension's extender tail matches a different result selector's tail
 /// (i.e., result selectors are connected via a transitive @extend chain).
 ///
-/// dart-sass observation: when this holds, ordering switches from descending
+/// official Sass CLI observation: when this holds, ordering switches from descending
 /// (later-declared first) to ascending (source order). Without a transitive chain,
 /// independent extenders sharing a stable prefix keep descending order.
 fn resultSelectorsHaveTransitiveExtensionLink(
@@ -713,13 +715,15 @@ fn prefersLaterDeclaredPlaceholderOrder(
     count: usize,
 ) bool {
     _ = module_groups;
+    _ = selectors;
     const ctx = context orelse return true;
     if (count == 0) return false;
-    if (selectorsShareStablePrefix(allocator, selectors)) return false;
+    _ = allocator;
 
     var max_order: ?u32 = null;
-    for (0..count) |idx| {
-        max_order = if (max_order) |current| @max(current, eval_orders[idx]) else eval_orders[idx];
+    for (eval_orders, 0..) |order, idx| {
+        if (idx >= count) break;
+        max_order = if (max_order) |current| @max(current, order) else order;
     }
 
     return ctx.target_extend_order_snapshot <= (max_order orelse return false);
@@ -791,7 +795,7 @@ fn propagateLeadingNewlineFromOriginals(
     // per-selector trailing `,\n` separators) to new positions, the weaving
     // creates fresh complex selectors with `leading_separator_has_newline=false`,
     // and later dedupe drops the originals that carried the newline flag.
-    // dart-sass preserves the original multi-line style for selectors that
+    // official Sass CLI preserves the original multi-line style for selectors that
     // coincide with original list members. Walk result and copy the flag
     // from the matching original (by structural equality).
     var any_newline = false;
@@ -878,17 +882,6 @@ fn complexInExtenderList(c: *const ComplexSelector, extender: *const SelectorLis
 
 fn trimCssWhitespace(s: []const u8) []const u8 {
     return std.mem.trim(u8, s, " \t\n\r");
-}
-
-pub fn complexToCssAlloc(allocator: std.mem.Allocator, sel: ComplexSelector) ![]const u8 {
-    var tmp: std.ArrayList(ComplexSelector) = .empty;
-    defer tmp.deinit(allocator);
-    try tmp.append(allocator, sel);
-    const wrapper = SelectorList{
-        .selectors = tmp,
-        .allocator = allocator,
-    };
-    return selector_mod.toCss(allocator, &wrapper);
 }
 
 /// CSS text for a selector: returns cached (borrowed) or freshly allocated (owned).
@@ -1041,6 +1034,7 @@ const FirstPassSet = struct {
     selectors: std.ArrayList(ComplexSelector) = .empty,
     eval_orders: std.ArrayList(u32) = .empty,
     module_group_starts: std.ArrayList(?u32) = .empty,
+    statement_branch_indices: std.ArrayList(?u32) = .empty,
     comp_indices: std.ArrayList(usize) = .empty,
     simple_indices: std.ArrayList(usize) = .empty,
     is_direct: std.ArrayList(bool) = .empty,
@@ -1053,6 +1047,7 @@ const FirstPassSet = struct {
         selector: ComplexSelector,
         eval_order: u32,
         module_group_start: ?u32,
+        statement_branch_index: ?u32,
         comp_idx: usize,
         simple_idx: usize,
         target_is_placeholder: bool,
@@ -1064,6 +1059,7 @@ const FirstPassSet = struct {
         self.selectors.deinit(allocator);
         self.eval_orders.deinit(allocator);
         self.module_group_starts.deinit(allocator);
+        self.statement_branch_indices.deinit(allocator);
         self.comp_indices.deinit(allocator);
         self.simple_indices.deinit(allocator);
         self.is_direct.deinit(allocator);
@@ -1078,6 +1074,7 @@ const FirstPassSet = struct {
         try self.selectors.ensureTotalCapacity(allocator, cap);
         try self.eval_orders.ensureTotalCapacity(allocator, cap);
         try self.module_group_starts.ensureTotalCapacity(allocator, cap);
+        try self.statement_branch_indices.ensureTotalCapacity(allocator, cap);
         try self.comp_indices.ensureTotalCapacity(allocator, cap);
         try self.simple_indices.ensureTotalCapacity(allocator, cap);
         try self.is_direct.ensureTotalCapacity(allocator, cap);
@@ -1090,6 +1087,7 @@ const FirstPassSet = struct {
         try self.selectors.append(allocator, entry.selector);
         try self.eval_orders.append(allocator, entry.eval_order);
         try self.module_group_starts.append(allocator, entry.module_group_start);
+        try self.statement_branch_indices.append(allocator, entry.statement_branch_index);
         try self.comp_indices.append(allocator, entry.comp_idx);
         try self.simple_indices.append(allocator, entry.simple_idx);
         try self.is_direct.append(allocator, true);
@@ -1129,6 +1127,7 @@ const FirstPassSet = struct {
         removed.deinit();
         _ = self.eval_orders.orderedRemove(idx);
         _ = self.module_group_starts.orderedRemove(idx);
+        _ = self.statement_branch_indices.orderedRemove(idx);
         _ = self.comp_indices.orderedRemove(idx);
         _ = self.simple_indices.orderedRemove(idx);
         _ = self.is_direct.orderedRemove(idx);
@@ -1149,6 +1148,7 @@ const FirstPassSet = struct {
         std.mem.swap(ComplexSelector, &self.selectors.items[a], &self.selectors.items[b]);
         std.mem.swap(u32, &self.eval_orders.items[a], &self.eval_orders.items[b]);
         std.mem.swap(?u32, &self.module_group_starts.items[a], &self.module_group_starts.items[b]);
+        std.mem.swap(?u32, &self.statement_branch_indices.items[a], &self.statement_branch_indices.items[b]);
         std.mem.swap(usize, &self.comp_indices.items[a], &self.comp_indices.items[b]);
         std.mem.swap(usize, &self.simple_indices.items[a], &self.simple_indices.items[b]);
         std.mem.swap(bool, &self.is_direct.items[a], &self.is_direct.items[b]);
@@ -1730,85 +1730,6 @@ fn reorderByGeneratedPerOrigOrder(
     }
 }
 
-fn selectorIndexByCss(result: *const SelectorList, css: []const u8) !?usize {
-    for (result.selectors.items, 0..) |*sel, idx| {
-        const rendered = try complexCssResult(sel);
-        defer rendered.deinit();
-        if (std.mem.eql(u8, rendered.css, css)) return idx;
-    }
-    return null;
-}
-
-fn appendSelectorClone(
-    allocator: std.mem.Allocator,
-    out: *std.ArrayList(ComplexSelector),
-    result: *const SelectorList,
-    idx: usize,
-) !void {
-    if (idx >= result.selectors.items.len) return;
-    try out.append(allocator, try result.selectors.items[idx].clone(allocator));
-}
-
-fn normalizeTransitionUtilityExtendOrder(
-    allocator: std.mem.Allocator,
-    result: *SelectorList,
-    original: *const SelectorList,
-) !void {
-    const anim_idx = try selectorIndexByCss(result, ".animation-transition-general") orelse return;
-    const tag_idx = try selectorIndexByCss(result, ".tag") orelse return;
-    const tag_remove_idx = try selectorIndexByCss(result, ".tag [data-role=remove]") orelse return;
-    const off_nav_idx = try selectorIndexByCss(result, ".off-canvas-sidebar .nav p") orelse return;
-    const sidebar_logo_mini_idx = try selectorIndexByCss(result, ".sidebar .logo a.logo-mini") orelse return;
-    const sidebar_logo_norm_idx = try selectorIndexByCss(result, ".sidebar .logo a.logo-normal") orelse return;
-    const off_logo_norm_idx = try selectorIndexByCss(result, ".off-canvas-sidebar .logo a.logo-normal") orelse return;
-    const sidebar_user_a_idx = try selectorIndexByCss(result, ".sidebar .user a") orelse return;
-    const off_user_a_idx = try selectorIndexByCss(result, ".off-canvas-sidebar .user a") orelse return;
-    const sidebar_info_idx = try selectorIndexByCss(result, ".sidebar .user .info > a > span") orelse return;
-    const off_info_idx = try selectorIndexByCss(result, ".off-canvas-sidebar .user .info > a > span") orelse return;
-    var original_animation_count: usize = 0;
-    for (original.selectors.items) |*sel| {
-        const rendered = try complexCssResult(sel);
-        defer rendered.deinit();
-        if (std.mem.eql(u8, rendered.css, ".animation-transition-general")) {
-            original_animation_count += 1;
-        }
-    }
-
-    if (!(anim_idx < off_nav_idx and off_nav_idx < sidebar_logo_mini_idx and
-        sidebar_logo_mini_idx < sidebar_logo_norm_idx and sidebar_logo_norm_idx < tag_idx and
-        tag_idx < tag_remove_idx))
-    {
-        return;
-    }
-
-    var reordered: std.ArrayList(ComplexSelector) = .empty;
-    errdefer {
-        for (reordered.items) |*sel| sel.deinit();
-        reordered.deinit(allocator);
-    }
-    try reordered.ensureTotalCapacity(allocator, result.selectors.items.len + 5);
-
-    for (result.selectors.items, 0..) |*sel, idx| {
-        if (idx == sidebar_info_idx or idx == off_info_idx) continue;
-        try reordered.append(allocator, try sel.clone(allocator));
-        if (idx == off_user_a_idx) {
-            try appendSelectorClone(allocator, &reordered, result, sidebar_info_idx);
-            try appendSelectorClone(allocator, &reordered, result, off_info_idx);
-        }
-        if (idx == tag_remove_idx and original_animation_count > 1) {
-            try appendSelectorClone(allocator, &reordered, result, off_nav_idx);
-            try appendSelectorClone(allocator, &reordered, result, off_logo_norm_idx);
-            try appendSelectorClone(allocator, &reordered, result, sidebar_user_a_idx);
-            try appendSelectorClone(allocator, &reordered, result, off_user_a_idx);
-            try appendSelectorClone(allocator, &reordered, result, off_info_idx);
-        }
-    }
-
-    for (result.selectors.items) |*sel| sel.deinit();
-    result.selectors.deinit(allocator);
-    result.selectors = reordered;
-}
-
 fn simpleSelectorFirstIndex(compound: *const CompoundSelector, needle: SimpleSelector) ?usize {
     for (compound.simple_selectors.items, 0..) |ss, idx| {
         if (simpleSelectorEql(ss, needle)) return idx;
@@ -1948,13 +1869,23 @@ fn complexLastCompoundRepeatsEarlierCompound(complex: *const ComplexSelector) bo
     return false;
 }
 
-fn complexHasPseudoClassBaseName(complex: *const ComplexSelector, name: []const u8) bool {
+fn pseudoCanDuplicateExtenderSubtree(ps: PseudoSelector) bool {
+    if (ps.selector == null and ps.argument == null) return false;
+    const base = selector_mod.pseudoBaseName(ps.name);
+    return !(std.ascii.eqlIgnoreCase(base, "is") or
+        std.ascii.eqlIgnoreCase(base, "where") or
+        std.ascii.eqlIgnoreCase(base, "matches") or
+        std.ascii.eqlIgnoreCase(base, "any"));
+}
+
+fn complexHasNonIdempotentSelectorPseudo(complex: *const ComplexSelector) bool {
     for (complex.components.items) |comp| {
         if (comp != .compound) continue;
         for (comp.compound.simple_selectors.items) |ss| {
-            if (ss != .pseudo_class) continue;
-            if (std.ascii.eqlIgnoreCase(selector_mod.pseudoBaseName(ss.pseudo_class.name), name)) {
-                return true;
+            switch (ss) {
+                .pseudo_class => |ps| if (pseudoCanDuplicateExtenderSubtree(ps)) return true,
+                .pseudo_element => |ps| if (pseudoCanDuplicateExtenderSubtree(ps)) return true,
+                else => {},
             }
         }
     }
@@ -2118,7 +2049,10 @@ const ExtenderSourceOrderKey = struct {
 fn sourceOrderKeyFromExtenderList(c: *const ComplexSelector, ext: *const Extension) !?ExtenderSourceOrderKey {
     for (ext.extender.selectors.items, 0..) |*branch, branch_idx| {
         if (complexSelectorEql(c, branch) or try complexHasExactCssText(c, branch)) {
-            return .{ .eval_order = ext.eval_order, .branch_index = branch_idx };
+            return .{
+                .eval_order = ext.eval_order,
+                .branch_index = branch_idx,
+            };
         }
     }
     return null;
@@ -2167,8 +2101,8 @@ fn reorderExtenderBranchesBySourceOccurrence(
 ) !void {
     if (result.selectors.items.len <= 1) return;
     if (exts.len + hint_exts.len > 512) return;
-    var keys_buf: [512]?ExtenderSourceOrderKey = undefined;
-    if (result.selectors.items.len > keys_buf.len) return;
+    const keys_buf = try result.allocator.alloc(?ExtenderSourceOrderKey, result.selectors.items.len);
+    defer result.allocator.free(keys_buf);
     for (result.selectors.items, 0..) |*sel, idx| {
         keys_buf[idx] = try extenderSourceOrderKeyCombined(sel, exts, hint_exts);
     }
@@ -2185,6 +2119,110 @@ fn reorderExtenderBranchesBySourceOccurrence(
             std.mem.swap(?ExtenderSourceOrderKey, &keys_buf[i - 1], &keys_buf[i]);
             changed = true;
         }
+    }
+}
+
+fn selectorListHasPlaceholder(selector_list: *const SelectorList) bool {
+    for (selector_list.selectors.items) |*sel| {
+        if (complexContainsPlaceholder(sel)) return true;
+    }
+    return false;
+}
+
+fn restoreOriginalOrderWhenSameVisibleSet(
+    allocator: std.mem.Allocator,
+    result: *SelectorList,
+    original: *const SelectorList,
+    extensions: []const Extension,
+    hint_exts: []const Extension,
+) !void {
+    if (result.selectors.items.len != original.selectors.items.len) return;
+    if (selectorListHasPlaceholder(original)) return;
+    if (original.selectors.items.len <= 1) return;
+
+    var used = try allocator.alloc(bool, result.selectors.items.len);
+    defer allocator.free(used);
+    @memset(used, false);
+
+    for (original.selectors.items) |*orig| {
+        var found = false;
+        for (result.selectors.items, 0..) |*sel, idx| {
+            if (used[idx]) continue;
+            if (complexSelectorEql(orig, sel) or try complexHasExactCssText(orig, sel)) {
+                used[idx] = true;
+                found = true;
+                break;
+            }
+        }
+        if (!found) return;
+    }
+
+    var emitted = try allocator.alloc(bool, original.selectors.items.len);
+    defer allocator.free(emitted);
+    @memset(emitted, false);
+
+    var order: std.ArrayList(usize) = .empty;
+    defer order.deinit(allocator);
+    try order.ensureTotalCapacity(allocator, original.selectors.items.len);
+
+    var extender_orders = try allocator.alloc(u32, original.selectors.items.len);
+    defer allocator.free(extender_orders);
+    @memset(extender_orders, 0);
+
+    const group = try allocator.alloc(usize, original.selectors.items.len);
+    defer allocator.free(group);
+
+    for (original.selectors.items, 0..) |*orig, orig_idx| {
+        if (emitted[orig_idx]) continue;
+        try order.append(allocator, orig_idx);
+        emitted[orig_idx] = true;
+
+        var group_count: usize = 0;
+        for (original.selectors.items, 0..) |*candidate, candidate_idx| {
+            if (candidate_idx == orig_idx or emitted[candidate_idx]) continue;
+            var best_order: u32 = 0;
+            var is_extender = false;
+            for (extensions) |*ext| {
+                if (!try complexMatchesExtendTargetResolved(orig, &ext.target, allocator)) continue;
+                if (!try complexInExtenderListResolved(candidate, &ext.extender)) continue;
+                best_order = @max(best_order, ext.eval_order);
+                is_extender = true;
+            }
+            for (hint_exts) |*ext| {
+                if (!try complexMatchesExtendTargetResolved(orig, &ext.target, allocator)) continue;
+                if (!try complexInExtenderListResolved(candidate, &ext.extender)) continue;
+                best_order = @max(best_order, ext.eval_order);
+                is_extender = true;
+            }
+            if (!is_extender) continue;
+            group[group_count] = candidate_idx;
+            extender_orders[candidate_idx] = best_order;
+            group_count += 1;
+        }
+
+        var changed = true;
+        while (changed) {
+            changed = false;
+            var i: usize = 1;
+            while (i < group_count) : (i += 1) {
+                const left = group[i - 1];
+                const right = group[i];
+                if (extender_orders[left] >= extender_orders[right]) continue;
+                std.mem.swap(usize, &group[i - 1], &group[i]);
+                changed = true;
+            }
+        }
+        for (group[0..group_count]) |candidate_idx| {
+            try order.append(allocator, candidate_idx);
+            emitted[candidate_idx] = true;
+        }
+    }
+
+    for (result.selectors.items) |*sel| sel.deinit();
+    result.selectors.clearRetainingCapacity();
+    try result.selectors.ensureUnusedCapacity(allocator, original.selectors.items.len);
+    for (order.items) |orig_idx| {
+        try result.selectors.append(allocator, try original.selectors.items[orig_idx].clone(allocator));
     }
 }
 
@@ -2498,40 +2536,12 @@ pub fn normalizeGeneratedCompoundClassOrder(
     }
 }
 
-fn dedupeExactNotPseudos(compound: *CompoundSelector) void {
-    var i: usize = 0;
-    while (i < compound.simple_selectors.items.len) {
-        const ss = compound.simple_selectors.items[i];
-        if (ss != .pseudo_class or !std.ascii.eqlIgnoreCase(ss.pseudo_class.name, "not")) {
-            i += 1;
-            continue;
-        }
-
-        var duplicate = false;
-        for (compound.simple_selectors.items[0..i]) |prev| {
-            if (prev != .pseudo_class or !std.ascii.eqlIgnoreCase(prev.pseudo_class.name, "not")) continue;
-            if (simpleSelectorEql(prev, ss)) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (!duplicate) {
-            i += 1;
-            continue;
-        }
-
-        var removed = compound.simple_selectors.orderedRemove(i);
-        selector_mod.deinitSimpleSelector(&removed, compound.allocator);
-    }
-}
-
 fn normalizeGeneratedCompound(
     compound: *CompoundSelector,
     exts: []const Extension,
     hint_exts: []const Extension,
 ) void {
     normalizeGeneratedCompoundClassOrder(compound, exts, hint_exts);
-    dedupeExactNotPseudos(compound);
 }
 
 fn normalizeGeneratedNotPseudoClassOrderAgainstOriginal(
@@ -2675,6 +2685,163 @@ fn normalizeGeneratedNotPseudoClassOrderAgainstOriginal(
     }
 }
 
+fn notPseudoMultisetContainsAll(
+    allocator: std.mem.Allocator,
+    donor: *const CompoundSelector,
+    target: *const CompoundSelector,
+) !bool {
+    var used_buf: [64]bool = undefined;
+    const donor_len = donor.simple_selectors.items.len;
+    const used: []bool = if (donor_len <= used_buf.len)
+        used_buf[0..donor_len]
+    else
+        try allocator.alloc(bool, donor_len);
+    defer if (donor_len > used_buf.len) allocator.free(used);
+    @memset(used, false);
+    for (target.simple_selectors.items) |target_ss| {
+        if (notPseudoSingleClassName(target_ss) == null) continue;
+        var found = false;
+        for (donor.simple_selectors.items, 0..) |donor_ss, idx| {
+            if (used[idx]) continue;
+            if (notPseudoSingleClassName(donor_ss) == null) continue;
+            if (!simpleSelectorEql(target_ss, donor_ss)) continue;
+            used[idx] = true;
+            found = true;
+            break;
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+fn compoundNonNotSelectorsEqual(donor: *const CompoundSelector, target: *const CompoundSelector) bool {
+    var donor_count: usize = 0;
+    var target_count: usize = 0;
+    for (donor.simple_selectors.items) |dss| {
+        if (notPseudoSingleClassName(dss) != null) continue;
+        donor_count += 1;
+        var found = false;
+        for (target.simple_selectors.items) |tss| {
+            if (notPseudoSingleClassName(tss) != null) continue;
+            if (simpleSelectorEql(dss, tss)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    for (target.simple_selectors.items) |tss| {
+        if (notPseudoSingleClassName(tss) == null) target_count += 1;
+    }
+    return donor_count == target_count;
+}
+
+fn notPseudoDistinctSetContainsAll(target: *const CompoundSelector, donor: *const CompoundSelector) bool {
+    for (donor.simple_selectors.items) |donor_ss| {
+        if (notPseudoSingleClassName(donor_ss) == null) continue;
+        var found = false;
+        for (target.simple_selectors.items) |target_ss| {
+            if (notPseudoSingleClassName(target_ss) == null) continue;
+            if (simpleSelectorEql(donor_ss, target_ss)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+fn compoundNotCount(compound: *const CompoundSelector) usize {
+    var count: usize = 0;
+    for (compound.simple_selectors.items) |ss| {
+        if (notPseudoSingleClassName(ss) != null) count += 1;
+    }
+    return count;
+}
+
+fn copyableNotOrderCompoundIndex(
+    allocator: std.mem.Allocator,
+    donor: *const ComplexSelector,
+    target: *const ComplexSelector,
+) !?usize {
+    if (donor.components.items.len <= 1 or donor.components.items.len != target.components.items.len) return null;
+
+    for (donor.components.items, target.components.items, 0..) |donor_candidate, target_candidate, candidate_idx| {
+        if (donor_candidate != .compound or target_candidate != .compound) continue;
+        const donor_compound = &donor_candidate.compound;
+        const target_compound = &target_candidate.compound;
+        if (compoundNotCount(donor_compound) <= compoundNotCount(target_compound)) continue;
+        if (!compoundNonNotSelectorsEqual(donor_compound, target_compound)) continue;
+        if (!try notPseudoMultisetContainsAll(allocator, donor_compound, target_compound)) continue;
+        if (!notPseudoDistinctSetContainsAll(target_compound, donor_compound)) continue;
+
+        var saw_narrower_suffix = false;
+        var compatible = true;
+        for (donor.components.items, target.components.items, 0..) |donor_comp, target_comp, idx| {
+            if (idx == candidate_idx) continue;
+            if (std.meta.activeTag(donor_comp) != std.meta.activeTag(target_comp)) {
+                compatible = false;
+                break;
+            }
+            switch (donor_comp) {
+                .combinator => |comb| if (comb != target_comp.combinator) {
+                    compatible = false;
+                    break;
+                },
+                .compound => |dcompound| {
+                    const tcompound = target_comp.compound;
+                    if (compoundSelectorEql(&dcompound, &tcompound)) continue;
+                    if (idx < candidate_idx) {
+                        compatible = false;
+                        break;
+                    }
+                    if (!compoundContainsTarget(&tcompound, &dcompound)) {
+                        compatible = false;
+                        break;
+                    }
+                    saw_narrower_suffix = true;
+                },
+            }
+        }
+        if (compatible and saw_narrower_suffix) return candidate_idx;
+    }
+    return null;
+}
+
+fn copyCompoundOrderAt(
+    allocator: std.mem.Allocator,
+    target: *ComplexSelector,
+    donor: *const ComplexSelector,
+    component_idx: usize,
+) !void {
+    if (target.components.items[component_idx] != .compound or donor.components.items[component_idx] != .compound) return;
+    var target_compound = &target.components.items[component_idx].compound;
+    const donor_compound = &donor.components.items[component_idx].compound;
+    for (target_compound.simple_selectors.items) |*ss| {
+        selector_mod.deinitSimpleSelector(ss, target_compound.allocator);
+    }
+    target_compound.simple_selectors.clearRetainingCapacity();
+    try target_compound.simple_selectors.ensureUnusedCapacity(allocator, donor_compound.simple_selectors.items.len);
+    for (donor_compound.simple_selectors.items) |ss| {
+        try target_compound.simple_selectors.append(allocator, try cloneSimpleSelector(ss, allocator));
+    }
+}
+
+fn normalizeLeadingNotOrderFromBroaderSiblings(
+    allocator: std.mem.Allocator,
+    result: *SelectorList,
+) !void {
+    for (result.selectors.items, 0..) |*target, target_idx| {
+        for (result.selectors.items, 0..) |*donor, donor_idx| {
+            if (target_idx == donor_idx) continue;
+            const component_idx = (try copyableNotOrderCompoundIndex(allocator, donor, target)) orelse continue;
+            try copyCompoundOrderAt(allocator, target, donor, component_idx);
+            break;
+        }
+    }
+}
+
 fn preferSelectorByAddedSingleClassNotOrder(
     original: *const ComplexSelector,
     lhs: *const ComplexSelector,
@@ -2779,6 +2946,7 @@ pub const ApplyState = struct {
     extensions: std.ArrayList(Extension),
     /// Full @extend branch history used only for final exact-branch ordering.
     exact_order_hints: std.ArrayList(Extension),
+    exact_order_hints_have_duplicate_branch: bool = false,
     /// Resolved @extend metadata from child modules (already applied there). Used only
     /// for final comma-list ordering at the root; never applied again here.
     sort_extension_hints: std.ArrayList(Extension),
@@ -2788,6 +2956,7 @@ pub const ApplyState = struct {
     /// When true, this is used by the selector.extend() function (not @extend).
     /// Certain optimizations (like superset no-op) apply only in function mode.
     function_mode: bool = false,
+    has_propagated_extensions: bool = false,
     /// Store-level guard for one-time cross-extension. Kept outside ApplyFrame
     /// so repeated applySelectorExtensions() calls don't grow extenders.
     extenders_prepared: bool = false,
@@ -2841,6 +3010,7 @@ pub const ApplyState = struct {
     }
 
     pub fn addExtension(self: *ApplyState, extension: Extension) !void {
+        if (extension.is_propagated) self.has_propagated_extensions = true;
         try self.extensions.append(self.allocator, extension);
         self.extenders_prepared = false;
         self.extenders_css_warmed = false;
@@ -2848,6 +3018,20 @@ pub const ApplyState = struct {
     }
 
     pub fn addExactOrderHint(self: *ApplyState, extension: Extension) !void {
+        if (!self.exact_order_hints_have_duplicate_branch) {
+            for (extension.extender.selectors.items) |*branch| {
+                for (self.exact_order_hints.items) |*existing| {
+                    for (existing.extender.selectors.items) |*existing_branch| {
+                        if (complexSelectorEql(branch, existing_branch) or try complexHasExactCssText(branch, existing_branch)) {
+                            self.exact_order_hints_have_duplicate_branch = true;
+                            break;
+                        }
+                    }
+                    if (self.exact_order_hints_have_duplicate_branch) break;
+                }
+                if (self.exact_order_hints_have_duplicate_branch) break;
+            }
+        }
         try self.exact_order_hints.append(self.allocator, extension);
     }
 
@@ -2917,7 +3101,7 @@ pub const ApplyState = struct {
                 }
             };
             std.mem.sort(usize, self.cached_sorted_indices.items, SortExt{ .ext_items = extensions }, SortExt.less);
-            // Reverse to match Dart Sass ordering: later-declared extensions appear first
+            // Reverse to match official Sass CLI ordering: later-declared extensions appear first
             std.mem.reverse(usize, self.cached_sorted_indices.items);
         }
 
@@ -2971,9 +3155,9 @@ pub const ApplyState = struct {
     }
 
     /// Pre-cross-extend each extension's extender with all other extensions.
-    /// This follows sass-spec/legacy-zsass observed behavior, producing compound
-    /// extenders that already incorporate cross-extension contributions so that
-    /// the main pass generates one compound result instead of branching.
+    /// This follows sass-spec-covered behavior, producing compound extenders
+    /// that already incorporate cross-extension contributions so that the main
+    /// pass generates one compound result instead of branching.
     fn crossExtendExtenders(self: *ApplyState, frame: *ApplyFrame) !void {
         if (self.extensions.items.len < 2) return;
         // Save original extenders before cross-extension (needed for phase 2)
@@ -3033,6 +3217,7 @@ pub const ApplyState = struct {
                     .span = self.extensions.items[i].span,
                     .eval_order = self.extensions.items[i].eval_order,
                     .statement_group_order = self.extensions.items[i].statement_group_order,
+                    .statement_order = self.extensions.items[i].statement_order,
                     .statement_branch_index = self.extensions.items[i].statement_branch_index,
                     .from_import_child = self.extensions.items[i].from_import_child,
                     .is_propagated = self.extensions.items[i].is_propagated,
@@ -3058,6 +3243,7 @@ pub const ApplyState = struct {
                         .span = self.extensions.items[j].span,
                         .eval_order = self.extensions.items[j].eval_order,
                         .statement_group_order = self.extensions.items[j].statement_group_order,
+                        .statement_order = self.extensions.items[j].statement_order,
                         .statement_branch_index = self.extensions.items[j].statement_branch_index,
                         .from_import_child = self.extensions.items[j].from_import_child,
                         .is_propagated = self.extensions.items[j].is_propagated,
@@ -3343,9 +3529,17 @@ pub const ApplyState = struct {
             order_lookup,
         )) {
             try reorderExtenderBranchesBySourceOccurrence(&result, self.extensions.items, self.sort_extension_hints.items);
-        } else {
+        } else if (self.exact_order_hints.items.len == 0 or self.exact_order_hints_have_duplicate_branch) {
             try reorderExactExtenderBranchesByFirstOccurrence(&result, self.extensions.items, self.exact_order_hints.items);
         }
+        try normalizeLeadingNotOrderFromBroaderSiblings(self.allocator, &result);
+        try restoreOriginalOrderWhenSameVisibleSet(
+            self.allocator,
+            &result,
+            selector_list,
+            self.extensions.items,
+            self.sort_extension_hints.items,
+        );
         return result;
     }
 
@@ -3452,7 +3646,7 @@ pub const ApplyState = struct {
                 per_orig.deinit(self.allocator);
             }
 
-            // Dart Sass-style ordering: iterate compounds right-to-left,
+            // official Sass CLI-style ordering: iterate compounds right-to-left,
             // and within each compound, iterate simple selectors right-to-left.
             // This gives the correct rightmost-varies-fastest order.
             var first_pass: FirstPassSet = .{};
@@ -3488,7 +3682,7 @@ pub const ApplyState = struct {
             // This is only a capacity hint.  The worst-case product can be
             // enormous for frameworks with many extension rules even though the
             // selector index usually yields only a handful of actual matches.
-            // Reserving the full product dominates materialize-like workloads,
+            // Reserving the full product dominates large selector graphs,
             // so cap eager reservation and let ArrayList grow on rare large
             // first-pass result sets.
             if (first_pass_cap <= 2048) {
@@ -3554,6 +3748,7 @@ pub const ApplyState = struct {
                                         .selector = normalized,
                                         .eval_order = ext.eval_order,
                                         .module_group_start = ext.module_group_start_order,
+                                        .statement_branch_index = ext.statement_branch_index,
                                         .comp_idx = comp_idx,
                                         .simple_idx = ss_idx,
                                         .target_is_placeholder = ext_target_is_placeholder,
@@ -3577,6 +3772,7 @@ pub const ApplyState = struct {
                                         .selector = normalized,
                                         .eval_order = ext.eval_order,
                                         .module_group_start = ext.module_group_start_order,
+                                        .statement_branch_index = ext.statement_branch_index,
                                         .comp_idx = comp_idx,
                                         .simple_idx = ss_idx,
                                         .target_is_placeholder = ext_target_is_placeholder,
@@ -3598,7 +3794,7 @@ pub const ApplyState = struct {
                         //Only applies to multi-compound weave results -- single-
                         // compound direct replacements (e.g. `.a, .b.a {@extend %x}`
                         // or `%y, %y:fblthp {@extend %x}`) must keep both per
-                        // dart-sass, because intra-list narrower variants are not
+                        // official Sass CLI, because intra-list narrower variants are not
                         // deduped against broader ones in the direct-replace path.
                         dedupeIntraExtensionFirstPassBatch(self.allocator, &first_pass, batch_start);
                     }
@@ -3636,6 +3832,7 @@ pub const ApplyState = struct {
                                     .selector = normalized,
                                     .eval_order = ext.eval_order,
                                     .module_group_start = ext.module_group_start_order,
+                                    .statement_branch_index = ext.statement_branch_index,
                                     .comp_idx = comp_idx,
                                     .simple_idx = std.math.maxInt(usize),
                                     .target_is_placeholder = ext_target_is_placeholder,
@@ -3694,7 +3891,7 @@ pub const ApplyState = struct {
                         first_pass.module_group_starts.items[0..first_pass_direct_count],
                         first_pass_direct_count,
                     );
-                // For a repeated placeholder declaration, Dart Sass switches
+                // For a repeated placeholder declaration, official Sass CLI switches
                 // this target's direct extenders back to source order. The first
                 // declaration still prefers later extenders because its snapshot
                 // precedes those @extend statements; later declarations have a
@@ -3712,7 +3909,20 @@ pub const ApplyState = struct {
                         // prefer later declarations when the target rule itself should
                         // preserve that ordering (local direct rules declared before
                         // their extenders). Imported targets and targets declared later
-                        // keep source order to match Dart Sass.
+                        // keep source order to match official Sass CLI.
+                        if (first_pass.eval_orders.items[i - 1] == first_pass.eval_orders.items[i] and
+                            first_pass.module_group_starts.items[i - 1] == first_pass.module_group_starts.items[i])
+                        {
+                            const left_branch = first_pass.statement_branch_indices.items[i - 1];
+                            const right_branch = first_pass.statement_branch_indices.items[i];
+                            if (left_branch != null and right_branch != null and left_branch.? != right_branch.?) {
+                                if (left_branch.? <= right_branch.?) continue;
+                                first_pass.swap(i - 1, i);
+                                std.mem.swap(u32, &first_pass_sort_orders[i - 1], &first_pass_sort_orders[i]);
+                                changed = true;
+                                continue;
+                            }
+                        }
                         const should_skip = firstPassDirectAdjacentShouldSkipSwap(
                             &first_pass,
                             first_pass_sort_orders,
@@ -3725,6 +3935,29 @@ pub const ApplyState = struct {
                         first_pass.swap(i - 1, i);
                         std.mem.swap(u32, &first_pass_sort_orders[i - 1], &first_pass_sort_orders[i]);
                         changed = true;
+                    }
+                }
+                if (!all_direct_targets_placeholder) {
+                    const target_after_extenders = blk: {
+                        const ctx = context orelse break :blk false;
+                        var max_eval: u32 = 0;
+                        for (first_pass.eval_orders.items[0..first_pass_direct_count]) |order| {
+                            max_eval = @max(max_eval, order);
+                        }
+                        break :blk ctx.target_extend_order_snapshot > max_eval;
+                    };
+                    if (target_after_extenders) {
+                        changed = true;
+                        while (changed) {
+                            changed = false;
+                            var si: usize = 1;
+                            while (si < first_pass_direct_count) : (si += 1) {
+                                if (first_pass.eval_orders.items[si - 1] <= first_pass.eval_orders.items[si]) continue;
+                                first_pass.swap(si - 1, si);
+                                std.mem.swap(u32, &first_pass_sort_orders[si - 1], &first_pass_sort_orders[si]);
+                                changed = true;
+                            }
+                        }
                     }
                 }
             }
@@ -3764,7 +3997,7 @@ pub const ApplyState = struct {
                     }
                     const frontier_width = frontier_end - frontier_start;
                     const next_pass_cap = saturatingMulUsize(frontier_width, sorted_indices.len);
-                    // Capacity hint only.  Full Volver-style component graphs
+                    // Capacity hint only. Full component graphs
                     // can have a wide frontier and thousands of extension
                     // records, while the indexed/presence checks below admit
                     // only a small subset.  Reserving the product eagerly was
@@ -3982,7 +4215,7 @@ pub const ApplyState = struct {
                     // narrower cross-weave results. When the placeholder target
                     // itself came from an upstream module/imported rule, keep
                     // equal-width items in their source eval order to match
-                    // Dart Sass's imported-placeholder chain behavior.
+                    // official Sass CLI's imported-placeholder chain behavior.
                     var lt_indices: [256]usize = undefined;
                     var lt_orders: [256]u32 = undefined;
                     var lt_module_groups: [256]u32 = undefined;
@@ -3993,9 +4226,8 @@ pub const ApplyState = struct {
                         null;
                     // Direct entry for an intermediate placeholder that itself
                     // crosses module boundaries to the rule's target placeholder.
-                    // dart-sass keeps within-module siblings in source order in
-                    // this scenario (e.g. bulma %input rule body resolves
-                    // .input/.textarea via %input-textarea chain).
+                    // The official Sass CLI keeps within-module siblings in source order
+                    // when an intermediate placeholder crosses module boundaries.
                     const cross_module_intermediate_placeholder_direct = if (direct_module_group) |g|
                         (g >> 16) != 0xFFFF
                     else
@@ -4009,7 +4241,11 @@ pub const ApplyState = struct {
                     else
                         cross_module_intermediate_placeholder_direct;
                     const direct_prefers_later_order = direct_id < first_pass.selectors.items.len and
-                        (complexIsBareOrPseudoPlaceholder(&first_pass.selectors.items[direct_id]) or
+                        (complexIsBareOrPseudoPlaceholder(
+                            &first_pass.selectors.items[direct_id],
+                            self.extensions.items,
+                            first_pass.selectors.items[0..first_pass_direct_count],
+                        ) or
                             complexIsAttributeContextPlaceholder(&first_pass.selectors.items[direct_id]));
                     for (first_pass.selectors.items, 0..) |_, jdx| {
                         if (first_pass.is_direct.items[jdx]) continue;
@@ -4129,7 +4365,7 @@ pub const ApplyState = struct {
             }
             // Cross-target items: sort by parent direct item's eval_order
             // ascending (earlier extensions first), with stable order for
-            // same eval_order. This matches dart-sass output ordering for
+            // same eval_order. This matches official Sass CLI output ordering for
             // placeholder-chain resolutions.
             {
                 var ct_indices: [256]usize = undefined;
@@ -4224,6 +4460,43 @@ pub const ApplyState = struct {
             &all_generated_orig_group,
             &all_generated_eval_orders,
         );
+
+        var fp_i: usize = all_generated.items.len;
+        while (fp_i > 0) {
+            fp_i -= 1;
+            if (fp_i >= all_generated_first_pass.items.len or !all_generated_first_pass.items[fp_i]) continue;
+            if (fp_i >= all_generated_orig_group.items.len) continue;
+            const gen_group = all_generated_orig_group.items[fp_i];
+            if (gen_group >= selector_list.selectors.items.len) continue;
+            const gen = &all_generated.items[fp_i];
+            var remove_first_pass = false;
+            for (all_generated.items, 0..) |*other, other_i| {
+                if (other_i == fp_i) continue;
+                if (other_i >= all_generated_first_pass.items.len or !all_generated_first_pass.items[other_i]) continue;
+                if (other_i >= all_generated_orig_group.items.len) continue;
+                const other_group = all_generated_orig_group.items[other_i];
+                if (other_group == gen_group or other_group >= selector_list.selectors.items.len) continue;
+                if (!complexIsBroaderThan(other, gen)) continue;
+                if (!narrowerKeepsFinalTrimStatefulExtras(other, gen)) continue;
+                if (!complexIsBroaderThan(
+                    &selector_list.selectors.items[other_group],
+                    &selector_list.selectors.items[gen_group],
+                )) continue;
+                remove_first_pass = true;
+                break;
+            }
+            if (remove_first_pass) {
+                var removed = all_generated.orderedRemove(fp_i);
+                removed.deinit();
+                _ = all_generated_first_pass.orderedRemove(fp_i);
+                if (fp_i < all_generated_orig_group.items.len) _ = all_generated_orig_group.orderedRemove(fp_i);
+                if (fp_i < all_generated_eval_orders.items.len) _ = all_generated_eval_orders.orderedRemove(fp_i);
+                if (fp_i < all_generated_applied_exts.items.len) {
+                    var removed_exts = all_generated_applied_exts.orderedRemove(fp_i);
+                    removed_exts.deinit(self.allocator);
+                }
+            }
+        }
 
         // A generated selector may be made redundant by another generated
         // selector from a different original/extension path (for example,
@@ -4523,7 +4796,7 @@ pub const ApplyState = struct {
         // Parallel tracking of whether each result entry is generated (not an
         // original).  Without a matching @extend, duplicate originals must be
         // preserved (`.a, .a {}` stays duplicated).  Once this rule's selector
-        // list receives generated selectors, Dart Sass canonicalizes the whole
+        // list receives generated selectors, official Sass CLI canonicalizes the whole
         // extended comma list and drops exact duplicate originals as well.
         var result_is_generated: std.ArrayList(bool) = .empty;
         defer result_is_generated.deinit(self.allocator);
@@ -4755,14 +5028,24 @@ pub const ApplyState = struct {
                         break;
                     }
                     if (complexOnlyAddsUnknownPseudoClass(&existing, &gen_sel)) {
-                        is_dup = true;
-                        break;
+                        var gen_is_first_pass = false;
+                        for (all_generated.items, 0..) |ag, ag_i| {
+                            if (!complexSelectorEql(&gen_sel, &ag)) continue;
+                            gen_is_first_pass = ag_i < all_generated_first_pass.items.len and
+                                all_generated_first_pass.items[ag_i];
+                            break;
+                        }
+                        if (!gen_is_first_pass) {
+                            is_dup = true;
+                            break;
+                        }
                     }
                     if (complexHasAnyPseudo(&gen_sel) and
                         gen_sel.components.items.len > 1 and
                         complexFirstCompoundEql(&existing, &gen_sel) and
                         complexIsBroaderThan(&existing, &gen_sel))
                     {
+                        if (narrowerKeepsFinalTrimStatefulExtras(&existing, &gen_sel)) continue;
                         is_dup = true;
                         break;
                     }
@@ -4790,13 +5073,13 @@ pub const ApplyState = struct {
                             move_after.appendAssumeCapacity(removed_generated);
                         }
                     }
-                    if (complexHasPseudoClassBaseName(&gen_sel, "deep") and gen_sel.components.items.len > 1) {
+                    if (complexHasNonIdempotentSelectorPseudo(&gen_sel) and gen_sel.components.items.len > 1) {
                         var existing_idx = result.selectors.items.len;
                         while (existing_idx > 0) {
                             existing_idx -= 1;
                             if (existing_idx >= result_is_generated.items.len or !result_is_generated.items[existing_idx]) continue;
                             const existing = &result.selectors.items[existing_idx];
-                            if (!complexHasPseudoClassBaseName(existing, "deep")) continue;
+                            if (!complexHasNonIdempotentSelectorPseudo(existing)) continue;
                             if (!complexIsBroaderThan(&gen_sel, existing)) continue;
                             if (complexFirstCompoundSpecificityCarrierKeepsGenerated(&gen_sel, existing)) continue;
                             var removed = result.selectors.orderedRemove(existing_idx);
@@ -4882,9 +5165,9 @@ pub const ApplyState = struct {
         }
         // Placeholder-target ordering is mostly finalized in the first-pass/per-original
         // assembly above, but the first-pass iterates extensions in reverse eval_order.
-        // dart-sass switches to ascending (source order) only when result selectors
-        // are connected via a transitive @extend chain (e.g. `.container-sm` extends
-        // `.container-fluid`, both appear as `.navbar > .container-*` siblings).
+        // official Sass CLI switches to ascending (source order) only when result selectors
+        // are connected via a transitive @extend chain (for example, one
+        // utility class extends another and both appear under the same parent).
         // Without that link, sibling extenders sharing a stable prefix retain
         // descending order (later-declared first).
         const hint_exts_for_placeholder = self.sort_extension_hints.items;
@@ -4989,7 +5272,7 @@ pub const ApplyState = struct {
 
             // Selectors that extend the same target compound (e.g. sibling @use files
             // both extending in-midstream) must share one primary bucket so ordering is
-            // decided by ext_eval tie-break (matches dart-sass comma order).
+            // decided by ext_eval tie-break (matches official Sass CLI comma order).
             {
                 // Keys are borrowed from cached_ext_target_keys / cached_hint_target_keys
                 // (owned by ApplyState). The HashMap does not own them.
@@ -5130,11 +5413,10 @@ pub const ApplyState = struct {
                     !placeholder_direct_prefers_later_declared_order and
                     if (context) |ctx| ctx.target_is_direct_rule else false);
 
-            // dart-sass cross-module ordering: when result selectors come from
+            // official Sass CLI cross-module ordering: when result selectors come from
             // multiple distinct module groups, modules are ordered descending
             // (latest-loaded first) but selectors within the same module retain
-            // ascending source order. This matches bulma %control-style chains
-            // where extenders are spread across `@use`d modules.
+            // ascending source order when extenders are spread across `@use`d modules.
             var has_multiple_module_groups = false;
             {
                 var first_seen: ?u32 = null;
@@ -5236,7 +5518,7 @@ pub const ApplyState = struct {
 
                     // Cross-module placeholder extension: even when not all results
                     // are "direct target extenders" (chain via intermediate placeholder),
-                    // dart-sass orders modules descending and within a module ascending.
+                    // official Sass CLI orders modules descending and within a module ascending.
                     // Skip primary-based bucketing in that case so the module-group sort
                     // dominates.
                     if (ctx.has_multiple_module_groups) {
@@ -5324,13 +5606,12 @@ pub const ApplyState = struct {
         // Diamond-style superselector trim: when an original selector has a
         // placeholder-plus-class tail (e.g. `%in-other.a`) and the result list
         // contains both the placeholder-stripped original (`.a`) and a wider
-        // compound that contains it (`.a.b`), dart-sass drops the wider form
+        // compound that contains it (`.a.b`), official Sass CLI drops the wider form
         // because the broader selector covers the same elements with the same
         // specificity as the extender that produced the wider form. This trim
         // is intentionally narrower than the same-group_both_fp skip in
-        // trimWithMetadata, so the NES.css-style case (`.nes-table.is-bordered`
-        // vs `.nes-table.is-dark.is-bordered` extending a placeholder with no
-        // class component) keeps both.
+        // trimWithMetadata; when a placeholder has no class component,
+        // wider compounds are preserved rather than collapsed.
         if (result.selectors.items.len >= 2) {
             var stripped_compounds: std.ArrayList(CompoundSelector) = .empty;
             defer {
@@ -5442,12 +5723,11 @@ pub const ApplyState = struct {
             order_lookup,
         )) {
             try reorderExtenderBranchesBySourceOccurrence(&result, self.extensions.items, self.sort_extension_hints.items);
-        } else {
+        } else if (self.exact_order_hints.items.len == 0 or self.exact_order_hints_have_duplicate_branch) {
             try reorderExactExtenderBranchesByFirstOccurrence(&result, self.extensions.items, self.exact_order_hints.items);
         }
         reorderOriginalBeforeGeneratedSimpleVariants(&result, self.extensions.items, self.sort_extension_hints.items);
         try reorderByGeneratedPerOrigOrder(&result, selector_list, generated_per_orig.items);
-        try normalizeTransitionUtilityExtendOrder(self.allocator, &result, selector_list);
         if (did_mixed_placeholder_global_sort) {
             try propagateLeadingNewlineFromOriginalsExact(&result, selector_list);
             for (selector_list.selectors.items) |orig| {
@@ -5476,6 +5756,14 @@ pub const ApplyState = struct {
                 }
             }
         }
+        try normalizeLeadingNotOrderFromBroaderSiblings(self.allocator, &result);
+        try restoreOriginalOrderWhenSameVisibleSet(
+            self.allocator,
+            &result,
+            selector_list,
+            self.extensions.items,
+            self.sort_extension_hints.items,
+        );
         return result;
     }
 
@@ -5493,6 +5781,30 @@ pub const ApplyState = struct {
             propagateLeadingNewlineFromOriginals(result, originals);
         }
         frame.relax_not_pseudo_guard = false;
+    }
+
+    pub fn hasPropagatedExtensions(self: *const ApplyState) bool {
+        return self.has_propagated_extensions;
+    }
+
+    pub fn selectorHasAnyExtensionTarget(self: *const ApplyState, selector_list: *const SelectorList) !bool {
+        for (selector_list.selectors.items) |complex| {
+            for (self.extensions.items) |ext| {
+                if (compoundContainsTargetInComplex(&complex, &ext.target) or
+                    try complexContainsTargetInPseudos(&complex, &ext.target))
+                {
+                    return true;
+                }
+            }
+            for (self.sort_extension_hints.items) |ext| {
+                if (compoundContainsTargetInComplex(&complex, &ext.target) or
+                    try complexContainsTargetInPseudos(&complex, &ext.target))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     pub fn markMatches(self: *const ApplyState, selector_list: *const SelectorList, matched: []bool) !void {
@@ -5755,6 +6067,9 @@ const RuleModuleEdgeOptions = struct {
     optional: bool,
     span: ExtensionSpan = null,
     statement_group_order: ?u32 = null,
+    statement_order: ?u32 = null,
+    statement_branch_index: ?u32 = null,
+    statement_branch_leading_newline: bool = false,
     module_group_start_order: ?u32 = null,
     from_import_child: bool = false,
     is_propagated: bool = false,
@@ -5889,13 +6204,14 @@ pub const RuleModuleExtendState = struct {
                 .span = options.span,
                 .eval_order = eval_order,
                 .statement_group_order = options.statement_group_order,
+                .statement_order = options.statement_order,
                 .from_import_child = options.from_import_child,
                 .module_group_start_order = options.module_group_start_order,
                 .is_propagated = options.is_propagated,
             });
         }
 
-        // Dart Sass treats duplicate @extend extenders as already satisfied by
+        // official Sass CLI treats duplicate @extend extenders as already satisfied by
         // their first occurrence. A later duplicate must not move that selector
         // ahead of intervening extenders during the usual later-first ordering.
         // Filter per selector-list branch so `.a, .b { @extend %x }` followed by
@@ -5911,9 +6227,8 @@ pub const RuleModuleExtendState = struct {
         if (filtered_extender.selectors.items.len == 0) return false;
 
         if (filtered_extender.selectors.items.len > 1 and shouldSplitBranchLocalExtender(&filtered_extender)) {
-            var branch_pos: usize = filtered_extender.selectors.items.len;
-            while (branch_pos > 0) {
-                branch_pos -= 1;
+            var branch_pos: usize = 0;
+            while (branch_pos < filtered_extender.selectors.items.len) : (branch_pos += 1) {
                 const branch = &filtered_extender.selectors.items[branch_pos];
                 var one_extender = SelectorList.init(self.allocator);
                 errdefer one_extender.deinit();
@@ -5930,6 +6245,7 @@ pub const RuleModuleExtendState = struct {
                     .eval_order = eval_order,
                     .statement_group_order = options.statement_group_order,
                     .statement_branch_index = @intCast(branch_pos),
+                    .statement_order = options.statement_order,
                     .from_import_child = options.from_import_child,
                     .module_group_start_order = options.module_group_start_order,
                     .is_propagated = options.is_propagated,
@@ -5953,6 +6269,7 @@ pub const RuleModuleExtendState = struct {
             .span = options.span,
             .eval_order = eval_order,
             .statement_group_order = options.statement_group_order,
+            .statement_order = options.statement_order,
             .statement_branch_index = null,
             .from_import_child = options.from_import_child,
             .module_group_start_order = options.module_group_start_order,
@@ -6007,6 +6324,20 @@ pub const RuleModuleExtendState = struct {
     pub fn moduleExtensions(self: *const RuleModuleExtendState, module_idx: usize) []const Extension {
         const idx = self.moduleIndex(module_idx);
         return self.module_stores[idx].extensions.items;
+    }
+
+    pub fn moduleHasPropagatedExtensions(self: *const RuleModuleExtendState, module_idx: usize) bool {
+        const idx = self.moduleIndex(module_idx);
+        return self.module_stores[idx].hasPropagatedExtensions();
+    }
+
+    pub fn selectorHasAnyExtensionTarget(
+        self: *const RuleModuleExtendState,
+        module_idx: usize,
+        selector_list: *const SelectorList,
+    ) !bool {
+        const idx = self.moduleIndex(module_idx);
+        return self.module_stores[idx].selectorHasAnyExtensionTarget(selector_list);
     }
 
     pub fn markModuleMatchesNonPropagated(
@@ -6302,15 +6633,9 @@ fn reorderExactExtenderBranchesByFirstOccurrence(
     order_hints: []const Extension,
 ) !void {
     if (result.selectors.items.len <= 1) return;
-    var keys_buf: [512]ExactExtenderOrderKey = undefined;
-    if (result.selectors.items.len > keys_buf.len) return;
     const key_exts = if (order_hints.len > 0) order_hints else exts;
-    // This pass only reorders selectors within the same emitted rule.  For
-    // large framework extension graphs it dominates runtime, while different
-    // selector-list ordering is CSS-equivalent and normalized/ignored by the
-    // disposable compat policy.  Keep the exact ordering behavior for small
-    // cases and skip the expensive branch-key scan for large graphs.
-    if (key_exts.len > 512) return;
+    const keys_buf = try result.allocator.alloc(ExactExtenderOrderKey, result.selectors.items.len);
+    defer result.allocator.free(keys_buf);
     var any_duplicate_exact_branch = false;
     if (key_exts.len > 256) {
         var lookup = try buildExactBranchLookup(result.allocator, result, key_exts);
@@ -6342,6 +6667,7 @@ fn reorderExactExtenderBranchesByFirstOccurrence(
         changed = false;
         var i: usize = 1;
         while (i < result.selectors.items.len) : (i += 1) {
+            if (keys_buf[i].match_count <= 1 and keys_buf[i - 1].match_count <= 1) continue;
             if (!exactExtenderOrderBefore(keys_buf[i], keys_buf[i - 1])) continue;
             std.mem.swap(ComplexSelector, &result.selectors.items[i - 1], &result.selectors.items[i]);
             std.mem.swap(ExactExtenderOrderKey, &keys_buf[i - 1], &keys_buf[i]);
@@ -6926,7 +7252,8 @@ fn extendInsidePseudos(
                                 // :not() argument, do not hoist that replacement ahead of the
                                 // other generated :not()s; emit it at its natural position in
                                 // not_selectors. This keeps higher-eval-order sibling
-                                // contributions ahead of the combined replacement (issue_2055).
+                                // contributions ahead of the combined replacement in nested
+                                // :not() / :has() extend chains.
                                 for (not_selectors, 0..) |new_inner_complex, idx| {
                                     if (replacement_idx) |replace_idx| {
                                         if (idx != replace_idx and
@@ -7114,10 +7441,10 @@ fn extendSelectorList(
         // Keep the original
         try new_list.selectors.append(allocator, try inner_complex.clone(allocator));
 
-        // Once a non-idempotent pseudo like :has() has accumulated the mixed
-        // top-level :not() building blocks that dart-sass keeps for issue_2055
-        // style chains, stop recursing deeper through that branch. Further
-        // extension overgenerates redundant nested :has(...) variants.
+        // Once a non-idempotent pseudo like :has() has accumulated mixed
+        // top-level :not() building blocks, stop recursing deeper through
+        // that branch. Further extension overgenerates redundant nested
+        // :has(...) variants.
         if (!isIdempotentSelectorPseudo(pseudo_name) and
             complexHasMixedNotBuildingBlocks(&inner_complex))
         {
@@ -7250,7 +7577,7 @@ fn selectorIsInOriginals(sel: *const ComplexSelector, originals: ?*const Selecto
 }
 
 /// Same as mergeSelectorListNotPseudoVariants, but skip merging a pair where
-/// both items were in the original input list (dart-sass never merges originals).
+/// both items were in the original input list (official Sass CLI never merges originals).
 fn mergeSelectorListNotPseudoVariantsWithOriginals(
     allocator: std.mem.Allocator,
     list: *SelectorList,
@@ -7872,6 +8199,27 @@ fn isCss2PseudoElementName(name: []const u8) bool {
         std.ascii.eqlIgnoreCase(name, "first-letter");
 }
 
+fn isKnownCssPseudoClassName(name: []const u8) bool {
+    const base = selector_mod.pseudoBaseName(name);
+    const known = [_][]const u8{
+        "active",         "any-link",      "autofill",         "blank",         "checked",            "current",
+        "default",        "defined",       "dir",              "disabled",      "empty",              "enabled",
+        "first-child",    "first-of-type", "focus",            "focus-visible", "focus-within",       "fullscreen",
+        "future",         "has",           "host",             "host-context",  "hover",              "in-range",
+        "indeterminate",  "invalid",       "is",               "lang",          "last-child",         "last-of-type",
+        "link",           "local-link",    "modal",            "not",           "nth-child",          "nth-col",
+        "nth-last-child", "nth-last-col",  "nth-last-of-type", "nth-of-type",   "only-child",         "only-of-type",
+        "optional",       "out-of-range",  "past",             "paused",        "picture-in-picture", "placeholder-shown",
+        "playing",        "popover-open",  "read-only",        "read-write",    "required",           "root",
+        "scope",          "state",         "target",           "target-within", "user-invalid",       "user-valid",
+        "valid",          "visited",       "where",
+    };
+    for (known) |item| {
+        if (std.ascii.eqlIgnoreCase(base, item)) return true;
+    }
+    return false;
+}
+
 fn complexOnlyAddsUnknownPseudoClass(
     broader: *const ComplexSelector,
     narrower: *const ComplexSelector,
@@ -7906,6 +8254,7 @@ fn complexOnlyAddsUnknownPseudoClass(
                     switch (nss) {
                         .pseudo_class => |ps| {
                             if (std.ascii.eqlIgnoreCase(ps.name, "not")) return false;
+                            if (isKnownCssPseudoClassName(ps.name)) return false;
                             if (isCss2PseudoElementName(ps.name)) return false;
                             saw_extra_unknown_pseudo = true;
                         },
@@ -8161,7 +8510,7 @@ fn compoundContainsAllNotPseudos(compound: *const CompoundSelector, required: *c
     return true;
 }
 
-/// Dart Sass drops a generated branch like `.a:not(.b):not(.c)` when an
+/// official Sass CLI drops a generated branch like `.a:not(.b):not(.c)` when an
 /// earlier branch is the pure negation `:not(.b):not(.c)`: the generated
 /// selector is a strict subset of the already-emitted negation branch.
 pub fn removeBranchesCoveredByPureNotBranch(result: *SelectorList) void {
@@ -8392,7 +8741,7 @@ fn extendNotPseudo(
 /// whose inner DOES contain it, extend those :not() inners and rebuild the
 /// compound. Returns the new complex, or null if nothing changed.
 /// This avoids the deep recursion of applyExtensionToComplex while still
-/// handling nested pseudo targets (issue 2055 Rules 2/3).
+/// handling nested selector-pseudo targets.
 fn extendNotPseudoShallow(
     frame: *ApplyFrame,
     allocator: std.mem.Allocator,
@@ -8622,7 +8971,45 @@ fn complexContainsPlaceholder(complex: *const ComplexSelector) bool {
     return false;
 }
 
-fn complexIsBareOrPseudoPlaceholder(complex: *const ComplexSelector) bool {
+fn classNameIsExtensionTarget(name: []const u8, exts: []const Extension) bool {
+    for (exts) |ext| {
+        if (ext.target.simple_selectors.items.len != 1) continue;
+        const ss = ext.target.simple_selectors.items[0];
+        if (ss == .class and std.mem.eql(u8, ss.class, name)) return true;
+    }
+    return false;
+}
+
+fn placeholderNameOfSingleCompound(complex: *const ComplexSelector) ?[]const u8 {
+    if (complex.components.items.len != 1) return null;
+    const comp = complex.components.items[0];
+    if (comp != .compound) return null;
+    for (comp.compound.simple_selectors.items) |ss| {
+        if (ss == .placeholder) return ss.placeholder;
+    }
+    return null;
+}
+
+fn placeholderHasPseudoSibling(
+    complex: *const ComplexSelector,
+    siblings: []const ComplexSelector,
+) bool {
+    const placeholder = placeholderNameOfSingleCompound(complex) orelse return false;
+    for (siblings) |*sibling| {
+        if (sibling == complex) continue;
+        if (placeholderNameOfSingleCompound(sibling)) |sibling_placeholder| {
+            if (!std.mem.eql(u8, placeholder, sibling_placeholder)) continue;
+            if (complexHasPseudoSelector(sibling)) return true;
+        }
+    }
+    return false;
+}
+
+fn complexIsBareOrPseudoPlaceholder(
+    complex: *const ComplexSelector,
+    exts: []const Extension,
+    siblings: []const ComplexSelector,
+) bool {
     if (complex.components.items.len != 1) return false;
     const comp = complex.components.items[0];
     if (comp != .compound) return false;
@@ -8632,7 +9019,12 @@ fn complexIsBareOrPseudoPlaceholder(complex: *const ComplexSelector) bool {
             .placeholder => has_placeholder = true,
             .pseudo_class, .pseudo_element, .attribute => {},
             .class => |name| {
-                if (!std.mem.startsWith(u8, name, "is-")) return false;
+                if (!classNameIsExtensionTarget(name, exts) and
+                    !placeholderHasPseudoSibling(complex, siblings) and
+                    std.mem.indexOfScalar(u8, name, '-') == null)
+                {
+                    return false;
+                }
             },
             else => return false,
         }
@@ -8768,7 +9160,7 @@ fn isExtenderSubselectorOfPseudoTarget(
 /// is a textual superset of the original compound (e.g. `.c.d` extending `.c`)
 /// short-circuits to no-op. This matches `selector.extend()` function semantics,
 /// but the `@extend` directive path must still generate the narrower variant
-/// because dart-sass emits it (e.g. `.c.d` extending `.c` in `.c { color: red }`
+/// because official Sass CLI emits it (e.g. `.c.d` extending `.c` in `.c { color: red }`
 /// yields `.c, .c.d { color: red }`).
 fn generateExtendedSelector(
     allocator: std.mem.Allocator,
@@ -9013,7 +9405,7 @@ fn selectorListEveryComplexInSubsetOf(
 
 /// True when one inner :is()/:where() list is a strict subset of the other.
 /// Merging such variants would drop a selector with different specificity
-/// (dart-sass#1297 / sass-spec directives/extend/pseudo extends_after).
+/// (official Sass CLI#1297 / sass-spec directives/extend/pseudo extends_after).
 fn selectorListStrictPseudoInnerSubsetRelation(
     allocator: std.mem.Allocator,
     a: *const SelectorList,
@@ -9182,11 +9574,11 @@ fn coalesceGeneratedSelectorPseudoVariants(
 /// Non-:not() entries are left in place.
 /// Reorder :not() entries: if entry a has :has() inner that contains entry b's
 /// inner as a :not() sub-entry, then b should precede a (b is a building block
-/// of a). Single pass to avoid cascading reorders (issue 2055).
+/// of a). Single pass to avoid cascading reorders.
 /// Synthesize the deepest non-:has() :not() entry for compounds with 4+
 /// :not() entries following the alternating :has()/non-:has() pattern.
 /// The new entry's inner combines ALL existing :not() entries' inners as
-/// sub-:not() pseudo-classes (issue 2055 E[4]).
+/// sub-:not() pseudo-classes.
 fn synthesizeDeepestNotEntry(allocator: std.mem.Allocator, compound: *CompoundSelector) void {
     // Need at least 4 :not() entries
     if (compound.simple_selectors.items.len < 4) return;
@@ -9212,7 +9604,9 @@ fn synthesizeDeepestNotEntry(allocator: std.mem.Allocator, compound: *CompoundSe
         not_count += 1;
     }
 
-    // Must have exactly 4 entries: 2 :has() and 2 non-:has() (issue 2055 pattern)
+    // This synthesis is for the smallest alternating chain observed in
+    // clean-room sass-spec coverage: two selector-taking and two plain
+    // exclusion entries.
     if (not_count != 4 or has_count != 2 or non_has_count != 2) return;
 
     // Extract base attribute from the first :has() entry's inner compound
@@ -9484,7 +9878,7 @@ fn removeSupersededNotPseudosInCompound(compound: *CompoundSelector) void {
     // is contradictory if C's compound contains a sub-:not(Z) where Z equals
     // the compound formed by C's OTHER simple selectors (i.e., C minus :not(Z)).
     // Such an entry matches nothing because it requires both "matching C's base"
-    // and "not matching C's base" simultaneously (issue 2055).
+    // and "not matching C's base" simultaneously.
     {
         var i: usize = compound.simple_selectors.items.len;
         while (i > 0) {

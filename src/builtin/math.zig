@@ -734,7 +734,7 @@ fn renderCssMathArg(ctx: *BuiltinContext, arg: Value) BuiltinError![]u8 {
 }
 
 /// When a math-builtin (min/max/clamp/abs/etc.) arg is a single `calc(X)` call
-/// string, Dart Sass unwraps the outer `calc(`...`)` at serialization.
+/// string, official Sass CLI unwraps the outer `calc(`...`)` at serialization.
 ///   calc(1 + 2px)      -> 1 + 2px
 ///   calc(var(--x))     -> (var(--x))   [single var/env keeps parens]
 ///   calc(1 * 2) + 3px  -> unchanged    (not a single top-level calc call)

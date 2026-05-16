@@ -438,10 +438,9 @@ pub fn buildModuleExports(
                     try markForwardAmbiguousDefaultVarExport(meta_alloc, &out, module_id, out_name, fr.from_import);
                 }
                 // In the first forward dep where out.mixins / out.ambiguous_mixins is empty, all
-                // mergeForwardCallableExport lookup twice (ambiguous
-                // + map) can be skipped and bulk inserted. In legacy `@forward` chains
-                // observed in real-world fixtures this path is hot (targeting the
-                // forward route 1.56% of lookupCallable).
+                // mergeForwardCallableExport lookup twice (ambiguous + map) can be
+                // skipped and bulk inserted. Large legacy `@forward` chains make
+                // this route hot.
                 const fmixins_fast = out.mixins.count() == 0 and out.ambiguous_mixins.count() == 0;
                 if (fmixins_fast) {
                     try out.mixins.ensureUnusedCapacity(meta_alloc, dep.mixins.count());

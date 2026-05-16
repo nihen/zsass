@@ -172,7 +172,7 @@ const CalcTokenizer = struct {
             while (self.pos < self.src.len and isDigit(self.src[self.pos])) self.pos += 1;
         }
         const num_str = self.src[start..self.pos];
-        const value = std.fmt.parseFloat(f64, num_str) catch 0.0;
+        const value = std.fmt.parseFloat(f64, num_str) catch return .{ .invalid = self.src[start] };
 
         // unit (e.g. px, %, em, rem, vw, vh ...)
         const unit_start = self.pos;
@@ -612,7 +612,7 @@ pub fn simplify(allocator: Allocator, value: *const CalcValue) !*CalcValue {
                         // Different-unit zero additions/subtractions are
                         // still CSS calculations unless the units are
                         // directly comparable (handled above). For
-                        // example Dart Sass preserves `calc(15vw + 0px)`
+                        // example official Sass CLI preserves `calc(15vw + 0px)`
                         // rather than folding it to `15vw`.
                     },
                     .multiply => {
@@ -1241,6 +1241,11 @@ test "parse with precedence: 10px + 2 * 5px" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "parse rejects malformed decimal point" {
+    const allocator = testing.allocator;
+    try testing.expectError(error.UnexpectedToken, parseCalc(allocator, "."));
 }
 
 test "parse nested: calc(100% - calc(20px + 10px))" {

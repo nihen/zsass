@@ -1,11 +1,9 @@
 //! Parsed AST cache over worker for Multi-entry CLI.
 //!
-//! For large multi-entry compilations (hundreds of entries sharing vendor
-//! modules), common vendor `@use` / `@forward` / `@import` chains
-//! (compass / fontawesome etc.) are reused across entries. SharedSourceCache
-//! shares disk reads but lex/parse is re-executed per entry, and the profile
-//! Top `lexer.tokenize 2.60%` + `parser.parseUnaryOrAtom 1.07%` + related alloc of gap
-//! occupies a part. Has a mechanism equivalent to legacy zsass's `ImportCaches.stylesheets`.
+//! For large multi-entry compilations, common `@use` / `@forward` /
+//! `@import` dependency chains are reused across entries. SharedSourceCache
+//! shares disk reads, but lex/parse is re-executed per entry; this cache
+//! avoids repeated AST construction for identical source files.
 //!
 //! Design:
 //! - `Entry` is a heap alloc (stable pointer). It has a **per-entry arena** inside and there

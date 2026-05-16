@@ -5,7 +5,7 @@ const ComplexSelector = selector_mod.ComplexSelector;
 const CompoundSelector = selector_mod.CompoundSelector;
 const extend_mod = @import("extend.zig");
 const ApplyState = extend_mod.ApplyState;
-const complexToCssAlloc = extend_mod.complexToCssAlloc;
+const complexSelectorToCss = selector_mod.complexSelectorToCss;
 const compoundContainsTarget = extend_mod.compoundContainsTarget;
 const normalizeGeneratedCompoundClassOrder = extend_mod.normalizeGeneratedCompoundClassOrder;
 const unification = @import("extend_unification.zig");
@@ -50,8 +50,8 @@ test "simple extend: .bar extends .foo" {
     // Check that both .foo and .bar are present
     var has_foo = false;
     var has_bar = false;
-    for (result.selectors.items) |sel| {
-        const css = try complexToCssAlloc(allocator, sel);
+    for (result.selectors.items) |*sel| {
+        const css = try complexSelectorToCss(allocator, sel);
         defer allocator.free(css);
         if (std.mem.eql(u8, css, ".foo")) has_foo = true;
         if (std.mem.eql(u8, css, ".bar")) has_bar = true;
@@ -94,8 +94,8 @@ test "extend with combinators" {
     try std.testing.expect(result.selectors.items.len >= 2);
 
     var has_parent_bar = false;
-    for (result.selectors.items) |sel| {
-        const css = try complexToCssAlloc(allocator, sel);
+    for (result.selectors.items) |*sel| {
+        const css = try complexSelectorToCss(allocator, sel);
         defer allocator.free(css);
         if (std.mem.eql(u8, css, ".parent .bar")) has_parent_bar = true;
     }
@@ -134,8 +134,8 @@ test "placeholder extend" {
     try std.testing.expect(result.selectors.items.len >= 2);
 
     var has_bar = false;
-    for (result.selectors.items) |sel| {
-        const css = try complexToCssAlloc(allocator, sel);
+    for (result.selectors.items) |*sel| {
+        const css = try complexSelectorToCss(allocator, sel);
         defer allocator.free(css);
         if (std.mem.eql(u8, css, ".bar")) has_bar = true;
     }
@@ -740,31 +740,31 @@ test "applyExtensions interleaves branch-local chained extensions before unrelat
 test "applyExtensions keeps same-branch single selectors before descendant variants" {
     const allocator = std.testing.allocator;
 
-    var sel_list = try selector_mod.parse(allocator, ".button.is-rounded");
+    var sel_list = try selector_mod.parse(allocator, ".control.rounded");
     defer sel_list.deinit();
 
-    var is_rounded_target = try selector_mod.parse(allocator, ".is-rounded");
-    defer is_rounded_target.deinit();
-    var button_target = try selector_mod.parse(allocator, ".button");
-    defer button_target.deinit();
-    var avatar_extender = try selector_mod.parse(allocator, ".avatar");
-    defer avatar_extender.deinit();
-    var copy_button_extender = try selector_mod.parse(allocator, ".copy-container button");
-    defer copy_button_extender.deinit();
+    var rounded_target = try selector_mod.parse(allocator, ".rounded");
+    defer rounded_target.deinit();
+    var control_target = try selector_mod.parse(allocator, ".control");
+    defer control_target.deinit();
+    var badge_extender = try selector_mod.parse(allocator, ".badge");
+    defer badge_extender.deinit();
+    var wrapper_control_extender = try selector_mod.parse(allocator, ".wrapper control");
+    defer wrapper_control_extender.deinit();
 
     var store = ApplyState.init(allocator);
     defer store.deinit();
 
     try store.addExtension(.{
-        .extender = try avatar_extender.clone(allocator),
-        .target = try is_rounded_target.selectors.items[0].components.items[0].compound.clone(allocator),
+        .extender = try badge_extender.clone(allocator),
+        .target = try rounded_target.selectors.items[0].components.items[0].compound.clone(allocator),
         .optional = false,
         .span = null,
         .eval_order = 0,
     });
     try store.addExtension(.{
-        .extender = try copy_button_extender.clone(allocator),
-        .target = try button_target.selectors.items[0].components.items[0].compound.clone(allocator),
+        .extender = try wrapper_control_extender.clone(allocator),
+        .target = try control_target.selectors.items[0].components.items[0].compound.clone(allocator),
         .optional = false,
         .span = null,
         .eval_order = 1,
@@ -776,7 +776,7 @@ test "applyExtensions keeps same-branch single selectors before descendant varia
     const css = try selector_mod.toCss(allocator, &result);
     defer allocator.free(css);
     try std.testing.expectEqualStrings(
-        ".button.is-rounded, .copy-container button.is-rounded, .button.avatar, .copy-container button.avatar",
+        ".control.rounded, .wrapper control.rounded, .control.badge, .wrapper control.badge",
         css,
     );
 }
@@ -917,7 +917,7 @@ test "trimWithMetadata keeps cross-group first-pass single-compound focus varian
     try trimWithMetadata(allocator, &list, &first_pass, &orig_groups, &eval_orders);
 
     try std.testing.expectEqual(@as(usize, 2), list.items.len);
-    const css = try complexToCssAlloc(allocator, list.items[0]);
+    const css = try complexSelectorToCss(allocator, &list.items[0]);
     defer allocator.free(css);
     try std.testing.expectEqualStrings("iconview:selected:focus", css);
 }
@@ -956,7 +956,7 @@ test "trimWithMetadata trims cross-group first-pass descendant focus variant" {
     try trimWithMetadata(allocator, &list, &first_pass, &orig_groups, &eval_orders);
 
     try std.testing.expectEqual(@as(usize, 1), list.items.len);
-    const css = try complexToCssAlloc(allocator, list.items[0]);
+    const css = try complexSelectorToCss(allocator, &list.items[0]);
     defer allocator.free(css);
     try std.testing.expectEqualStrings(".view text:selected", css);
 }
@@ -1000,12 +1000,12 @@ test "trimWithMetadata keeps cross-group first-pass descendant focus when leadin
 test "applyExtensions keeps both descendant weave orders for self type extend" {
     const allocator = std.testing.allocator;
 
-    var sel_list = try selector_mod.parse(allocator, ".jumbotron h1");
+    var sel_list = try selector_mod.parse(allocator, ".hero h1");
     defer sel_list.deinit();
 
     var target = try selector_mod.parse(allocator, "h1");
     defer target.deinit();
-    var extender = try selector_mod.parse(allocator, ".CodeMirror .CodeMirror-code h1");
+    var extender = try selector_mod.parse(allocator, ".editor .editor-code h1");
     defer extender.deinit();
 
     var store = ApplyState.init(allocator);
@@ -1025,7 +1025,7 @@ test "applyExtensions keeps both descendant weave orders for self type extend" {
     const css = try selector_mod.toCss(allocator, &result);
     defer allocator.free(css);
     try std.testing.expectEqualStrings(
-        ".jumbotron h1, .jumbotron .CodeMirror .CodeMirror-code h1, .CodeMirror .CodeMirror-code .jumbotron h1",
+        ".hero h1, .hero .editor .editor-code h1, .editor .editor-code .hero h1",
         css,
     );
 }
@@ -1033,9 +1033,9 @@ test "applyExtensions keeps both descendant weave orders for self type extend" {
 test "weavePaths returns both descendant orderings for unrelated prefixes" {
     const allocator = std.testing.allocator;
 
-    var original = try selector_mod.parse(allocator, ".jumbotron h1");
+    var original = try selector_mod.parse(allocator, ".hero h1");
     defer original.deinit();
-    var extender = try selector_mod.parse(allocator, ".CodeMirror .CodeMirror-code h1");
+    var extender = try selector_mod.parse(allocator, ".editor .editor-code h1");
     defer extender.deinit();
 
     const orig_prefix = original.selectors.items[0].components.items[0..1];

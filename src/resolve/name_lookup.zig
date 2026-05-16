@@ -215,6 +215,18 @@ pub fn lookupIdentifierIdInsensitive(
     return lookupStringMapIdentifierInsensitive(u32, map, name);
 }
 
+pub fn lookupIdentifierIdKeyInsensitive(
+    map: *const std.StringHashMapUnmanaged(u32),
+    name: []const u8,
+) ?[]const u8 {
+    if (map.getEntry(name)) |entry| return entry.key_ptr.*;
+    var it = map.iterator();
+    while (it.next()) |entry| {
+        if (identifierEq(entry.key_ptr.*, name)) return entry.key_ptr.*;
+    }
+    return null;
+}
+
 pub fn lookupBoolFlagInsensitive(
     map: *const std.StringHashMapUnmanaged(bool),
     name: []const u8,

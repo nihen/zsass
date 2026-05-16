@@ -2286,7 +2286,7 @@ test "pseudo selector comma continuation keeps selector comma" {
     const source =
         \\.button
         \\  &:hover,
-        \\  &.is-hovered
+        \\  &.state-hover
         \\    color: red
         \\
     ;
@@ -2295,7 +2295,7 @@ test "pseudo selector comma continuation keeps selector comma" {
     try std.testing.expectEqualStrings(
         \\.button {
         \\&:hover,
-        \\&.is-hovered {
+        \\&.state-hover {
         \\color: red;
         \\}
         \\}

@@ -67,9 +67,9 @@ pub fn resolveContentBlock(ctx: anytype, using_extra: u32, body_extra: u32, comp
     // Caller scope captures are allowed; keep the running local allocator, but
     // never let content-block locals alias the reserved global slot prefix.
     //
-    // (bootstrap/_containers.scss: content block inside top-level @if caused
-    // `$extend-breakpoint` to land in the global range, so nested @if updates
-    // were restored by flow-scope pop and the guard stayed effectively `true`.)
+    // A content block inside a top-level conditional can otherwise allocate
+    // locals inside the reserved global range. Nested conditional flow-scope
+    // restoration would then roll back updates that must remain local.
     if (!ctx.in_callable and ctx.next_local_slot < ctx.prog.next_global_slot) {
         ctx.next_local_slot = ctx.prog.next_global_slot;
     }

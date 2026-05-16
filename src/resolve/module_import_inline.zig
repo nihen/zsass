@@ -194,7 +194,7 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, comptime d
     }
     var fi: usize = import_forward_before;
     while (fi < ctx.forward_rules.items.len) : (fi += 1) {
-        try deps.mergeForwardRuleIntoImportScope(ctx, ctx.forward_rules.items[fi]);
+        try deps.mergeForwardRuleIntoImportScope(ctx, ctx.forward_rules.items[fi], false);
     }
 
     try recordImportPreambleComments(ctx.prog, loader, loader_import_origin_idx, expanded_top.items);

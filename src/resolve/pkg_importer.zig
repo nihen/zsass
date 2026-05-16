@@ -420,7 +420,7 @@ test "isSafeRelativePath rejects traversal and absolute paths" {
 }
 
 test "isSafePackageName rejects traversal-bearing names" {
-    try std.testing.expect(isSafePackageName("bootstrap"));
+    try std.testing.expect(isSafePackageName("pkg-name"));
     try std.testing.expect(isSafePackageName("@scope/pkg"));
     try std.testing.expect(!isSafePackageName(""));
     try std.testing.expect(!isSafePackageName("."));
@@ -464,13 +464,13 @@ test "resolve rejects pkg: URLs that try to traverse out" {
 }
 
 test "splitPackagePath unscoped" {
-    const name1, const sub1 = splitPackagePath("bootstrap");
-    try std.testing.expectEqualStrings("bootstrap", name1);
+    const name1, const sub1 = splitPackagePath("pkg-name");
+    try std.testing.expectEqualStrings("pkg-name", name1);
     try std.testing.expect(sub1 == null);
 
-    const name2, const sub2 = splitPackagePath("bootstrap/scss/bootstrap");
-    try std.testing.expectEqualStrings("bootstrap", name2);
-    try std.testing.expectEqualStrings("scss/bootstrap", sub2.?);
+    const name2, const sub2 = splitPackagePath("pkg-name/scss/main");
+    try std.testing.expectEqualStrings("pkg-name", name2);
+    try std.testing.expectEqualStrings("scss/main", sub2.?);
 }
 
 test "splitPackagePath scoped" {

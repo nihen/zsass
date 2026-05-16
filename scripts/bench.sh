@@ -15,6 +15,7 @@ ZSASS="${ZSASS_BIN:-./zig-out/bin/zsass}"
 SPEC_RUNNER="${SPEC_RUNNER:-./zig-out/bin/spec_runner}"
 SPEC_DIR="$(pwd)/tests/sass-spec/spec"
 OUTFILE="bench-results.md"
+DIFF_DIR="${BENCH_DIFF_DIR:-bench-results.diffs}"
 DART_CACHE_FILE="${DART_CACHE_FILE:-.bench-dart-cache.json}"
 # Number of dart runs used to populate the timing cache.
 # Keep this cold by default: no hyperfine warmup, one fresh process run.
@@ -149,9 +150,10 @@ trap "rm -rf $tmpdir" EXIT
 declare -a SUITES=()
 declare -A SUITE_N=()
 declare -A SUITE_SCRIPT_Z=()
-declare -A SUITE_SCRIPT_Z_SERIAL=()
 declare -A SUITE_SCRIPT_D=()
 declare -A SUITE_DART_KEY=()
+declare -A SUITE_OUT_Z=()
+declare -A SUITE_OUT_D=()
 # shellcheck disable=SC2034  # SUITE_DIR is read by suite-emitting helpers below.
 declare -A SUITE_DIR=()
 
@@ -188,9 +190,11 @@ for d in "$FIXTURES"/*/; do
   done < "$d/load_paths.txt"
 
   # Build multi-input args: input1:output1 input2:output2 ...
-  outd="$tmpdir/out/$suite"
-  mkdir -p "$outd"
-  multi_args=""
+  z_outd="$tmpdir/out/$suite/zsass"
+  d_outd="$tmpdir/out/$suite/dart"
+  mkdir -p "$z_outd" "$d_outd"
+  multi_args_z=""
+  multi_args_d=""
   n=0
   while IFS= read -r rel; do
     [[ -n "$rel" ]] || continue
@@ -200,46 +204,33 @@ for d in "$FIXTURES"/*/; do
       input="$d$src_dir/$rel"
     fi
     [[ -f "$input" ]] || continue
-    out="$outd/${rel%.*}.css"
-    mkdir -p "$(dirname "$out")"
-    printf -v io_arg '%q' "$input:$out"
-    multi_args="$multi_args $io_arg"
+    z_out="$z_outd/${rel%.*}.css"
+    d_out="$d_outd/${rel%.*}.css"
+    mkdir -p "$(dirname "$z_out")" "$(dirname "$d_out")"
+    printf -v io_arg '%q' "$input:$z_out"
+    multi_args_z="$multi_args_z $io_arg"
+    printf -v io_arg '%q' "$input:$d_out"
+    multi_args_d="$multi_args_d $io_arg"
     n=$((n+1))
   done < "$d/$ef_name"
   [[ $n -gt 0 ]] || continue
 
   # Write compile scripts (single process, all entries)
   z_script="$tmpdir/$suite.z.sh"
-  z_serial_script="$tmpdir/$suite.z.serial.sh"
   d_script="$tmpdir/$suite.d.sh"
   echo "#!/bin/bash" > "$z_script"
-  echo "ZSASS_CSS_CACHE=0 $ZSASS --no-source-map --quiet-deps$lp$multi_args 2>/dev/null" >> "$z_script"
+  echo "ZSASS_CSS_CACHE=0 $ZSASS --no-source-map --quiet$lp$multi_args_z 2>/dev/null" >> "$z_script"
   chmod +x "$z_script"
-  echo "#!/bin/bash" > "$z_serial_script"
-  echo "set -euo pipefail" >> "$z_serial_script"
-  while IFS= read -r rel; do
-    [[ -n "$rel" ]] || continue
-    if [[ "$layout" == "samples" ]]; then
-      input="$d$samples_dir/$rel"
-    else
-      input="$d$src_dir/$rel"
-    fi
-    [[ -f "$input" ]] || continue
-    out="$outd/${rel%.*}.css"
-    mkdir -p "$(dirname "$out")"
-    printf -v io_arg '%q' "$input:$out"
-    echo "ZSASS_CSS_CACHE=0 $ZSASS --no-source-map --quiet-deps$lp $io_arg 2>/dev/null" >> "$z_serial_script"
-  done < "$d/$ef_name"
-  chmod +x "$z_serial_script"
   echo "#!/bin/bash" > "$d_script"
-  echo "sass --no-source-map --quiet-deps$lp$multi_args 2>/dev/null" >> "$d_script"
+  echo "sass --no-source-map --quiet-deps$lp$multi_args_d 2>/dev/null" >> "$d_script"
   chmod +x "$d_script"
 
   SUITES+=("$suite")
   SUITE_N[$suite]=$n
   SUITE_SCRIPT_Z[$suite]="$z_script"
-  SUITE_SCRIPT_Z_SERIAL[$suite]="$z_serial_script"
   SUITE_SCRIPT_D[$suite]="$d_script"
+  SUITE_OUT_Z[$suite]="$z_outd"
+  SUITE_OUT_D[$suite]="$d_outd"
   # shellcheck disable=SC2034  # SUITE_DIR is consulted by post-loop reporting.
   SUITE_DIR[$suite]="$d"
   SUITE_DART_KEY[$suite]=$(dart_cache_key_for "$d" "$ef_name")
@@ -248,6 +239,8 @@ done
 # -- Benchmark --
 declare -A Z_MS=()
 declare -A D_MS=()
+rm -rf "$DIFF_DIR"
+mkdir -p "$DIFF_DIR"
 total=${#SUITES[@]}
 count=0
 
@@ -258,18 +251,17 @@ for suite in "${SUITES[@]}"; do
 
   json="$tmpdir/$suite.json"
 
-  # Test both can compile
+  # Test both can compile and produce the same raw CSS before benchmarking.
   z_ok=true; bash "${SUITE_SCRIPT_Z[$suite]}" || z_ok=false
-  if ! $z_ok; then
-    # Some large suites still expose cross-entry batch-state races with CSS
-    # cache disabled. Keep the benchmark useful by falling back to isolated
-    # per-entry zsass invocations rather than reporting a suite-wide FAIL.
-    if bash "${SUITE_SCRIPT_Z_SERIAL[$suite]}"; then
-      SUITE_SCRIPT_Z[$suite]="${SUITE_SCRIPT_Z_SERIAL[$suite]}"
-      z_ok=true
+  d_ok=true; bash "${SUITE_SCRIPT_D[$suite]}" || d_ok=false
+  if $z_ok && $d_ok; then
+    diff_file="$DIFF_DIR/$suite.diff"
+    if diff -ru "${SUITE_OUT_D[$suite]}" "${SUITE_OUT_Z[$suite]}" > "$diff_file"; then
+      rm -f "$diff_file"
+    else
+      z_ok=false
     fi
   fi
-  d_ok=true; bash "${SUITE_SCRIPT_D[$suite]}" || d_ok=false
 
   if $z_ok && $d_ok; then
     cache_key="${SUITE_DART_KEY[$suite]}"
@@ -454,3 +446,6 @@ done
 cat "$OUTFILE"
 echo "" >&2
 echo "Saved to $OUTFILE" >&2
+if [[ -n "$(find "$DIFF_DIR" -type f -name '*.diff' -print -quit 2>/dev/null)" ]]; then
+  echo "Raw CSS diffs saved to $DIFF_DIR" >&2
+fi

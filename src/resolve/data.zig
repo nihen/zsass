@@ -255,7 +255,7 @@ pub const CommentData = struct {
     /// exists alone). Calculated by backward scanning ast.source at resolver point.
     /// In @import inline, parent module's line_starts has incorrect child file coordinates.
     /// Even if it is determined that they are the same line, the value given here is correct. inlineCommentAfter
-    // Used to correct "line check lie of block_end" in /// judgment (Z23-MATERIALIZE-DIFF).
+    // Used to correct block-end same-line checks for inline @import chunks.
     leading_same_line: bool = false,
 };
 
@@ -707,7 +707,7 @@ pub const ModuleResolver = struct {
     /// User module search root column passed from embedder. `from_path` dir When relative and undiscovered
     /// Scan in order. Ownership is on the caller (spec_runner, etc.) side -- only retained within self.
     load_paths: []const []const u8 = &.{},
-    /// dart-sass parity: `pkg:` URL resolution is rejected unless this is
+    /// official Sass CLI parity: `pkg:` URL resolution is rejected unless this is
     /// `true`. The CLI sets it via `--pkg-importer=node`; embedders set it
     /// through `CompileOptions.pkg_importer_enabled`. Defaults to `false`
     /// so an untrusted SCSS input cannot read host packages by default.
@@ -816,7 +816,7 @@ pub const ModuleExports = struct {
     default_vars: std.StringHashMapUnmanaged(VarTarget) = .empty,
     default_var_source_modules: std.StringHashMapUnmanaged(u32) = .empty,
     /// Private top-level !default variables are not module members and must not be forwarded/exported,
-    /// but explicit `with` configuration still accepts them for Dart Sass 1.x compatibility.
+    /// but explicit `with` configuration still accepts them for official Sass CLI 1.x compatibility.
     private_default_vars: std.StringHashMapUnmanaged(VarTarget) = .empty,
     /// Conflicting configurable export name in `@forward` export.
     ambiguous_default_vars: std.StringHashMapUnmanaged(void) = .empty,

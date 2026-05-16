@@ -1,6 +1,5 @@
 const std = @import("std");
 const color_mod = @import("color.zig");
-const color_sentinels = @import("color_sentinels.zig");
 const value_mod = @import("../runtime/value.zig");
 const value_format = @import("../runtime/value_format.zig");
 const perf = @import("../runtime/perf.zig");
@@ -56,8 +55,9 @@ fn namedColorForRgb(r: u8, g: u8, b: u8) ?[]const u8 {
 }
 
 fn allocPreferredNamedOrHex(alloc: std.mem.Allocator, r: u8, g: u8, b: u8) std.mem.Allocator.Error![]u8 {
+    const hex_len: usize = if (canShortHex(r, g, b)) 4 else 7;
     if (namedColorForRgb(r, g, b)) |name| {
-        return alloc.dupe(u8, name);
+        if (name.len <= hex_len) return alloc.dupe(u8, name);
     }
     return allocHexColor(alloc, r, g, b, true);
 }
@@ -174,10 +174,10 @@ fn formatLegacySrgb(alloc: std.mem.Allocator, entry: ColorEntry) std.mem.Allocat
     const missing_b = channelMissing(entry.missing, 2);
     const missing_a = channelMissing(entry.missing, 3);
 
-    // dart-sass legacy srgb channel tolerance is 5e-6 (see legacy
+    // official Sass CLI legacy srgb channel tolerance is 5e-6 (see legacy
     // value.zig:1901). mix()/lighten()/darken()/hsl-roundtrip can produce
     // channels 0.000001..0.00001 off integer bytes; tighter tolerances
-    // force fractional rgb() output where dart-sass would collapse to hex.
+    // force fractional rgb() output where official Sass CLI would collapse to hex.
     const channel_tol: f64 = 5e-6;
     const out_of_gamut = !std.math.isFinite(r_raw) or !std.math.isFinite(g_raw) or !std.math.isFinite(b_raw) or
         r_raw < -channel_tol or r_raw > 255.0 + channel_tol or
@@ -234,6 +234,14 @@ fn formatLegacySrgb(alloc: std.mem.Allocator, entry: ColorEntry) std.mem.Allocat
         const b = try value_format.formatNumberCore(alloc, b_clamped);
         defer alloc.free(b);
         if (@abs(alpha - 1.0) < channel_tol) {
+            if (entry.legacy and is_integer_byte and entry.inspect_repr != .legacy_rgb_function) {
+                return allocPreferredNamedOrHex(
+                    alloc,
+                    color_mod.clampByte(r_clamped),
+                    color_mod.clampByte(g_clamped),
+                    color_mod.clampByte(b_clamped),
+                );
+            }
             return std.fmt.allocPrint(alloc, "rgb({s}, {s}, {s})", .{ r, g, b });
         }
         const a = try value_format.formatNumberCore(alloc, alpha);
@@ -297,21 +305,6 @@ fn formatLegacyHwb(alloc: std.mem.Allocator, entry: ColorEntry) std.mem.Allocato
             return alloc.dupe(u8, name);
         }
         return allocHexColor(alloc, r, g, b, false);
-    }
-
-    if (entry.missing == 0 and @abs(entry.channels[3] - 1.0) <= 1e-12) {
-        if (@abs(entry.channels[0] - 167.1631207662) <= 1e-10 and
-            @abs(entry.channels[1] - -4485026.800979206) <= 1e-6 and
-            @abs(entry.channels[2] - -1804487.0443575173) <= 1e-6)
-        {
-            return alloc.dupe(u8, "hsl(347.1631207662, 234.6485806965%, -1340219.878310844%)");
-        }
-        if (@abs(entry.channels[0] - 171.6022221471) <= 1e-10 and
-            @abs(entry.channels[1] - -42904554.421379425) <= 1e-4 and
-            @abs(entry.channels[2] - -14581280.607266026) <= 1e-4)
-        {
-            return alloc.dupe(u8, "hsl(351.6022221471, 202.9643125658%, -14161586.907056702%)");
-        }
     }
 
     const hsl = color_mod.convert(primitive, .hsl);
@@ -381,9 +374,7 @@ fn formatLabLikeOutOfRange(
         entry.channels[3],
         entry.space,
     );
-    var xyz = color_mod.convert(primitive, .xyz_d65);
-    color_sentinels.canonicalizeLabLikeFallbackXyz(space, &xyz);
-
+    const xyz = color_mod.convert(primitive, .xyz_d65);
     const x = try value_format.formatNumberCore(alloc, xyz.channels[0]);
     defer alloc.free(x);
     const y = try value_format.formatNumberCore(alloc, xyz.channels[1]);
@@ -453,4 +444,63 @@ pub fn formatColorCss(alloc: std.mem.Allocator, entry: ColorEntry) std.mem.Alloc
             formatLabLike(alloc, entry, "oklch", 100.0, "%", "deg"),
         else => formatColorFunction(alloc, entry),
     };
+}
+
+pub fn formatColorCssRaw(alloc: std.mem.Allocator, entry: ColorEntry) std.mem.Allocator.Error![]u8 {
+    if (entry.legacy and entry.space == .srgb) {
+        const primitive = color_mod.Color.init(
+            entry.channels[0],
+            entry.channels[1],
+            entry.channels[2],
+            entry.channels[3],
+            entry.space,
+        );
+        const srgb = if (entry.space == .srgb) primitive else color_mod.convert(primitive, .srgb);
+        const r_raw = srgb.channels[0] * 255.0;
+        const g_raw = srgb.channels[1] * 255.0;
+        const b_raw = srgb.channels[2] * 255.0;
+        const alpha = clampLegacyAlpha(srgb.channels[3]);
+        const channel_tol: f64 = 5e-6;
+        const out_of_gamut = !std.math.isFinite(r_raw) or !std.math.isFinite(g_raw) or !std.math.isFinite(b_raw) or
+            r_raw < -channel_tol or r_raw > 255.0 + channel_tol or
+            g_raw < -channel_tol or g_raw > 255.0 + channel_tol or
+            b_raw < -channel_tol or b_raw > 255.0 + channel_tol;
+        if (entry.missing != 0 or out_of_gamut) {
+            return formatLegacySrgb(alloc, entry);
+        }
+        const r = color_mod.clampByte(clampLegacyByte(r_raw));
+        const g = color_mod.clampByte(clampLegacyByte(g_raw));
+        const b = color_mod.clampByte(clampLegacyByte(b_raw));
+        const rs = try value_format.formatNumberCore(alloc, clampLegacyByte(r_raw));
+        defer alloc.free(rs);
+        const gs = try value_format.formatNumberCore(alloc, clampLegacyByte(g_raw));
+        defer alloc.free(gs);
+        const bs = try value_format.formatNumberCore(alloc, clampLegacyByte(b_raw));
+        defer alloc.free(bs);
+        if (@abs(alpha - 1.0) < 5e-6) {
+            if (entry.inspect_repr == .literal_long_hex or entry.inspect_repr == .literal_short_hex) {
+                const short = entry.inspect_repr == .literal_short_hex;
+                const rendered = try allocHexColor(alloc, r, g, b, short);
+                if (!entry.inspect_uppercase_hex) return rendered;
+                for (rendered) |*c| c.* = std.ascii.toUpper(c.*);
+                return rendered;
+            }
+            const is_integer_byte = @abs(clampLegacyByte(r_raw) - @round(clampLegacyByte(r_raw))) <= 5e-6 and
+                @abs(clampLegacyByte(g_raw) - @round(clampLegacyByte(g_raw))) <= 5e-6 and
+                @abs(clampLegacyByte(b_raw) - @round(clampLegacyByte(b_raw))) <= 5e-6;
+            if (entry.inspect_repr != .legacy_rgb_function and is_integer_byte) {
+                if (namedColorForRgb(r, g, b)) |name| return alloc.dupe(u8, name);
+                return allocHexColor(alloc, r, g, b, false);
+            }
+            if (entry.prefer_long_hex and entry.inspect_repr == .auto and is_integer_byte) {
+                if (namedColorForRgb(r, g, b)) |name| return alloc.dupe(u8, name);
+                return allocHexColor(alloc, r, g, b, false);
+            }
+            return std.fmt.allocPrint(alloc, "rgb({s}, {s}, {s})", .{ rs, gs, bs });
+        }
+        const as = try value_format.formatNumberCore(alloc, alpha);
+        defer alloc.free(as);
+        return std.fmt.allocPrint(alloc, "rgba({s}, {s}, {s}, {s})", .{ rs, gs, bs, as });
+    }
+    return formatColorCss(alloc, entry);
 }

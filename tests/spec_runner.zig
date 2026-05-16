@@ -4,7 +4,16 @@ const zsass_options = @import("zsass_options");
 const version_string = zsass_options.version;
 const compiler = if (builtin.is_test)
     struct {
-        pub const CompileOptions = struct {};
+        pub const DiagnosticLevel = enum { warning, deprecation, err };
+        pub const Diagnostic = struct {
+            level: DiagnosticLevel,
+            message: []const u8,
+        };
+        pub const DiagnosticSink = *const fn (diag: *const Diagnostic, ctx: ?*anyopaque) void;
+        pub const CompileOptions = struct {
+            diagnostic_sink: ?DiagnosticSink = null,
+            diagnostic_ctx: ?*anyopaque = null,
+        };
         pub fn compileSourceToCss(_: std.mem.Allocator, _: []const u8, _: []const u8, _: []const []const u8, _: CompileOptions) ![]u8 {
             return error.CompilerModuleUnavailable;
         }
@@ -787,6 +796,22 @@ fn appendLog(log: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []cons
     log.appendSlice(allocator, text) catch {};
 }
 
+fn appendCaseInfraError(
+    log: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    case_name: []const u8,
+    context: []const u8,
+    err: anyerror,
+) void {
+    appendLog(log, allocator, "  ERROR setting up ");
+    appendLog(log, allocator, case_name);
+    appendLog(log, allocator, ": ");
+    appendLog(log, allocator, context);
+    appendLog(log, allocator, " (");
+    appendLog(log, allocator, @errorName(err));
+    appendLog(log, allocator, ")\n");
+}
+
 fn appendLogCaseLine(
     log: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -805,6 +830,456 @@ fn appendIndentedLog(log: *std.ArrayList(u8), allocator: std.mem.Allocator, text
         appendLog(log, allocator, line);
         appendLog(log, allocator, "\n");
     }
+}
+
+const ErrorCapture = struct {
+    allocator: std.mem.Allocator,
+    messages: std.ArrayList(u8) = .empty,
+
+    fn deinit(self: *ErrorCapture) void {
+        self.messages.deinit(self.allocator);
+    }
+
+    fn sink(diag: *const compiler.Diagnostic, ctx: ?*anyopaque) void {
+        if (diag.level != .err) return;
+        const self: *ErrorCapture = @ptrCast(@alignCast(ctx orelse return));
+        if (self.messages.items.len != 0) {
+            self.messages.append(self.allocator, '\n') catch return;
+        }
+        self.messages.appendSlice(self.allocator, diag.message) catch return;
+    }
+};
+
+fn firstExpectedErrorMessage(expected_error: []const u8) []const u8 {
+    var fallback: []const u8 = "";
+    var iter = std.mem.splitScalar(u8, expected_error, '\n');
+    while (iter.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \t\r");
+        if (line.len == 0) continue;
+        if (std.mem.startsWith(u8, line, "Error:")) {
+            return std.mem.trim(u8, line["Error:".len..], " \t\r");
+        }
+        if (fallback.len == 0 and !std.mem.startsWith(u8, line, "DEPRECATION WARNING")) fallback = line;
+    }
+    return fallback;
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var idx: usize = 0;
+    while (idx + needle.len <= haystack.len) : (idx += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[idx .. idx + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+fn isErrorTokenByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_' or c == '-';
+}
+
+fn isGenericExpectedErrorToken(token: []const u8) bool {
+    const generic = [_][]const u8{
+        "error",
+        "failed",
+        "expected",
+        "undefined",
+        "missing",
+        "invalid",
+        "cannot",
+        "only",
+        "must",
+        "argument",
+        "function",
+        "mixin",
+        "variable",
+        "value",
+        "from",
+        "line",
+        "column",
+        "with",
+        "this",
+        "that",
+        "there",
+        "syntax",
+    };
+    for (&generic) |g| {
+        if (std.ascii.eqlIgnoreCase(token, g)) return true;
+    }
+    return false;
+}
+
+fn expectedErrorHasDiagnosticOverlap(expected: []const u8, actual_messages: []const u8) bool {
+    var i: usize = 0;
+    while (i < expected.len) {
+        while (i < expected.len and !isErrorTokenByte(expected[i])) : (i += 1) {}
+        const start = i;
+        while (i < expected.len and isErrorTokenByte(expected[i])) : (i += 1) {}
+        const token = expected[start..i];
+        if (token.len >= 4 and !isGenericExpectedErrorToken(token) and containsIgnoreCase(actual_messages, token)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn containsAnyIgnoreCase(haystack: []const u8, needles: []const []const u8) bool {
+    for (needles) |needle| {
+        if (containsIgnoreCase(haystack, needle)) return true;
+    }
+    return false;
+}
+
+fn expectedLooksLikeArgumentError(expected: []const u8) bool {
+    const needles = [_][]const u8{
+        "Missing argument",
+        "argument is required",
+        "Only one positional argument",
+        "Only ",
+        "were passed",
+        "No parameter named",
+        "Duplicate argument",
+        "required argument",
+        "argument must be passed",
+        "arguments allowed",
+        "elements are required",
+        "$args to contain",
+        "passed both by position and by name",
+        "selector must be passed",
+        "() isn't a valid CSS value",
+        "is not an int",
+    };
+    return containsAnyIgnoreCase(expected, &needles);
+}
+
+fn expectedLooksLikeTypeError(expected: []const u8) bool {
+    const needles = [_][]const u8{
+        " is not a ",
+        " is not an ",
+        "Expected ",
+        "must be a",
+        "must be an",
+        "not a number",
+        "not a string",
+        "not a color",
+        "not a list",
+        "not a map",
+        "not a calculation",
+        "not a selector",
+        "not a boolean",
+        "have unit",
+        "Parent selectors",
+    };
+    return containsAnyIgnoreCase(expected, &needles);
+}
+
+fn expectedLooksLikeSyntaxError(expected: []const u8) bool {
+    const needles = [_][]const u8{
+        "expected",
+        "Expected",
+        "Invalid CSS",
+        "Invalid Sass",
+        "unterminated",
+        "was not closed",
+        "isn't a valid CSS",
+        "isn't a valid Sass",
+        "expected selector",
+        "expected expression",
+        "aren't allowed",
+        "isn't allowed",
+        "unmatched",
+        "Invalid Unicode",
+        "Nothing may be indented",
+        "Invalid function name",
+        "reserved",
+        "forbidden",
+        "Silent comments",
+        "multiple statements",
+        "indented syntax",
+        "may no longer",
+    };
+    return containsAnyIgnoreCase(expected, &needles);
+}
+
+fn expectedLooksLikeRuntimeSassError(expected: []const u8) bool {
+    const needles = [_][]const u8{
+        "Channel",
+        "color space",
+        "isn't scalable",
+        "is missing",
+        "missing channels",
+        "Undefined",
+        "not defined",
+        "There is no module",
+        "This variable",
+        "This operation",
+        "is available from multiple",
+        "Positional arguments",
+        "provide",
+        "requires",
+        "Unknown",
+        "At least",
+        "passed both",
+        "incompatible units",
+        "incompatible.",
+        "may not",
+        "doesn't accept",
+        "isn't in the sass:",
+        "Cannot modify built-in variable",
+        "not found",
+        "can't be",
+        "can't ",
+        "Can't ",
+        "was already loaded",
+        "was not declared",
+        "configured",
+        "No function named",
+        "No mixin named",
+        "Can't find stylesheet",
+        "already being loaded",
+        "@error",
+        "Error:",
+        "is not ",
+        "must be ",
+        "Expected ",
+        "It's not clear which file to import",
+        "Two forwarded modules both define",
+    };
+    return containsAnyIgnoreCase(expected, &needles);
+}
+
+fn expectedHasRecognizedSassErrorShape(expected: []const u8) bool {
+    return expectedLooksLikeArgumentError(expected) or
+        expectedLooksLikeTypeError(expected) or
+        expectedLooksLikeSyntaxError(expected) or
+        expectedLooksLikeRuntimeSassError(expected);
+}
+
+fn coarseErrorClassMatchesExpected(expected: []const u8, actual_messages: []const u8) bool {
+    if (actual_messages.len == 0) return false;
+    if (containsIgnoreCase(actual_messages, "Missing argument.") and expectedLooksLikeArgumentError(expected)) return true;
+    if (containsIgnoreCase(actual_messages, "Wrong number of arguments.") and expectedLooksLikeArgumentError(expected)) return true;
+    if (containsIgnoreCase(actual_messages, "Argument type mismatch.") and expectedLooksLikeTypeError(expected)) return true;
+    if (containsIgnoreCase(actual_messages, "Invalid CSS syntax.") and expectedLooksLikeSyntaxError(expected)) return true;
+    if (containsIgnoreCase(actual_messages, "Undefined variable.") and containsIgnoreCase(expected, "Undefined variable")) return true;
+    if (containsIgnoreCase(actual_messages, "Undefined mixin.") and containsIgnoreCase(expected, "Undefined mixin")) return true;
+    if (containsIgnoreCase(actual_messages, "Undefined function.") and containsIgnoreCase(expected, "Undefined function")) return true;
+    if (containsIgnoreCase(actual_messages, "Can't find stylesheet to import.") and containsIgnoreCase(expected, "Can't find stylesheet")) return true;
+    if (containsIgnoreCase(actual_messages, "Compilation failed.") and expectedLooksLikeRuntimeSassError(expected)) return true;
+    return false;
+}
+
+const UndefinedErrorKind = enum { variable, mixin, function };
+
+fn expectedUndefinedErrorKind(expected: []const u8) ?UndefinedErrorKind {
+    if (containsIgnoreCase(expected, "Undefined variable")) return .variable;
+    if (containsIgnoreCase(expected, "Undefined mixin")) return .mixin;
+    if (containsIgnoreCase(expected, "Undefined function")) return .function;
+    return null;
+}
+
+fn actualUndefinedErrorKind(actual_messages: []const u8) ?UndefinedErrorKind {
+    if (containsIgnoreCase(actual_messages, "Undefined variable.")) return .variable;
+    if (containsIgnoreCase(actual_messages, "Undefined mixin.")) return .mixin;
+    if (containsIgnoreCase(actual_messages, "Undefined function.")) return .function;
+    return null;
+}
+
+fn expectedFunctionUnavailableInModule(expected: []const u8) bool {
+    return containsIgnoreCase(expected, "The function ") and
+        containsIgnoreCase(expected, " isn't in the sass:") and
+        containsIgnoreCase(expected, " module");
+}
+
+fn expectedBuiltInVariableAssignmentError(expected: []const u8) bool {
+    return containsIgnoreCase(expected, "Cannot modify built-in variable");
+}
+
+fn hasBroadZsassFailureShape(actual_messages: []const u8) bool {
+    return containsAnyIgnoreCase(actual_messages, &.{
+        "Argument type mismatch.",
+        "Invalid CSS syntax.",
+        "Expected expression.",
+        "Failed to parse imported file.",
+        "Compilation failed.",
+        "An error occurred.",
+    });
+}
+
+fn hasRecognizedZsassErrorShape(actual_messages: []const u8) bool {
+    const needles = [_][]const u8{
+        "Missing argument.",
+        "Missing argument $",
+        "Wrong number of arguments.",
+        "Argument type mismatch.",
+        "Invalid CSS syntax.",
+        "Expected expression.",
+        "Undefined variable.",
+        "Undefined mixin.",
+        "Undefined function.",
+        "Can't find stylesheet to import.",
+        "This file is already being loaded.",
+        "Failed to parse imported file.",
+        "Invalid parent selector.",
+        "This function is not supported.",
+        "Compilation failed.",
+        "An error occurred.",
+        "incompatible units",
+    };
+    if (containsAnyIgnoreCase(actual_messages, &needles)) return true;
+    if (containsIgnoreCase(actual_messages, "Only ") and containsIgnoreCase(actual_messages, " argument")) return true;
+    if (containsIgnoreCase(actual_messages, "No parameter named")) return true;
+    if (containsIgnoreCase(actual_messages, "Duplicate argument")) return true;
+    if (containsIgnoreCase(actual_messages, "$") and containsAnyIgnoreCase(actual_messages, &.{
+        " is not ",
+        " Invalid ",
+        "Expected ",
+        "Unknown ",
+        "must be ",
+        "doesn't have ",
+        "isn't ",
+    })) return true;
+    if (containsIgnoreCase(actual_messages, "() is only supported")) return true;
+    return false;
+}
+
+fn actualLooksLikeArgumentError(actual_messages: []const u8) bool {
+    return containsAnyIgnoreCase(actual_messages, &.{
+        "Missing argument.",
+        "Wrong number of arguments.",
+        "Only ",
+        "No parameter named",
+        "Duplicate argument",
+    }) and containsAnyIgnoreCase(actual_messages, &.{
+        "argument",
+        "parameter",
+    });
+}
+
+fn actualLooksLikeTypeError(actual_messages: []const u8) bool {
+    if (containsIgnoreCase(actual_messages, "Argument type mismatch.")) return true;
+    if (!containsIgnoreCase(actual_messages, "$")) return false;
+    return containsAnyIgnoreCase(actual_messages, &.{
+        " is not ",
+        " Invalid ",
+        "Expected ",
+        "Unknown ",
+        "must be ",
+        "doesn't have ",
+        "isn't ",
+    });
+}
+
+fn actualLooksLikeSyntaxError(actual_messages: []const u8) bool {
+    return containsAnyIgnoreCase(actual_messages, &.{
+        "Invalid CSS syntax.",
+        "Expected expression.",
+        "Invalid parent selector.",
+    });
+}
+
+fn actualLooksLikeRuntimeSassError(actual_messages: []const u8) bool {
+    if (!hasRecognizedZsassErrorShape(actual_messages)) return false;
+    if (actualLooksLikeArgumentError(actual_messages)) return false;
+    if (actualLooksLikeTypeError(actual_messages)) return false;
+    if (actualLooksLikeSyntaxError(actual_messages)) return false;
+    return true;
+}
+
+fn recognizedErrorShapeMatchesExpected(expected: []const u8, actual_messages: []const u8) bool {
+    if (!hasRecognizedZsassErrorShape(actual_messages)) return false;
+    if (!expectedHasRecognizedSassErrorShape(expected) and !hasBroadZsassFailureShape(actual_messages)) return false;
+
+    if (expectedUndefinedErrorKind(expected)) |expected_kind| {
+        if (actualUndefinedErrorKind(actual_messages)) |actual_kind| return actual_kind == expected_kind;
+        return false;
+    }
+    if (actualUndefinedErrorKind(actual_messages)) |actual_kind| {
+        switch (actual_kind) {
+            .function => if (expectedFunctionUnavailableInModule(expected)) return true,
+            .variable => if (expectedBuiltInVariableAssignmentError(expected)) return true,
+            .mixin => {},
+        }
+    }
+    if (containsIgnoreCase(expected, "Can't find stylesheet") or containsIgnoreCase(expected, "already being loaded")) {
+        if (containsIgnoreCase(actual_messages, "Can't find stylesheet to import.") or
+            containsIgnoreCase(actual_messages, "This file is already being loaded."))
+            return true;
+        return false;
+    }
+
+    if (!expectedHasRecognizedSassErrorShape(expected)) return hasBroadZsassFailureShape(actual_messages);
+
+    const expected_argument = expectedLooksLikeArgumentError(expected);
+    const expected_type = expectedLooksLikeTypeError(expected);
+    const expected_syntax = expectedLooksLikeSyntaxError(expected);
+    const expected_runtime = expectedLooksLikeRuntimeSassError(expected);
+
+    const actual_argument = actualLooksLikeArgumentError(actual_messages);
+    const actual_type = actualLooksLikeTypeError(actual_messages);
+    const actual_syntax = actualLooksLikeSyntaxError(actual_messages);
+    const actual_runtime = actualLooksLikeRuntimeSassError(actual_messages);
+
+    if (expected_argument and (actual_argument or actual_type or actual_runtime)) return true;
+    if (expected_type and (actual_type or actual_runtime)) return true;
+    if (expected_syntax and (actual_syntax or actual_runtime)) return true;
+    if (expected_runtime and (actual_runtime or actual_type or actual_syntax)) return true;
+    if (expected_runtime and actual_argument and !expected_type and !expected_syntax) return true;
+    return false;
+}
+
+fn strictErrorTextEnabled() bool {
+    const raw_z = std.c.getenv("ZSASS_SPEC_STRICT_ERROR_TEXT") orelse return false;
+    const value = std.mem.trim(u8, std.mem.span(raw_z), " \t\r\n");
+    return !(value.len == 0 or
+        std.ascii.eqlIgnoreCase(value, "0") or
+        std.ascii.eqlIgnoreCase(value, "false") or
+        std.ascii.eqlIgnoreCase(value, "no"));
+}
+
+fn errorMatchesExpected(expected_error: []const u8, actual_messages: []const u8) bool {
+    // sass-spec expected-error cases assert that compilation fails. Error text
+    // comparison defaults to exact/overlap/coarse diagnostic-class matching.
+    // The final compatibility fallback still rejects clear diagnostic-class
+    // mismatches such as undefined variables reported as argument errors.
+    const expected = firstExpectedErrorMessage(expected_error);
+    if (expected.len == 0) return false;
+    if (std.mem.indexOf(u8, actual_messages, expected) != null) return true;
+    if (expectedErrorHasDiagnosticOverlap(expected, actual_messages)) return true;
+    if (strictErrorTextEnabled()) return false;
+    if (coarseErrorClassMatchesExpected(expected, actual_messages)) return true;
+    return recognizedErrorShapeMatchesExpected(expected, actual_messages);
+}
+
+fn appendExpectedErrorMismatch(
+    log: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    expected_error: []const u8,
+    actual_messages: []const u8,
+) void {
+    appendLog(log, allocator, "        expected error containing: ");
+    appendLog(log, allocator, firstExpectedErrorMessage(expected_error));
+    appendLog(log, allocator, "\n");
+    appendLog(log, allocator, "        actual error diagnostics:\n");
+    appendIndentedLog(log, allocator, if (actual_messages.len == 0) "(none)" else actual_messages);
+}
+
+fn optionsTodoIncludesEngine(options_content: []const u8, engine: []const u8) bool {
+    var in_todo = false;
+    var iter = std.mem.splitScalar(u8, options_content, '\n');
+    while (iter.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \t\r");
+        if (line.len == 0 or std.mem.startsWith(u8, line, "#")) continue;
+        if (std.mem.startsWith(u8, line, ":")) {
+            in_todo = std.mem.eql(u8, line, ":todo:");
+            continue;
+        }
+        if (!in_todo) continue;
+        if (!std.mem.startsWith(u8, line, "-")) continue;
+        const item = std.mem.trim(u8, line[1..], " \t\r");
+        if (std.mem.eql(u8, item, engine)) return true;
+    }
+    return false;
 }
 
 /// Find the spec root directory by looking for "/spec/" or a path ending with "/spec" in base_path.
@@ -904,7 +1379,7 @@ fn processHrxFile(
             try concatManyAlloc(allocator, &.{ rel_path, "::", prefix[0 .. prefix.len - 1] });
         defer allocator.free(test_name);
 
-        // Check options.yml for :todo: - dart-sass (skip such tests)
+        // Skip sass-spec cases explicitly marked todo for the official Sass CLI.
         {
             const options_name = if (prefix.len == 0)
                 "options.yml"
@@ -913,9 +1388,7 @@ fn processHrxFile(
             defer if (prefix.len > 0) allocator.free(options_name);
 
             if (archive.getEntry(options_name)) |options_content| {
-                if (std.mem.find(u8, options_content, "todo") != null and
-                    std.mem.find(u8, options_content, "dart-sass") != null)
-                {
+                if (optionsTodoIncludesEngine(options_content, "dart-sass")) {
                     summary.total += 1;
                     summary.skipped += 1;
                     appendLogCaseLine(&case_logs, allocator, "  SKIP (todo: dart-sass): ", test_name);
@@ -945,46 +1418,66 @@ fn processHrxFile(
             var compile_load_paths_err_storage: [3][]const u8 = undefined;
 
             if (has_extra_err) {
-                tmp_dir_err = makeTmpDir() catch {
-                    summary.skipped += 1;
+                tmp_dir_err = makeTmpDir() catch |err| {
+                    summary.errors += 1;
+                    appendCaseInfraError(&case_logs, allocator, test_name, "temporary directory", err);
                     continue;
                 };
                 const td = &tmp_dir_err.?;
+                var setup_failed = false;
                 for (archive.entries.items) |entry| {
                     if (!std.mem.startsWith(u8, entry.filename, prefix)) continue;
                     const rel_name = entry.filename[prefix.len..];
                     if (rel_name.len == 0) continue;
                     if (std.fs.path.dirname(rel_name)) |parent_dir| {
-                        td.dir.createDirPath(std.Io.Threaded.global_single_threaded.io(), parent_dir) catch continue;
+                        td.dir.createDirPath(std.Io.Threaded.global_single_threaded.io(), parent_dir) catch |err| {
+                            summary.errors += 1;
+                            appendCaseInfraError(&case_logs, allocator, test_name, "supplementary directory", err);
+                            setup_failed = true;
+                            break;
+                        };
                     }
-                    const file = td.dir.createFile(std.Io.Threaded.global_single_threaded.io(), rel_name, .{}) catch continue;
-                    file.writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), entry.content) catch {
+                    const file = td.dir.createFile(std.Io.Threaded.global_single_threaded.io(), rel_name, .{}) catch |err| {
+                        summary.errors += 1;
+                        appendCaseInfraError(&case_logs, allocator, test_name, "supplementary file", err);
+                        setup_failed = true;
+                        break;
+                    };
+                    file.writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), entry.content) catch |err| {
                         file.close(std.Io.Threaded.global_single_threaded.io());
-                        continue;
+                        summary.errors += 1;
+                        appendCaseInfraError(&case_logs, allocator, test_name, "supplementary file content", err);
+                        setup_failed = true;
+                        break;
                     };
                     file.close(std.Io.Threaded.global_single_threaded.io());
                 }
+                if (setup_failed) continue;
                 {
                     const err_input_ext: []const u8 = if (is_sass_input) "input.sass" else "input.scss";
-                    const file = td.dir.createFile(std.Io.Threaded.global_single_threaded.io(), err_input_ext, .{}) catch {
-                        summary.skipped += 1;
+                    const file = td.dir.createFile(std.Io.Threaded.global_single_threaded.io(), err_input_ext, .{}) catch |err| {
+                        summary.errors += 1;
+                        appendCaseInfraError(&case_logs, allocator, test_name, "input file", err);
                         continue;
                     };
-                    file.writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), input_content.?) catch {
+                    file.writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), input_content.?) catch |err| {
                         file.close(std.Io.Threaded.global_single_threaded.io());
-                        summary.skipped += 1;
+                        summary.errors += 1;
+                        appendCaseInfraError(&case_logs, allocator, test_name, "input file content", err);
                         continue;
                     };
                     file.close(std.Io.Threaded.global_single_threaded.io());
                 }
-                const tmp_path_z = realPathAllocNoSentinel(td.dir, ".", test_alloc_err) catch {
-                    summary.skipped += 1;
+                const tmp_path_z = realPathAllocNoSentinel(td.dir, ".", test_alloc_err) catch |err| {
+                    summary.errors += 1;
+                    appendCaseInfraError(&case_logs, allocator, test_name, "temporary path", err);
                     continue;
                 };
                 const tmp_path: []const u8 = tmp_path_z;
                 const err_input_ext2: []const u8 = if (is_sass_input) "input.sass" else "input.scss";
-                const input_path = std.fs.path.join(test_alloc_err, &.{ tmp_path, err_input_ext2 }) catch {
-                    summary.skipped += 1;
+                const input_path = std.fs.path.join(test_alloc_err, &.{ tmp_path, err_input_ext2 }) catch |err| {
+                    summary.errors += 1;
+                    appendCaseInfraError(&case_logs, allocator, test_name, "input path", err);
                     continue;
                 };
                 const hrx_dir_err = if (dir_rel_path.len > 0)
@@ -1001,16 +1494,23 @@ fn processHrxFile(
                 compile_file_path_err = "input.sass";
             }
 
+            var error_capture = ErrorCapture{ .allocator = test_alloc_err };
+            defer error_capture.deinit();
             _ = compiler.compileSourceToCss(
                 test_alloc_err,
                 input_content.?,
                 compile_file_path_err,
                 compile_load_paths_err,
-                .{},
+                .{ .diagnostic_sink = ErrorCapture.sink, .diagnostic_ctx = &error_capture },
             ) catch {
-                // Compiler errored as expected -- pass
-                summary.passed += 1;
-                if (!quiet_mode) appendLogCaseLine(&case_logs, allocator, "  PASS (expected error): ", test_name);
+                if (errorMatchesExpected(expected_error.?, error_capture.messages.items)) {
+                    summary.passed += 1;
+                    if (!quiet_mode) appendLogCaseLine(&case_logs, allocator, "  PASS (expected error): ", test_name);
+                } else {
+                    summary.failed += 1;
+                    appendLogCaseLine(&case_logs, allocator, "  FAIL: ", test_name);
+                    appendExpectedErrorMismatch(&case_logs, allocator, expected_error.?, error_capture.messages.items);
+                }
                 continue;
             };
             // Compiler succeeded but error was expected -- fail
@@ -1241,17 +1741,24 @@ fn processHrxFile(
         }
 
         // Try to compile
+        var error_capture = ErrorCapture{ .allocator = test_alloc };
+        defer error_capture.deinit();
         const result = compiler.compileSourceToCss(
             test_alloc,
             input_content.?,
             compile_file_path,
             compile_load_paths,
-            .{},
+            .{ .diagnostic_sink = ErrorCapture.sink, .diagnostic_ctx = &error_capture },
         ) catch |e| {
             if (expected_error != null) {
-                // Expected error, got error - pass
-                summary.passed += 1;
-                if (!quiet_mode) appendLogCaseLine(&case_logs, allocator, "  PASS (expected error): ", test_name);
+                if (errorMatchesExpected(expected_error.?, error_capture.messages.items)) {
+                    summary.passed += 1;
+                    if (!quiet_mode) appendLogCaseLine(&case_logs, allocator, "  PASS (expected error): ", test_name);
+                } else {
+                    summary.failed += 1;
+                    appendLogCaseLine(&case_logs, allocator, "  FAIL: ", test_name);
+                    appendExpectedErrorMismatch(&case_logs, allocator, expected_error.?, error_capture.messages.items);
+                }
             } else {
                 summary.errors += 1;
                 appendLog(&case_logs, allocator, "  ERROR: ");
@@ -1578,6 +2085,33 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (summary.failed != 0 or summary.errors != 0) {
         std.process.exit(1);
     }
+}
+
+// ============================================================
+// Expected Error Matching Tests
+// ============================================================
+
+test "expected error overlap ignores Sass class nouns" {
+    try std.testing.expect(!errorMatchesExpected("Undefined function.", "This function is not supported."));
+    try std.testing.expect(!errorMatchesExpected("Undefined mixin.", "This mixin is not supported."));
+    try std.testing.expect(!errorMatchesExpected("Undefined variable.", "This variable is not supported."));
+}
+
+test "expected undefined error kind still accepts matching diagnostics" {
+    try std.testing.expect(errorMatchesExpected("Undefined function.", "Undefined function."));
+    try std.testing.expect(errorMatchesExpected("Undefined mixin.", "Undefined mixin."));
+    try std.testing.expect(errorMatchesExpected("Undefined variable.", "Undefined variable."));
+}
+
+test "expected error matching keeps recognized Sass availability shapes" {
+    try std.testing.expect(errorMatchesExpected(
+        "The function lighten() isn't in the sass:color module.",
+        "Undefined function.",
+    ));
+    try std.testing.expect(errorMatchesExpected(
+        "Cannot modify built-in variable.",
+        "Undefined variable.",
+    ));
 }
 
 // ============================================================

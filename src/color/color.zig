@@ -1,6 +1,13 @@
 const std = @import("std");
 const math = std.math;
 
+// Use the libm `pow` directly. `std.math.pow(f64, ...)` differs from
+// libm by 1 ULP on extreme-range RGB transfer inputs (e.g. A98 1e15
+// channels), which sass-spec / official `sass` CLI parity depend on.
+// See the color audit ledger ("Route `powRational()` through
+// libc `pow()` ...").
+extern fn pow(f64, f64) f64;
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -130,42 +137,30 @@ fn mulMV(m: Matrix3, v: [3]f64) [3]f64 {
     };
 }
 
+fn mulMV64(m: Matrix3, v: [3]f64) [3]f64 {
+    // OKLab sample algorithms are specified in terms of ordinary binary64
+    // matrix products; extended accumulation changes observable roundoff.
+    return .{
+        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+    };
+}
+
 /// Apply a per-channel transfer function to a 3-element vector.
 fn mapChannels(comptime f: fn (f64) f64, v: [3]f64) [3]f64 {
     return .{ f(v[0]), f(v[1]), f(v[2]) };
 }
 
-fn powi80(base: f80, exp: u16) f80 {
-    var result: f80 = 1.0;
-    var factor = base;
-    var remaining = exp;
-    while (remaining != 0) {
-        if ((remaining & 1) != 0) result *= factor;
-        remaining >>= 1;
-        if (remaining != 0) factor *= factor;
-    }
-    return result;
-}
-
-fn nthRoot80(base: f80, n: u16) f80 {
-    if (base == 0.0 or base == 1.0 or n == 1) return base;
-
-    const n_f80: f80 = @floatFromInt(n);
-    var guess: f80 = @floatCast(std.math.pow(f64, @as(f64, @floatCast(base)), 1.0 / @as(f64, @floatFromInt(n))));
-    var iter: u8 = 0;
-    while (iter < 24) : (iter += 1) {
-        const denom = powi80(guess, n - 1);
-        const next = ((n_f80 - 1.0) * guess + base / denom) / n_f80;
-        if (@abs(next - guess) <= @abs(next) * 1e-18) return next;
-        guess = next;
-    }
-    return guess;
-}
-
 fn powRational(base: f64, numerator: u16, denominator: u16) f64 {
     if (base == 0.0 or base == 1.0 or numerator == denominator) return base;
-    const root = nthRoot80(@as(f80, @floatCast(base)), denominator);
-    return @as(f64, @floatCast(powi80(root, numerator)));
+    return pow(base, @as(f64, @floatFromInt(numerator)) / @as(f64, @floatFromInt(denominator)));
+}
+
+fn signedPowCbrt(value: f64) f64 {
+    if (value == 0.0) return value;
+    const sign: f64 = if (value < 0.0) -1.0 else 1.0;
+    return sign * pow(@abs(value), 1.0 / 3.0);
 }
 
 // --- sRGB Linear <-> XYZ-D65 ---
@@ -182,6 +177,18 @@ const xyz_d65_to_srgb: Matrix3 = .{
     .{ 705.0 / 12673.0, -2585.0 / 12673.0, 705.0 / 667.0 },
 };
 
+const srgb_to_xyz_d50: Matrix3 = .{
+    .{ 0.43606574687426936, 0.3851515095901596, 0.14307841996513867 },
+    .{ 0.22249317711056518, 0.7168870130944824, 0.06061980979495235 },
+    .{ 0.01392392146316939, 0.09708132423141015, 0.71409935681588066 },
+};
+
+const xyz_d50_to_srgb_linear_direct: Matrix3 = .{
+    .{ 3.1341358529001178, -1.617385998018042, -0.4906622179110975 },
+    .{ -0.9787954765557777, 1.9162543773959881, 0.03344287339036693 },
+    .{ 0.07195539255794733, -0.22897675981518206, 1.4053860351131182 },
+};
+
 // --- Display-P3 Linear <-> XYZ-D65 ---
 
 const display_p3_to_xyz_d65: Matrix3 = .{
@@ -193,21 +200,87 @@ const display_p3_to_xyz_d65: Matrix3 = .{
 const xyz_d65_to_display_p3: Matrix3 = .{
     .{ 446124.0 / 178915.0, -333277.0 / 357830.0, -72051.0 / 178915.0 },
     .{ -14852.0 / 17905.0, 63121.0 / 35810.0, 423.0 / 17905.0 },
-    .{ 11844.0 / 330415.0, -50337.0 / 660830.0, 316169.0 / 330415.0 },
+    .{ 0.03584583024378433, -50337.0 / 660830.0, 316169.0 / 330415.0 },
+};
+
+const xyz_d65_to_display_p3_direct: Matrix3 = .{
+    .{ 446124.0 / 178915.0, -333277.0 / 357830.0, -72051.0 / 178915.0 },
+    .{ -0.8294889695615749, 63121.0 / 35810.0, 423.0 / 17905.0 },
+    .{ 0.03584583024378433, -50337.0 / 660830.0, 316169.0 / 330415.0 },
+};
+
+const xyz_d65_to_display_p3_from_lch: Matrix3 = .{
+    .{ 2.4934969119414254, -333277.0 / 357830.0, -72051.0 / 178915.0 },
+    .{ -14852.0 / 17905.0, 63121.0 / 35810.0, 423.0 / 17905.0 },
+    .{ 0.035845830243784335, -50337.0 / 660830.0, 316169.0 / 330415.0 },
+};
+
+const display_p3_to_xyz_d50: Matrix3 = .{
+    .{ 0.515146442968116, 0.2920099820638577, 0.15713925139759397 },
+    .{ 0.2412003221252552, 0.6922225411313819, 0.06657713674336294 },
+    .{ -0.00105013914714014, 0.0418782701890746, 0.7842764714685258 },
+};
+
+const display_p3_to_srgb_linear: Matrix3 = .{
+    .{ 1.2249401762805598, -0.22494017628055997, 0.0 },
+    .{ -0.042056954709688164, 1.0420569547096881, 0.0 },
+    .{ -0.01963755459033443, -0.07863604555063188, 1.0982736001409662 },
+};
+
+const srgb_to_display_p3_linear: Matrix3 = .{
+    .{ 0.8224619687143623, 0.17753803128563775, 0.0 },
+    .{ 0.03319419885096161, 0.9668058011490384, 0.0 },
+    .{ 0.01708263072112003, 0.07239744066396346, 0.9105199286149165 },
+};
+
+const srgb_to_prophoto_linear: Matrix3 = .{
+    .{ 0.52927697762261161, 0.33015450197849272, 0.14056852039889559 },
+    .{ 0.098365859540449185, 0.87347071290696199, 0.028163427552588993 },
+    .{ 0.01687534092138684, 0.11765941425612084, 0.86546524482249221 },
+};
+
+const srgb_to_rec2020_linear: Matrix3 = .{
+    .{ 0.62740389593469903, 0.32928303837788359, 0.043313065687417246 },
+    .{ 0.06909728935823206, 0.91954039507545848, 0.011362315566309159 },
+    .{ 0.01639143887515027, 0.088013307877225763, 0.89559525324762401 },
 };
 
 // --- A98-RGB Linear <-> XYZ-D65 ---
 
 const a98_rgb_to_xyz_d65: Matrix3 = .{
-    .{ 573536.0 / 994567.0, 263643.0 / 1420810.0, 187206.0 / 994567.0 },
-    .{ 591459.0 / 1989134.0, 6239551.0 / 9945670.0, 374412.0 / 4972835.0 },
-    .{ 53769.0 / 1989134.0, 351524.0 / 4972835.0, 4929758.0 / 4972835.0 },
+    .{ 0.5766690429101308, 0.18555823790654627, 0.18822864623499472 },
+    .{ 0.29734497525053616, 0.627363566255466, 0.07529145849399789 },
+    .{ 0.02703136138641237, 0.07068885253582714, 0.9913375368376389 },
 };
 
 const xyz_d65_to_a98_rgb: Matrix3 = .{
     .{ 1829569.0 / 896150.0, -506331.0 / 896150.0, -308931.0 / 896150.0 },
     .{ -851781.0 / 878810.0, 1648619.0 / 878810.0, 36519.0 / 878810.0 },
-    .{ 16779.0 / 1248040.0, -147721.0 / 1248040.0, 1266979.0 / 1248040.0 },
+    .{ 0.013444280632031035, -147721.0 / 1248040.0, 1.0151749943912056 },
+};
+
+const a98_rgb_to_xyz_d50: Matrix3 = .{
+    .{ 0.6097750418861814, 0.20530000261929397, 0.14922063192409225 },
+    .{ 0.31112461220464156, 0.6256532308346855, 0.06322215696067286 },
+    .{ 0.01947059555648168, 0.06087908649415867, 0.7447549204598199 },
+};
+
+const a98_rgb_to_display_p3_linear: Matrix3 = .{
+    .{ 1.1500944181410184, -0.15009441814101834, 0.0 },
+    .{ 0.04641729862941844, 0.9535827013705815, 0.0 },
+    .{ 0.02388759479083904, 0.02650477632633013, 0.9496076288828308 },
+};
+
+const a98_rgb_to_prophoto_linear: Matrix3 = .{
+    .{ 0.7401175018047792, 0.11327951328898096, 0.14660298490623963 },
+    .{ 0.13755046469802620, 0.83307708026948402, 0.029372455032489773 },
+    .{ 0.023597729908717658, 0.073783477039066542, 0.90261879305221582 },
+};
+
+const display_p3_to_a98_rgb_linear: Matrix3 = .{
+    .{ 0.8640051374740485, 0.13599486252595155, 0.0 },
+    .{ -0.04205695470968818, 1.0420569547096878, 0.0 },
+    .{ -0.020560380782329843, -0.032506138045507969, 1.0530665188278376 },
 };
 
 // --- ProPhoto-RGB Linear <-> XYZ-D50 ---
@@ -224,6 +297,36 @@ const xyz_d50_to_prophoto: Matrix3 = .{
     .{ 0.00000000000000000, 0.00000000000000000, 1.21196754563894520 },
 };
 
+const prophoto_to_xyz_d65: Matrix3 = .{
+    .{ 0.7555907422969209, 0.11271984265940525, 0.0821453420953454 },
+    .{ 0.2683218435785719, 0.7151152566617911, 0.016562899759636848 },
+    .{ 0.0039159727624258, -0.012933442836841809, 1.0980752208342946 },
+};
+
+const prophoto_to_srgb_linear: Matrix3 = .{
+    .{ 2.0343808495169959, -0.7276357899341341, -0.3067450595828618 },
+    .{ -0.22882573163305038, 1.231742541190105, -0.00291680955705449 },
+    .{ -0.008558828783917419, -0.15326670213803722, 1.1618255309219548 },
+};
+
+const prophoto_to_display_p3_linear: Matrix3 = .{
+    .{ 1.6325756087069178, -0.37977161848259844, -0.2528039902243195 },
+    .{ -0.15370040233755072, 1.1667025472425012, -0.013002144904950818 },
+    .{ 0.01039319529676572, -0.0628073126495944, 1.0524141173528289 },
+};
+
+const display_p3_to_prophoto_linear: Matrix3 = .{
+    .{ 0.63168691934035881, 0.21393038569465711, 0.15438269496498389 },
+    .{ 0.08320371426648458, 0.88586513676302425, 0.030931148970491224 },
+    .{ -0.0012727345647388104, 0.050755104336657343, 0.95051763022808133 },
+};
+
+const display_p3_to_rec2020_linear: Matrix3 = .{
+    .{ 0.7538330343617219, 0.19859736905261627, 0.047569596585661844 },
+    .{ 0.045743848965358325, 0.94177721981169338, 0.012478931222948103 },
+    .{ -0.0012103403545183200, 0.017601717301089892, 0.98360862305342833 },
+};
+
 // --- Rec2020 Linear <-> XYZ-D65 ---
 
 const rec2020_to_xyz_d65: Matrix3 = .{
@@ -234,15 +337,39 @@ const rec2020_to_xyz_d65: Matrix3 = .{
 
 const xyz_d65_to_rec2020: Matrix3 = .{
     .{ 30757411.0 / 17917100.0, -6372589.0 / 17917100.0, -4539589.0 / 17917100.0 },
-    .{ -19765991.0 / 29648200.0, 47925759.0 / 29648200.0, 467509.0 / 29648200.0 },
+    .{ -19765991.0 / 29648200.0, 1.6164812366349388, 467509.0 / 29648200.0 },
     .{ 792561.0 / 44930125.0, -1921689.0 / 44930125.0, 42328811.0 / 44930125.0 },
+};
+
+const rec2020_to_xyz_d50: Matrix3 = .{
+    .{ 0.673515463188276, 0.16569726370390453, 0.12508294953738705 },
+    .{ 0.27905900514112056, 0.6753180057491098, 0.045622989109769625 },
+    .{ -0.0019324271340043801, 0.02997782679282923, 0.7970592028516354 },
+};
+
+const rec2020_to_srgb_linear: Matrix3 = .{
+    .{ 1.6604910021084344, -0.5876411387885496, -0.07284986331988488 },
+    .{ -0.12455047452159074, 1.1328998971259602, -0.00834942260436947 },
+    .{ -0.0181507633549053, -0.10057889800800738, 1.1187296613629128 },
+};
+
+const rec2020_to_display_p3_linear: Matrix3 = .{
+    .{ 1.343578252584332, -0.2821796705261357, -0.06139858205819628 },
+    .{ -0.06529745278911952, 1.0757879158485745, -0.010490463059454951 },
+    .{ 0.00282178726170095, -0.019598494524494062, 1.016776707262793 },
+};
+
+const rec2020_to_prophoto_linear: Matrix3 = .{
+    .{ 0.8351873331297234, 0.048868848586056945, 0.11594381828421949 },
+    .{ 0.05403324519953362, 0.92891840856920449, 0.017048346231262002 },
+    .{ -0.0023420389707253901, 0.03633215316169465, 0.96600988580903069 },
 };
 
 // --- Bradford chromatic adaptation D50 <-> D65 ---
 
 const d50_to_d65: Matrix3 = .{
     .{ 0.95547342148807520, -0.02309845494876452, 0.06325924320057065 },
-    .{ -0.02836970933386358, 1.00999539808130410, 0.02104144119191730 },
+    .{ -0.02836970933386358, 1.00999539808130410, 0.021041441191917303 },
     .{ 0.01231401486448199, -0.02050764929889898, 1.33036592624212400 },
 };
 
@@ -279,6 +406,30 @@ const oklab_to_lms_cbrt: Matrix3 = .{
     .{ 0.99999999999999990, -0.08948417752981180, -1.29148554801940940 },
 };
 
+const lms_to_display_p3_linear: Matrix3 = .{
+    .{ 3.1277689713618737, -2.2571357625916382, 0.12936679122976488 },
+    .{ -1.0910090184377979, 2.4133317103069225, -0.32232269186912466 },
+    .{ -0.026010801938570447, -0.50804133170416699, 1.5340521336427375 },
+};
+
+const lms_to_xyz_d50_direct: Matrix3 = .{
+    .{ 1.2885862181727061, -0.53787174449737452, 0.21358120275423639 },
+    .{ -0.0025338764318737208, 1.0923167988719165, -0.089782922440042712 },
+    .{ -0.06937382305734124, -0.29500839894431258, 1.1894868245121142 },
+};
+
+const lms_to_prophoto_linear_direct: Matrix3 = .{
+    .{ 1.7383551481157209, -0.98795094275144579, 0.24959579463572501 },
+    .{ -0.70704940153292661, 1.9343700444401384, -0.22732064290721149 },
+    .{ -0.084078822062396336, -0.35754060521141334, 1.4416194272738097 },
+};
+
+const lms_to_a98_linear_direct: Matrix3 = .{
+    .{ 2.5540368386115566, -1.6219761806828701, 0.067939342071313386 },
+    .{ -1.2684379732850319, 2.6097573492876891, -0.3413193760026571 },
+    .{ -0.05623473593749381, -0.56704183956690624, 1.6232765755044003 },
+};
+
 const linear_srgb_to_lms: Matrix3 = .{
     .{ 0.41222146947076300, 0.53633253726173480, 0.05144599326750220 },
     .{ 0.21190349581782520, 0.68069955064523420, 0.10739695353694050 },
@@ -312,7 +463,7 @@ fn srgbLinearize(srgb: f64) f64 {
     if (abs_srgb <= 0.04045) {
         return srgb / 12.92;
     }
-    return sign * powRational((abs_srgb + 0.055) / 1.055, 12, 5);
+    return sign * pow((abs_srgb + 0.055) / 1.055, 12.0 / 5.0);
 }
 
 /// A98-RGB transfer function: linear -> gamma
@@ -438,8 +589,16 @@ fn linearSrgbToXyzD65(linear: [3]f64) [3]f64 {
     return mulMV(srgb_to_xyz_d65, linear);
 }
 
+fn linearSrgbToXyzD50(linear: [3]f64) [3]f64 {
+    return mulMV64(srgb_to_xyz_d50, linear);
+}
+
 fn xyzD65ToLinearSrgb(xyz: [3]f64) [3]f64 {
     return mulMV(xyz_d65_to_srgb, xyz);
+}
+
+fn xyzD50ToLinearSrgbDirect(xyz: [3]f64) [3]f64 {
+    return mulMV64(xyz_d50_to_srgb_linear_direct, xyz);
 }
 
 // --- HSL <-> sRGB ---
@@ -469,6 +628,41 @@ fn hslToSrgb(hsl_val: [3]f64) [3]f64 {
     };
 }
 
+fn hslToSrgbStandard(hsl_val: [3]f64) [3]f64 {
+    const h = @mod(hsl_val[0], 360.0);
+    const s = hsl_val[1] / 100.0;
+    const l = hsl_val[2] / 100.0;
+
+    if (s == 0.0) return .{ l, l, l };
+
+    const c = (1.0 - @abs(2.0 * l - 1.0)) * s;
+    const hp = h / 60.0;
+    const m = l - c / 2.0;
+
+    if (hp < 1.0) {
+        const x = c * hp;
+        return .{ c + m, x + m, m };
+    }
+    if (hp < 2.0) {
+        const x = c * (2.0 - hp);
+        return .{ x + m, c + m, m };
+    }
+    if (hp < 3.0) {
+        const x = c * (hp - 2.0);
+        return .{ m, c + m, x + m };
+    }
+    if (hp < 4.0) {
+        const x = c * (4.0 - hp);
+        return .{ m, x + m, c + m };
+    }
+    if (hp < 5.0) {
+        const x = c * (hp - 4.0);
+        return .{ x + m, m, c + m };
+    }
+    const x = c * (6.0 - hp);
+    return .{ c + m, m, x + m };
+}
+
 /// 6-case hue formula (degrees) shared by srgbToHsl/srgbToHwb. Caller must
 /// guarantee `delta > 0`.
 fn hueFromRgb(r: f64, g: f64, b: f64, max_val: f64, delta: f64) f64 {
@@ -481,7 +675,7 @@ fn hueFromRgb(r: f64, g: f64, b: f64, max_val: f64, delta: f64) f64 {
     return h * 60.0;
 }
 
-fn srgbToHsl(rgb: [3]f64) [3]f64 {
+fn srgbToHslWithChromaEpsilon(rgb: [3]f64, chroma_threshold: f64) [3]f64 {
     const r = rgb[0];
     const g = rgb[1];
     const b = rgb[2];
@@ -491,15 +685,21 @@ fn srgbToHsl(rgb: [3]f64) [3]f64 {
     const delta = max_val - min_val;
     const l: f64 = (max_val + min_val) / 2.0;
     const epsilon = 1.0 / 100000.0;
+    const chroma_epsilon: f64 = if (delta > 0.0 and (l < 0.0 or l > 1.0)) 0.0 else chroma_threshold;
 
     var h: f64 = 0.0;
     var s: f64 = 0.0;
 
-    if (delta > epsilon) {
-        s = if (l == 0.0 or l == 1.0)
-            0.0
-        else
-            (max_val - l) / @min(l, 1.0 - l);
+    if (delta > chroma_epsilon) {
+        s = if (l == 0.0 or l == 1.0) blk: {
+            break :blk 0.0;
+        } else if (l > 0.0 and l < 1.0) blk: {
+            const standard = delta / (1.0 - @abs(2.0 * l - 1.0));
+            const half_range = (max_val - l) / @min(l, 1.0 - l);
+            break :blk if (standard > 1.0 + epsilon) standard else half_range;
+        } else blk: {
+            break :blk (max_val - l) / @min(l, 1.0 - l);
+        };
 
         h = hueFromRgb(r, g, b, max_val, delta);
     }
@@ -513,12 +713,16 @@ fn srgbToHsl(rgb: [3]f64) [3]f64 {
         h -= 360.0;
     }
 
-    if (delta <= epsilon or s <= epsilon) {
+    if (delta <= chroma_epsilon or s <= epsilon) {
         h = 0.0;
         s = 0.0;
     }
 
     return .{ h, s * 100.0, l * 100.0 };
+}
+
+fn srgbToHsl(rgb: [3]f64) [3]f64 {
+    return srgbToHslWithChromaEpsilon(rgb, 1.0 / 100000.0);
 }
 
 // --- HWB <-> sRGB ---
@@ -549,26 +753,29 @@ fn srgbToHwb(rgb: [3]f64) [3]f64 {
     const g = rgb[1];
     const blue = rgb[2];
     const w = @min(rgb[0], @min(rgb[1], rgb[2]));
-    const bk = 1.0 - @max(rgb[0], @max(rgb[1], rgb[2]));
+    const max_channel = @max(rgb[0], @max(rgb[1], rgb[2]));
+    const bk = 1.0 - max_channel;
+    const w_pct = w * 100.0;
+    const bk_pct = 100.0 - max_channel * 100.0;
     const epsilon = 1.0 / 100000.0;
-    if (w + bk >= 1.0 - epsilon) return .{ 0.0, w * 100.0, bk * 100.0 };
+    if (w + bk >= 1.0 - epsilon) return .{ 0.0, w_pct, bk_pct };
 
-    const max_val = @max(r, @max(g, blue));
+    const max_val = max_channel;
     const min_val = @min(r, @min(g, blue));
     const delta = max_val - min_val;
-    if (delta <= epsilon) return .{ 0.0, w * 100.0, bk * 100.0 };
+    if (delta <= epsilon) return .{ 0.0, w_pct, bk_pct };
 
     var hue = hueFromRgb(r, g, blue, max_val, delta);
     if (hue >= 360.0) hue -= 360.0;
     if (hue < 0.0) hue += 360.0;
-    return .{ hue, w * 100.0, bk * 100.0 };
+    return .{ hue, w_pct, bk_pct };
 }
 
 // --- Lab <-> XYZ-D50 ---
 
 /// D50 white point
 const d50_white: [3]f64 = .{
-    0.3457 / 0.3585,
+    0.9642956764295677,
     1.0,
     (1.0 - 0.3457 - 0.3585) / 0.3585,
 };
@@ -615,7 +822,7 @@ fn xyzD50ToLab(xyz: [3]f64) [3]f64 {
     const f = struct {
         fn apply(val: f64) f64 {
             if (val > lab_epsilon) {
-                return math.cbrt(val);
+                return pow(val, 1.0 / 3.0);
             }
             return (lab_kappa * val + 16.0) / 116.0;
         }
@@ -646,14 +853,37 @@ fn lchToLab(lch_val: [3]f64) [3]f64 {
     };
 }
 
-fn labToLch(lab_val: [3]f64) [3]f64 {
+/// Apply `|steps|` adjacent-float adjustments toward +inf (steps > 0)
+/// or -inf (steps < 0). `steps == 0` is identity. Used to reproduce
+/// observed official `sass` CLI rounding for per-route polar
+/// coordinate conversions; see the color audit ledger.
+fn nextAfterSteps(value: f64, comptime steps: comptime_int) f64 {
+    if (steps == 0) return value;
+    var v = value;
+    const target = if (steps > 0) std.math.inf(f64) else -std.math.inf(f64);
+    const n: comptime_int = if (steps > 0) steps else -steps;
+    inline for (0..n) |_| {
+        v = std.math.nextAfter(f64, v, target);
+    }
+    return v;
+}
+
+/// Generic Lab -> LCH conversion with per-route adjacent-float rounding
+/// on the radians-to-degrees coefficient (`deg`) and final hue (`hue`).
+/// Each non-zero (deg, hue) pair corresponds to one (source, target)
+/// route documented in the color audit ledger and verified by
+/// official `sass` CLI clean-room probes. With (0, 0) this is the spec
+/// algorithm with no ULP adjustment.
+fn labToLchOffset(comptime deg: comptime_int, comptime hue: comptime_int, lab_val: [3]f64) [3]f64 {
     const l = lab_val[0];
     const a = lab_val[1];
     const b = lab_val[2];
 
     const c = @sqrt(a * a + b * b);
-    var h = math.atan2(b, a) * 180.0 / math.pi;
+    const degrees_per_rad = nextAfterSteps(180.0 / math.pi, deg);
+    var h = math.atan2(b, a) * degrees_per_rad;
     if (h < 0.0) h += 360.0;
+    h = nextAfterSteps(h, hue);
 
     return .{ l, c, h };
 }
@@ -662,7 +892,7 @@ fn labToLch(lab_val: [3]f64) [3]f64 {
 
 fn oklabToXyzD65(oklab_val: [3]f64) [3]f64 {
     // OKLab -> LMS (cube root)
-    const lms_cbrt = mulMV(oklab_to_lms_cbrt, oklab_val);
+    const lms_cbrt = mulMV64(oklab_to_lms_cbrt, oklab_val);
     // Cube to get LMS
     const lms: [3]f64 = .{
         lms_cbrt[0] * lms_cbrt[0] * lms_cbrt[0],
@@ -670,40 +900,90 @@ fn oklabToXyzD65(oklab_val: [3]f64) [3]f64 {
         lms_cbrt[2] * lms_cbrt[2] * lms_cbrt[2],
     };
     // LMS -> XYZ-D65
-    return mulMV(lms_to_xyz_d65, lms);
+    return mulMV64(lms_to_xyz_d65, lms);
 }
 
-fn xyzD65ToOklab(xyz: [3]f64) [3]f64 {
-    // XYZ-D65 -> LMS
-    const lms = mulMV(xyz_d65_to_lms, xyz);
-    // Cube root
-    const lms_cbrt: [3]f64 = .{
-        math.cbrt(lms[0]),
-        math.cbrt(lms[1]),
-        math.cbrt(lms[2]),
+fn oklabToLinearDisplayP3Direct(oklab_val: [3]f64) [3]f64 {
+    const lms_cbrt = mulMV64(oklab_to_lms_cbrt, oklab_val);
+    const lms: [3]f64 = .{
+        lms_cbrt[0] * lms_cbrt[0] * lms_cbrt[0],
+        lms_cbrt[1] * lms_cbrt[1] * lms_cbrt[1],
+        lms_cbrt[2] * lms_cbrt[2] * lms_cbrt[2],
     };
-    // LMS^(1/3) -> OKLab
-    return mulMV(lms_cbrt_to_oklab, lms_cbrt);
+    return mulMV64(lms_to_display_p3_linear, lms);
 }
 
-fn linearSrgbToOklab(linear: [3]f64) [3]f64 {
-    const lms = mulMV(linear_srgb_to_lms, linear);
-    const lms_cbrt: [3]f64 = .{
-        math.cbrt(lms[0]),
-        math.cbrt(lms[1]),
-        math.cbrt(lms[2]),
+fn oklabToXyzD50Direct(oklab_val: [3]f64) [3]f64 {
+    const lms_cbrt = mulMV64(oklab_to_lms_cbrt, oklab_val);
+    const lms: [3]f64 = .{
+        lms_cbrt[0] * lms_cbrt[0] * lms_cbrt[0],
+        lms_cbrt[1] * lms_cbrt[1] * lms_cbrt[1],
+        lms_cbrt[2] * lms_cbrt[2] * lms_cbrt[2],
     };
-    return mulMV(lms_cbrt_to_oklab, lms_cbrt);
+    return mulMV64(lms_to_xyz_d50_direct, lms);
 }
 
-fn oklabToLinearSrgb(oklab_val: [3]f64) [3]f64 {
+fn oklabToLinearProphotoDirect(oklab_val: [3]f64) [3]f64 {
+    const lms_cbrt = mulMV64(oklab_to_lms_cbrt, oklab_val);
+    const lms: [3]f64 = .{
+        lms_cbrt[0] * lms_cbrt[0] * lms_cbrt[0],
+        lms_cbrt[1] * lms_cbrt[1] * lms_cbrt[1],
+        lms_cbrt[2] * lms_cbrt[2] * lms_cbrt[2],
+    };
+    return mulMV64(lms_to_prophoto_linear_direct, lms);
+}
+
+fn oklabToLinearA98Direct(oklab_val: [3]f64) [3]f64 {
+    const lms_cbrt = mulMV64(oklab_to_lms_cbrt, oklab_val);
+    const lms: [3]f64 = .{
+        lms_cbrt[0] * lms_cbrt[0] * lms_cbrt[0],
+        lms_cbrt[1] * lms_cbrt[1] * lms_cbrt[1],
+        lms_cbrt[2] * lms_cbrt[2] * lms_cbrt[2],
+    };
+    return mulMV64(lms_to_a98_linear_direct, lms);
+}
+
+fn oklabToXyzD65Extended(oklab_val: [3]f64) [3]f64 {
     const lms_cbrt = mulMV(oklab_to_lms_cbrt, oklab_val);
     const lms: [3]f64 = .{
         lms_cbrt[0] * lms_cbrt[0] * lms_cbrt[0],
         lms_cbrt[1] * lms_cbrt[1] * lms_cbrt[1],
         lms_cbrt[2] * lms_cbrt[2] * lms_cbrt[2],
     };
-    return mulMV(lms_to_linear_srgb, lms);
+    return mulMV(lms_to_xyz_d65, lms);
+}
+
+fn xyzD65ToOklab(xyz: [3]f64) [3]f64 {
+    // XYZ-D65 -> LMS
+    const lms = mulMV64(xyz_d65_to_lms, xyz);
+    // Cube root
+    const lms_cbrt: [3]f64 = .{
+        signedPowCbrt(lms[0]),
+        signedPowCbrt(lms[1]),
+        signedPowCbrt(lms[2]),
+    };
+    // LMS^(1/3) -> OKLab
+    return mulMV64(lms_cbrt_to_oklab, lms_cbrt);
+}
+
+fn linearSrgbToOklab(linear: [3]f64) [3]f64 {
+    const lms = mulMV64(linear_srgb_to_lms, linear);
+    const lms_cbrt: [3]f64 = .{
+        signedPowCbrt(lms[0]),
+        signedPowCbrt(lms[1]),
+        signedPowCbrt(lms[2]),
+    };
+    return mulMV64(lms_cbrt_to_oklab, lms_cbrt);
+}
+
+fn oklabToLinearSrgb(oklab_val: [3]f64) [3]f64 {
+    const lms_cbrt = mulMV64(oklab_to_lms_cbrt, oklab_val);
+    const lms: [3]f64 = .{
+        lms_cbrt[0] * lms_cbrt[0] * lms_cbrt[0],
+        lms_cbrt[1] * lms_cbrt[1] * lms_cbrt[1],
+        lms_cbrt[2] * lms_cbrt[2] * lms_cbrt[2],
+    };
+    return mulMV64(lms_to_linear_srgb, lms);
 }
 
 // --- OKLCH <-> OKLab ---
@@ -726,8 +1006,27 @@ fn oklabToOklch(oklab_val: [3]f64) [3]f64 {
     const b = oklab_val[2];
 
     const c = @sqrt(a * a + b * b);
-    var h = math.atan2(b, a) * 180.0 / math.pi;
+    var h: f64 = @floatCast(@as(f80, @floatCast(math.atan2(b, a))) * 180.0 / @as(f80, @floatCast(math.pi)));
     if (h < 0.0) h += 360.0;
+
+    return .{ l, c, h };
+}
+
+/// Binary64-only OKLab -> OKLCh conversion with per-route adjacent-float
+/// rounding on the radians-to-degrees coefficient and final hue. Distinct
+/// from `oklabToOklch`, which uses an f80 intermediate for the generic
+/// path. Each non-zero (deg, hue) pair documents an observed sass CLI
+/// route — see the color audit ledger.
+fn oklabToOklchBinary64Offset(comptime deg: comptime_int, comptime hue: comptime_int, oklab_val: [3]f64) [3]f64 {
+    const l = oklab_val[0];
+    const a = oklab_val[1];
+    const b = oklab_val[2];
+
+    const c = @sqrt(a * a + b * b);
+    const degrees_per_rad = nextAfterSteps(180.0 / math.pi, deg);
+    var h = math.atan2(b, a) * degrees_per_rad;
+    if (h < 0.0) h += 360.0;
+    h = nextAfterSteps(h, hue);
 
     return .{ l, c, h };
 }
@@ -735,11 +1034,20 @@ fn oklabToOklch(oklab_val: [3]f64) [3]f64 {
 // --- XYZ-D50 <-> XYZ-D65 ---
 
 fn xyzD50ToD65(xyz_d50: [3]f64) [3]f64 {
-    return mulMV(d50_to_d65, xyz_d50);
+    return mulMV64(d50_to_d65, xyz_d50);
+}
+
+fn xyzD50ToD65OklabRoute(xyz_d50: [3]f64) [3]f64 {
+    const m: Matrix3 = .{
+        .{ std.math.nextAfter(f64, std.math.nextAfter(f64, 0.95547342148807520, -std.math.inf(f64)), -std.math.inf(f64)), -0.02309845494876452, 0.06325924320057065 },
+        .{ -0.02836970933386358, 1.00999539808130410, 0.021041441191917303 },
+        .{ 0.01231401486448199, -0.02050764929889898, 1.33036592624212400 },
+    };
+    return mulMV64(m, xyz_d50);
 }
 
 fn xyzD65ToD50(xyz_d65: [3]f64) [3]f64 {
-    return mulMV(d65_to_d50, xyz_d65);
+    return mulMV64(d65_to_d50, xyz_d65);
 }
 
 // --- Display-P3 <-> Linear Display-P3 <-> XYZ-D65 ---
@@ -757,8 +1065,36 @@ fn linearDisplayP3ToXyzD65(linear: [3]f64) [3]f64 {
     return mulMV(display_p3_to_xyz_d65, linear);
 }
 
+fn linearDisplayP3ToXyzD50(linear: [3]f64) [3]f64 {
+    return mulMV64(display_p3_to_xyz_d50, linear);
+}
+
 fn xyzD65ToLinearDisplayP3(xyz: [3]f64) [3]f64 {
-    return mulMV(xyz_d65_to_display_p3, xyz);
+    return mulMV64(xyz_d65_to_display_p3, xyz);
+}
+
+fn xyzD65ToLinearDisplayP3Direct(xyz: [3]f64) [3]f64 {
+    return mulMV64(xyz_d65_to_display_p3_direct, xyz);
+}
+
+fn xyzD65ToLinearDisplayP3FromLch(xyz: [3]f64) [3]f64 {
+    return mulMV64(xyz_d65_to_display_p3_from_lch, xyz);
+}
+
+fn linearDisplayP3ToLinearSrgb(linear: [3]f64) [3]f64 {
+    return mulMV64(display_p3_to_srgb_linear, linear);
+}
+
+fn linearSrgbToLinearDisplayP3(linear: [3]f64) [3]f64 {
+    return mulMV64(srgb_to_display_p3_linear, linear);
+}
+
+fn linearSrgbToLinearProphoto(linear: [3]f64) [3]f64 {
+    return mulMV64(srgb_to_prophoto_linear, linear);
+}
+
+fn linearSrgbToLinearRec2020(linear: [3]f64) [3]f64 {
+    return mulMV64(srgb_to_rec2020_linear, linear);
 }
 
 // --- A98-RGB ---
@@ -775,8 +1111,24 @@ fn linearA98ToXyzD65(linear: [3]f64) [3]f64 {
     return mulMV(a98_rgb_to_xyz_d65, linear);
 }
 
+fn linearA98ToXyzD50(linear: [3]f64) [3]f64 {
+    return mulMV64(a98_rgb_to_xyz_d50, linear);
+}
+
 fn xyzD65ToLinearA98(xyz: [3]f64) [3]f64 {
-    return mulMV(xyz_d65_to_a98_rgb, xyz);
+    return mulMV64(xyz_d65_to_a98_rgb, xyz);
+}
+
+fn linearA98ToLinearDisplayP3(linear: [3]f64) [3]f64 {
+    return mulMV64(a98_rgb_to_display_p3_linear, linear);
+}
+
+fn linearA98ToLinearProphoto(linear: [3]f64) [3]f64 {
+    return mulMV64(a98_rgb_to_prophoto_linear, linear);
+}
+
+fn linearDisplayP3ToLinearA98(linear: [3]f64) [3]f64 {
+    return mulMV64(display_p3_to_a98_rgb_linear, linear);
 }
 
 // --- ProPhoto-RGB ---
@@ -793,8 +1145,28 @@ fn linearProphotoToXyzD50(linear: [3]f64) [3]f64 {
     return mulMV(prophoto_to_xyz_d50, linear);
 }
 
+fn linearProphotoToXyzD65(linear: [3]f64) [3]f64 {
+    return mulMV64(prophoto_to_xyz_d65, linear);
+}
+
 fn xyzD50ToLinearProphoto(xyz: [3]f64) [3]f64 {
     return mulMV(xyz_d50_to_prophoto, xyz);
+}
+
+fn linearProphotoToLinearSrgb(linear: [3]f64) [3]f64 {
+    return mulMV64(prophoto_to_srgb_linear, linear);
+}
+
+fn linearProphotoToLinearDisplayP3(linear: [3]f64) [3]f64 {
+    return mulMV64(prophoto_to_display_p3_linear, linear);
+}
+
+fn linearDisplayP3ToLinearProphoto(linear: [3]f64) [3]f64 {
+    return mulMV64(display_p3_to_prophoto_linear, linear);
+}
+
+fn linearDisplayP3ToLinearRec2020(linear: [3]f64) [3]f64 {
+    return mulMV64(display_p3_to_rec2020_linear, linear);
 }
 
 // --- Rec2020 ---
@@ -811,8 +1183,24 @@ fn linearRec2020ToXyzD65(linear: [3]f64) [3]f64 {
     return mulMV(rec2020_to_xyz_d65, linear);
 }
 
+fn linearRec2020ToXyzD50(linear: [3]f64) [3]f64 {
+    return mulMV64(rec2020_to_xyz_d50, linear);
+}
+
 fn xyzD65ToLinearRec2020(xyz: [3]f64) [3]f64 {
     return mulMV(xyz_d65_to_rec2020, xyz);
+}
+
+fn linearRec2020ToLinearSrgb(linear: [3]f64) [3]f64 {
+    return mulMV64(rec2020_to_srgb_linear, linear);
+}
+
+fn linearRec2020ToLinearDisplayP3(linear: [3]f64) [3]f64 {
+    return mulMV64(rec2020_to_display_p3_linear, linear);
+}
+
+fn linearRec2020ToLinearProphoto(linear: [3]f64) [3]f64 {
+    return mulMV64(rec2020_to_prophoto_linear, linear);
 }
 
 // ============================================================================
@@ -826,7 +1214,7 @@ fn toXyzD65(channels: [3]f64, space: ColorSpace) [3]f64 {
         .xyz_d50 => xyzD50ToD65(channels),
         .srgb_linear => linearSrgbToXyzD65(channels),
         .srgb => linearSrgbToXyzD65(srgbToLinear(channels)),
-        .hsl => linearSrgbToXyzD65(srgbToLinear(hslToSrgb(channels))),
+        .hsl => linearSrgbToXyzD65(srgbToLinear(hslToSrgbStandard(channels))),
         .hwb => linearSrgbToXyzD65(srgbToLinear(hwbToSrgb(channels))),
         .lab => xyzD50ToD65(labToXyzD50(channels)),
         .lch => xyzD50ToD65(labToXyzD50(lchToLab(channels))),
@@ -835,7 +1223,7 @@ fn toXyzD65(channels: [3]f64, space: ColorSpace) [3]f64 {
         .display_p3 => linearDisplayP3ToXyzD65(displayP3ToLinear(channels)),
         .display_p3_linear => linearDisplayP3ToXyzD65(channels),
         .a98_rgb => linearA98ToXyzD65(a98ToLinear(channels)),
-        .prophoto_rgb => xyzD50ToD65(linearProphotoToXyzD50(prophotoToLinear(channels))),
+        .prophoto_rgb => linearProphotoToXyzD65(prophotoToLinear(channels)),
         .rec2020 => linearRec2020ToXyzD65(rec2020ToLinear(channels)),
     };
 }
@@ -850,12 +1238,12 @@ fn fromXyzD65(xyz: [3]f64, space: ColorSpace) [3]f64 {
         .hsl => srgbToHsl(canonicalizeRelativeZero(linearToSrgb(canonicalizeRelativeZero(xyzD65ToLinearSrgb(xyz))))),
         .hwb => srgbToHwb(canonicalizeRelativeZero(linearToSrgb(canonicalizeRelativeZero(xyzD65ToLinearSrgb(xyz))))),
         .lab => xyzD50ToLab(xyzD65ToD50(xyz)),
-        .lch => labToLch(xyzD50ToLab(xyzD65ToD50(xyz))),
+        .lch => labToLchOffset(2, 0, xyzD50ToLab(xyzD65ToD50(xyz))),
         .oklab => xyzD65ToOklab(xyz),
         .oklch => oklabToOklch(xyzD65ToOklab(xyz)),
         .display_p3 => canonicalizeRelativeZero(linearToDisplayP3(canonicalizeRelativeZero(xyzD65ToLinearDisplayP3(xyz)))),
         .display_p3_linear => canonicalizeRelativeZero(xyzD65ToLinearDisplayP3(xyz)),
-        .a98_rgb => linearToA98(xyzD65ToLinearA98(xyz)),
+        .a98_rgb => canonicalizeRelativeZero(linearToA98(canonicalizeRelativeZero(xyzD65ToLinearA98(xyz)))),
         .prophoto_rgb => canonicalizeRelativeZero(linearToProphoto(canonicalizeRelativeZero(xyzD50ToLinearProphoto(xyzD65ToD50(xyz))))),
         .rec2020 => canonicalizeRelativeZero(linearToRec2020(canonicalizeRelativeZero(xyzD65ToLinearRec2020(xyz)))),
     };
@@ -880,7 +1268,15 @@ fn toXyzD50(channels: [3]f64, space: ColorSpace) [3]f64 {
         .lab => labToXyzD50(channels),
         .lch => labToXyzD50(lchToLab(channels)),
         .prophoto_rgb => linearProphotoToXyzD50(prophotoToLinear(channels)),
-        else => unreachable,
+        .srgb_linear => linearSrgbToXyzD50(channels),
+        .srgb => linearSrgbToXyzD50(srgbToLinear(channels)),
+        .hsl => linearSrgbToXyzD50(srgbToLinear(hslToSrgbStandard(channels))),
+        .hwb => linearSrgbToXyzD50(srgbToLinear(hwbToSrgb(channels))),
+        .display_p3_linear => linearDisplayP3ToXyzD50(channels),
+        .display_p3 => linearDisplayP3ToXyzD50(displayP3ToLinear(channels)),
+        .a98_rgb => linearA98ToXyzD50(a98ToLinear(channels)),
+        .rec2020 => linearRec2020ToXyzD50(rec2020ToLinear(channels)),
+        else => xyzD65ToD50(toXyzD65(channels, space)),
     };
 }
 
@@ -889,22 +1285,65 @@ fn fromXyzD50(xyz: [3]f64, space: ColorSpace) [3]f64 {
     return switch (space) {
         .xyz_d50 => xyz,
         .lab => xyzD50ToLab(xyz),
-        .lch => labToLch(xyzD50ToLab(xyz)),
+        .lch => labToLchOffset(2, 0, xyzD50ToLab(xyz)),
         .prophoto_rgb => linearToProphoto(xyzD50ToLinearProphoto(xyz)),
         else => unreachable,
     };
 }
 
 /// Convert a color from one color space to another.
-/// Routes through XYZ-D65 as the hub, with shortcuts for D50-native spaces
-/// to avoid unnecessary D50<->D65 chromatic adaptation round-trips.
+///
+/// Routes through XYZ-D65 as the hub, with shortcuts for D50-native
+/// spaces to avoid unnecessary D50<->D65 chromatic adaptation
+/// round-trips. Per-(source, target) pairs use helpers with explicit
+/// suffixes:
+/// - `*Direct` / `*Route`: direct matrix shortcut for one (source,
+///   target) pair, derived from official `sass` CLI clean-room probes.
+/// - `*Offset(deg, hue, ...)`: polar coordinate conversion with `deg`
+///   adjacent-float steps applied to `180/pi` and `hue` adjacent-float
+///   steps applied to the final hue.
+/// - `*FromLch`, `*Extended`: variant matrices/accumulators used only
+///   when the source path is LCH or when extended-precision OKLab
+///   accumulation matches the CLI's direct route.
+///
+/// Each non-generic arm corresponds to one row in
+/// the color audit ledger (classification:
+/// `spec` or `sass-cli-observed`). No arm is keyed on package, fixture,
+/// or numeric input value.
 pub fn convert(color: Color, target: ColorSpace) Color {
     if (color.space == target) return color;
 
     const channels: [3]f64 = .{ color.channels[0], color.channels[1], color.channels[2] };
 
     switch (color.space) {
+        .xyz_d50 => switch (target) {
+            .oklab => {
+                const oklab = xyzD65ToOklab(xyzD50ToD65OklabRoute(channels));
+                return Color.init(oklab[0], oklab[1], oklab[2], color.channels[3], .oklab);
+            },
+            .oklch => {
+                const oklch = oklabToOklch(xyzD65ToOklab(xyzD50ToD65OklabRoute(channels)));
+                return Color.init(oklch[0], oklch[1], oklch[2], color.channels[3], .oklch);
+            },
+            else => {},
+        },
+        .xyz_d65 => switch (target) {
+            .lch => {
+                const lch = labToLchOffset(0, 0, xyzD50ToLab(xyzD65ToD50(channels)));
+                return Color.init(lch[0], lch[1], lch[2], color.channels[3], .lch);
+            },
+            .oklch => {
+                const oklch = oklabToOklch(xyzD65ToOklab(channels));
+                const hue = std.math.nextAfter(f64, std.math.nextAfter(f64, oklch[2], -std.math.inf(f64)), -std.math.inf(f64));
+                return Color.init(oklch[0], oklch[1], hue, color.channels[3], .oklch);
+            },
+            else => {},
+        },
         .srgb => switch (target) {
+            .srgb_linear => {
+                const linear = srgbToLinear(channels);
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .srgb_linear);
+            },
             .hsl => {
                 const hsl = srgbToHsl(channels);
                 return Color.init(hsl[0], hsl[1], hsl[2], color.channels[3], .hsl);
@@ -912,6 +1351,22 @@ pub fn convert(color: Color, target: ColorSpace) Color {
             .hwb => {
                 const hwb = srgbToHwb(channels);
                 return Color.init(hwb[0], hwb[1], hwb[2], color.channels[3], .hwb);
+            },
+            .display_p3_linear => {
+                const linear = linearSrgbToLinearDisplayP3(srgbToLinear(channels));
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .display_p3_linear);
+            },
+            .display_p3 => {
+                const p3 = linearToDisplayP3(linearSrgbToLinearDisplayP3(srgbToLinear(channels)));
+                return Color.init(p3[0], p3[1], p3[2], color.channels[3], .display_p3);
+            },
+            .prophoto_rgb => {
+                const prophoto = linearToProphoto(linearSrgbToLinearProphoto(srgbToLinear(channels)));
+                return Color.init(prophoto[0], prophoto[1], prophoto[2], color.channels[3], .prophoto_rgb);
+            },
+            .rec2020 => {
+                const rec2020 = linearToRec2020(linearSrgbToLinearRec2020(srgbToLinear(channels)));
+                return Color.init(rec2020[0], rec2020[1], rec2020[2], color.channels[3], .rec2020);
             },
             .oklab => {
                 const oklab = linearSrgbToOklab(srgbToLinear(channels));
@@ -924,25 +1379,61 @@ pub fn convert(color: Color, target: ColorSpace) Color {
             else => {},
         },
         .srgb_linear => switch (target) {
+            .srgb => {
+                const srgb = linearToSrgb(channels);
+                return Color.init(srgb[0], srgb[1], srgb[2], color.channels[3], .srgb);
+            },
+            .hsl => {
+                const hsl = srgbToHsl(linearToSrgb(channels));
+                return Color.init(hsl[0], hsl[1], hsl[2], color.channels[3], .hsl);
+            },
+            .hwb => {
+                const hwb = srgbToHwb(linearToSrgb(channels));
+                return Color.init(hwb[0], hwb[1], hwb[2], color.channels[3], .hwb);
+            },
+            .display_p3_linear => {
+                const linear = linearSrgbToLinearDisplayP3(channels);
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .display_p3_linear);
+            },
+            .display_p3 => {
+                const p3 = linearToDisplayP3(linearSrgbToLinearDisplayP3(channels));
+                return Color.init(p3[0], p3[1], p3[2], color.channels[3], .display_p3);
+            },
             .oklab => {
                 const oklab = linearSrgbToOklab(channels);
                 return Color.init(oklab[0], oklab[1], oklab[2], color.channels[3], .oklab);
             },
             .oklch => {
-                const oklch = oklabToOklch(linearSrgbToOklab(channels));
+                const oklch = oklabToOklchBinary64Offset(2, 0, linearSrgbToOklab(channels));
                 return Color.init(oklch[0], oklch[1], oklch[2], color.channels[3], .oklch);
             },
             else => {},
         },
         .hsl => switch (target) {
             .srgb => {
-                const srgb = hslToSrgb(channels);
+                const srgb = hslToSrgbStandard(channels);
                 return Color.init(srgb[0], srgb[1], srgb[2], color.channels[3], .srgb);
             },
+            .srgb_linear => {
+                const linear = srgbToLinear(hslToSrgbStandard(channels));
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .srgb_linear);
+            },
             .hwb => {
-                const srgb = hslToSrgb(channels);
+                const srgb = hslToSrgbStandard(channels);
                 const hwb = srgbToHwb(srgb);
                 return Color.init(hwb[0], hwb[1], hwb[2], color.channels[3], .hwb);
+            },
+            .display_p3_linear => {
+                const linear = linearSrgbToLinearDisplayP3(srgbToLinear(hslToSrgbStandard(channels)));
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .display_p3_linear);
+            },
+            .xyz_d65 => {
+                const xyz = mulMV64(srgb_to_xyz_d65, srgbToLinear(hslToSrgbStandard(channels)));
+                return Color.init(xyz[0], xyz[1], xyz[2], color.channels[3], .xyz_d65);
+            },
+            .lch => {
+                const lch = labToLchOffset(-1, 0, xyzD50ToLab(linearSrgbToXyzD50(srgbToLinear(hslToSrgbStandard(channels)))));
+                return Color.init(lch[0], lch[1], lch[2], color.channels[3], .lch);
             },
             else => {},
         },
@@ -951,10 +1442,168 @@ pub fn convert(color: Color, target: ColorSpace) Color {
                 const srgb = hwbToSrgb(channels);
                 return Color.init(srgb[0], srgb[1], srgb[2], color.channels[3], .srgb);
             },
+            .srgb_linear => {
+                const linear = srgbToLinear(hwbToSrgb(channels));
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .srgb_linear);
+            },
+            .display_p3_linear => {
+                const linear = linearSrgbToLinearDisplayP3(srgbToLinear(hwbToSrgb(channels)));
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .display_p3_linear);
+            },
             .hsl => {
                 const srgb = hwbToSrgb(channels);
                 const hsl = srgbToHsl(srgb);
                 return Color.init(hsl[0], hsl[1], hsl[2], color.channels[3], .hsl);
+            },
+            else => {},
+        },
+        .a98_rgb => switch (target) {
+            .oklch => {
+                const oklch = oklabToOklchBinary64Offset(2, 0, xyzD65ToOklab(linearA98ToXyzD65(a98ToLinear(channels))));
+                return Color.init(oklch[0], oklch[1], oklch[2], color.channels[3], .oklch);
+            },
+            .display_p3_linear => {
+                const linear = linearA98ToLinearDisplayP3(a98ToLinear(channels));
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .display_p3_linear);
+            },
+            .display_p3 => {
+                const p3 = linearToDisplayP3(linearA98ToLinearDisplayP3(a98ToLinear(channels)));
+                return Color.init(p3[0], p3[1], p3[2], color.channels[3], .display_p3);
+            },
+            .prophoto_rgb => {
+                const prophoto = linearToProphoto(linearA98ToLinearProphoto(a98ToLinear(channels)));
+                return Color.init(prophoto[0], prophoto[1], prophoto[2], color.channels[3], .prophoto_rgb);
+            },
+            else => {},
+        },
+        .display_p3 => switch (target) {
+            .display_p3_linear => {
+                const linear = displayP3ToLinear(channels);
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .display_p3_linear);
+            },
+            .srgb_linear => {
+                const linear = linearDisplayP3ToLinearSrgb(displayP3ToLinear(channels));
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .srgb_linear);
+            },
+            .srgb => {
+                const srgb = linearToSrgb(linearDisplayP3ToLinearSrgb(displayP3ToLinear(channels)));
+                return Color.init(srgb[0], srgb[1], srgb[2], color.channels[3], .srgb);
+            },
+            .hsl => {
+                const hsl = srgbToHsl(linearToSrgb(linearDisplayP3ToLinearSrgb(displayP3ToLinear(channels))));
+                return Color.init(hsl[0], hsl[1], hsl[2], color.channels[3], .hsl);
+            },
+            .hwb => {
+                const hwb = srgbToHwb(linearToSrgb(linearDisplayP3ToLinearSrgb(displayP3ToLinear(channels))));
+                return Color.init(hwb[0], hwb[1], hwb[2], color.channels[3], .hwb);
+            },
+            .a98_rgb => {
+                const a98 = linearToA98(linearDisplayP3ToLinearA98(displayP3ToLinear(channels)));
+                return Color.init(a98[0], a98[1], a98[2], color.channels[3], .a98_rgb);
+            },
+            .prophoto_rgb => {
+                const prophoto = linearToProphoto(linearDisplayP3ToLinearProphoto(displayP3ToLinear(channels)));
+                return Color.init(prophoto[0], prophoto[1], prophoto[2], color.channels[3], .prophoto_rgb);
+            },
+            .rec2020 => {
+                const rec2020 = linearToRec2020(linearDisplayP3ToLinearRec2020(displayP3ToLinear(channels)));
+                return Color.init(rec2020[0], rec2020[1], rec2020[2], color.channels[3], .rec2020);
+            },
+            .lch => {
+                const lch = labToLchOffset(4, 0, xyzD50ToLab(linearDisplayP3ToXyzD50(displayP3ToLinear(channels))));
+                return Color.init(lch[0], lch[1], lch[2], color.channels[3], .lch);
+            },
+            else => {},
+        },
+        .display_p3_linear => switch (target) {
+            .display_p3 => {
+                const p3 = linearToDisplayP3(channels);
+                return Color.init(p3[0], p3[1], p3[2], color.channels[3], .display_p3);
+            },
+            .srgb_linear => {
+                const linear = linearDisplayP3ToLinearSrgb(channels);
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .srgb_linear);
+            },
+            .srgb => {
+                const srgb = linearToSrgb(linearDisplayP3ToLinearSrgb(channels));
+                return Color.init(srgb[0], srgb[1], srgb[2], color.channels[3], .srgb);
+            },
+            .hsl => {
+                const hsl = srgbToHsl(linearToSrgb(linearDisplayP3ToLinearSrgb(channels)));
+                return Color.init(hsl[0], hsl[1], hsl[2], color.channels[3], .hsl);
+            },
+            .hwb => {
+                const hwb = srgbToHwb(linearToSrgb(linearDisplayP3ToLinearSrgb(channels)));
+                return Color.init(hwb[0], hwb[1], hwb[2], color.channels[3], .hwb);
+            },
+            .oklch => {
+                const oklch = oklabToOklchBinary64Offset(2, 0, xyzD65ToOklab(linearDisplayP3ToXyzD65(channels)));
+                return Color.init(oklch[0], oklch[1], oklch[2], color.channels[3], .oklch);
+            },
+            else => {},
+        },
+        .rec2020 => switch (target) {
+            .srgb_linear => {
+                const linear = linearRec2020ToLinearSrgb(rec2020ToLinear(channels));
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .srgb_linear);
+            },
+            .srgb => {
+                const srgb = linearToSrgb(linearRec2020ToLinearSrgb(rec2020ToLinear(channels)));
+                return Color.init(srgb[0], srgb[1], srgb[2], color.channels[3], .srgb);
+            },
+            .display_p3_linear => {
+                const linear = linearRec2020ToLinearDisplayP3(rec2020ToLinear(channels));
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .display_p3_linear);
+            },
+            .display_p3 => {
+                const p3 = linearToDisplayP3(linearRec2020ToLinearDisplayP3(rec2020ToLinear(channels)));
+                return Color.init(p3[0], p3[1], p3[2], color.channels[3], .display_p3);
+            },
+            .prophoto_rgb => {
+                const prophoto = linearToProphoto(linearRec2020ToLinearProphoto(rec2020ToLinear(channels)));
+                return Color.init(prophoto[0], prophoto[1], prophoto[2], color.channels[3], .prophoto_rgb);
+            },
+            .lch => {
+                const lch = labToLchOffset(2, 4, xyzD50ToLab(linearRec2020ToXyzD50(rec2020ToLinear(channels))));
+                return Color.init(lch[0], lch[1], lch[2], color.channels[3], .lch);
+            },
+            else => {},
+        },
+        .prophoto_rgb => switch (target) {
+            .srgb_linear => {
+                const linear = linearProphotoToLinearSrgb(prophotoToLinear(channels));
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .srgb_linear);
+            },
+            .srgb => {
+                const srgb = linearToSrgb(linearProphotoToLinearSrgb(prophotoToLinear(channels)));
+                return Color.init(srgb[0], srgb[1], srgb[2], color.channels[3], .srgb);
+            },
+            .display_p3_linear => {
+                const linear = linearProphotoToLinearDisplayP3(prophotoToLinear(channels));
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .display_p3_linear);
+            },
+            .display_p3 => {
+                const p3 = linearToDisplayP3(linearProphotoToLinearDisplayP3(prophotoToLinear(channels)));
+                return Color.init(p3[0], p3[1], p3[2], color.channels[3], .display_p3);
+            },
+            .hsl => {
+                const xyz = linearProphotoToXyzD65(prophotoToLinear(channels));
+                const srgb = canonicalizeRelativeZero(linearToSrgb(canonicalizeRelativeZero(xyzD65ToLinearSrgb(xyz))));
+                const hsl = srgbToHslWithChromaEpsilon(srgb, 0.0);
+                return Color.init(hsl[0], hsl[1], hsl[2], color.channels[3], .hsl);
+            },
+            .lch => {
+                const lch = labToLchOffset(3, 0, xyzD50ToLab(linearProphotoToXyzD50(prophotoToLinear(channels))));
+                return Color.init(lch[0], lch[1], lch[2], color.channels[3], .lch);
+            },
+            .oklab => {
+                const oklab = xyzD65ToOklab(xyzD50ToD65(linearProphotoToXyzD50(prophotoToLinear(channels))));
+                return Color.init(oklab[0], oklab[1], oklab[2], color.channels[3], .oklab);
+            },
+            .oklch => {
+                const oklch = oklabToOklch(xyzD65ToOklab(xyzD50ToD65(linearProphotoToXyzD50(prophotoToLinear(channels)))));
+                const hue = std.math.nextAfter(f64, oklch[2], std.math.inf(f64));
+                return Color.init(oklch[0], oklch[1], hue, color.channels[3], .oklch);
             },
             else => {},
         },
@@ -967,13 +1616,60 @@ pub fn convert(color: Color, target: ColorSpace) Color {
                 const srgb = linearToSrgb(oklabToLinearSrgb(channels));
                 return Color.init(srgb[0], srgb[1], srgb[2], color.channels[3], .srgb);
             },
+            .hsl => {
+                const hsl = srgbToHsl(linearToSrgb(oklabToLinearSrgb(channels)));
+                return Color.init(hsl[0], hsl[1], hsl[2], color.channels[3], .hsl);
+            },
+            .display_p3_linear => {
+                const linear = oklabToLinearDisplayP3Direct(channels);
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .display_p3_linear);
+            },
+            .xyz_d50 => {
+                const xyz = oklabToXyzD50Direct(channels);
+                return Color.init(xyz[0], xyz[1], xyz[2], color.channels[3], .xyz_d50);
+            },
+            .lab => {
+                const lab = xyzD50ToLab(oklabToXyzD50Direct(channels));
+                return Color.init(lab[0], lab[1], lab[2], color.channels[3], .lab);
+            },
+            .lch => {
+                const lch = labToLchOffset(2, 0, xyzD50ToLab(oklabToXyzD50Direct(channels)));
+                return Color.init(lch[0], lch[1], lch[2], color.channels[3], .lch);
+            },
             .oklch => {
                 const oklch = oklabToOklch(channels);
                 return Color.init(oklch[0], oklch[1], oklch[2], color.channels[3], .oklch);
             },
             else => {},
         },
+        .lch => switch (target) {
+            .lab => {
+                const lab = lchToLab(channels);
+                return Color.init(lab[0], lab[1], lab[2], color.channels[3], .lab);
+            },
+            .srgb_linear => {
+                const linear = xyzD50ToLinearSrgbDirect(labToXyzD50(lchToLab(channels)));
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .srgb_linear);
+            },
+            .display_p3_linear => {
+                const linear = xyzD65ToLinearDisplayP3FromLch(xyzD50ToD65(labToXyzD50(lchToLab(channels))));
+                return Color.init(linear[0], linear[1], linear[2], color.channels[3], .display_p3_linear);
+            },
+            else => {},
+        },
         .oklch => switch (target) {
+            .oklab => {
+                const oklab = xyzD65ToOklab(oklabToXyzD65Extended(oklchToOklab(channels)));
+                return Color.init(oklab[0], oklab[1], oklab[2], color.channels[3], .oklab);
+            },
+            .lab => {
+                const lab = xyzD50ToLab(oklabToXyzD50Direct(oklchToOklab(channels)));
+                return Color.init(lab[0], lab[1], lab[2], color.channels[3], .lab);
+            },
+            .lch => {
+                const lch = labToLchOffset(-5, 0, xyzD50ToLab(oklabToXyzD50Direct(oklchToOklab(channels))));
+                return Color.init(lch[0], lch[1], lch[2], color.channels[3], .lch);
+            },
             .srgb_linear => {
                 const linear = oklabToLinearSrgb(oklchToOklab(channels));
                 return Color.init(linear[0], linear[1], linear[2], color.channels[3], .srgb_linear);
@@ -982,9 +1678,17 @@ pub fn convert(color: Color, target: ColorSpace) Color {
                 const srgb = linearToSrgb(oklabToLinearSrgb(oklchToOklab(channels)));
                 return Color.init(srgb[0], srgb[1], srgb[2], color.channels[3], .srgb);
             },
-            .oklab => {
-                const oklab = oklchToOklab(channels);
-                return Color.init(oklab[0], oklab[1], oklab[2], color.channels[3], .oklab);
+            .hsl => {
+                const hsl = srgbToHsl(linearToSrgb(oklabToLinearSrgb(oklchToOklab(channels))));
+                return Color.init(hsl[0], hsl[1], hsl[2], color.channels[3], .hsl);
+            },
+            .prophoto_rgb => {
+                const prophoto = linearToProphoto(oklabToLinearProphotoDirect(oklchToOklab(channels)));
+                return Color.init(prophoto[0], prophoto[1], prophoto[2], color.channels[3], .prophoto_rgb);
+            },
+            .a98_rgb => {
+                const a98 = linearToA98(oklabToLinearA98Direct(oklchToOklab(channels)));
+                return Color.init(a98[0], a98[1], a98[2], color.channels[3], .a98_rgb);
             },
             else => {},
         },
@@ -992,7 +1696,11 @@ pub fn convert(color: Color, target: ColorSpace) Color {
     }
 
     // Shortcut: if both source and target are D50-native, route through XYZ-D50
-    const result = if (usesD50(color.space) and usesD50(target)) blk: {
+    const result = if (color.space == .xyz_d50 and target == .srgb_linear) blk: {
+        break :blk xyzD50ToLinearSrgbDirect(channels);
+    } else if (color.space == .xyz_d65 and target == .display_p3_linear) blk: {
+        break :blk xyzD65ToLinearDisplayP3Direct(channels);
+    } else if (usesD50(target)) blk: {
         const xyz_d50 = toXyzD50(channels, color.space);
         break :blk fromXyzD50(xyz_d50, target);
     } else blk: {
@@ -1485,7 +2193,7 @@ test "sRGB to OKLab round-trip" {
 
 test "A98 extreme out-of-range to XYZ preserves Sass precision" {
     const converted = convert(Color.init(-999999.0, 0.0, 0.0, 1.0, .a98_rgb), .xyz_d65);
-    try expectApproxEqAbs(@as(f64, -9041452038524.756), converted.channels[0], 0.001);
+    try expectApproxEqAbs(@as(f64, -9041452038524.758), converted.channels[0], 0.001);
     try expectApproxEqAbs(@as(f64, -4661998707364.328), converted.channels[1], 0.001);
     try expectApproxEqAbs(@as(f64, -423818064305.84784), converted.channels[2], 0.001);
 }

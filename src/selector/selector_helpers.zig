@@ -353,7 +353,7 @@ pub fn preserveOriginalSelectorCommaNewlinesAlloc(
     //Original for which no matching extended is found is treated as dropped by placeholder etc. (maxInt remains).
     //In older implementations that advanced `next_orig_idx` in a per-extended loop, before orig[1]=`.btn-flat`
     //When ext[1]=`.btn-small` comes, orig[1] is skipped and the .btn-flat match is lost.
-    //There was a bug (observed with materialize `.btn,\n.btn-flat` + `.btn-small @extend .btn`).
+    // There was a bug with multi-line original selectors and extend-added siblings.
     const matched_count = matchOriginalPartsToExtendedIndices(
         original_items,
         extended_parts.items,
@@ -399,9 +399,9 @@ test "preserveOriginalSelectorCommaNewlinesAlloc keeps multiline separators afte
 }
 
 test "preserveOriginalSelectorCommaNewlinesAlloc keeps only boundary newline for extend-added siblings" {
-    //materialize `.btn,\n.btn-flat { ... }` to `.btn-small @extend .btn`, `.btn-large @extend .btn`
-    //is applied, extended sibling lines up on the same line `, `, newline of the original source
-    //is reflected only on the boundary (end of extend group).
+    // When extend adds sibling selectors between original items, the added
+    // siblings stay on one line and the original newline is preserved only at
+    // the boundary.
     const allocator = std.testing.allocator;
     const original = ".btn,\n.btn-flat";
     const extended = ".btn, .btn-small, .btn-large, .btn-flat";

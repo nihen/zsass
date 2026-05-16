@@ -54,7 +54,7 @@ pub const Lexer = struct {
     /// Set to true when at least one `#{` interpolation start is emitted.
     /// Parser fast-path uses this to skip per-statement interp_depth tracking
     /// when it's known the source contains zero interpolations (typical for
-    /// plain CSS / vendored .css files in suites like chatwoot).
+    /// plain CSS / vendored .css files).
     saw_interpolation: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) Lexer {
@@ -555,7 +555,7 @@ pub const Lexer = struct {
                 while (self.pos < self.source.len and isDigit(self.source[self.pos])) self.pos += 1;
             }
         }
-        // `12.` / `+1.` / `1.}` -- '.' must be followed by a digit (dart-sass).
+        // `12.` / `+1.` / `1.}` -- '.' must be followed by a digit (official Sass CLI).
         // Allow `1...` (rest args): first '.' after the integer is followed by another '.'.
         // Inside url(), digits can be part of a path (e.g. url(404.png)), so skip this check.
         if (self.url_paren_depth == 0) {

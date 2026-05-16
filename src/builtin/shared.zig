@@ -56,8 +56,8 @@ pub const BuiltinContext = struct {
     list_parent_sel_none_hook: ?ListSidecarHook = null,
     /// list_handle is "a map with only a naive string key (no calc-marker / no named-color / no escape)"
     /// If it is determined, the hash index of the first index of that key bytes  ->  pair is retained.
-    /// Replace linear scan of `map.get` / `map.has-key` with O(1) (with ngx-admin etc.
-    /// Countermeasure against hot path where the same map.get is called thousands of times for 3000 key map).
+    /// Replace linear scan of `map.get` / `map.has-key` with O(1) for hot
+    /// paths where the same lookup is called thousands of times for a large map.
     /// If the value is `null`, "cache has been determined to be non-plain" (= linear every time).
     /// The lifetime matches the VM since it is owned by the VM. If you pass `null` for test
     /// Bypass cache and use only linear scan.

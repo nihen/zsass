@@ -121,7 +121,7 @@ pub const ResolveResult = struct {
 /// Resolver-tuning options that can be threaded through `resolveUrl` and
 /// `resolveImportUrl` without breaking existing call-sites.
 pub const ResolveOptions = struct {
-    /// dart-sass parity: the `pkg:` URL scheme must be explicitly enabled
+    /// official Sass CLI parity: the `pkg:` URL scheme must be explicitly enabled
     /// via `--pkg-importer=node`. When this flag is `false` (the default),
     /// `pkg:` resolution is rejected so untrusted SCSS input cannot use it
     /// to read packages off the host filesystem.
@@ -251,7 +251,7 @@ fn resolveUrlImpl(
     // 0. Handle pkg: URL scheme (Node.js package resolution).
     // Always rejected unless the caller explicitly opted in via
     // --pkg-importer=node (or the embedding-API equivalent), matching
-    // dart-sass behavior. Even when enabled, pkg_importer itself
+    // official Sass CLI behavior. Even when enabled, pkg_importer itself
     // performs path-traversal validation.
     if (std.mem.startsWith(u8, url, "pkg:")) {
         if (!opts.pkg_importer_enabled) return null;
@@ -306,7 +306,7 @@ fn resolveUrlImpl(
         } else if (try tryCandidates(allocator, abs_base, abs_file)) |path| {
             return .{ .path = path, .allocator = allocator };
         }
-        // Dart Sass still consults load paths for explicit-relative URLs when
+        // official Sass CLI still consults load paths for explicit-relative URLs when
         // the importer-relative candidate is absent. This is observable in
         // real-world projects that write `@import "./variables/colors"` from a
         // file under `src/` while `variables/` lives at the configured source
@@ -758,7 +758,7 @@ test "isPlainCssImport: .scss is not plain CSS" {
 }
 
 test "isPlainCssImport: bare name is not plain CSS" {
-    try std.testing.expect(!isPlainCssImport("foundation"));
+    try std.testing.expect(!isPlainCssImport("plain-name"));
 }
 
 test "Module: add and get members" {

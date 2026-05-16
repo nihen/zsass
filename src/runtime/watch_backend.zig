@@ -826,7 +826,7 @@ test "splitDirAndBasename peels off basename and keeps relative dir" {
     }
 }
 
-// dart-sass parity for the watcher: a write that lands on a file
+// official Sass CLI parity for the watcher: a write that lands on a file
 // registered against `job_index = N` must surface as `out_dirty[N] = true`
 // while every unrelated index stays `false`. This is the cross-cutting
 // invariant the per-job recompile in `runWatchLoop` depends on; if a

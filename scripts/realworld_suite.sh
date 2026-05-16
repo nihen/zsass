@@ -18,6 +18,9 @@ Options:
   --zsass-bin PATH       zsass binary path. Default: zig-out/bin/zsass
   --jobs N               Check-mode worker count. Default: cpu*2 (fallback: 8)
   --fail-fast            Stop on the first compile failure or CSS diff
+  --allow-normalized-pass
+                          Deprecated no-op. Raw CSS mismatches always fail;
+                          normalization is recorded as diagnostic context only.
   --runs N               Benchmark repetitions for bench mode. Default: 3
   -h, --help             Show this help
 
@@ -317,7 +320,7 @@ run_zsass_timed() {
     cmd=("/usr/bin/time" "-f" "%e\t%M\t%x" "-o" "$time_file" "timeout" "$timeout_secs" "env" "ZSASS_CSS_CACHE=0" "$zsass_bin")
   fi
   if [[ "${quiet_deps:-1}" == "1" ]]; then
-    cmd+=("--quiet-deps")
+    cmd+=("--quiet")
   fi
   while [[ $# -gt 0 ]]; do
     cmd+=("--load-path" "$1")
@@ -410,6 +413,7 @@ realworld-suite check summary
   total:    $total_count
   matched:  $matched_count
   diffs:    $diff_count
+  normalized: $normalized_count
   failed:   $failed_count
   missing:  $missing_count
   results:  $run_root
@@ -532,13 +536,19 @@ process_check_entry() {
     return 0
   fi
 
-  if python3 "$repo/scripts/css_normalized_equal.py" "$expected" "$output"; then
-    printf 'match\t%s\n' "$rel" > "$status_file"
-    return 0
-  fi
-
   diff -u "$expected" "$output" > "$diff_file" || true
-  printf 'diff\t%s\t%s\n' "$rel" "$diff_file" > "$status_file"
+  local normalized_log status_kind
+  normalized_log="$run_root/normalized/$(css_rel_for_entry "$rel").log"
+  mkdir -p "$(dirname "$normalized_log")"
+  status_kind="diff"
+  if python3 "$normalizer" "$expected" "$output" > "$normalized_log" 2>&1; then
+    rm -f "$normalized_log"
+  elif grep -q '^normalized_equal: raw CSS differs' "$normalized_log"; then
+    status_kind="diff_normalized_equal"
+  else
+    rm -f "$normalized_log"
+  fi
+  printf '%s\t%s\t%s\n' "$status_kind" "$rel" "$diff_file" > "$status_file"
   [[ "$fail_fast" == "1" ]] && return 1
   return 0
 }
@@ -549,6 +559,7 @@ rebuild_check_outputs() {
 
   total_count=0
   matched_count=0
+  normalized_count=0
   diff_count=0
   failed_count=0
   missing_count=0
@@ -569,6 +580,11 @@ rebuild_check_outputs() {
       diff)
         diff_count=$((diff_count + 1))
         printf 'diff\t%s\t%s\n' "$a" "$b" >> "$summary_file"
+        ;;
+      diff_normalized_equal)
+        diff_count=$((diff_count + 1))
+        normalized_count=$((normalized_count + 1))
+        printf 'diff_normalized_equal\t%s\t%s\n' "$a" "$b" >> "$summary_file"
         ;;
       compile_fail)
         failed_count=$((failed_count + 1))
@@ -643,7 +659,7 @@ print_check_failure_and_die() {
       print_check_summary
       die "compile failed for $rel"
       ;;
-    diff)
+    diff|diff_normalized_equal)
       sed -n '1,120p' "$extra" >&2 || true
       print_check_summary
       die "css diff for $rel"
@@ -1039,6 +1055,7 @@ main() {
   work_root=""
   explicit_work_root=0
   zsass_bin="$repo/zig-out/bin/zsass"
+  normalizer="$repo/scripts/css_normalized_equal.py"
   check_jobs=$(default_check_jobs)
   fail_fast=0
   bench_runs=3
@@ -1073,6 +1090,9 @@ main() {
         ;;
       --fail-fast)
         fail_fast=1
+        shift
+        ;;
+      --allow-normalized-pass)
         shift
         ;;
       --runs)

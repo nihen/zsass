@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Disposable real-world Sass compatibility runner.
 
-This runner checks one GitHub repository at a time against Dart Sass CLI and
+This runner checks one git repository at a time against Dart Sass CLI and
 zsass, writes durable pass/failure records into ../zsass-realworld-fixtures, and
 removes successful source checkouts. It intentionally does not add anything to
 zig build realworld.
@@ -9,7 +9,6 @@ zig build realworld.
 from __future__ import annotations
 
 import argparse
-import colorsys
 import datetime as dt
 from decimal import Decimal
 import hashlib
@@ -20,10 +19,14 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 from typing import Any
+import urllib.parse
+import urllib.request
+import zipfile
 
-NORMALIZER_VERSION = 25
-IGNORED_DIFF_KINDS = ["blank", "comment", "comment-license", "quote", "selector-comma-newline", "selector-list-order", "selector-where-list", "selector-pseudo-order", "selector-compound-class-order", "selector-impossible-body-descendant", "selector-impossible-form-control-descendant", "selector-redundant-child-combinator", "selector-redundant-descendant-compound", "selector-redundant-compound-class", "selector-redundant-pseudo-class", "selector-disjoint-pseudo-block-order", "media-and-order", "media-nested-and", "media-disjoint-decl-order", "empty-rule", "adjacent-same-selector-block", "calc-arithmetic", "calc-min-arg-wrapper", "opaque-color", "generated-keyframes-name", "transparent-color", "line-indent"]
+NORMALIZER_VERSION = 26
+IGNORED_DIFF_KINDS = ["blank", "comment", "comment-license", "quote", "selector-comma-newline", "selector-list-order", "selector-where-list", "selector-pseudo-order", "selector-compound-class-order", "selector-impossible-body-descendant", "selector-impossible-form-control-descendant", "selector-redundant-child-combinator", "selector-redundant-descendant-compound", "selector-redundant-compound-class", "selector-redundant-pseudo-class", "selector-disjoint-pseudo-block-order", "media-and-order", "media-nested-and", "media-disjoint-decl-order", "empty-rule", "adjacent-same-selector-block", "calc-arithmetic", "calc-min-arg-wrapper", "opaque-color", "transparent-color", "line-indent"]
 
 
 def split_top_level_commas(value: str) -> list[str] | None:
@@ -1443,10 +1446,6 @@ def normalize_simple_calc_arithmetic(value: str) -> str:
     value = re.sub(r"calc\(([-0-9.]+px) - calc\(([^()]+ / 2)\)( \* 2)?\)", r"calc(\1 - \2\3)", value)
     value = re.sub(r"calc\(([-0-9.]+px) - calc\(\(([^()]+)\) / 2\) \* 2\)", r"calc(\1 - (\2) / 2 * 2)", value)
     value = re.sub(r"calc\(calc\(\(([^()]+)\) / 2\) - ([^;]+)\)", r"calc((\1) / 2 - \2)", value)
-    value = value.replace(
-        "calc((var(--plyr-control-icon-size, 18px) / 2 + calc(var(--plyr-control-spacing, 10px) * 0.7)) - var(--plyr-menu-arrow-size, 4px) / 2)",
-        "calc(var(--plyr-control-icon-size, 18px) / 2 + calc(var(--plyr-control-spacing, 10px) * 0.7) - var(--plyr-menu-arrow-size, 4px) / 2)",
-    )
     value = re.sub(r"calc\(\(([^()]*\([^()]*\)[^()]*)\) - ([^()]+)\)", r"calc(\1 - \2)", value)
     value = re.sub(r"calc\(calc\(([^()]*(?:\([^()]*\)[^()]*)*)\)\)", r"calc(\1)", value)
     value = re.sub(r"\(\s*([^()]+?)\s*-\s*-([0-9.]+[A-Za-z%]*)\s*\)", r"(\1 + \2)", value)
@@ -1516,6 +1515,9 @@ EXCLUDED_DIRS = {
 SASS_EXTS = {".scss", ".sass"}
 DEFAULT_TIMEOUT = 120
 INSTALL_TIMEOUT = 900
+COMPAT_TARGET = int(os.environ.get("ZSASS_COMPAT_TARGET", "10000"))
+DISALLOWED_FULL_NAMES = {"sass/dart-sass"}
+
 
 
 def repo_root() -> Path:
@@ -1552,7 +1554,78 @@ def utc_now() -> str:
 
 
 def suite_name(full_name: str) -> str:
-    return full_name.replace("/", "__")
+    return re.sub(r"[^A-Za-z0-9._-]+", "__", full_name).strip("_")
+
+
+def sanitized_source_id(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._/-]+", "_", value).strip("_")
+
+
+def github_owner_repo_from_url(url: str) -> str | None:
+    raw = url.strip()
+    if "://" not in raw:
+        m = re.match(r"^(?:[^@\s]+@)?github\.com[:/]+([^/\s:]+)/([^/\s:]+?)(?:\.git)?/?$", raw, re.IGNORECASE)
+        if m:
+            return f"github.com/{urllib.parse.unquote(m.group(1))}/{urllib.parse.unquote(m.group(2))}"
+
+    parsed = urllib.parse.urlparse(raw)
+    host = parsed.netloc.lower().removeprefix("www.")
+    if "@" in host:
+        host = host.rsplit("@", 1)[1]
+    if parsed.scheme in {"ssh", "git+ssh"}:
+        if host != "github.com":
+            return None
+    elif parsed.scheme not in {"http", "https"}:
+        return None
+    elif host not in {"github.com", "codeload.github.com"}:
+        return None
+    parts = [urllib.parse.unquote(part) for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) < 2:
+        return None
+    owner = parts[0]
+    repo = parts[1].removesuffix(".git")
+    if not owner or not repo:
+        return None
+    return f"github.com/{owner}/{repo}"
+
+
+def repo_id_from_url(url: str) -> str:
+    github_id = github_owner_repo_from_url(url)
+    if github_id:
+        return github_id
+    m = re.match(r"https?://([^/]+)/(.+?)(?:\.git)?/?$", url)
+    if not m:
+        return sanitized_source_id(url)
+    return f"{m.group(1)}/{m.group(2).removesuffix('.git')}"
+
+
+def archive_id_from_url(url: str) -> str:
+    github_id = github_owner_repo_from_url(url)
+    if github_id:
+        return github_id
+    m = re.match(r"https?://([^/]+)/(.+)$", url)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    return sanitized_source_id(url)
+
+
+def source_kind(args: argparse.Namespace) -> str:
+    if args.source_kind:
+        return args.source_kind
+    if args.archive_url:
+        return "archive"
+    if args.repo_url:
+        host = re.match(r"https?://([^/]+)/", args.repo_url)
+        if host:
+            return host.group(1).removeprefix("www.")
+        return "git"
+    return "github"
+
+
+def ensure_repo_allowed(full_name: str) -> None:
+    normalized = full_name.lower().removeprefix("github.com/").removesuffix(".git")
+    if normalized in DISALLOWED_FULL_NAMES or normalized.endswith("/sass/dart-sass"):
+        raise SystemExit(f"refusing to clone prohibited clean-room source: {full_name}")
 
 
 def ensure_dirs(fixture_root: Path) -> tuple[Path, Path, Path]:
@@ -1588,8 +1661,8 @@ def command_text(cmd: list[str], cwd: Path | None = None) -> str:
     return prefix + " ".join(cmd)
 
 
-def normalize_css(css: str) -> str:
-    """Normalizer v9: remove CSS-noise diffs while preserving CSS token meaning.
+def normalize_css(css: str, *, generated_keyframes: bool = False) -> str:
+    """Normalizer v26: remove CSS-noise diffs while preserving CSS token meaning.
 
     The scanner is string-aware so comment markers inside strings are kept. It
     also normalizes whitespace after commas outside strings, which ignores
@@ -1715,7 +1788,8 @@ def normalize_css(css: str) -> str:
     lines = normalize_adjacent_disjoint_pseudo_block_order(lines)
     lines = normalize_nested_media_and(lines)
     lines = normalize_media_disjoint_decl_order(lines)
-    lines = normalize_generated_keyframes_names(lines)
+    if generated_keyframes:
+        lines = normalize_generated_keyframes_names(lines)
     return "\n".join(lines) + "\n"
 
 
@@ -1725,7 +1799,7 @@ def tree_hash(root: Path) -> str:
         rel = p.relative_to(root).as_posix()
         parts.append(rel.encode())
         parts.append(b"\0")
-        parts.append(normalize_css(p.read_text(encoding="utf-8", errors="surrogateescape")).encode("utf-8", "surrogateescape"))
+        parts.append(p.read_bytes())
         parts.append(b"\0")
     return sha256_bytes(b"".join(parts))
 
@@ -1785,7 +1859,7 @@ def maybe_sass_counterparts(source: Path, value: str) -> list[Path]:
     out: list[Path] = []
     for name in names:
         p = source / name
-        if p.is_file() and p.suffix in SASS_EXTS and not is_excluded(p, source) and not p.name.startswith("_"):
+        if p.is_file() and p.suffix in SASS_EXTS and not is_excluded(p, source):
             out.append(p)
     return out
 
@@ -1868,15 +1942,20 @@ def read_candidate_list(fixture_root: Path) -> list[dict[str, Any]]:
     return data.get("candidates", [])
 
 
+def core_suite_count(fixture_root: Path) -> int:
+    return sum(1 for _ in fixture_root.glob("*/suite.env"))
+
+def core_full_name_identity(value: str) -> str:
+    return value.removeprefix("github.com/")
+
 def imported_core_full_names(fixture_root: Path) -> set[str]:
     path = fixture_root / ".plans" / "fixture-candidates.json"
-    if not path.exists():
-        return set()
-    data = json.loads(path.read_text(encoding="utf-8"))
     out: set[str] = set()
-    for item in data.get("candidates", []):
-        if item.get("kind") == "local-sample":
-            out.add(item.get("full_name", ""))
+    if path.exists():
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for item in data.get("candidates", []):
+            if item.get("kind") == "local-sample":
+                out.add(item.get("full_name", ""))
     # Also protect existing checked fixture directories by source.json URL.
     for source_json in fixture_root.glob("*/source.json"):
         try:
@@ -1898,26 +1977,109 @@ def pick_candidate(fixture_root: Path, explicit: str | None) -> str:
     core = imported_core_full_names(fixture_root)
     for item in read_candidate_list(fixture_root):
         full = item.get("full_name")
-        if not full or full in passed or full in failed or full in core:
+        if not full or full in DISALLOWED_FULL_NAMES or full in passed or full in failed or full in core:
             continue
         return full
     raise SystemExit("no candidate available; pass --repo owner/repo")
 
 
-def clone_repo(full_name: str, suite: str, work_root: Path) -> tuple[Path, str, str]:
+def clone_repo_url(repo_url: str, suite: str, work_root: Path) -> tuple[Path, str, str]:
     suite_work = work_root / suite
     if suite_work.exists():
         shutil.rmtree(suite_work)
     suite_work.mkdir(parents=True)
     source = suite_work / "source"
-    repo_url = f"https://github.com/{full_name}"
     clone_env = {**os.environ, "GIT_LFS_SKIP_SMUDGE": "1"}
-    cp = run(["git", "clone", "--depth", "1", repo_url, str(source)], timeout=900,
-             env=clone_env)
+    cp = run(["git", "clone", "--depth", "1", repo_url, str(source)], timeout=900, env=clone_env)
     if cp.returncode != 0:
         raise RuntimeError(f"git clone failed: {cp.stderr.strip() or cp.stdout.strip()}")
     commit = run(["git", "rev-parse", "HEAD"], cwd=source).stdout.strip()
     return source, repo_url, commit
+
+
+def clone_repo(full_name: str, suite: str, work_root: Path) -> tuple[Path, str, str]:
+    ensure_repo_allowed(full_name)
+    return clone_repo_url(f"https://github.com/{full_name}", suite, work_root)
+
+
+def safe_extract_zip(archive: Path, dest: Path) -> None:
+    dest_resolved = dest.resolve()
+    with zipfile.ZipFile(archive) as zf:
+        for item in zf.infolist():
+            target = (dest / item.filename).resolve()
+            if not target.is_relative_to(dest_resolved):
+                raise RuntimeError(f"zip entry escapes extraction root: {item.filename}")
+        zf.extractall(dest)
+
+
+def safe_extract_tar(archive: Path, dest: Path) -> None:
+    dest_resolved = dest.resolve()
+    with tarfile.open(archive, "r:*") as tf:
+        for member in tf.getmembers():
+            if member.islnk() or member.issym():
+                raise RuntimeError(f"tar link entry is not allowed: {member.name}")
+            if member.isdev() or not (member.isdir() or member.isfile()):
+                raise RuntimeError(f"unsupported tar entry type: {member.name}")
+            target = (dest / member.name).resolve()
+            if not target.is_relative_to(dest_resolved):
+                raise RuntimeError(f"tar entry escapes extraction root: {member.name}")
+        tf.extractall(dest)
+
+
+def extracted_source_root(dest: Path) -> Path:
+    children = [p for p in dest.iterdir() if p.name not in {"__MACOSX"}]
+    dirs = [p for p in children if p.is_dir()]
+    files = [p for p in children if p.is_file()]
+    if len(dirs) == 1 and not files:
+        return dirs[0]
+    return dest
+
+
+def file_tree_hash(root: Path) -> str:
+    parts: list[bytes] = []
+    for p in sorted(x for x in root.rglob("*") if x.is_file()):
+        if is_excluded(p, root):
+            continue
+        rel = p.relative_to(root).as_posix()
+        parts.append(rel.encode())
+        parts.append(b"\0")
+        try:
+            parts.append(sha256_bytes(p.read_bytes()).encode())
+        except OSError:
+            continue
+        parts.append(b"\0")
+    return sha256_bytes(b"".join(parts))
+
+
+def fetch_archive_source(archive_url: str, suite: str, work_root: Path) -> tuple[Path, dict[str, str]]:
+    suite_work = work_root / suite
+    if suite_work.exists():
+        shutil.rmtree(suite_work)
+    suite_work.mkdir(parents=True)
+    archive = suite_work / "source.archive"
+    req = urllib.request.Request(archive_url, headers={"User-Agent": "zsass-compat-disposable"})
+    with urllib.request.urlopen(req, timeout=900) as resp:
+        archive.write_bytes(resp.read())
+    archive_sha = sha256_bytes(archive.read_bytes())
+    extract_root = suite_work / "extract"
+    extract_root.mkdir()
+    if zipfile.is_zipfile(archive):
+        safe_extract_zip(archive, extract_root)
+        archive_format = "zip"
+    else:
+        try:
+            safe_extract_tar(archive, extract_root)
+        except tarfile.TarError as e:
+            raise RuntimeError(f"unsupported archive format: {e}") from e
+        archive_format = "tar"
+    source = extracted_source_root(extract_root)
+    meta = {
+        "archive_url": archive_url,
+        "archive_sha256": archive_sha,
+        "archive_format": archive_format,
+        "source_tree_sha256": file_tree_hash(source),
+    }
+    return source, meta
 
 
 def nearest_package_root(entry: Path, source: Path) -> Path | None:
@@ -1995,8 +2157,6 @@ def _find_node_module(nm: Path, name: str) -> Path | None:
             continue
         if (scope / name).is_dir():
             return scope / name
-        if (scope / f"jquery-{name}").is_dir():
-            return scope / f"jquery-{name}"
     return None
 
 
@@ -2138,10 +2298,8 @@ def entry_sass_load_paths(entries: list[Path], source: Path) -> list[Path]:
                     add_path(child)
             cur = cur.parent
         # Some repos vendor a Sass framework as a direct child of the entry
-        # directory and import its entrypoint by basename, for example
-        # `assets/css/styles.scss` importing `"bulma.sass"` while the actual
-        # file lives at `assets/css/bulma/bulma.sass`. Bundlers commonly add
-        # those vendor roots; Dart Sass CLI needs them as explicit load paths.
+        # directory and import its entrypoint by basename. Bundlers commonly
+        # add those vendor roots; Dart Sass CLI needs them as explicit load paths.
         try:
             children = sorted(entry.parent.iterdir(), key=lambda x: x.name)
         except OSError:
@@ -2312,29 +2470,13 @@ def node_module_sass_load_paths(nm: Path) -> list[Path]:
     if not nm.is_dir():
         return out
 
-    # sass-true exposes its Sass entrypoint as `sass/_true.scss`, while test
-    # suites commonly write `@use "true"`. Large node_modules directories can
-    # push it past the bounded scan below, so add this well-known package path
-    # explicitly when present.
-    sass_true = nm / "sass-true" / "sass"
-    if sass_true.is_dir():
-        out.append(sass_true)
-    for rel in (
-        "wyrm/sass",
-        "bourbon/app/assets/stylesheets",
-        "bourbon-neat/app/assets/stylesheets",
-    ):
-        p = nm / rel
-        if p.is_dir():
-            out.append(p)
-
     def add_package_dirs(pkg_dir: Path) -> None:
         try:
             if any(p.is_file() and p.suffix in SASS_EXTS for p in pkg_dir.iterdir()):
                 out.append(pkg_dir)
         except OSError:
             pass
-        for rel in ("scss", "sass", "styles", "stylesheets"):
+        for rel in ("scss", "sass", "styles", "stylesheets", "app/assets/stylesheets"):
             p = pkg_dir / rel
             if p.is_dir():
                 out.append(p)
@@ -2391,26 +2533,6 @@ def package_collection_sass_load_paths(root: Path) -> list[Path]:
         if child.is_dir():
             add_package_dirs(child)
     return out
-
-
-def repair_common_package_typos(pkg: Path) -> list[str]:
-    setup: list[str] = []
-    nm = pkg / "node_modules"
-    if not nm.is_dir():
-        return setup
-    bootstrap = nm / "bootstrap"
-    boostrap = nm / "boostrap"
-    if bootstrap.is_dir() and not boostrap.exists():
-        boostrap.symlink_to("bootstrap", target_is_directory=True)
-        setup.append("symlink node_modules/boostrap -> bootstrap")
-    boostrap_scss = boostrap / "scss"
-    if boostrap_scss.is_dir():
-        src = boostrap_scss / "bootstrap.scss"
-        dst = boostrap_scss / "boostrap.scss"
-        if src.is_file() and not dst.exists():
-            dst.symlink_to("bootstrap.scss")
-            setup.append("symlink node_modules/boostrap/scss/boostrap.scss -> bootstrap.scss")
-    return setup
 
 
 def repair_package_source_indexes(nm: Path) -> list[str]:
@@ -2554,241 +2676,6 @@ def repair_relative_node_modules_imports(source: Path) -> list[str]:
             rel_target = os.path.relpath(target, nm_dir)
             link.symlink_to(rel_target, target_is_directory=True)
             setup.append(f"symlink {link.relative_to(source_resolved).as_posix()} -> {Path(rel_target).as_posix()}")
-    return setup
-
-
-def _parse_hsl(s: str) -> tuple[float, float, float, float] | None:
-    """Parse hsl/hsla(...) -> (h, s, l, a) with h in [0,360], s/l in [0,100], a in [0,1]."""
-    m = re.match(r"hsla?\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*(?:,\s*([\d.]+))?\s*\)", s)
-    if m:
-        return float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4) or 1)
-    return None
-
-
-def _parse_hex(s: str) -> tuple[float, float, float, float] | None:
-    """Parse #rgb or #rrggbb -> (h, s, l, a)."""
-    m = re.match(r"#([0-9a-fA-F]{3,8})$", s)
-    if not m:
-        return None
-    hexv = m.group(1)
-    if len(hexv) == 3:
-        r, g, b = int(hexv[0]*2, 16)/255, int(hexv[1]*2, 16)/255, int(hexv[2]*2, 16)/255
-        a = 1.0
-    elif len(hexv) == 6:
-        r, g, b = int(hexv[0:2], 16)/255, int(hexv[2:4], 16)/255, int(hexv[4:6], 16)/255
-        a = 1.0
-    elif len(hexv) == 8:
-        r, g, b = int(hexv[0:2], 16)/255, int(hexv[2:4], 16)/255, int(hexv[4:6], 16)/255
-        a = int(hexv[6:8], 16)/255
-    else:
-        return None
-    h, l, s = colorsys.rgb_to_hls(r, g, b)
-    return h * 360, s * 100, l * 100, a
-
-
-def _parse_rgb(s: str) -> tuple[float, float, float, float] | None:
-    """Parse rgb/rgba(...) -> (h, s, l, a)."""
-    m = re.match(r"rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+))?\s*\)", s)
-    if m:
-        r, g, b = float(m.group(1))/255, float(m.group(2))/255, float(m.group(3))/255
-        a = float(m.group(4) or 1)
-        h, l, s = colorsys.rgb_to_hls(r, g, b)
-        return h * 360, s * 100, l * 100, a
-    return None
-
-
-def _parse_color(s: str) -> tuple[float, float, float, float] | None:
-    """Parse a CSS color value to (h, s, l, a)."""
-    s = s.strip()
-    return _parse_hsl(s) or _parse_hex(s) or _parse_rgb(s)
-
-
-def _hsl_to_css(h: float, s: float, l: float, a: float) -> str:
-    """Convert (h, s, l, a) to CSS hsl/hsla string."""
-    h = h % 360
-    s = max(0, min(100, s))
-    l = max(0, min(100, l))
-    a = max(0, min(1, a))
-    if a < 1:
-        a_str = f"{a:.4f}".rstrip("0").rstrip(".")
-        return f"hsla({h:.1f}, {s:.1f}%, {l:.1f}%, {a_str})"
-    return f"hsl({h:.1f}, {s:.1f}%, {l:.1f}%)"
-
-
-def _mix_colors(c1: tuple[float,float,float,float], c2: tuple[float,float,float,float], weight: float) -> tuple[float,float,float,float]:
-    """Mix two colors (like Sass mix). weight is c1's weight in [0,100]."""
-    w = weight / 100
-    r1, g1, b1 = colorsys.hls_to_rgb(c1[0]/360, c1[2]/100, c1[1]/100)
-    r2, g2, b2 = colorsys.hls_to_rgb(c2[0]/360, c2[2]/100, c2[1]/100)
-    a1, a2 = c1[3], c2[3]
-    combined_a = a1 + a2 - a1 * a2
-    if combined_a == 0:
-        wa = w
-    else:
-        wa = (a1 * w + a2 * (1 - w) * (1 - a1)) / combined_a if combined_a else w
-    r = r1 * wa + r2 * (1 - wa)
-    g = g1 * wa + g2 * (1 - wa)
-    b = b1 * wa + b2 * (1 - wa)
-    a = a1 * w + a2 * (1 - w)
-    h, l_v, s_v = colorsys.rgb_to_hls(max(0, min(1, r)), max(0, min(1, g)), max(0, min(1, b)))
-    return h * 360, s_v * 100, l_v * 100, a
-
-
-def _lighten(c: tuple[float,float,float,float], amount: float) -> tuple[float,float,float,float]:
-    return (c[0], c[1], min(100, c[2] + amount), c[3])
-
-
-def _darken(c: tuple[float,float,float,float], amount: float) -> tuple[float,float,float,float]:
-    return (c[0], c[1], max(0, c[2] - amount), c[3])
-
-
-def _alpha(c: tuple[float,float,float,float], amount: float) -> tuple[float,float,float,float]:
-    return (c[0], c[1], c[2], max(0, min(1, amount / 100)))
-
-
-def _fade(c: tuple[float,float,float,float], amount: float) -> tuple[float,float,float,float]:
-    return (c[0], c[1], c[2], c[3] * (1 - amount / 100))
-
-
-def _parse_mix_name(name: str) -> dict[str, Any] | None:
-    """Parse a $m- variable name like 'accent_bg--mix-10' into components."""
-    parts = name.split("--")
-    if len(parts) != 2:
-        return None
-    colors_part, opval = parts
-    color_parts = colors_part.split("_", 1)
-    c1 = color_parts[0]
-    c2 = color_parts[1] if len(color_parts) > 1 else None
-    op_match = re.match(r"([a-z]+)-(\d+)", opval)
-    if not op_match:
-        return None
-    op = op_match.group(1)
-    val = int(op_match.group(2))
-    return {"c1": c1, "c2": c2, "op": op, "val": val}
-
-
-def generate_theme_gen_files(source: Path) -> list[str]:
-    """Generate theme gen/ files for projects that use a build-time color mixing system (like lichess)."""
-    theme_dir = None
-    for scss_file in source.rglob("*.scss"):
-        if is_excluded(scss_file, source, for_sass=True):
-            continue
-        try:
-            text = scss_file.read_text(encoding="utf-8", errors="surrogateescape")
-        except Exception:
-            continue
-        for m in re.finditer(r"@import\s+['\"]([^'\"]*gen/[^'\"]*)['\"]", text):
-            import_path = m.group(1)
-            gen_dir = (scss_file.parent / import_path.rsplit("/", 1)[0]).resolve()
-            if not gen_dir.exists():
-                # The missing import points at <theme>/gen/<file>. Generate files
-                # under the imported gen directory's parent, not necessarily the
-                # stylesheet's own directory (e.g. abstract/_theme imports
-                # ../theme/gen/wrap).
-                theme_dir = gen_dir.parent
-                break
-        if theme_dir:
-            break
-    if not theme_dir:
-        return []
-
-    theme_files: dict[str, Path] = {}
-    for f in theme_dir.iterdir():
-        m = re.match(r"_theme\.(\w+)\.scss$", f.name)
-        if m:
-            theme_files[m.group(1)] = f
-
-    if not theme_files:
-        return []
-
-    color_defs: dict[str, dict[str, tuple[float,float,float,float]]] = {}
-    for theme_name, theme_file in sorted(theme_files.items()):
-        text = theme_file.read_text(encoding="utf-8", errors="surrogateescape")
-        colors: dict[str, tuple[float,float,float,float]] = {}
-        for m in re.finditer(r"\$c-([-a-z0-9]+):\s*([^;]+);", text):
-            parsed = _parse_color(m.group(2).split("//")[0].strip())
-            if parsed:
-                colors[m.group(1)] = parsed
-        color_defs[theme_name] = colors
-
-    if "default" in color_defs:
-        for theme_name, colors in color_defs.items():
-            if theme_name == "default":
-                continue
-            for k, v in color_defs["default"].items():
-                colors.setdefault(k, v)
-
-    mix_vars: set[str] = set()
-    for f in source.rglob("*.scss"):
-        if is_excluded(f, source, for_sass=True):
-            continue
-        try:
-            text = f.read_text(encoding="utf-8", errors="surrogateescape")
-        except Exception:
-            continue
-        for m in re.finditer(r"\$m-([-a-z0-9_]+)", text):
-            mix_vars.add(m.group(1))
-
-    if not mix_vars:
-        return []
-
-    gen_dir = theme_dir / "gen"
-    gen_dir.mkdir(parents=True, exist_ok=True)
-    setup: list[str] = []
-
-    mix_lines: dict[str, list[str]] = {name: [] for name in color_defs}
-    for var_name in sorted(mix_vars):
-        parsed = _parse_mix_name(var_name)
-        if not parsed:
-            continue
-        for theme_name, colors in color_defs.items():
-            c1_color = colors.get(parsed["c1"])
-            if not c1_color:
-                c1_color = _parse_color(parsed["c1"])
-            if not c1_color:
-                continue
-            result: tuple[float,float,float,float] | None = None
-            if parsed["op"] == "mix":
-                c2_color = colors.get(parsed["c2"]) if parsed["c2"] else None
-                if not c2_color:
-                    c2_color = _parse_color(parsed["c2"] or "")
-                if c2_color:
-                    result = _mix_colors(c1_color, c2_color, parsed["val"])
-            elif parsed["op"] == "lighten":
-                result = _lighten(c1_color, parsed["val"])
-            elif parsed["op"] == "darken":
-                result = _darken(c1_color, parsed["val"])
-            elif parsed["op"] == "alpha":
-                result = _alpha(c1_color, parsed["val"])
-            elif parsed["op"] == "fade":
-                result = _fade(c1_color, parsed["val"])
-            if result:
-                mix_lines[theme_name].append(f"  --m-{var_name}: {_hsl_to_css(*result)};")
-
-    mix_content = ""
-    for theme_name in sorted(mix_lines):
-        lines = sorted(mix_lines[theme_name])
-        mix_content += f"@mixin {theme_name}-mix {{\n"
-        mix_content += "\n".join(lines) + "\n"
-        mix_content += "}\n\n"
-    (gen_dir / "_mix.scss").write_text(mix_content, encoding="utf-8")
-    setup.append(f"generate {gen_dir.relative_to(source).as_posix()}/_mix.scss ({len(mix_vars)} color mixes)")
-
-    css_vars: set[str] = set()
-    for f in sorted(theme_dir.rglob("_theme.*.scss")):
-        try:
-            text = f.read_text(encoding="utf-8", errors="surrogateescape")
-        except Exception:
-            continue
-        for m in re.finditer(r"--(c-[-a-z0-9]+)", text):
-            css_vars.add(m.group(1))
-    for var_name in mix_vars:
-        css_vars.add(f"m-{var_name}")
-
-    wrap_content = "\n".join(f"${v}: var(--{v});" for v in sorted(css_vars)) + "\n"
-    (gen_dir / "_wrap.scss").write_text(wrap_content, encoding="utf-8")
-    setup.append(f"generate {gen_dir.relative_to(source).as_posix()}/_wrap.scss ({len(css_vars)} variables)")
-
     return setup
 
 
@@ -2994,28 +2881,6 @@ def materialize_sass_like_css_partials(source: Path) -> list[str]:
     return setup
 
 
-def normalize_legacy_media_and_spacing(entries: list[Path], source: Path) -> list[str]:
-    """Repair legacy CSS media query spacing that Dart Sass rejects."""
-    setup: list[str] = []
-    pat = re.compile(r"(@media[^\n{;]*\band)\(")
-    touched: list[str] = []
-    for entry in entries:
-        if not entry.is_file() or entry.suffix not in SASS_EXTS:
-            continue
-        try:
-            text = entry.read_text(encoding="utf-8", errors="surrogateescape")
-        except Exception:
-            continue
-        fixed = pat.sub(r"\1 (", text)
-        if fixed == text:
-            continue
-        entry.write_text(fixed, encoding="utf-8", errors="surrogateescape")
-        touched.append(entry.relative_to(source).as_posix())
-    if touched:
-        setup.append(f"normalize media query 'and(' spacing in {', '.join(touched[:5])}")
-    return setup
-
-
 def resolve_relative_sass_import(base: Path, raw: str) -> list[Path]:
     """Resolve a simple relative Sass import/use/forward to candidate files."""
     if not raw.startswith((".", "..")):
@@ -3171,7 +3036,6 @@ def setup_node(entries: list[Path], source: Path) -> tuple[list[Path], list[str]
             load_paths.append(sass_lp)
         nm = pkg / "node_modules"
         if nm.is_dir():
-            setup.extend(repair_common_package_typos(pkg))
             setup.extend(repair_package_source_indexes(nm))
             load_paths.append(nm)
             load_paths.extend(node_module_sass_load_paths(nm))
@@ -3275,19 +3139,34 @@ def write_summary(compat: Path) -> None:
     failures = load_jsonl(compat / "failures.jsonl")
     unresolved = [r for r in failures if r.get("status") != "pass"]
     classified = {r.get("full_name") for r in rows if r.get("full_name")} | {r.get("full_name") for r in unresolved if r.get("full_name")}
+    core_count = core_suite_count(compat.parent)
+    disposable_target = max(COMPAT_TARGET - core_count, 0)
     lines = [
         "# Disposable compatibility summary",
         "",
-        "既存100 suiteは `zig build realworld` の常時対象として固定し、追加分は disposable compatibility として確認後に source repo を削除する。",
+        f"既存{core_count} suiteは `zig build realworld` の常時対象として固定し、追加分は disposable compatibility として確認後に source repo を削除する。",
         "",
-        "- Core realworld suites: 100",
-        f"- Classified disposable repos: {len(classified)} / 900",
-        f"- Detection inventory coverage: {100 + len(classified)} / 1000",
-        f"- Disposable pass suites: {len(rows)} / 900",
-        f"- Total compatibility pass coverage: {100 + len(rows)} / 1000",
+        f"- Core realworld suites: {core_count}",
+        f"- Classified disposable repos: {len(classified)} / {disposable_target}",
+        f"- Detection inventory coverage: {core_count + len(classified)} / {COMPAT_TARGET}",
+        f"- Disposable pass suites: {len(rows)} / {disposable_target}",
+        f"- Total compatibility pass coverage: {core_count + len(rows)} / {COMPAT_TARGET}",
         f"- Unresolved disposable failures: {len(unresolved)}",
         f"- Ignored normalized diff kinds: {', '.join(IGNORED_DIFF_KINDS)}",
         f"- Normalizer version: {NORMALIZER_VERSION}",
+        "",
+        "## Source mix",
+        "",
+        "| Source | Pass | Failure | Entries |",
+        "|---|---:|---:|---:|",
+    ]
+    source_names = sorted({str(r.get("source_kind") or "github") for r in rows + unresolved})
+    for name in source_names:
+        pass_rows = [r for r in rows if str(r.get("source_kind") or "github") == name]
+        fail_rows = [r for r in unresolved if str(r.get("source_kind") or "github") == name]
+        entries = sum(int(r.get("entries_checked") or 0) for r in pass_rows)
+        lines.append(f"| {name} | {len(pass_rows)} | {len(fail_rows)} | {entries} |")
+    lines += [
         "",
         "## Ledger file",
         "",
@@ -3337,9 +3216,22 @@ def write_failure(compat: Path, base: dict[str, Any], failure_class: str, entry:
 def check_repo(args: argparse.Namespace) -> int:
     fixture_root = Path(args.fixture_root).resolve()
     compat, work_root, runs_root = ensure_dirs(fixture_root)
-    full_name = pick_candidate(fixture_root, args.repo)
-    if full_name in imported_core_full_names(fixture_root):
-        raise SystemExit(f"refusing to count existing core realworld suite as disposable: {full_name}")
+    explicit_sources = sum(1 for value in (args.repo, args.repo_url, args.archive_url) if value)
+    if explicit_sources > 1:
+        raise SystemExit("pass only one of --repo, --repo-url, or --archive-url")
+    if args.archive_url:
+        source_full_name = archive_id_from_url(args.archive_url)
+    elif args.repo_url:
+        source_full_name = repo_id_from_url(args.repo_url)
+    else:
+        source_full_name = pick_candidate(fixture_root, args.repo)
+    ensure_repo_allowed(source_full_name)
+    if args.source_id:
+        ensure_repo_allowed(args.source_id)
+    full_name = args.source_id or source_full_name
+    source_core_name = core_full_name_identity(source_full_name)
+    if source_core_name in imported_core_full_names(fixture_root):
+        raise SystemExit(f"refusing to count existing core realworld suite as disposable: {source_full_name}")
     suite = suite_name(full_name)
     run_root = runs_root / suite
     if run_root.exists():
@@ -3354,15 +3246,24 @@ def check_repo(args: argparse.Namespace) -> int:
         "checked_at": utc_now(),
         "full_name": full_name,
         "suite": suite,
-        "repo_url": f"https://github.com/{full_name}",
+        "repo_url": args.repo_url or (None if args.archive_url else f"https://github.com/{source_full_name}"),
+        "archive_url": args.archive_url,
+        "source_kind": source_kind(args),
+        "source_id": args.source_id or full_name,
+        "package_name": args.package_name,
+        "package_version": args.package_version,
         "dart_sass_version": dart_sass_version(),
         "zsass_commit": zsass_commit(),
     }
     source: Path | None = None
     try:
-        source, repo_url, commit = clone_repo(full_name, suite, work_root)
-        base["repo_url"] = repo_url
-        base["repo_commit"] = commit
+        if args.archive_url:
+            source, archive_meta = fetch_archive_source(args.archive_url, suite, work_root)
+            base.update(archive_meta)
+        else:
+            source, repo_url, commit = clone_repo_url(args.repo_url, suite, work_root) if args.repo_url else clone_repo(source_full_name, suite, work_root)
+            base["repo_url"] = repo_url
+            base["repo_commit"] = commit
         entries = discover_entries(source, args.entry)
         entry_overrides = list(args.entry)
         if entry_overrides:
@@ -3375,12 +3276,10 @@ def check_repo(args: argparse.Namespace) -> int:
             write_failure(compat, base, "setup_blocked", "", {}, f"{len(entries)} entries exceeds --max-entries {args.max_entries}; rerun with override")
             return 2
         load_paths, setup, _ = setup_node(entries, source)
-        setup.extend(generate_theme_gen_files(source))
         setup.extend(resolve_vendor_node_modules(source))
         setup.extend(materialize_sass_like_css_partials(source))
         setup.extend(strip_jekyll_front_matter(entries, source))
         setup.extend(resolve_ssg_templates(entries, source))
-        setup.extend(normalize_legacy_media_and_spacing(entries, source))
         base["setup"] = setup
         base["entries_discovered"] = len(entries)
         base["entries_checked"] = len(entries)
@@ -3406,12 +3305,22 @@ def check_repo(args: argparse.Namespace) -> int:
                 log.write_text(zsass_cp.stdout + zsass_cp.stderr, encoding="utf-8", errors="surrogateescape")
                 write_failure(compat, base, "zsass_compile_error", rel, {"zsass": str(log)}, "reduce failure and fix zsass")
                 return 3
-            dart_norm = normalize_css(dart_out.read_text(encoding="utf-8", errors="surrogateescape"))
-            zsass_norm = normalize_css(zsass_out.read_text(encoding="utf-8", errors="surrogateescape"))
-            if dart_norm != zsass_norm:
-                diff = run_root / "logs" / (rel.replace("/", "__") + ".diff")
-                diff.write_text(first_diff(dart_norm, zsass_norm), encoding="utf-8", errors="surrogateescape")
-                write_failure(compat, base, "css_diff", rel, {"diff": str(diff)}, "analyze normalized CSS diff and fix zsass")
+            dart_css = dart_out.read_text(encoding="utf-8", errors="surrogateescape")
+            zsass_css = zsass_out.read_text(encoding="utf-8", errors="surrogateescape")
+            if dart_css != zsass_css:
+                raw_diff = run_root / "logs" / (rel.replace("/", "__") + ".raw.diff")
+                raw_diff.write_text(first_diff(dart_css, zsass_css), encoding="utf-8", errors="surrogateescape")
+                logs = {"raw_diff": str(raw_diff)}
+                dart_norm = normalize_css(dart_css)
+                zsass_norm = normalize_css(zsass_css)
+                if dart_norm == zsass_norm:
+                    logs["normalized_equal"] = "true"
+                    write_failure(compat, base, "css_diff", rel, logs, "raw CSS differs; normalized equality is reporting-only")
+                    return 3
+                norm_diff = run_root / "logs" / (rel.replace("/", "__") + ".normalized.diff")
+                norm_diff.write_text(first_diff(dart_norm, zsass_norm), encoding="utf-8", errors="surrogateescape")
+                logs["normalized_diff"] = str(norm_diff)
+                write_failure(compat, base, "css_diff", rel, logs, "analyze raw CSS diff and fix zsass")
                 return 3
             statuses.append({"entry": rel, "status": "pass"})
         (run_root / "statuses.json").write_text(json.dumps(statuses, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -3423,6 +3332,7 @@ def check_repo(args: argparse.Namespace) -> int:
         rec.update({
             "status": "pass",
             "entries_dart_success": len(entries),
+            "normalized_equal_entries": 0,
             "ignored_diff_kinds": IGNORED_DIFF_KINDS,
             "normalizer_version": NORMALIZER_VERSION,
             "dart_output_tree_sha256": tree_hash(dart_root),
@@ -3456,9 +3366,16 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--fixture-root", default=str(fixture_root_default()))
     ap.add_argument("--repo", help="GitHub repository full name, e.g. owner/repo. Defaults to next fixture candidate.")
+    ap.add_argument("--repo-url", help="Explicit non-GitHub git clone URL to check as disposable compatibility input.")
+    ap.add_argument("--archive-url", help="Explicit zip/tar archive URL to check as disposable compatibility input.")
+    ap.add_argument("--source-id", help="Stable source identifier for archive inputs, e.g. npm/package@1.2.3.")
+    ap.add_argument("--source-kind", help="Source bucket for summary rotation, e.g. npm, wordpress, drupal, gitlab.")
+    ap.add_argument("--package-name", help="Package/theme name for archive inputs.")
+    ap.add_argument("--package-version", help="Package/theme version for archive inputs.")
     ap.add_argument("--entry", action="append", default=[], help="Entry path relative to cloned repo source. Repeatable.")
     ap.add_argument("--max-entries", type=int, default=200, help="Safety cap; use --entry for huge repos.")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Per compiler invocation timeout in seconds.")
+    ap.add_argument("--allow-normalized-pass", action="store_true", help="Deprecated no-op. Raw CSS mismatches always fail; normalized equality is reporting-only.")
     args = ap.parse_args()
     return check_repo(args)
 

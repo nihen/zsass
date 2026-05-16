@@ -229,8 +229,8 @@ fn restoreStringMap(
 // In the old design, 9 to 13 types of StringHashMap were used during `pushScope` / `pushCallableScope`
 // Clone all entries to create a snapshot and replace all with `popScope` (clearRetainingCapacity
 //+ ensureTotalCapacity + put loop) to restore. The amount of calculation is scope depth x each map.
-// In modules that use a large number of `@use ... as *` imports across many entries
-// It was actually hot for a fixture that frequently pushes the nested scope while holding it.
+// In modules that use a large number of `@use ... as *` imports across many entries,
+// nested-scope churn can dominate resolver time while those imports are active.
 //
 // undo log method: push one layer at scope start (entries start from zero),
 // Every time a map mutation occurs within scope, the "state before change (was_present + prev value)"
@@ -917,7 +917,7 @@ const Ctx = struct {
         // while resolving the body, then continue resolving sibling flow-control
         // scopes.  Local slots must not reuse that global frame slot, otherwise
         // a loop variable can overwrite/clear the global fallback value at run
-        // time (for example Bootstrap-style `$enable-important-utilities`).
+        // time.
         while (self.slotIsGlobal(self.next_local_slot)) {
             self.next_local_slot += 1;
         }
@@ -1262,6 +1262,7 @@ const hasMixedIdentifierAliasChars = name_lookup.hasMixedIdentifierAliasChars;
 const lookupConfigVarTargetInsensitive = name_lookup.lookupConfigVarTargetInsensitive;
 const lookupCallableTargetInsensitive = name_lookup.lookupCallableTargetInsensitive;
 const lookupIdentifierIdInsensitive = name_lookup.lookupIdentifierIdInsensitive;
+const lookupIdentifierIdKeyInsensitive = name_lookup.lookupIdentifierIdKeyInsensitive;
 const lookupBoolFlagInsensitive = name_lookup.lookupBoolFlagInsensitive;
 const lookupVoidFlagInsensitive = name_lookup.lookupVoidFlagInsensitive;
 const lookupUseBindingInsensitive = name_lookup.lookupUseBindingInsensitive;
@@ -1334,8 +1335,6 @@ fn cssIdentEquals(name: []const u8, expected_lower: []const u8) bool {
     return true;
 }
 
-// Legacy/eval2 oracle:
-// - src/resolve/prelude.zig:isReservedFunctionName
 fn isReservedFunctionName(name: []const u8) bool {
     const reserved_lowercase = [_][]const u8{ "element", "expression", "url", "and", "or", "not" };
     for (reserved_lowercase) |r| {
@@ -1351,8 +1350,6 @@ fn isReservedFunctionName(name: []const u8) bool {
     return false;
 }
 
-// Legacy/eval2 oracle:
-// - src/eval2_css_special_runtime.zig:cssSpecialBaseName/canonicalizeCssSpecialFunctionName
 fn cssSpecialBaseName(raw_name: []const u8) ?[]const u8 {
     if (raw_name.len == 0) return null;
     if (std.ascii.startsWithIgnoreCase(raw_name, "progid:")) return "progid";
@@ -1551,6 +1548,9 @@ fn nodeContainsCalcArgOpaqueCssFunction(ast: *const ast_flat.Ast, ctx: *Ctx, nod
 
 fn resolveCalcArgInterpPart(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex, span: Span) ResolveError!ExprIndex {
     const n = ast.getNode(node);
+    if (extractCalcArgStaticNumberInfo(ast, ctx, node)) |num| {
+        return try appendNumberLiteral(ctx.prog, ctx.a, num.value, num.unit_id, span);
+    }
     if (nodeContainsCalcArgOpaqueCssFunction(ast, ctx, node) and
         !calcArgNodeNeedsRuntimeInterpolation(ast, node) and
         n.span_start <= n.span_end and n.span_end <= ast.source.len)
@@ -1615,7 +1615,7 @@ fn parseWithConfigEntries(ctx: *Ctx, config_extra: ExtraIndex) ResolveError![]Wi
 }
 
 fn updateTopLevelStaticConfigValue(ctx: *Ctx, slot: SlotId, value_expr: ExprIndex) ResolveError!void {
-    var env: ResolverEvalEnv = .{ .ctx = ctx };
+    var env: ResolverEvalEnv = .{ .ctx = ctx, .allow_configurable_defaults = true };
     const value = resolver_eval.eval(&env, ctx.prog, value_expr) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
@@ -2404,9 +2404,8 @@ fn mergeStarUserModule(ctx: *Ctx, module_id: u32) !void {
 
     // When merging the first module into an empty map, all entries are definitely unregistered, so
     // You can completely skip dedupe's `lookupCallableTargetInsensitive` (variant scan).
-    // In legacy `@import` chains observed in real-world fixtures, the number of
-    // mixins/functions per module is large enough that duplicate checks
-    // accounted for 5.86% of the profile.
+    // Large legacy `@import` chains can have enough mixins/functions per module
+    // that duplicate checks dominate this merge path.
     const vars_fast = ctx.star_vars.count() == 0;
     const mixins_fast = ctx.star_mixins.count() == 0;
     const functions_fast = ctx.star_functions.count() == 0;
@@ -2569,7 +2568,7 @@ fn rebindUnassignedGlobalVarRefsToCrossTarget(
 
 /// Expose `@forward` reached via `@import` to importer scope.
 /// Inject the name after prefix/show/hide is applied to the same star map as `@use ... as *`.
-fn mergeForwardRuleIntoImportScope(ctx: *Ctx, fr: ForwardRuleResolved) ResolveError!void {
+fn mergeForwardRuleIntoImportScope(ctx: *Ctx, fr: ForwardRuleResolved, remove_local_callables: bool) ResolveError!void {
     ctx.markScopeRestoreDirty();
     switch (fr.target) {
         .builtin_module => |module_name| {
@@ -2630,6 +2629,12 @@ fn mergeForwardRuleIntoImportScope(ctx: *Ctx, fr: ForwardRuleResolved) ResolveEr
                 const name = entry.key_ptr.*;
                 const out_name = try withForwardPrefix(ctx.prog, fr.prefix, name);
                 if (!forwardAllowsPlain(out_name, fr.show, fr.hide)) continue;
+                if (remove_local_callables) {
+                    if (lookupIdentifierIdKeyInsensitive(&ctx.prog.mixin_names, out_name)) |local_name| {
+                        try ctx.recordMapMut(ctx.a, .prog_mixin_names, local_name);
+                        _ = ctx.prog.mixin_names.remove(local_name);
+                    }
+                }
                 if (lookupStarMixinMapInsensitive(ctx, out_name)) |existing| {
                     if (existing.module_id == entry.value_ptr.*.module_id and existing.id == entry.value_ptr.*.id) {
                         continue;
@@ -2652,6 +2657,12 @@ fn mergeForwardRuleIntoImportScope(ctx: *Ctx, fr: ForwardRuleResolved) ResolveEr
                 const name = entry.key_ptr.*;
                 const out_name = try withForwardPrefix(ctx.prog, fr.prefix, name);
                 if (!forwardAllowsPlain(out_name, fr.show, fr.hide)) continue;
+                if (remove_local_callables) {
+                    if (lookupIdentifierIdKeyInsensitive(&ctx.prog.function_names, out_name)) |local_name| {
+                        try ctx.recordMapMut(ctx.a, .prog_function_names, local_name);
+                        _ = ctx.prog.function_names.remove(local_name);
+                    }
+                }
                 if (lookupStarFunctionMapInsensitive(ctx, out_name)) |existing| {
                     if (existing.module_id == entry.value_ptr.*.module_id and existing.id == entry.value_ptr.*.id) {
                         continue;
@@ -3527,7 +3538,12 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
         };
         switch (binding) {
             .builtin_module => |mod| {
-                const bid = builtin_mod.resolve(mod, name_slice) orelse return error.UnknownFunctionInBuiltinNs;
+                const bid = builtin_mod.resolve(mod, name_slice) orelse {
+                    if (ctx.in_callable and !ctx.resolving_callable_default) {
+                        return try appendSassErrorExpr(ctx, span);
+                    }
+                    return error.UnknownFunctionInBuiltinNs;
+                };
                 try ensureMetaModuleLoadedForIntrospection(ctx, bid, arg_buf.items, arg_name_buf.items);
                 if (try tryFoldMetaBuiltinExists(ctx, bid, arg_buf.items, arg_name_buf.items, span)) |folded| {
                     return folded;
@@ -3701,8 +3717,9 @@ fn resolveExpr(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ResolveErro
     const span = Span{ .start = n.span_start, .end = n.span_end };
     // CLI-FIX-E Step 2: When an error occurs, record the most recent expr span in thread-local.
     // The span of the innermost frame (= closest to the actual error location) remains (via recordErrorSpanIfUnset).
-    // file_id is 0 hardcode of entry. resolver error in imported module is the same source path as entry
-    // frame is drawn, but dart compatibility is ensured by the VM path (current_source_span.file_id).
+    // Resolver-only diagnostics do not yet carry the module file id here, so
+    // this fallback records the entry span. Runtime errors use the VM
+    // current_source_span.file_id path for module-specific frames.
     errdefer |err| {
         error_format.recordErrorSpanIfUnset(span.start, span.end, 0);
         error_format.recordErrorTag(err);
@@ -4304,7 +4321,7 @@ fn sourceSliceHasTopLevelComma(text: []const u8) bool {
 /// Requirements quick check for `sourceSpanLooksLikeBareMultilineComma`. declaration value
 /// If raw text does not contain `,`, the end of the declaration start line cannot also be `,`
 /// (Even in the `b: c,\n d` form of sass syntax, the value span is `c,...d` and includes `,`).
-/// You can skip all line scans by confirming false. chatwoot etc. plain CSS heavy type
+/// You can skip all line scans by confirming false for plain CSS-heavy inputs.
 /// Aim for hot where `sourceSpanLooksLikeBareMultilineComma` accounted for perf flat 15%.
 fn rawValueLooksLikeTrailingCommaCandidate(raw_val: []const u8) bool {
     return std.mem.indexOfScalar(u8, raw_val, ',') != null;
@@ -4346,6 +4363,16 @@ fn declarationSourceHasHorizontalWhitespaceAfterColon(text: []const u8, span: Sp
     const colon = css_utils.findDeclarationColon(slice) orelse return false;
     const next = colon + 1;
     return next < slice.len and (slice[next] == ' ' or slice[next] == '\t');
+}
+
+fn declarationSourceHasWhitespaceAfterColon(text: []const u8, span: Span) bool {
+    const start: usize = @min(@as(usize, @intCast(span.start)), text.len);
+    const end: usize = @min(@as(usize, @intCast(span.end)), text.len);
+    if (end <= start) return false;
+    const slice = text[start..end];
+    const colon = css_utils.findDeclarationColon(slice) orelse return false;
+    const next = colon + 1;
+    return next < slice.len and std.ascii.isWhitespace(slice[next]);
 }
 
 fn appendListExprFromElems(
@@ -4755,7 +4782,7 @@ fn preservedCalcSlashInterpolationLiteral(ctx: *Ctx, text: []const u8) ResolveEr
 /// Split an interpolated `calc()` argument like `appendInterpolationParts()`,
 /// but let complete literal-only multiplicative terms simplify before runtime
 /// interpolation concatenates the pieces. This keeps the existing calc marker
-/// boundary while matching Dart Sass for `calc(#{$x} + 4px * 2)` without
+/// boundary while matching official Sass CLI for `calc(#{$x} + 4px * 2)` without
 /// simplifying `calc(#{$x} * 2)`.
 fn appendCalcInterpolationParts(ctx: *Ctx, text: []const u8, span: Span, out: *std.ArrayListUnmanaged(ExprIndex)) ResolveError!void {
     var i: usize = 0;
@@ -6155,7 +6182,11 @@ fn resolveCssSpecialCallExprFromSourceText(ctx: *Ctx, raw_text: []const u8, span
     }
 
     if (url_eval_mode == .structured) {
-        const inner_expr = parseSubExpr(ctx, normalized_inner, span) catch blk: {
+        const inner_expr = parseSubExpr(ctx, normalized_inner, span) catch |err| blk: {
+            if (cssIdentEquals(base, "url")) switch (err) {
+                error.UnknownVar => return error.UnknownVar,
+                else => {},
+            };
             const normalized_text = try std.fmt.allocPrint(ctx.a, "{s}({s})", .{ canonical_name, normalized_inner });
             defer ctx.a.free(normalized_text);
             break :blk try resolveInterpolatedTextExpr(ctx, normalized_text, span, true);
@@ -7652,13 +7683,12 @@ fn resolveCommentStmt(ctx: *Ctx, span: Span) ResolveError!StmtIndex {
             }
             break :blk false;
         };
-        // Z23-HOVER-DIFF: `@include foo(...); trailing of /* c */` (without content block)
-        // comment is not attached inline to the final decl of mixin body (dart-sass behavior. hover
-        // `_float-shadow.scss` `@include prefixed(transform, translateY(-5px));
-        // observed in /* move the element up by 5px */`). The output of the mixin body is the output of the caller
-        // Since it comes from a different source position than the @include line, the inline appendage takes the proximity on source to
-        // Misrepresent. `@include foo { body } /* c */` with content block means that body is caller
-        // It is not affected because it is derived from source, and is included in the final decl as before (dart-sass match).
+        // For `@include foo(...); /* c */` without a content block, the
+        // trailing comment belongs to the include site, not the final
+        // declaration emitted by the mixin body. The mixin body has a different
+        // source position, so treating the comment as same-line would attach it
+        // to the wrong output. Includes with content blocks keep the comment
+        // behavior of caller-authored declarations.
         if (leading_same_line and ctx.prog.stmts.items.len > 0) {
             const prev_stmt = ctx.prog.stmts.items[ctx.prog.stmts.items.len - 1];
             if (prev_stmt.kind == .include) {
@@ -7790,7 +7820,7 @@ fn resolvePlainCssDeclarationStmtFast(
     }
     // `sourceSpanLooksLikeBareMultilineComma` scans span line in reverse/order direction
     // Heavy functions to do. A typical plain CSS declaration does not have trailing `,`, so
-    // Check the end of raw_val and confirm if it is false, skip all (aiming for chatwoot perf flat 15%).
+    // Check raw_val first; if it has no comma, skip the more expensive source scan.
     if (rawValueLooksLikeTrailingCommaCandidate(raw_val) and
         sourceSpanLooksLikeBareMultilineComma(ctx.ast.source, span))
     {
@@ -7920,7 +7950,7 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
     else if (in_plain_css_module) blk: {
         const raw_val = value_source;
         const raw_id = if (plain_css_is_custom_property) id: {
-            // dart-sass uses plain CSS custom property (`--foo:`) value
+            // official Sass CLI uses plain CSS custom property (`--foo:`) value
             // retain verbatim (slash compaction / leading-zero / hex color expansion
             // Neither applies).
             break :id try ctx.pool.intern(raw_val);
@@ -7973,9 +8003,11 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
         const prop_source = exprNodeSourceText(ctx.ast, prop_n) orelse "";
         break :blk std.mem.startsWith(u8, std.mem.trim(u8, prop_source, " \t\r\n"), "--");
     };
-    if ((prop_source_is_custom or pd.prop_kind == .dynamic) and
-        declarationSourceHasHorizontalWhitespaceAfterColon(ctx.ast.source, span))
-    {
+    const custom_source_has_leading_space = if (pd.prop_kind == .dynamic)
+        declarationSourceHasWhitespaceAfterColon(ctx.ast.source, span)
+    else
+        declarationSourceHasHorizontalWhitespaceAfterColon(ctx.ast.source, span);
+    if ((prop_source_is_custom or pd.prop_kind == .dynamic) and custom_source_has_leading_space) {
         emit_decl_flags |= opcode_mod.emit_decl_flag_custom_property_leading_space;
     }
     const raw_value_source_intern: InternId = if (prop_source_is_custom and
@@ -8973,7 +9005,7 @@ fn resolveIncludeStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex 
         } else if (ctx.in_callable or ctx.flow_control_depth > 0) {
             // The include may be skipped at runtime when it lives in flow
             // control (for example `@each { @if $flag { @include missing; } }`).
-            // Dart Sass reports an unknown mixin only if the branch executes, so
+            // official Sass CLI reports an unknown mixin only if the branch executes, so
             // keep a provisional local id and let the compiler emit a runtime
             // error at the include site instead of failing resolution eagerly.
             // Callable bodies need the same late binding because later imports
@@ -9635,7 +9667,7 @@ fn appendResolvedRootStmt(
     if (merge_import_forwards and n.tag == .stmt_forward and ctx.forward_rules.items.len > forward_before) {
         var fi: usize = forward_before;
         while (fi < ctx.forward_rules.items.len) : (fi += 1) {
-            try mergeForwardRuleIntoImportScope(ctx, ctx.forward_rules.items[fi]);
+            try mergeForwardRuleIntoImportScope(ctx, ctx.forward_rules.items[fi], true);
         }
     }
     if (ctx.pending_extra_top.items.len > 0) {
@@ -10960,6 +10992,12 @@ test "resolver: vendor-prefixed css special call with unknown var compiles as li
     const decl = pr.decl_stmts.items[0];
     const ex = pr.exprs.items[decl.value_expr];
     try std.testing.expectEqual(ExprKind.literal_string, ex.kind);
+}
+
+test "resolver: vendor-prefixed url with unknown var errors" {
+    try std.testing.expectError(error.UnknownVar, parseAndResolve(std.testing.allocator,
+        \\a { b: -c-url($d); }
+    ));
 }
 
 test "resolver: custom css @function body keeps unknown var literal" {

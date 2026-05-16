@@ -142,7 +142,7 @@ pub const Parser = struct {
     }
 
     /// CLI-FIX-E Step 2b: Call from errdefer and return "the span of the token that was most recently processed".
-    /// The case that reaches the EOF token (= the end of source) is compatible with dart-sass and is "before the newline at the end of source"
+    /// The case that reaches the EOF token (= the end of source) is compatible with official Sass CLI and is "before the newline at the end of source"
     // Returns /// as a point (= the position of "I read this far but there is no }").
     fn currentTokenSpan(self: *const Parser) Span {
         if (self.tokens.len == 0) {
@@ -153,7 +153,7 @@ pub const Parser = struct {
         const tok = self.tokens[idx];
         if (tok.tag == .eof) {
             // Skip the trailing newline (\n / \r) and return the position at the end of the previous line as point.
-            // Because dart-sass's `expected "}"` outputs the col just before the line break as 1-indexed.
+            // Because official Sass CLI's `expected "}"` outputs the col just before the line break as 1-indexed.
             var p = tok.span.start;
             while (p > 0) {
                 const c = self.source[p - 1];
@@ -393,7 +393,7 @@ pub const Parser = struct {
         // paren/bracket tracking + first `{`/`;`/`}` at depth zero. This
         // skips per-token `hash_lbrace`/`rbrace`-interp pair tracking and the
         // indented-syntax deep-line `{` check, both of which are dead code
-        // for plain CSS / interp-free SCSS sources (chatwoot vendored .css).
+        // for plain CSS / interp-free SCSS sources.
         if (self.no_interpolation and !self.is_indented_syntax) {
             var scan_fp = self.pos;
             var depth_fp: u32 = 0;
@@ -490,9 +490,8 @@ pub const Parser = struct {
         // style rule (`selector` + nested body).
         const saved_pos = self.pos;
         // In indented syntax, a top-level `:` with no following whitespace is
-        // a selector-ish header (`baz:bam`, `&:hover`, `::before`) rather than
-        // a property declaration.  Preserve the legacy oracle behavior here so
-        // `.sass` inputs like libsass issue_1578 parse as nested selectors
+        // a selector-like header (`baz:bam`, `&:hover`, `::before`) rather
+        // than a property declaration, so parse it as a nested style rule
         // before declaration parsing can incorrectly succeed.
         if (self.shouldFallbackIndentedStyleRuleOnHardDeclError(saved_pos)) {
             return self.parseIndentedStyleRule(ast);
@@ -1363,7 +1362,7 @@ pub const Parser = struct {
                 self.pos = saved_pos;
             },
             // HardSyntaxError must propagate -- these are constructs
-            // (e.g. `ns.member`, `$.foo`, `ns.$_priv`) where dart-sass
+            // (e.g. `ns.member`, `$.foo`, `ns.$_priv`) where official Sass CLI
             // rejects rather than treating as raw CSS.
             error.HardSyntaxError => return error.SyntaxError,
             else => return err,
@@ -2905,7 +2904,7 @@ pub const Parser = struct {
             // legitimate way for an `@include` to end implicitly is at
             // the end of file or just before the `}` that closes the
             // enclosing block -- match those, but reject things like
-            // `@include mixin() () {}` (extra paren) which dart-sass
+            // `@include mixin() () {}` (extra paren) which official Sass CLI
             // rejects with `expected ";"`.
             if (self.is_indented_syntax) {
                 // In indented syntax, the statement ends implicitly at a
@@ -5925,7 +5924,7 @@ pub const Parser = struct {
             // Comments between operands behave as whitespace for operator
             // parsing -- `c/**/-(d)` parses as binary subtract just like
             // `c -(d)` does.  Block comments survive only when they sit
-            // outside an expression; inside, dart-sass collapses them to
+            // outside an expression; inside, official Sass CLI collapses them to
             // a single space which has no semantic effect on operator
             // recognition.  See `operators/minus.hrx::syntax/comment/*`.
             self.skipWhitespaceAndComments();
@@ -6029,7 +6028,7 @@ pub const Parser = struct {
             // it as binary `+` on the current left.
             //
             // The `+` sign also folds when the *previous* token is whitespace
-            // (i.e. `A +B`) -- dart-sass parses this as binary `+` and emits a
+            // (i.e. `A +B`) -- official Sass CLI parses this as binary `+` and emits a
             // strict-unary deprecation.  The `-` sign does NOT fold across
             // whitespace: `A -B` is a space-list of `A` and the unary-negated
             // `-B`, which is the historically correct behaviour.
@@ -6249,7 +6248,7 @@ pub const Parser = struct {
             // start of a number literal (e.g. `.5`), and the lexer emits
             // `.number` for that case.  A bare `.dot` is otherwise
             // ambiguous -- it could be the leading dot of a no-namespace
-            // member call (`.member()` -- ill-formed Sass that dart-sass
+            // member call (`.member()` -- ill-formed Sass that official Sass CLI
             // rejects with `Expected digit.`), or it could be a CSS-ish
             // construct like `url(../test.png)` that the surrounding
             // declaration-value capture path can recover via raw text.
@@ -6282,7 +6281,7 @@ pub const Parser = struct {
     /// When a primary atom is followed (with no intervening whitespace)
     /// by another schema-eligible token -- `ident`, `number`, or
     /// `#{...}` interpolation -- fold the run into a single
-    /// `expr_string_interp` (unquoted) node.  This matches dart-sass
+    /// `expr_string_interp` (unquoted) node.  This matches official Sass CLI
     /// behaviour for cases like `lschema_#{ritlp}` (ident + adjacent
     /// interp) and `#{1}0` (interp + adjacent number) which together
     /// form a single string-schema value.
@@ -6615,7 +6614,7 @@ pub const Parser = struct {
                 // right operands, not schema continuations.  Letting
                 // them attach here turns `#{10}+1#{0}` into a raw
                 // `#{10}+1#{0}` unquoted-ident, which loses the
-                // binary-add semantics (dart-sass evaluates `#{10}+1`
+                // binary-add semantics (official Sass CLI evaluates `#{10}+1`
                 // as string concat  ->  `"101"`). Bail and let the
                 // outer Pratt loop pick the sign up as implicit add /
                 // sub.  The lexer preserves the sign inside the number
@@ -6920,7 +6919,7 @@ pub const Parser = struct {
             if (self.isAtEnd() or self.current().tag != .rparen) {
                 // `(a, b: c)` -- once we have committed to a comma list
                 // (i.e. saw a comma), subsequent `:` cannot retroactively
-                // turn this into a map.  dart-sass: "expected ')'.".
+                // turn this into a map.  official Sass CLI: "expected ')'.".
                 // Hard error: do not let the declaration-value fallback
                 // swallow this as a raw CSS value.
                 if (!self.isAtEnd() and self.current().tag == .colon) {
@@ -7091,7 +7090,7 @@ pub const Parser = struct {
         // CSS custom property names (`--foo`) and SCSS dash-only idents
         // (`---`) are NOT valid number units -- `1--em` parses as the
         // space-list `1 --em`, not as a number with unit `--em`.
-        // dart-sass excludes idents that start with `--` from the
+        // official Sass CLI excludes idents that start with `--` from the
         // unit slot here.  See `libsass-closed-issues/issue_1526.hrx`.
         var unit_id: InternId = .none;
         var end: u32 = num_tok.span.end;
@@ -7383,7 +7382,7 @@ pub const Parser = struct {
     ///   3. `ident . dollar_ident` -- namespaced variable. Bare `$` and
     ///      private (`_`-prefixed) members are syntax errors.
     ///   4. `ident . ident (` -- namespaced function call.
-    ///   5. `ident . <other>` -- syntax error (dart-sass: "expected '('"
+    ///   5. `ident . <other>` -- syntax error (official Sass CLI: "expected '('"
     ///      or "Expected identifier", depending on what follows the dot).
     ///   6. plain `expr_unquoted_ident` (with adjacent-token folding).
     ///
@@ -7555,7 +7554,7 @@ pub const Parser = struct {
                     //     `expr_unquoted_ident` covering the full span
                     //     so CSS-like values keep working.
                     //   * At top-level value position -- this is a
-                    //     malformed Sass namespace reference (dart-sass
+                    //     malformed Sass namespace reference (official Sass CLI
                     //     reports `expected "("`). Hard error so the
                     //     declaration text node path does not absorb it.
                     if (self.call_arg_depth == 0) {
@@ -8281,7 +8280,7 @@ pub const Parser = struct {
         const text = tok.slice(self.source);
         std.debug.assert(text.len >= 1 and text[0] == '$');
         // Bare `$` (no identifier body, e.g. `$.member` or `$,`) is a
-        // syntax error -- dart-sass reports "Expected identifier".
+        // syntax error -- official Sass CLI reports "Expected identifier".
         // Hard error: must NOT fall back to raw declaration capture.
         if (text.len == 1) return error.HardSyntaxError;
         self.advance();
@@ -9592,7 +9591,7 @@ test "parseIdent: ns.name without parens is a HardSyntaxError at top level" {
     defer pool.deinit(alloc);
 
     // A bare `ns.name` at top-level value position is ill-formed Sass
-    // (dart-sass reports `expected "("`). Parser must reject it hard so
+    // (official Sass CLI reports `expected "("`). Parser must reject it hard so
     // the declaration-value fallback does not swallow it as raw text.
     try std.testing.expectError(error.HardSyntaxError, parseOneExpr(alloc, &pool, "abc.def"));
 }
@@ -12415,7 +12414,7 @@ test "parse: indented unquoted tilde @import" {
     var pool = try InternPool.init(alloc);
     defer pool.deinit(alloc);
 
-    var result = try parseFullSourceWithSyntax(alloc, &pool, "@import ~bourbon/app/assets/stylesheets/bourbon", true);
+    var result = try parseFullSourceWithSyntax(alloc, &pool, "@import ~pkg/app/styles/main", true);
     defer result.ast.deinit();
 
     try std.testing.expectEqual(@as(u32, 1), rootChildCount(&result.ast));
