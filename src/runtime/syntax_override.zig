@@ -1,7 +1,7 @@
 /// Per-call source-syntax override shared across the parse / resolve / VM
 /// layers. The CLI's `--indented` / `--no-indented` / `--scss` /
 /// `--plain-css` flags push a non-null value here for the duration of one
-/// compile; null means "infer from the entry path" (the dart-sass default:
+/// compile; null means "infer from the entry path" (the official Sass CLI default:
 /// `.sass` -> indented, `.css` -> plain CSS, otherwise SCSS).
 ///
 /// The override lives in this small standalone module so that both

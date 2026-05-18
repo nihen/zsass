@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
-"""Exit 0 when two CSS files are equal after compat-disposable normalization."""
+"""Report whether two CSS files are equal before and after diagnostic normalization."""
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import sys
 from pathlib import Path
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        print("usage: css_normalized_equal.py EXPECTED ACTUAL", file=sys.stderr)
-        return 2
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--allow-normalized-pass",
+        action="store_true",
+        help="Deprecated no-op. Raw CSS differences always exit nonzero; normalization is diagnostic-only.",
+    )
+    parser.add_argument("expected")
+    parser.add_argument("actual")
+    args = parser.parse_args()
 
     script_dir = Path(__file__).resolve().parent
     compat_path = script_dir / "compat_disposable.py"
@@ -22,9 +29,14 @@ def main() -> int:
     compat = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(compat)
 
-    expected = Path(sys.argv[1]).read_text(encoding="utf-8", errors="surrogateescape")
-    actual = Path(sys.argv[2]).read_text(encoding="utf-8", errors="surrogateescape")
-    return 0 if compat.normalize_css(expected) == compat.normalize_css(actual) else 1
+    expected = Path(args.expected).read_text(encoding="utf-8", errors="surrogateescape")
+    actual = Path(args.actual).read_text(encoding="utf-8", errors="surrogateescape")
+    if expected == actual:
+        return 0
+    if compat.normalize_css(expected) != compat.normalize_css(actual):
+        return 1
+    print("normalized_equal: raw CSS differs", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":

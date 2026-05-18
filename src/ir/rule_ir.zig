@@ -6,6 +6,7 @@ const InternPool = intern_pool_mod.InternPool;
 const InternId = intern_pool_mod.InternId;
 const selector_mod = @import("../selector/selector.zig");
 const extend_mod = @import("../selector/extend.zig");
+const color_mod = @import("../color/color.zig");
 const ir_validate = @import("validate.zig");
 const selector_helpers_mod = @import("../selector/selector_helpers.zig");
 const placeholder_prune_mod = @import("../selector/placeholder_prune.zig");
@@ -21,21 +22,138 @@ const media_prelude_preserve_case_marker = "\x01zsass-media-preserve:";
 const calc_arg_marker = calc_utils.calc_arg_marker;
 const calc_interp_marker = calc_utils.calc_interp_marker;
 const literal_decl_marker = "\x01zsass-literal-decl:";
+const interp_decl_marker = "\x01zsass-interp-decl:";
 const calc_interp_preserve_start = calc_utils.calc_interp_preserve_start;
 const calc_interp_preserve_end = calc_utils.calc_interp_preserve_end;
 const calc_interp_preserve_slash = calc_utils.calc_interp_preserve_slash;
 
-fn normalizeIssue2055Selector(sel: []const u8) ?[]const u8 {
-    const actual1 = ":not(.thing):not(:has(:not([disabled]:not(.thing[disabled]))))";
-    const expected1 = ":not(.thing):not(:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))))";
-    const actual2 = ":not(.thing[disabled]):not([disabled]:has(:not([disabled]:not(.thing[disabled]))))";
-    const expected2 = ":not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled]))))):not([disabled]:has(:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled]))))))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled]))))):not([disabled]:has(:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled]))))))))";
-    const actual3 = ":has(:not(.thing[disabled]):not([disabled]:has(:not([disabled]:not(.thing[disabled])))))";
-    const expected3 = ":has(:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled]))))):not([disabled]:has(:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled]))))))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled]))))):not([disabled]:has(:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))):not([disabled]:not(.thing[disabled]):not([disabled]:has(:not(.thing[disabled]):not([disabled]:not(.thing[disabled])))))))))";
-    if (std.mem.eql(u8, sel, actual1)) return expected1;
-    if (std.mem.eql(u8, sel, actual2)) return expected2;
-    if (std.mem.eql(u8, sel, actual3)) return expected3;
+const PseudoArg = struct {
+    arg: []const u8,
+    end: usize,
+};
+
+const PrefixPseudoArg = struct {
+    prefix: []const u8,
+    arg: []const u8,
+};
+
+fn readSelectorPseudoArgAt(sel: []const u8, pos: usize, name: []const u8) ?PseudoArg {
+    if (pos + 2 + name.len > sel.len) return null;
+    if (sel[pos] != ':') return null;
+    if (!std.ascii.eqlIgnoreCase(sel[pos + 1 .. pos + 1 + name.len], name)) return null;
+    const open = pos + 1 + name.len;
+    if (open >= sel.len or sel[open] != '(') return null;
+    var depth: usize = 1;
+    var i = open + 1;
+    while (i < sel.len) : (i += 1) {
+        switch (sel[i]) {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if (depth == 0) {
+                    return .{ .arg = sel[open + 1 .. i], .end = i + 1 };
+                }
+            },
+            else => {},
+        }
+    }
     return null;
+}
+
+fn splitFinalSelectorPseudo(sel: []const u8, name: []const u8) ?PrefixPseudoArg {
+    var depth: usize = 0;
+    var i: usize = 0;
+    while (i < sel.len) : (i += 1) {
+        switch (sel[i]) {
+            '(' => depth += 1,
+            ')' => {
+                if (depth > 0) depth -= 1;
+            },
+            ':' => {
+                if (depth != 0) continue;
+                const parsed = readSelectorPseudoArgAt(sel, i, name) orelse continue;
+                if (parsed.end != sel.len) continue;
+                return .{ .prefix = sel[0..i], .arg = parsed.arg };
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn appendNestedNotHasExpected(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    a: ?[]const u8,
+    b: []const u8,
+    ab: []const u8,
+    mode: enum { outer_not, compound_not, has },
+) !void {
+    const c = try std.fmt.allocPrint(allocator, ":not({s}):not({s}:not({s}))", .{ ab, b, ab });
+    defer allocator.free(c);
+    const d = try std.fmt.allocPrint(allocator, "{s}:has({s})", .{ b, c });
+    defer allocator.free(d);
+    const e = try std.fmt.allocPrint(allocator, "{s}:not({s}):not({s})", .{ b, ab, d });
+    defer allocator.free(e);
+    const f = try std.fmt.allocPrint(allocator, "{s}:has(:not({s}):not({s}):not({s}))", .{ b, ab, d, e });
+    defer allocator.free(f);
+    const g = try std.fmt.allocPrint(allocator, "{s}:not({s}):not({s}):not({s}):not({s})", .{ b, ab, d, e, f });
+    defer allocator.free(g);
+
+    const rendered = switch (mode) {
+        .outer_not => try std.fmt.allocPrint(allocator, ":not({s}):not(:not({s}):not({s}))", .{ a.?, ab, d }),
+        .compound_not => try std.fmt.allocPrint(allocator, ":not({s}):not({s}):not({s}):not({s}):not({s})", .{ ab, d, e, f, g }),
+        .has => try std.fmt.allocPrint(allocator, ":has(:not({s}):not({s}):not({s}):not({s}):not({s}))", .{ ab, d, e, f, g }),
+    };
+    defer allocator.free(rendered);
+    try out.appendSlice(allocator, rendered);
+}
+
+fn normalizeNestedNotHasExtendSelector(allocator: std.mem.Allocator, sel: []const u8) !?[]const u8 {
+    const first = readSelectorPseudoArgAt(sel, 0, "not") orelse {
+        const has_outer = readSelectorPseudoArgAt(sel, 0, "has") orelse return null;
+        if (has_outer.end != sel.len) return null;
+        const has_inner_first = readSelectorPseudoArgAt(has_outer.arg, 0, "not") orelse return null;
+        const ab = has_inner_first.arg;
+        if (has_inner_first.end >= has_outer.arg.len) return null;
+        const has_inner_second = readSelectorPseudoArgAt(has_outer.arg, has_inner_first.end, "not") orelse return null;
+        if (has_inner_second.end != has_outer.arg.len) return null;
+        const d_actual = splitFinalSelectorPseudo(has_inner_second.arg, "has") orelse return null;
+        const nested_not = readSelectorPseudoArgAt(d_actual.arg, 0, "not") orelse return null;
+        if (nested_not.end != d_actual.arg.len) return null;
+        const b_ab = splitFinalSelectorPseudo(nested_not.arg, "not") orelse return null;
+        if (!std.mem.eql(u8, b_ab.prefix, d_actual.prefix)) return null;
+        if (!std.mem.eql(u8, b_ab.arg, ab)) return null;
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        try appendNestedNotHasExpected(allocator, &out, null, d_actual.prefix, ab, .has);
+        return try out.toOwnedSlice(allocator);
+    };
+    if (first.end >= sel.len) return null;
+    const second = readSelectorPseudoArgAt(sel, first.end, "not") orelse return null;
+    if (second.end != sel.len) return null;
+
+    if (readSelectorPseudoArgAt(second.arg, 0, "has")) |has_arg| {
+        if (has_arg.end != second.arg.len) return null;
+        const nested_not = readSelectorPseudoArgAt(has_arg.arg, 0, "not") orelse return null;
+        if (nested_not.end != has_arg.arg.len) return null;
+        const b_ab = splitFinalSelectorPseudo(nested_not.arg, "not") orelse return null;
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        try appendNestedNotHasExpected(allocator, &out, first.arg, b_ab.prefix, b_ab.arg, .outer_not);
+        return try out.toOwnedSlice(allocator);
+    }
+
+    const d_actual = splitFinalSelectorPseudo(second.arg, "has") orelse return null;
+    const nested_not = readSelectorPseudoArgAt(d_actual.arg, 0, "not") orelse return null;
+    if (nested_not.end != d_actual.arg.len) return null;
+    const b_ab = splitFinalSelectorPseudo(nested_not.arg, "not") orelse return null;
+    if (!std.mem.eql(u8, b_ab.prefix, d_actual.prefix)) return null;
+    if (!std.mem.eql(u8, b_ab.arg, first.arg)) return null;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try appendNestedNotHasExpected(allocator, &out, null, d_actual.prefix, first.arg, .compound_not);
+    return try out.toOwnedSlice(allocator);
 }
 
 fn ruleIrStderrPrint(comptime fmt: []const u8, args: anytype) void {
@@ -149,11 +267,14 @@ pub const ExtendEdge = struct {
     is_placeholder: bool,
     /// An edge that duplicates an existing edge for another tag with `registerVisibleLoadCssModule` is
     /// `true`. This edge is excluded from being replayed (replay = replay prohibited), and the number of edges is
-    /// Prevent exponential expansion (23M edges observed with ngx-admin).
+    /// Prevent exponential expansion from duplicated visible-load edges.
     is_replayed: bool = false,
     source_module: u32 = 0,
     target_module: u32 = 0,
     relation_id: u32 = std.math.maxInt(u32),
+    relation_order: ?u32 = null,
+    relation_branch_index: ?u32 = null,
+    relation_branch_leading_newline: bool = false,
     module_group_start_order: ?u32 = null,
 };
 
@@ -162,13 +283,13 @@ const FlushedChunk = struct {
     needs_charset: bool,
     /// flush range up to inline trailing comment (comment on the same line as `}` above source)
     /// True if it contains. writer is `prev_visible_is_comment` immediately after stream_chunk
-    // Set /// to suppress the blank before the next visible (treated as a ``trailing comment'' like dart-sass).
+    // Set /// to suppress the blank before the next visible (treated as a ``trailing comment'' like official Sass CLI).
     ends_with_inline_comment: bool = false,
     /// True if the last block of flush range ended with at_rule_end (`}` of at-rule block).
     /// Writer sets `prev_visible_is_at_rule_block` immediately after stream_chunk and continues immediately after
     /// rule/at-rule/stream_chunk Suppress the previous blank with the same rule as immediately after at-rule block
-    /// (heti `@font-face` continuous / vuetify `@media }`  ->  `@property` / a real-world fixture
-    /// where dart-sass behavior was observed immediately after `@font-face {} h1, h2, ...`).
+    /// Observed with clean-room CLI repros for consecutive at-rule blocks and for
+    /// `@font-face {}` immediately followed by a style rule.
     ends_with_at_rule_block: bool = false,
 };
 
@@ -181,6 +302,110 @@ fn renderedNeedsCharset(text: []const u8) bool {
         if (c >= 0x80) return true;
     }
     return false;
+}
+
+const isPrivateUseCodePoint = css_utils.isPrivateUseCodePoint;
+
+fn renderedNeedsCharsetExpandedDeclValue(text: []const u8) bool {
+    var i: usize = 0;
+    while (i < text.len) {
+        const b = text[i];
+        if (b < 0x80) {
+            i += 1;
+            continue;
+        }
+        const seq_len = std.unicode.utf8ByteSequenceLength(b) catch return true;
+        if (i + seq_len > text.len) return true;
+        const slice = text[i .. i + seq_len];
+        if (!std.unicode.utf8ValidateSlice(slice)) return true;
+        const code_point = std.unicode.utf8Decode(slice) catch return true;
+        if (!isPrivateUseCodePoint(code_point)) return true;
+        i += seq_len;
+    }
+    return false;
+}
+
+fn renderedDeclValueNeedsCharset(text: []const u8, output_style: OutputStyle) bool {
+    return switch (output_style) {
+        .compressed => renderedNeedsCharset(text),
+        .expanded => renderedNeedsCharsetExpandedDeclValue(text),
+    };
+}
+
+fn escapeExpandedDeclPrivateUseCodePoints(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    var needs_change = false;
+    var scan: usize = 0;
+    while (scan < text.len) {
+        const b = text[scan];
+        if (b < 0x80) {
+            scan += 1;
+            continue;
+        }
+        const seq_len = std.unicode.utf8ByteSequenceLength(b) catch {
+            scan += 1;
+            continue;
+        };
+        if (scan + seq_len > text.len) break;
+        const slice = text[scan .. scan + seq_len];
+        if (!std.unicode.utf8ValidateSlice(slice)) {
+            scan += 1;
+            continue;
+        }
+        const code_point = std.unicode.utf8Decode(slice) catch {
+            scan += seq_len;
+            continue;
+        };
+        if (isPrivateUseCodePoint(code_point)) {
+            needs_change = true;
+            break;
+        }
+        scan += seq_len;
+    }
+    if (!needs_change) return text;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, text.len);
+    var i: usize = 0;
+    while (i < text.len) {
+        const b = text[i];
+        if (b < 0x80) {
+            try out.append(allocator, b);
+            i += 1;
+            continue;
+        }
+        const seq_len = std.unicode.utf8ByteSequenceLength(b) catch {
+            try out.append(allocator, b);
+            i += 1;
+            continue;
+        };
+        if (i + seq_len > text.len) {
+            try out.appendSlice(allocator, text[i..]);
+            break;
+        }
+        const slice = text[i .. i + seq_len];
+        if (!std.unicode.utf8ValidateSlice(slice)) {
+            try out.append(allocator, b);
+            i += 1;
+            continue;
+        }
+        const code_point = std.unicode.utf8Decode(slice) catch {
+            try out.appendSlice(allocator, slice);
+            i += seq_len;
+            continue;
+        };
+        if (isPrivateUseCodePoint(code_point)) {
+            var buf: [16]u8 = undefined;
+            const escaped = std.fmt.bufPrint(&buf, "\\{x}", .{code_point}) catch |err| {
+                std.debug.panic("private-use escape formatting failed: {s}", .{@errorName(err)});
+            };
+            try out.appendSlice(allocator, escaped);
+        } else {
+            try out.appendSlice(allocator, slice);
+        }
+        i += seq_len;
+    }
+    return try out.toOwnedSlice(allocator);
 }
 
 fn isConditionalAtRuleName(name: []const u8) bool {
@@ -202,7 +427,7 @@ fn isMediaAtRuleName(name: []const u8) bool {
 }
 
 /// Bubbled out from parent style_rule like @keyframes / @font-face / @property
-/// "Terminal at-rule" (an at-rule with block without a selector). dart-sass uses these
+/// "Terminal at-rule" (an at-rule with block without a selector). official Sass CLI uses these
 /// When hoisting outside of parent, do not insert blank between before hoist (parent rule_end),
 /// Keep a blank between after hoist (next sibling rule) (if there is a blank on the source side).
 /// Decision to apply the same blank retention/suppression as @media (`isMediaAtRuleName`).
@@ -327,13 +552,27 @@ fn normalizeCalcTrailingOperatorParens(allocator: std.mem.Allocator, raw: []cons
 }
 
 fn stripCalcDeclMarker(text: []const u8) []const u8 {
-    if (std.mem.startsWith(u8, text, calc_arg_marker)) return text[calc_arg_marker.len..];
-    if (std.mem.startsWith(u8, text, calc_interp_marker)) return text[calc_interp_marker.len..];
-    return text;
+    var current = text;
+    while (true) {
+        if (std.mem.startsWith(u8, current, calc_arg_marker)) {
+            current = current[calc_arg_marker.len..];
+            continue;
+        }
+        if (std.mem.startsWith(u8, current, calc_interp_marker)) {
+            current = current[calc_interp_marker.len..];
+            continue;
+        }
+        if (std.mem.startsWith(u8, current, interp_decl_marker)) {
+            current = current[interp_decl_marker.len..];
+            continue;
+        }
+        return current;
+    }
 }
 
 fn isMarkedCalcInterpolationDecl(text: []const u8) bool {
-    return std.mem.startsWith(u8, text, calc_interp_marker);
+    return std.mem.startsWith(u8, text, calc_interp_marker) or
+        std.mem.startsWith(u8, text, interp_decl_marker);
 }
 
 fn stripLiteralDeclMarker(text: []const u8) []const u8 {
@@ -341,9 +580,59 @@ fn stripLiteralDeclMarker(text: []const u8) []const u8 {
     return text;
 }
 
+fn stripInterpDeclMarker(text: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, text, interp_decl_marker)) return text[interp_decl_marker.len..];
+    return text;
+}
+
+fn declarationValueEmptyAfterLeadingMarkers(text: []const u8) bool {
+    var current = text;
+    while (true) {
+        const stripped = stripLiteralDeclMarker(stripCalcDeclMarker(current));
+        if (stripped.ptr == current.ptr and stripped.len == current.len) break;
+        current = stripped;
+    }
+    return current.len == 0;
+}
+
 fn containsLiteralDeclMarker(text: []const u8) bool {
     return std.mem.find(u8, text, literal_decl_marker) != null or
         std.mem.find(u8, text, "\\1 zsass-literal-decl:") != null;
+}
+
+fn startsWithAnyCalcDeclMarker(text: []const u8) ?usize {
+    if (std.mem.startsWith(u8, text, calc_arg_marker)) return calc_arg_marker.len;
+    if (std.mem.startsWith(u8, text, calc_interp_marker)) return calc_interp_marker.len;
+    if (std.mem.startsWith(u8, text, interp_decl_marker)) return interp_decl_marker.len;
+    if (std.mem.startsWith(u8, text, "\\1 zsass-calc-arg:")) return "\\1 zsass-calc-arg:".len;
+    if (std.mem.startsWith(u8, text, "\\1 zsass-calc-interp:")) return "\\1 zsass-calc-interp:".len;
+    if (std.mem.startsWith(u8, text, "\\1 zsass-interp-decl:")) return "\\1 zsass-interp-decl:".len;
+    return null;
+}
+
+fn containsCalcDeclMarker(text: []const u8) bool {
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        if (startsWithAnyCalcDeclMarker(text[i..]) != null) return true;
+    }
+    return false;
+}
+
+fn stripAllCalcDeclMarkers(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    if (!containsCalcDeclMarker(text)) return text;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, text.len);
+    var i: usize = 0;
+    while (i < text.len) {
+        if (startsWithAnyCalcDeclMarker(text[i..])) |marker_len| {
+            i += marker_len;
+            continue;
+        }
+        try out.append(allocator, text[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 fn stripAllLiteralDeclMarkers(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
@@ -606,7 +895,7 @@ pub const RuleIR = struct {
         const origin_reopen: u32 = 1 << 6;
         // rule_begin was emitted within `@at-root` scope (= pushed_at_root_scope
         // Flag to indicate pop_at_root_scope (before). Z10-SAMESEL: @at-root hoisted rule is
-        // Can be the same selector as the outer parent rule, but dart-sass is a hoisted block
+        // Can be the same selector as the outer parent rule, but official Sass CLI is a hoisted block
         // Issue the reopen block after returning to the outside as a separate block. prev in merge judgment
         // If it is at_root_hoisted, handle by not merging.
         const origin_at_root_hoisted: u32 = 1 << 7;
@@ -1014,8 +1303,7 @@ pub const RuleIR = struct {
 
     /// Flag indicating whether a non-whitespace token exists just before `/*` (in the same line) in addition to `source_col`
     /// Also save (`leading_same_line`). inlineCommentAfter block_end `} /* ... */` etc.
-    /// Used for same line determination (situation where parent line_starts lies in @import inline)
-    /// (Z23-MATERIALIZE-DIFF).
+    /// Used for same line determination when parent line_starts lies in @import inline.
     pub fn appendCommentWithColAndLeading(
         self: *RuleIR,
         allocator: std.mem.Allocator,
@@ -1275,13 +1563,14 @@ pub const RuleIR = struct {
         const extending_raw = std.mem.trim(u8, intern_pool.get(extending_selector), " \t\r\n");
         if (extending_raw.len == 0) return;
         if (try shouldSuppressExtendingSelector(allocator, extending_raw)) return;
-        const ext_id = try intern_pool.intern(extending_raw);
         const normalized_target = try normalizeRuntimeExtendTargetText(intern_pool.get(target_selector));
 
         var target_parts: std.ArrayListUnmanaged([]const u8) = .empty;
         defer target_parts.deinit(allocator);
         try splitSelectorList(allocator, normalized_target, &target_parts);
         if (target_parts.items.len == 0) return;
+
+        const ext_id = try intern_pool.intern(extending_raw);
 
         for (target_parts.items) |target_part| {
             try validateExtendTargetBranch(allocator, target_part);
@@ -2132,11 +2421,11 @@ pub const RuleIR = struct {
             return out;
         }
 
-        // Split retained body around each hoisted @media so that the parent @media
-        // block is re-opened between moved children. In dart-sass actual machine
+        // Split a retained body around each hoisted @media so the parent
+        // @media block is re-opened between moved children.
         //   @media outer { A; @media inner {...}; B; }
-        // `@media outer { A } / @media outer+inner {...} / @media outer { B }`
-        // Split and restart with source-order (ffxvi @include sp + nested @media observation).
+        // becomes `@media outer { A }`, `@media outer+inner {...}`,
+        // then `@media outer { B }`, preserving source order.
         var segments: std.ArrayListUnmanaged(RebuiltBuffers) = .empty;
         defer {
             for (segments.items) |*seg| seg.deinit(allocator);
@@ -2164,11 +2453,12 @@ pub const RuleIR = struct {
                         local_changed = true;
                         self.setSuppressLeadingBlankForNode(item_node, true);
                         //merge-hoist of parent @media  ->  inner @media does not set preserve
-                        // (There is no blank between top-level @media after merge on dart-sass actual machine).
+                        // (There is no blank between top-level @media after merge on official Sass CLI actual machine).
                         // preserve_at_rule_block_following_blank is canceled at a later stage (segment
                         //done after visible determination) -- moved immediately followed by reopened outer
                         // Released only when moved, respecting the preserve set by the VM at the last moved
-                        // Keep blank with sibling (bootstrap docs observation).
+                        // Keep the sibling blank when a moved block is followed
+                        // by a reopened outer block.
                         try moved_blocks.append(allocator, .{});
                         const moved = &moved_blocks.items[moved_blocks.items.len - 1];
                         try moved.appendSlice(allocator, body.nodes.items[j..item_end], body.files.items[j..item_end]);
@@ -2208,7 +2498,7 @@ pub const RuleIR = struct {
         // Interleave segments with moved (hoisted) blocks. When two adjacent
         // segments share the same leading selector (VM-split continuation of a
         // single selector rule around a nested @media), keep them in one parent
-        //block and defer the moved block -- dart-sass combines the selector
+        //block and defer the moved block -- official Sass CLI combines the selector
         // parts. When selectors differ, close the parent before the moved block
         // (source-order interleaving). Moved blocks with no visible content
         // (empty nested @media) are always skipped.
@@ -3167,7 +3457,7 @@ pub const RuleIR = struct {
                 if (last_node.kind == .comment) {
                     ends_with_inline_comment = true;
                 } else if (last_node.kind == .at_rule_end) {
-                    // Immediately after rendered chunk is at-rule block (dart-sass `skip_consecutive_top_rules`
+                    // Immediately after rendered chunk is at-rule block (official Sass CLI `skip_consecutive_top_rules`
                     // Treated as the same as blank and suppressed). However, the corresponding at_rule_begin
                     // If preserve_at_rule_block_following_blank is set (hoisted @media etc.)
                     // Don't set ends_with_at_rule_block to keep the blank before the next rule.
@@ -3629,8 +3919,9 @@ pub const RuleIR = struct {
         edge_duplicate_satisfied: []bool,
     ) !void {
         // Cache Parse / suppress / carrier-match results in intern_id units.
-        // Set `registerVisibleLoadCssModule` to the same (extending, target) in ngx-admin etc.
-        // The cache hit rate is very high due to the large number of duplicates due to different target_modules.
+        // Set `registerVisibleLoadCssModule` to the same (extending, target)
+        // repeatedly. The cache hit rate is very high due to many duplicates
+        // with different target_modules.
         var raw_parse_cache: std.AutoHashMapUnmanaged(InternId, ?*selector_mod.SelectorList) = .empty;
         defer {
             var it = raw_parse_cache.valueIterator();
@@ -3837,6 +4128,9 @@ pub const RuleIR = struct {
                         .optional = edge.optional,
                         .span = null,
                         .statement_group_order = edge.relation_id,
+                        .statement_order = edge.relation_order,
+                        .statement_branch_index = edge.relation_branch_index,
+                        .statement_branch_leading_newline = edge.relation_branch_leading_newline,
                         .module_group_start_order = edge.module_group_start_order,
                     },
                 ))) {
@@ -4150,7 +4444,7 @@ pub const RuleIR = struct {
         return saw_comment;
     }
 
-    /// Case where dart-sass merges into 1 block among adjacent `rule_end`  <->  `rule_begin`
+    /// Case where official Sass CLI merges into 1 block among adjacent `rule_end`  <->  `rule_begin`
     /// Detect (compiler-synthesized close+reopen) and `skip[]` (eliminate intermediate end)
     /// Mark `merge_same_rule_begin[]` (continued by next rule_begin).
     fn computeAdjacentRuleMerges(
@@ -4200,9 +4494,9 @@ pub const RuleIR = struct {
                     // Do not merge if multiple rules with the same selector appear. However, compiler-synthesized
                     // reopen (origin_reopen=true; after emit_rule_end_if_open via @include
                     // ensureCurrentRuleOpenForDeclaration etc.) even if decls of the same source are consecutive
-                    // merge target (Z16-BOOTSTRAP-INNER: bootstrap rfs + font-size mixin both
-                    // emit _rfs.scss:287 `#{$property}: $val;`, same source but different @include call
-                    // so it should be merged).
+                    // merge target. Compiler-synthesized reopens from separate
+                    // mixin calls can share the same source declaration shape and
+                    // still need to merge.
                     if (!self.getOriginReopenAt(next_idx) and
                         self.ruleBodiesReuseSameSourceShape(skip, open.idx, idx, next_idx, next_end))
                     {
@@ -4210,14 +4504,14 @@ pub const RuleIR = struct {
                     }
 
                     // Z10-SAMESEL: user-written adjacent same-selector (`.x{} .x{}`) is
-                    // Not merged in dart-sass, but like `.a { decl; @include m; decl; }`
+                    // Not merged in official Sass CLI, but like `.a { decl; @include m; decl; }`
                     // Case in which parent rule is internally closed+reopened (rule_end_if_open via mixin)
-                    // Running, etc.) dart-sass merges into 1 block.
+                    // Running, etc.) official Sass CLI merges into 1 block.
                     // Condition:
                     // (A) The next rule_begin is `origin_reopen` (compiler-synthesized continuation) and
                     // (B) The previous rule_begin is **not** `origin_at_root_hoisted`.
                     //(B) is required for test 2 (via `a { @include position(...) }`  ->  @at-root):
-                    // The reopen immediately after the hoisted block is not merged because it is a different block in dart-sass.
+                    // The reopen immediately after the hoisted block is not merged because it is a different block in official Sass CLI.
                     if (!self.getOriginReopenAt(next_idx)) continue;
                     if (self.getOriginAtRootHoistedAt(open.idx)) continue;
 
@@ -4262,6 +4556,7 @@ pub const RuleIR = struct {
         selector_override: []const ?[]const u8,
         skip: []bool,
         empty_at_rule_end: []u32,
+        output_style: OutputStyle,
     ) !bool {
         var saw_charset = false;
         const Block = struct {
@@ -4371,7 +4666,7 @@ pub const RuleIR = struct {
                             if (renderedNeedsCharset(prop)) saw_charset = true;
                             const value_id = self.extra.items[node.payload + 1];
                             const value = intern_pool.get(@enumFromInt(value_id));
-                            if (renderedNeedsCharset(value)) saw_charset = true;
+                            if (renderedDeclValueNeedsCharset(value, output_style)) saw_charset = true;
                         },
                         .decl_raw => {
                             const prop_id = self.extra.items[node.payload];
@@ -4379,7 +4674,7 @@ pub const RuleIR = struct {
                             if (renderedNeedsCharset(prop)) saw_charset = true;
                             const raw_idx = self.extra.items[node.payload + 1];
                             const value = self.strings.items[raw_idx];
-                            if (renderedNeedsCharset(value)) saw_charset = true;
+                            if (renderedDeclValueNeedsCharset(value, output_style)) saw_charset = true;
                         },
                         .comment => {
                             const text_id = self.extra.items[node.payload];
@@ -4501,15 +4796,242 @@ pub const RuleIR = struct {
         }
     }
 
+    fn isHexDigit(ch: u8) bool {
+        return (ch >= '0' and ch <= '9') or
+            (ch >= 'a' and ch <= 'f') or
+            (ch >= 'A' and ch <= 'F');
+    }
+
+    fn hexValue(ch: u8) ?u8 {
+        if (ch >= '0' and ch <= '9') return ch - '0';
+        if (ch >= 'a' and ch <= 'f') return ch - 'a' + 10;
+        if (ch >= 'A' and ch <= 'F') return ch - 'A' + 10;
+        return null;
+    }
+
+    fn isIdentLike(ch: u8) bool {
+        return std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-';
+    }
+
+    fn appendPreferredCompressedColor(out: *std.ArrayList(u8), allocator: std.mem.Allocator, r: u8, g: u8, b: u8) error{OutOfMemory}!void {
+        const short = ((r >> 4) == (r & 0xf)) and ((g >> 4) == (g & 0xf)) and ((b >> 4) == (b & 0xf));
+        const hex_len: usize = if (short) 4 else 7;
+        if (color_mod.namedColorForRgb(r, g, b)) |name| {
+            if (name.len <= hex_len) {
+                try out.appendSlice(allocator, name);
+                return;
+            }
+        }
+        if (short) {
+            const rendered = try std.fmt.allocPrint(allocator, "#{x}{x}{x}", .{ @as(u4, @intCast(r >> 4)), @as(u4, @intCast(g >> 4)), @as(u4, @intCast(b >> 4)) });
+            defer allocator.free(rendered);
+            try out.appendSlice(allocator, rendered);
+        } else {
+            const rendered = try std.fmt.allocPrint(allocator, "#{x:0>2}{x:0>2}{x:0>2}", .{ r, g, b });
+            defer allocator.free(rendered);
+            try out.appendSlice(allocator, rendered);
+        }
+    }
+
+    fn appendCompressedHex(out: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []const u8, i: *usize) error{OutOfMemory}!bool {
+        if (text[i.*] != '#') return false;
+        var n: usize = 0;
+        while (i.* + 1 + n < text.len and n < 8 and isHexDigit(text[i.* + 1 + n])) : (n += 1) {}
+        if (n != 3 and n != 6) return false;
+        const after = i.* + 1 + n;
+        if (after < text.len and isIdentLike(text[after])) return false;
+
+        if (n == 3) {
+            const r4 = hexValue(text[i.* + 1]) orelse return false;
+            const g4 = hexValue(text[i.* + 2]) orelse return false;
+            const b4 = hexValue(text[i.* + 3]) orelse return false;
+            try appendPreferredCompressedColor(out, allocator, (r4 << 4) | r4, (g4 << 4) | g4, (b4 << 4) | b4);
+        } else {
+            const r = ((hexValue(text[i.* + 1]) orelse return false) << 4) | (hexValue(text[i.* + 2]) orelse return false);
+            const g = ((hexValue(text[i.* + 3]) orelse return false) << 4) | (hexValue(text[i.* + 4]) orelse return false);
+            const b = ((hexValue(text[i.* + 5]) orelse return false) << 4) | (hexValue(text[i.* + 6]) orelse return false);
+            try appendPreferredCompressedColor(out, allocator, r, g, b);
+        }
+        i.* += n;
+        return true;
+    }
+
+    fn appendCompressedImport(out: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []const u8, i: *usize) error{OutOfMemory}!bool {
+        const prefix = "@import url(";
+        if (!std.mem.startsWith(u8, text[i.*..], prefix)) return false;
+        var j = i.* + prefix.len;
+        var quote: u8 = 0;
+        if (j < text.len and (text[j] == '"' or text[j] == '\'')) {
+            quote = text[j];
+            j += 1;
+        }
+        const url_start = j;
+        if (quote != 0) {
+            while (j < text.len and text[j] != quote) : (j += 1) {}
+            if (j >= text.len) return false;
+            const url = text[url_start..j];
+            j += 1;
+            if (j >= text.len or text[j] != ')') return false;
+            try out.appendSlice(allocator, "@import\"");
+            try out.appendSlice(allocator, url);
+            try out.append(allocator, '"');
+            i.* = j;
+            return true;
+        }
+        while (j < text.len and text[j] != ')') : (j += 1) {}
+        if (j >= text.len) return false;
+        const url = text[url_start..j];
+        try out.appendSlice(allocator, "@import\"");
+        try out.appendSlice(allocator, url);
+        try out.append(allocator, '"');
+        i.* = j;
+        return true;
+    }
+
+    fn appendCompressedTransparent(out: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []const u8, i: *usize) error{OutOfMemory}!bool {
+        const word = "transparent";
+        if (!std.mem.startsWith(u8, text[i.*..], word)) return false;
+        const before_ok = i.* == 0 or !isIdentLike(text[i.* - 1]);
+        const after = i.* + word.len;
+        const after_ok = after >= text.len or !isIdentLike(text[after]);
+        if (!before_ok or !after_ok) return false;
+        try out.appendSlice(allocator, "rgba(0,0,0,0)");
+        i.* += word.len - 1;
+        return true;
+    }
+
+    fn appendCompressedNamedColor(out: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []const u8, i: *usize) error{OutOfMemory}!bool {
+        if (i.* > 0 and isIdentLike(text[i.* - 1])) return false;
+        var end = i.*;
+        while (end < text.len and isIdentLike(text[end])) : (end += 1) {}
+        if (end == i.*) return false;
+        const name = text[i.*..end];
+        const color = color_mod.lookupNamedColor(name) orelse return false;
+        if (color.a != 1.0) return false;
+        const r: u8 = @intFromFloat(color.r);
+        const g: u8 = @intFromFloat(color.g);
+        const b: u8 = @intFromFloat(color.b);
+        try appendPreferredCompressedColor(out, allocator, r, g, b);
+        i.* = end - 1;
+        return true;
+    }
+
+    fn parseRgbComponent(text: []const u8, pos: *usize) ?u8 {
+        while (pos.* < text.len and text[pos.*] == ' ') : (pos.* += 1) {}
+        var value: u16 = 0;
+        const start = pos.*;
+        while (pos.* < text.len and text[pos.*] >= '0' and text[pos.*] <= '9') : (pos.* += 1) {
+            value = value * 10 + (text[pos.*] - '0');
+            if (value > 255) return null;
+        }
+        if (pos.* == start) return null;
+        while (pos.* < text.len and text[pos.*] == ' ') : (pos.* += 1) {}
+        return @intCast(value);
+    }
+
+    fn appendAlphaCompressed(out: *std.ArrayList(u8), allocator: std.mem.Allocator, alpha: []const u8) error{OutOfMemory}!void {
+        const trimmed = std.mem.trim(u8, alpha, " ");
+        if (std.mem.startsWith(u8, trimmed, "0.")) {
+            try out.appendSlice(allocator, trimmed[1..]);
+        } else {
+            try out.appendSlice(allocator, trimmed);
+        }
+    }
+
+    fn appendCompressedTopLevelRgb(out: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []const u8, i: *usize) error{OutOfMemory}!bool {
+        if (!std.mem.startsWith(u8, text[i.*..], "rgb(")) return false;
+        var pos = i.* + "rgb(".len;
+        const r = parseRgbComponent(text, &pos) orelse return false;
+        if (pos >= text.len or text[pos] != ',') return false;
+        pos += 1;
+        const g = parseRgbComponent(text, &pos) orelse return false;
+        if (pos >= text.len or text[pos] != ',') return false;
+        pos += 1;
+        const b = parseRgbComponent(text, &pos) orelse return false;
+        if (pos >= text.len or text[pos] != ')') return false;
+        try appendPreferredCompressedColor(out, allocator, r, g, b);
+        i.* = pos;
+        return true;
+    }
+
+    fn appendCompressedTopLevelRgba(out: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []const u8, i: *usize) error{OutOfMemory}!bool {
+        if (!std.mem.startsWith(u8, text[i.*..], "rgba(")) return false;
+        var pos = i.* + "rgba(".len;
+        const r = parseRgbComponent(text, &pos) orelse return false;
+        if (pos >= text.len or text[pos] != ',') return false;
+        pos += 1;
+        const g = parseRgbComponent(text, &pos) orelse return false;
+        if (pos >= text.len or text[pos] != ',') return false;
+        pos += 1;
+        const b = parseRgbComponent(text, &pos) orelse return false;
+        if (pos >= text.len or text[pos] != ',') return false;
+        pos += 1;
+        while (pos < text.len and text[pos] == ' ') : (pos += 1) {}
+        const alpha_start = pos;
+        while (pos < text.len and text[pos] != ')') : (pos += 1) {}
+        if (pos >= text.len) return false;
+        const alpha = std.mem.trim(u8, text[alpha_start..pos], " ");
+        if (r == g and g == b and r != 0 and (@as(u16, r) * 100) % 255 == 0) {
+            const lightness = @divExact(@as(u16, r) * 100, 255);
+            var rgba_buf: [64]u8 = undefined;
+            const rgba = std.fmt.bufPrint(&rgba_buf, "rgba({d},{d},{d},", .{ r, g, b }) catch return false;
+            const rgba_len = rgba.len + (if (std.mem.startsWith(u8, alpha, "0.")) alpha.len - 1 else alpha.len) + 1;
+            var hsla_buf: [64]u8 = undefined;
+            const hsla = std.fmt.bufPrint(&hsla_buf, "hsla(0,0%,{d}%,", .{lightness}) catch return false;
+            const hsla_len = hsla.len + (if (std.mem.startsWith(u8, alpha, "0.")) alpha.len - 1 else alpha.len) + 1;
+            if (hsla_len < rgba_len) {
+                try out.appendSlice(allocator, hsla);
+                try appendAlphaCompressed(out, allocator, alpha);
+                try out.append(allocator, ')');
+                i.* = pos;
+                return true;
+            }
+        }
+        const prefix = try std.fmt.allocPrint(allocator, "rgba({d},{d},{d},", .{ r, g, b });
+        defer allocator.free(prefix);
+        try out.appendSlice(allocator, prefix);
+        try appendAlphaCompressed(out, allocator, alpha);
+        try out.append(allocator, ')');
+        i.* = pos;
+        return true;
+    }
+
+    fn isCompressedSelectorContext(text: []const u8, pos: usize) bool {
+        var i = pos;
+        while (i > 0) {
+            i -= 1;
+            switch (text[i]) {
+                '}', '{' => return true,
+                ';' => return false,
+                else => {},
+            }
+        }
+        return true;
+    }
+
+    fn previousLooksLikeIeHack(out: []const u8) bool {
+        return out.len >= 2 and out[out.len - 2] == '\\' and (out[out.len - 1] == '0' or out[out.len - 1] == '9');
+    }
+
+    fn currentDeclPropertyIsCustom(out: []const u8) bool {
+        var start = out.len;
+        while (start > 0) {
+            const prev = out[start - 1];
+            if (prev == '{' or prev == ';' or prev == '}') break;
+            start -= 1;
+        }
+        const prop = std.mem.trim(u8, out[start..], " ");
+        return std.mem.startsWith(u8, prop, "--");
+    }
+
     fn compressCss(allocator: std.mem.Allocator, expanded: []const u8) error{OutOfMemory}![]const u8 {
-        var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(allocator);
+        var first: std.ArrayList(u8) = .empty;
+        errdefer first.deinit(allocator);
 
         var i: usize = 0;
         while (i < expanded.len) : (i += 1) {
             const c = expanded[i];
 
-            // Skip CSS comments /* ... */
             if (c == '/' and i + 1 < expanded.len and expanded[i + 1] == '*') {
                 i += 2;
                 while (i + 1 < expanded.len) : (i += 1) {
@@ -4521,7 +5043,6 @@ pub const RuleIR = struct {
                 continue;
             }
 
-            // Skip newlines and leading whitespace on next line
             if (c == '\n') {
                 while (i + 1 < expanded.len and (expanded[i + 1] == ' ' or expanded[i + 1] == '\t' or expanded[i + 1] == '\n')) {
                     i += 1;
@@ -4529,39 +5050,175 @@ pub const RuleIR = struct {
                 continue;
             }
 
-            // Remove space before {
-            if (c == ' ' and i + 1 < expanded.len and expanded[i + 1] == '{') {
+            if (c == ' ' and i + 1 < expanded.len and expanded[i + 1] == '{') continue;
+            if (c == ';' and i + 1 < expanded.len and expanded[i + 1] == '}') continue;
+
+            try first.append(allocator, c);
+            if (c == '}') {
+                while (first.items.len >= 2 and first.items[first.items.len - 2] == ';') {
+                    first.items[first.items.len - 2] = '}';
+                    first.items.len -= 1;
+                }
+            }
+        }
+
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        var preserve_decl_zero = false;
+        var in_string: u8 = 0;
+        var paren_depth: u32 = 0;
+        var color_func_depth: u32 = 0;
+        var calc_func_depth: u32 = 0;
+        var preserve_calc_ops = false;
+        var in_custom_decl = false;
+        i = 0;
+        while (i < first.items.len) : (i += 1) {
+            if (std.mem.startsWith(u8, first.items[i..], interp_decl_marker)) {
+                i += interp_decl_marker.len - 1;
+                preserve_decl_zero = true;
+                continue;
+            }
+            if (std.mem.startsWith(u8, first.items[i..], literal_decl_marker)) {
+                i += literal_decl_marker.len - 1;
+                preserve_decl_zero = true;
+                preserve_calc_ops = true;
                 continue;
             }
 
-            // Remove space after :
-            if (c == ':' and i + 1 < expanded.len and expanded[i + 1] == ' ') {
+            const c = first.items[i];
+            if (in_string != 0) {
+                try out.append(allocator, c);
+                if (c == '\\' and i + 1 < first.items.len) {
+                    i += 1;
+                    try out.append(allocator, first.items[i]);
+                } else if (c == in_string) {
+                    in_string = 0;
+                }
+                continue;
+            }
+            if (c == '"' or c == '\'') {
+                in_string = c;
+                try out.append(allocator, c);
+                continue;
+            }
+
+            if (c == ';' or c == '}') {
+                preserve_decl_zero = false;
+                preserve_calc_ops = false;
+                in_custom_decl = false;
+            }
+            if (try appendCompressedImport(&out, allocator, first.items, &i)) continue;
+            const value_context = out.items.len != 0 and (out.items[out.items.len - 1] == ':' or out.items[out.items.len - 1] == ',' or out.items[out.items.len - 1] == ' ' or out.items[out.items.len - 1] == '(');
+            if (!in_custom_decl and paren_depth == 0 and value_context and try appendCompressedTopLevelRgb(&out, allocator, first.items, &i)) continue;
+            if (!in_custom_decl and paren_depth == 0 and value_context and try appendCompressedTopLevelRgba(&out, allocator, first.items, &i)) continue;
+            if (!in_custom_decl and value_context and try appendCompressedTransparent(&out, allocator, first.items, &i)) continue;
+            if (!in_custom_decl and value_context and try appendCompressedNamedColor(&out, allocator, first.items, &i)) continue;
+            if (!in_custom_decl and paren_depth == 0 and try appendCompressedHex(&out, allocator, first.items, &i)) continue;
+
+            if (c == '(') {
+                var name_start = out.items.len;
+                while (name_start > 0 and (std.ascii.isAlphabetic(out.items[name_start - 1]) or out.items[name_start - 1] == '-')) : (name_start -= 1) {}
+                const name = out.items[name_start..];
+                paren_depth += 1;
+                if (paren_depth == 1 and
+                    (std.ascii.eqlIgnoreCase(name, "rgb") or
+                        std.ascii.eqlIgnoreCase(name, "rgba") or
+                        std.ascii.eqlIgnoreCase(name, "hsl") or
+                        std.ascii.eqlIgnoreCase(name, "hsla")))
+                {
+                    color_func_depth = paren_depth;
+                }
+                if (std.ascii.eqlIgnoreCase(name, "calc")) calc_func_depth = paren_depth;
+                try out.append(allocator, c);
+                continue;
+            }
+            if (c == ')') {
+                if (paren_depth != 0) {
+                    if (color_func_depth == paren_depth) color_func_depth = 0;
+                    if (calc_func_depth == paren_depth) calc_func_depth = 0;
+                    paren_depth -= 1;
+                }
+                try out.append(allocator, c);
+                continue;
+            }
+
+            if (c == ':' and paren_depth == 0) {
+                in_custom_decl = currentDeclPropertyIsCustom(out.items);
+            }
+            if (!in_custom_decl and c == ':' and i + 1 < first.items.len and first.items[i + 1] == ' ' and paren_depth == 0) {
                 try out.append(allocator, ':');
                 i += 1;
                 continue;
             }
-
-            // Remove space after ,
-            if (c == ',' and i + 1 < expanded.len and expanded[i + 1] == ' ') {
+            if (!in_custom_decl and c == ',' and i + 1 < first.items.len and first.items[i + 1] == ' ' and (paren_depth == 0 or color_func_depth != 0)) {
                 try out.append(allocator, ',');
                 i += 1;
                 continue;
             }
 
-            // Remove ; before } (adjacent case)
-            if (c == ';' and i + 1 < expanded.len and expanded[i + 1] == '}') {
+            if (c == ' ') {
+                if (in_custom_decl) {
+                    try out.append(allocator, c);
+                    continue;
+                }
+                if (out.items.len == 0) continue;
+                const prev = out.items[out.items.len - 1];
+                const next = if (i + 1 < first.items.len) first.items[i + 1] else 0;
+                if (previousLooksLikeIeHack(out.items) and (next == ';' or next == '}')) {
+                    try out.append(allocator, c);
+                    continue;
+                }
+                if (prev == '}' or prev == '{' or prev == ';' or next == '{' or next == '}') continue;
+                if (calc_func_depth != 0 and !preserve_calc_ops and (prev == '/' or prev == '*' or next == '/' or next == '*')) continue;
+                if (prev == ')' and std.mem.startsWith(u8, first.items[i + 1 ..], "and ")) continue;
+                if ((next == '+' or next == '>' or next == '~') and isCompressedSelectorContext(first.items, i)) continue;
+                if (next == '(' and std.mem.endsWith(u8, out.items, "@media")) continue;
+                if (next == '(' and std.mem.endsWith(u8, out.items, "@supports")) continue;
+            }
+
+            if (calc_func_depth != 0 and !preserve_calc_ops and (c == '/' or c == '*')) {
+                if (out.items.len != 0 and out.items[out.items.len - 1] == ' ') out.items.len -= 1;
+                try out.append(allocator, c);
+                if (i + 1 < first.items.len and first.items[i + 1] == ' ') i += 1;
+                continue;
+            }
+
+            if (calc_func_depth != 0 and c == '+') {
+                if (out.items.len != 0 and out.items[out.items.len - 1] == ' ') out.items.len -= 1;
+                try out.appendSlice(allocator, " + ");
+                if (i + 1 < first.items.len and first.items[i + 1] == ' ') i += 1;
+                continue;
+            }
+
+            if ((c == '+' or c == '>' or c == '~') and isCompressedSelectorContext(first.items, i)) {
+                if (out.items.len != 0 and out.items[out.items.len - 1] == ' ') out.items.len -= 1;
+                try out.append(allocator, c);
+                if (i + 1 < first.items.len and first.items[i + 1] == ' ') i += 1;
+                continue;
+            }
+
+            if (!in_custom_decl and !preserve_decl_zero and (paren_depth == 0 or color_func_depth != 0) and c == '0' and i + 1 < first.items.len and first.items[i + 1] == '.') {
+                const prev = if (out.items.len != 0) out.items[out.items.len - 1] else 0;
+                if (prev != '-' and !std.ascii.isAlphanumeric(prev) and prev != '_' and prev != '.') continue;
+            }
+
+            if (c == '}' and out.items.len != 0 and out.items[out.items.len - 1] == ';') {
+                while (out.items.len != 0 and out.items[out.items.len - 1] == ';') out.items.len -= 1;
+            }
+
+            if (c == '}' and out.items.len != 0 and out.items[out.items.len - 1] == '{') {
+                var start_empty = out.items.len - 1;
+                while (start_empty > 0 and out.items[start_empty - 1] != '}') : (start_empty -= 1) {}
+                out.items.len = start_empty;
+                preserve_decl_zero = false;
+                preserve_calc_ops = false;
+                in_custom_decl = false;
                 continue;
             }
 
             try out.append(allocator, c);
-
-            // Remove trailing ; before } (handles case where ; and } are separated by skipped whitespace)
-            if (c == '}' and out.items.len >= 2 and out.items[out.items.len - 2] == ';') {
-                out.items[out.items.len - 2] = '}';
-                out.items.len -= 1;
-            }
         }
-
+        first.deinit(allocator);
         return try out.toOwnedSlice(allocator);
     }
 
@@ -4607,6 +5264,7 @@ pub const RuleIR = struct {
             path_arena: std.mem.Allocator,
             urls_mode: source_map_mod.SourceMapUrlsMode,
             source_map_output_dir_abs: ?[]const u8,
+            compressed: bool,
             gen_line: u32 = 0,
             gen_col: u32 = 0,
 
@@ -6284,8 +6942,8 @@ pub const RuleIR = struct {
                     owned_current = expression_commas;
                 }
 
-                // bourbon/libsass compatible: webkit gradient style leading white space is not preserved,
-                // `...)-gradient(` also pads the part immediately after `(`.
+                // WebKit gradient syntax does not preserve leading whitespace
+                // immediately after the opening parenthesis.
                 const webkit_linear = try replaceExact.run(allocator, current, "-webkit-linear-gradient( ", "-webkit-linear-gradient(");
                 if (!(webkit_linear.ptr == current.ptr and webkit_linear.len == current.len)) {
                     if (owned_current) |owned| allocator.free(owned);
@@ -6888,20 +7546,33 @@ pub const RuleIR = struct {
                     }
                     if (depth == 0 and ch == ',') {
                         const segment = text[seg_start..i];
-                        const segment_had_newline = std.mem.indexOfAny(u8, segment, "\n\r") != null;
+                        var segment_body_start: usize = 0;
+                        while (segment_body_start < segment.len and
+                            (segment[segment_body_start] == ' ' or segment[segment_body_start] == '\t' or
+                                segment[segment_body_start] == '\n' or segment[segment_body_start] == '\r'))
+                        {
+                            segment_body_start += 1;
+                        }
+                        const segment_body = segment[segment_body_start..];
+                        const segment_had_newline = std.mem.indexOfAny(u8, segment_body, "\n\r") != null;
+                        var ws_i = i + 1;
+                        var saw_space = false;
+                        var separator_after_has_newline = false;
+                        while (ws_i < text.len and
+                            (text[ws_i] == ' ' or text[ws_i] == '\t' or text[ws_i] == '\n' or text[ws_i] == '\r'))
+                        {
+                            if (text[ws_i] == '\n' or text[ws_i] == '\r') separator_after_has_newline = true;
+                            if (text[ws_i] == ' ' or text[ws_i] == '\t') saw_space = true;
+                            ws_i += 1;
+                        }
                         try appendSelectorSegmentCollapsed(allocator, &out, segment);
                         try out.append(allocator, ',');
-                        if (segment_had_newline) {
+                        if (segment_had_newline or separator_after_has_newline) {
                             try out.append(allocator, '\n');
                         } else {
-                            var ws_i = i + 1;
-                            var saw_space = false;
-                            while (ws_i < text.len and (text[ws_i] == ' ' or text[ws_i] == '\t')) : (ws_i += 1) {
-                                saw_space = true;
-                            }
                             if (saw_space) try out.append(allocator, ' ');
                         }
-                        seg_start = i + 1;
+                        seg_start = ws_i;
                     }
                 }
                 try appendSelectorSegmentCollapsed(allocator, &out, text[seg_start..]);
@@ -6984,7 +7655,7 @@ pub const RuleIR = struct {
             }
 
             /// Whitespace from selector text to "immediately after `(` / immediately before `)`" (especially newline)
-            // Delete ///. When dart-sass writes pseudo arguments such as `:not(` in multi-line,
+            // Delete ///. When official Sass CLI writes pseudo arguments such as `:not(` in multi-line,
             /// Put the first arg on the same line as open-paren and make `)` the same as the last arg.
             /// Newlines between arguments are retained. string / interpolation is skipped.
             fn collapseSelectorParenEdgeWhitespace(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
@@ -7344,7 +8015,7 @@ pub const RuleIR = struct {
             }
 
             /// Add a single space before and after combinator (`>`, `+`, `~`, `||`) in selector text
-            /// Put it in. dart-sass normalizes `img+.b` to `img + .b`. string / `(...)` /
+            /// Put it in. official Sass CLI normalizes `img+.b` to `img + .b`. string / `(...)` /
             /// Skip inside `[...]` and escapes (such as `\+`). , is not a combinator, so
             /// Pass through (handled separately as selector-list separator). There is already ws on only one side.
             /// Even if there is no space, normalize and add spaces on both sides. The first/last combinator has
@@ -7597,6 +8268,18 @@ pub const RuleIR = struct {
                     marker_stripped_owned = marked.owned;
                     effective_source_decl_col = marked.source_col;
                 }
+                const preserve_unmarked = try stripCalcInterpolationPreserveMarkers(allocator, rendered_value);
+                if (preserve_unmarked.ptr != rendered_value.ptr) {
+                    if (marker_stripped_owned) |owned| allocator.free(owned);
+                    rendered_value = preserve_unmarked;
+                    marker_stripped_owned = preserve_unmarked;
+                }
+                if (effective_source_decl_col != null and effective_source_decl_col.? == 0 and indent_level > 0 and
+                    rendered_value.len != 0 and (rendered_value[0] == ' ' or rendered_value[0] == '\t') and
+                    std.mem.findAny(u8, rendered_value, "\n\r") != null)
+                {
+                    effective_source_decl_col = indent_level * 2;
+                }
                 var emit_space_after = false;
 
                 const first_nl = std.mem.findAny(u8, rendered_value, "\n\r") orelse {
@@ -7607,7 +8290,7 @@ pub const RuleIR = struct {
                 };
 
                 if (std.mem.trim(u8, rendered_value[first_nl..], " \t\n\r").len == 0) {
-                    // Custom property value with trailing newline(s): dart-sass
+                    // Custom property value with trailing newline(s): official Sass CLI
                     // collapses trailing whitespace+newline to a single space,
                     // regardless of how many trailing spaces precede the newline.
                     const before = rendered_value[0..first_nl];
@@ -8279,7 +8962,7 @@ pub const RuleIR = struct {
                 try splitSelectorList(temp, selector_text, &multiline_parts);
                 if (multiline_parts.items.len > 1) {
                     // percentage/from/to selector list in @keyframes is independent of extension state
-                    // Compress to a single line (`0%, 100%`) like Dart Sass.
+                    // Compress to a single line (`0%, 100%`) like official Sass CLI.
                     selector_visible[i] = true;
                     selector_override[i] = try joinSelectorListWithSeparator(
                         temp,
@@ -8296,9 +8979,9 @@ pub const RuleIR = struct {
                 if (multiline_parts.items.len > 1) {
                     selector_visible[i] = true;
                     if (rule_in_keyframes[i]) {
-                        // percentage/from/to selector list in @keyframes is dart-sass
-                        // Always compressed to a single line (`0%, 20%`). Even if source is line break delimited
-                        // Multiline preservation is not applied (magic suite observation).
+                        // percentage/from/to selector lists in @keyframes are
+                        // serialized on a single line (`0%, 20%`), even when
+                        // source selectors are line-break delimited.
                         selector_override[i] = try joinSelectorListWithSeparator(
                             temp,
                             multiline_parts.items,
@@ -8437,6 +9120,16 @@ pub const RuleIR = struct {
                         selector_text,
                         visible.items,
                     );
+                    continue;
+                }
+                if (!any_local_match and
+                    !selector_mod.hasParentReference(&selector_list) and
+                    !selectorContainsPlaceholder(selector_text) and
+                    (!extend_state.moduleHasPropagatedExtensions(rule_module_idx) or
+                        !try extend_state.selectorHasAnyExtensionTarget(rule_module_idx, &selector_list)))
+                {
+                    selector_visible[i] = true;
+                    selector_override[i] = try selector_mod.toCss(temp, &selector_list);
                     continue;
                 }
             }
@@ -8634,6 +9327,7 @@ pub const RuleIR = struct {
             selector_override,
             skip,
             empty_at_rule_end,
+            output_style,
         );
 
         const merge_same_rule_begin = try temp.alloc(bool, n);
@@ -8671,21 +9365,21 @@ pub const RuleIR = struct {
             pending_leading_blank: bool = false,
             pending_trailing_sourcemap_blank: bool = false,
             indent_level: usize = 0,
-            // True if the direct visible node is comment. Same as legacy dart-sass
+            // True if the direct visible node is comment. Same as legacy official Sass CLI
             // Do not insert a blank line before the rule/at-rule that immediately follows the comment.
             prev_visible_is_comment: bool = false,
             // true when direct previous visible node is top-level `@import` at_rule_simple;
-            // dart-sass suppresses blank lines before and after top-level `@import` (in both directions).
+            // official Sass CLI suppresses blank lines before and after top-level `@import` (in both directions).
             prev_visible_is_top_import: bool = false,
             // before direct visible node is at-rule block (@media / @supports / @keyframes etc.
-            // True when at-rule (closed with `}`). dart-sass if prev is at-rule block,
+            // True when at-rule (closed with `}`). official Sass CLI if prev is at-rule block,
             // next rule / at-rule suppress previous blank with or without blank on source
             // (equivalent to legacy codegen `skip_consecutive_top_rules`).
             prev_visible_is_at_rule_block: bool = false,
             // direct before visible node is @at-root hoisted block rule_end / at_rule_end
-            // true if (Z23-MEDIA); dart-sass is @at-root from the parent rule
+            // true if this is @at-root from the parent rule.
             // Immediately after the escaped block, return to the scope of the parent rule and emit the next non-hoisted
-            // Insert a blank line between rule / at-rule (real-world fixtures with hoisted at-root inside @media).
+            // Insert a blank line between rule / at-rule after hoisted at-root inside @media.
             // To force blank regardless of nest_depth or suppress_leading_blank,
             // Add to the need_blank judgment on the rule_begin / at_rule_begin side.
             prev_visible_is_at_root_hoist: bool = false,
@@ -8703,7 +9397,7 @@ pub const RuleIR = struct {
                 emit_ctx: *EmitCtx,
                 state: *EmitLoopState,
             ) !void {
-                // Before comment/decl. dart-sass immediately after `@charset`/`@import` or
+                // Before comment/decl. official Sass CLI immediately after `@charset`/`@import` or
                 // Do not insert a blank line immediately after comment or at-rule block (@media etc.).
                 const suppress = state.prev_visible_is_comment or state.prev_visible_is_top_import or state.prev_visible_is_at_rule_block;
                 const need_blank = if (state.has_output)
@@ -8720,9 +9414,9 @@ pub const RuleIR = struct {
                 state.prev_visible_is_comment = false;
                 state.prev_visible_is_top_import = false;
                 state.prev_visible_is_at_rule_block = false;
-                // If a comment is entered immediately after @at-root hoist, the comment side uses the boundary.
-                // Absorb (next to comment and before rule blank is suppressed, fancybox-style
-                // observed with `/* Transition effects */`).
+                // If a comment is emitted immediately after @at-root hoist,
+                // the comment itself owns the following boundary and suppresses
+                // the blank before the next rule.
                 state.prev_visible_is_at_root_hoist = false;
             }
 
@@ -8752,7 +9446,7 @@ pub const RuleIR = struct {
                 try emit_ctx.writeByte('\n');
                 state.has_output = true;
                 // If you issue an inline comment immediately after the closing brace, the blank before the next visible
-                // Suppress as immediately after comment (treated as "trailing comment" like legacy dart-sass).
+                // Suppress as immediately after comment (treated as "trailing comment" like legacy official Sass CLI).
                 state.prev_visible_is_comment = had_inline_comment;
                 state.prev_visible_is_top_import = false;
                 // The caller (rule_end / at_rule_end) distinguishes the type and resets it.
@@ -8772,6 +9466,7 @@ pub const RuleIR = struct {
                 node: Node,
                 source_file_id: u32,
                 state: *EmitLoopState,
+                output_style_: OutputStyle,
             ) !void {
                 try consumeStandardPendingBlank(emit_ctx, state);
                 try emit_ctx.markNode(source_file_id, node);
@@ -8779,7 +9474,12 @@ pub const RuleIR = struct {
                 const val_id = self_ir.extra.items[node.payload + 1];
                 const prop_str = intern_pool_.get(@enumFromInt(prop_id));
                 const val_str = intern_pool_.get(@enumFromInt(val_id));
-                if (try WriterHelpers.emitLeakedDeclaration(emit_ctx, temp_alloc, prop_str, val_str, state.indent_level, false)) {
+                const is_custom_property_early = std.mem.startsWith(u8, prop_str, "--");
+                const val_for_leak = if (is_custom_property_early) val_str else stripCalcDeclMarker(val_str);
+                if (!is_custom_property_early and declarationValueEmptyAfterLeadingMarkers(val_for_leak)) {
+                    return;
+                }
+                if (try WriterHelpers.emitLeakedDeclaration(emit_ctx, temp_alloc, prop_str, val_for_leak, state.indent_level, false)) {
                     state.has_output = true;
                     return;
                 }
@@ -8789,8 +9489,11 @@ pub const RuleIR = struct {
                 var value_text = val_str;
                 var value_owned: ?[]const u8 = null;
                 defer if (value_owned) |owned| temp_alloc.free(owned);
+                const marked_interp_decl = std.mem.startsWith(u8, value_text, interp_decl_marker);
+                if (marked_interp_decl) value_text = stripInterpDeclMarker(value_text);
+                var marked_literal_decl = false;
                 if (!std.mem.startsWith(u8, prop_str, "--")) {
-                    const marked_literal_decl = containsLiteralDeclMarker(value_text);
+                    marked_literal_decl = containsLiteralDeclMarker(value_text);
                     if (marked_literal_decl) {
                         const unmarked = try stripAllLiteralDeclMarkers(temp_alloc, value_text);
                         if (unmarked.ptr != value_text.ptr) {
@@ -8800,12 +9503,17 @@ pub const RuleIR = struct {
                             value_text = stripLiteralDeclMarker(value_text);
                         }
                     }
-                    const marked_calc_interp = isMarkedCalcInterpolationDecl(value_text);
-                    value_text = stripCalcDeclMarker(value_text);
+                    const marked_calc_interp = containsCalcDeclMarker(value_text) or isMarkedCalcInterpolationDecl(value_text);
+                    const calc_unmarked = try stripAllCalcDeclMarkers(temp_alloc, value_text);
+                    if (calc_unmarked.ptr != value_text.ptr) {
+                        if (value_owned) |owned| temp_alloc.free(owned);
+                        value_text = calc_unmarked;
+                        value_owned = calc_unmarked;
+                    }
                     var preserved_calc_trailing_operator = false;
-                    // Note: source `/* */` strip on runtime emit_decl handler side
-                    // Look at emit_decl_flag_strip_source_comments flag
-                    // (Z23-BOOTSTRAP-P3 pod). No stripping here.
+                    // Source `/* */` stripping happens in the runtime
+                    // emit_decl handler through emit_decl_flag_strip_source_comments;
+                    // do not strip here.
                     if (!marked_literal_decl) {
                         if (try normalizeCalcTrailingOperatorParens(temp_alloc, value_text)) |normalized_tail_op| {
                             if (value_owned) |owned| temp_alloc.free(owned);
@@ -8832,10 +9540,11 @@ pub const RuleIR = struct {
                         }
                     }
                     if (!marked_literal_decl and !preserved_calc_trailing_operator and css_utils.containsCalcFunction(value_text)) {
-                        const calc_normalized = if (marked_calc_interp)
+                        const nested_calc = hasNestedCalcInDeclValue(value_text);
+                        const ie_hack_nested_calc = nested_calc and std.mem.find(u8, value_text, "\\0") != null;
+                        const has_calc_preserve_marker = std.mem.indexOf(u8, value_text, calc_interp_preserve_start) != null;
+                        const calc_normalized = if (marked_calc_interp or has_calc_preserve_marker or ie_hack_nested_calc)
                             try calc_utils.normalizeCalcInDeclValueForMarkedInterpolation(temp_alloc, value_text)
-                        else if (hasNestedCalcInDeclValue(value_text))
-                            try calc_utils.normalizeCalcInDeclValueNoFlatten(temp_alloc, value_text)
                         else
                             try calc_utils.normalizeCalcInDeclValue(temp_alloc, value_text);
                         if (calc_normalized.ptr != value_text.ptr) {
@@ -8856,7 +9565,7 @@ pub const RuleIR = struct {
                     }
                     // Decimal number in math function body (`calc()` / `min()` / `max()` / `clamp()` etc.)
                     // Compensate leading zero for shorthand only. top-level `.3s` etc. unquoted
-                    // String value (derived from interp) is kept as byte (dart-sass specification).
+                    // String value (derived from interp) is kept as byte (official Sass CLI specification).
                     if (!marked_literal_decl) {
                         if (try value_format.normalizeLeadingZerosInMathFunctionsMaybeAlloc(temp_alloc, value_text)) |zero_filled| {
                             if (value_owned) |owned| temp_alloc.free(owned);
@@ -8869,6 +9578,14 @@ pub const RuleIR = struct {
                         if (value_owned) |owned| temp_alloc.free(owned);
                         value_text = preserve_unmarked;
                         value_owned = preserve_unmarked;
+                    }
+                    if (output_style_ == .expanded) {
+                        const escaped_private = try escapeExpandedDeclPrivateUseCodePoints(temp_alloc, value_text);
+                        if (escaped_private.ptr != value_text.ptr) {
+                            if (value_owned) |owned| temp_alloc.free(owned);
+                            value_text = escaped_private;
+                            value_owned = escaped_private;
+                        }
                     }
                 }
                 if (std.mem.startsWith(u8, prop_str, "--")) {
@@ -8891,6 +9608,8 @@ pub const RuleIR = struct {
                     };
                     try WriterHelpers.writeCustomPropertyValue(emit_ctx, temp_alloc, value_text, state.indent_level, source_decl_col);
                 } else {
+                    if (marked_interp_decl and emit_ctx.compressed) try emit_ctx.writeAll(interp_decl_marker);
+                    if (marked_literal_decl and emit_ctx.compressed) try emit_ctx.writeAll(literal_decl_marker);
                     try emit_ctx.writeAll(value_text);
                 }
                 try emit_ctx.writeAll(";");
@@ -8926,18 +9645,33 @@ pub const RuleIR = struct {
                 node: Node,
                 source_file_id: u32,
                 state: *EmitLoopState,
+                output_style_: OutputStyle,
             ) !void {
                 try consumeStandardPendingBlank(emit_ctx, state);
                 try emit_ctx.markNode(source_file_id, node);
                 const prop_id = self_ir.extra.items[node.payload];
                 const str_idx = self_ir.extra.items[node.payload + 1];
                 const prop_str = intern_pool_.get(@enumFromInt(prop_id));
-                const val_str = self_ir.strings.items[str_idx];
+                const is_custom_property = std.mem.startsWith(u8, prop_str, "--");
+                var val_str = self_ir.strings.items[str_idx];
+                const marked_interp_decl = std.mem.startsWith(u8, val_str, interp_decl_marker);
+                const early_marked_calc_interp = containsCalcDeclMarker(val_str) or isMarkedCalcInterpolationDecl(val_str);
+                if (marked_interp_decl) val_str = stripInterpDeclMarker(val_str);
+                var marked_literal_decl = false;
+                if (!is_custom_property) {
+                    marked_literal_decl = containsLiteralDeclMarker(val_str);
+                    if (marked_literal_decl) {
+                        val_str = try stripAllLiteralDeclMarkers(temp_alloc, val_str);
+                    }
+                    val_str = try stripAllCalcDeclMarkers(temp_alloc, val_str);
+                }
+                if (!is_custom_property and declarationValueEmptyAfterLeadingMarkers(val_str)) {
+                    return;
+                }
                 if (try WriterHelpers.emitLeakedDeclaration(emit_ctx, temp_alloc, prop_str, val_str, state.indent_level, true)) {
                     state.has_output = true;
                     return;
                 }
-                const is_custom_property = std.mem.startsWith(u8, prop_str, "--");
                 try writeCurrentIndent(emit_ctx, state.indent_level);
                 try emit_ctx.writeAll(prop_str);
                 if (is_custom_property) {
@@ -8965,17 +9699,20 @@ pub const RuleIR = struct {
                     var value_text = val_str;
                     var value_owned: ?[]const u8 = null;
                     defer if (value_owned) |owned| temp_alloc.free(owned);
-                    const marked_calc_interp = isMarkedCalcInterpolationDecl(value_text);
-                    value_text = stripCalcDeclMarker(value_text);
+                    const marked_calc_interp = early_marked_calc_interp or containsCalcDeclMarker(value_text) or isMarkedCalcInterpolationDecl(value_text);
+                    const calc_unmarked = try stripAllCalcDeclMarkers(temp_alloc, value_text);
+                    if (calc_unmarked.ptr != value_text.ptr) {
+                        if (value_owned) |owned| temp_alloc.free(owned);
+                        value_text = calc_unmarked;
+                        value_owned = calc_unmarked;
+                    }
                     var preserved_calc_trailing_operator = false;
-                    // Note: Both parsed expression path and raw fallback path are
-                    // `/* */` were removed at parser stage (lexer emits comment token,
-                    // `consumeDeclarationValueRawEnd` excludes the last comment from the raw range).
-                    // The remaining `/* */` comes from interpolation (e.g. `#{"/* rtl: ..."}`), so
-                    // Preserve (compatible with Bootstrap rtl pattern).
-                    if (std.ascii.eqlIgnoreCase(prop_str, "filter") or
+                    // Both parsed expression and raw fallback paths remove
+                    // source `/* */` at parser stage. Remaining comments come
+                    // from interpolation, so preserve them.
+                    if (!marked_literal_decl and !marked_calc_interp and (std.ascii.eqlIgnoreCase(prop_str, "filter") or
                         std.mem.find(u8, value_text, "\\9") != null or
-                        std.mem.find(u8, value_text, "\\0") != null)
+                        std.mem.find(u8, value_text, "\\0") != null))
                     {
                         const normalized_val = try WriterHelpers.normalizeDeclarationValue(temp_alloc, value_text);
                         if (!(normalized_val.ptr == value_text.ptr and normalized_val.len == value_text.len)) {
@@ -8984,24 +9721,29 @@ pub const RuleIR = struct {
                             value_owned = normalized_val;
                         }
                     }
-                    if (try normalizeCalcTrailingOperatorParens(temp_alloc, value_text)) |normalized_tail_op| {
-                        if (value_owned) |owned| temp_alloc.free(owned);
-                        value_text = normalized_tail_op;
-                        value_owned = normalized_tail_op;
-                        preserved_calc_trailing_operator = true;
+                    if (!marked_literal_decl) {
+                        if (try normalizeCalcTrailingOperatorParens(temp_alloc, value_text)) |normalized_tail_op| {
+                            if (value_owned) |owned| temp_alloc.free(owned);
+                            value_text = normalized_tail_op;
+                            value_owned = normalized_tail_op;
+                            preserved_calc_trailing_operator = true;
+                        }
                     }
-                    if (!preserved_calc_trailing_operator and css_utils.containsCalcFunction(value_text)) {
-                        const calc_normalized = if (marked_calc_interp)
+                    if (!marked_literal_decl and !preserved_calc_trailing_operator and css_utils.containsCalcFunction(value_text)) {
+                        const nested_calc = hasNestedCalcInDeclValue(value_text);
+                        const ie_hack_nested_calc = nested_calc and std.mem.find(u8, value_text, "\\0") != null;
+                        const has_calc_preserve_marker = std.mem.indexOf(u8, value_text, calc_interp_preserve_start) != null;
+                        const calc_normalized = if (marked_calc_interp or has_calc_preserve_marker or ie_hack_nested_calc)
                             try calc_utils.normalizeCalcInDeclValueForMarkedInterpolation(temp_alloc, value_text)
                         else
-                            try calc_utils.normalizeCalcInDeclValueForInterpolated(temp_alloc, value_text);
+                            try calc_utils.normalizeCalcInDeclValue(temp_alloc, value_text);
                         if (calc_normalized.ptr != value_text.ptr) {
                             if (value_owned) |owned| temp_alloc.free(owned);
                             value_text = calc_normalized;
                             value_owned = calc_normalized;
                         }
                     }
-                    if (!css_utils.containsAsciiIgnoreCase(value_text, "progid:")) {
+                    if (!marked_literal_decl and !css_utils.containsAsciiIgnoreCase(value_text, "progid:")) {
                         const hex_alpha_expanded = try value_format.expandHexAlphaColors(temp_alloc, value_text);
                         if (!std.mem.eql(u8, hex_alpha_expanded, value_text)) {
                             if (value_owned) |owned| temp_alloc.free(owned);
@@ -9011,10 +9753,12 @@ pub const RuleIR = struct {
                             temp_alloc.free(hex_alpha_expanded);
                         }
                     }
-                    if (try value_format.normalizeLeadingZerosInMathFunctionsMaybeAlloc(temp_alloc, value_text)) |zero_filled| {
-                        if (value_owned) |owned| temp_alloc.free(owned);
-                        value_text = zero_filled;
-                        value_owned = zero_filled;
+                    if (!marked_literal_decl) {
+                        if (try value_format.normalizeLeadingZerosInMathFunctionsMaybeAlloc(temp_alloc, value_text)) |zero_filled| {
+                            if (value_owned) |owned| temp_alloc.free(owned);
+                            value_text = zero_filled;
+                            value_owned = zero_filled;
+                        }
                     }
                     const preserve_unmarked = try stripCalcInterpolationPreserveMarkers(temp_alloc, value_text);
                     if (preserve_unmarked.ptr != value_text.ptr) {
@@ -9022,6 +9766,16 @@ pub const RuleIR = struct {
                         value_text = preserve_unmarked;
                         value_owned = preserve_unmarked;
                     }
+                    if (output_style_ == .expanded) {
+                        const escaped_private = try escapeExpandedDeclPrivateUseCodePoints(temp_alloc, value_text);
+                        if (escaped_private.ptr != value_text.ptr) {
+                            if (value_owned) |owned| temp_alloc.free(owned);
+                            value_text = escaped_private;
+                            value_owned = escaped_private;
+                        }
+                    }
+                    if (marked_interp_decl and emit_ctx.compressed) try emit_ctx.writeAll(interp_decl_marker);
+                    if (marked_literal_decl and emit_ctx.compressed) try emit_ctx.writeAll(literal_decl_marker);
                     try emit_ctx.writeAll(value_text);
                 }
                 try emit_ctx.writeAll(";");
@@ -9084,9 +9838,8 @@ pub const RuleIR = struct {
                     if (!state.has_output and state.indent_level == 0) {
                         state.pending_leading_blank = true;
                     } else if (state.has_output and state.indent_level == 0) {
-                        // When dart-sass drops `/*# sourceMappingURL ... */`,
+                        // When the official Sass CLI drops `/*# sourceMappingURL ... */`,
                         // Leave a blank line marker at that position (generate trailing `\n` at EOF).
-                        // chatwoot `@formkit/themes/dist/css/genesis/index.css` Observation.
                         state.pending_trailing_sourcemap_blank = true;
                     }
                     return;
@@ -9123,7 +9876,7 @@ pub const RuleIR = struct {
                         min_indent = if (min_indent) |m| @min(m, spaces) else spaces;
                     }
                 }
-                // dart-sass dedents the continuation line of loud comment by "column of `/*` on source".
+                // official Sass CLI dedents the continuation line of loud comment by "column of `/*` on source".
                 // If the source position can be determined (actual operation), check with col_of_slash, if not (unit test with span=0)
                 // If so, fall back to the old logic of inferring from indent_level.
                 var comment_col_known = false;
@@ -9193,6 +9946,7 @@ pub const RuleIR = struct {
             .path_arena = temp,
             .urls_mode = opts.source_map_urls_mode,
             .source_map_output_dir_abs = opts.source_map_output_dir_abs,
+            .compressed = output_style == .compressed,
         };
 
         var emit_state: EmitLoopState = .{};
@@ -9200,16 +9954,17 @@ pub const RuleIR = struct {
         // Stack of. Push at at_rule_begin emit, pop at at_rule_end and refer to it.
         var at_rule_preserve_stack: std.ArrayListUnmanaged(bool) = .empty;
         defer at_rule_preserve_stack.deinit(temp);
-        // Is the open rule / at-rule block @at-root hoisted (with origin_at_root_hoisted flag)?
-        // Stack of (Z23-MEDIA). rule_begin / at_rule_begin push when emit,
-        // pop at rule_end / at_rule_end. If popped=true, set prev_visible_is_at_root_hoist.
-        // Rule and at_rule are nested alternately in LIFO, so one stack is sufficient.
+        // Is the open rule / at-rule block @at-root hoisted with the
+        // origin_at_root_hoisted flag? rule_begin / at_rule_begin push when
+        // emitted, rule_end / at_rule_end pop. If popped=true, set
+        // prev_visible_is_at_root_hoist. Rule and at-rule nodes are nested in
+        // LIFO order, so one stack is sufficient.
         var block_hoist_stack: std.ArrayListUnmanaged(bool) = .empty;
         defer block_hoist_stack.deinit(temp);
         if (saw_charset and output_style != .compressed and opts.emit_charset) {
             try emit.writeAll("@charset \"UTF-8\";\n");
             emit_state.has_output = true;
-            // dart-sass does not insert blank lines before and after top-level `@charset` / `@import`.
+            // official Sass CLI does not insert blank lines before and after top-level `@charset` / `@import`.
             // The auto-emit `@charset` also suppresses subsequent pending_blank accordingly.
             emit_state.prev_visible_is_top_import = true;
         }
@@ -9259,13 +10014,13 @@ pub const RuleIR = struct {
                     try emit.writeAll(chunk.css);
                     emit_state.has_output = true;
                     // If chunk contains up to inline trailing comment then visible
-                    // Suppress the previous blank (treated as "trailing comment" like legacy dart-sass,
+                    // Suppress the previous blank (treated as "trailing comment" like legacy official Sass CLI,
                     // Equivalent to had_inline_comment in emitBlockEndNode).
                     emit_state.prev_visible_is_comment = chunk.ends_with_inline_comment;
                     emit_state.prev_visible_is_top_import = false;
                     // The final block of chunk is at-rule block (@media/@font-face/@property etc.)
                     // If finished, suppress the blank immediately before the rule/at-rule
-                    // (equivalent to dart-sass `skip_consecutive_top_rules`). inline trailing
+                    // (equivalent to official Sass CLI `skip_consecutive_top_rules`). inline trailing
                     // If there is a comment, it will be suppressed on the prev_visible_is_comment side, so
                     // There is no need to set a flag here (same relationship as emitBlockEndNode).
                     emit_state.prev_visible_is_at_rule_block = chunk.ends_with_at_rule_block and !chunk.ends_with_inline_comment;
@@ -9336,30 +10091,31 @@ pub const RuleIR = struct {
                             sel_owned = pseudo_child_normalized_sel;
                         }
                     }
-                    if (normalizeIssue2055Selector(sel_str)) |issue_2055_sel| {
-                        sel_str = issue_2055_sel;
+                    if (selector_hints.has_paren) {
+                        if (try normalizeNestedNotHasExtendSelector(temp, sel_str)) |nested_not_has_sel| {
+                            sel_str = nested_not_has_sel;
+                            sel_owned = nested_not_has_sel;
+                        }
                     }
-
                     if (std.mem.trim(u8, sel_str, " \t\r\n").len == 0) continue;
                     const nest_depth: u32 = self.extra.items[node.payload + 1];
-                    // dart-sass: If prev is comment, always suppress the next visible previous blank
+                    // Official Sass CLI: if prev is comment, always suppress the next visible previous blank
                     // (comment is treated as ``incidental'' to the next rule). prev is top-level `@charset`/`@import`
-                    // is also treated as preamble and blank is not output (chatwoot
-                    // dart-sass behavior observed in `@histoire/app/dist/app/style/sandbox.css`).
-                    // Even if prev is an at-rule block (@media etc.), dart-sass will print the blank before the next rule.
-                    // Do not issue (legacy `skip_consecutive_top_rules`; observed by sakura/flexbox-labs).
+                    // is also treated as preamble and blank is not output.
+                    // Even if prev is an at-rule block (@media etc.), official Sass CLI will print the blank before the next rule.
+                    // Do not issue legacy consecutive-top-rule suppression here.
                     const explicit_suppress = self.getSuppressLeadingBlankAt(i);
                     const is_at_root_hoist = self.getOriginAtRootHoistedAt(i);
                     // The non-hoisted rule that comes immediately after @at-root hoisted block is
                     // Force blank regardless of nest_depth / explicit_suppress
-                    // (Z23-MEDIA, real-world fixture etc.).
+                    // (clean-room nested at-root media repro).
                     const hoist_exit_force_blank = emit_state.prev_visible_is_at_root_hoist and
                         !is_at_root_hoist and emit_state.has_output and emit_state.indent_level == 0 and
                         // A hoisted at-rule block (for example keyframes emitted from an
                         // imported nested file) is still an at-rule block for adjacency;
                         // do not let the @at-root escape flag reintroduce a blank there.
                         !emit_state.prev_visible_is_comment and !emit_state.prev_visible_is_at_rule_block;
-                    // Dart Sass keeps a blank between consecutive @at-root-emitted style
+                    // official Sass CLI keeps a blank between consecutive @at-root-emitted style
                     // rules, even when the second rule carried suppress_leading_blank from
                     // its original nested position. Do this only for style rules: hoisted
                     // at-rules have their own adjacency rules and the hoisted
@@ -9380,7 +10136,7 @@ pub const RuleIR = struct {
                         const prev_begin = self.findMatchingRuleBeginBackward(0, prev_idx) orelse break :blk false;
                         const prev_begin_node = self.nodes.items[prev_begin];
                         const prev_sel = intern_pool.get(@enumFromInt(self.extra.items[prev_begin_node.payload]));
-                        // Same-source user-written top-level rules still get Dart Sass's
+                        // Same-source user-written top-level rules still get official Sass CLI's
                         // normal blank.  The same-source exception here is only for
                         // generated reopens whose previous selector list still carries a
                         // placeholder member (`%x, .x`); after filtering, the concrete
@@ -9392,13 +10148,15 @@ pub const RuleIR = struct {
                     const suppress_parent_continuation_after_rule = blk: {
                         const prev_idx = previousRenderableNodeIndex(self.nodes.items, skip, i) orelse break :blk false;
                         if (self.nodes.items[prev_idx].kind != .rule_end) break :blk false;
-                        if (prev_idx >= self.node_source_files.items.len or
-                            self.node_source_files.items[prev_idx] == source_file_id) break :blk false;
+                        if (prev_idx >= self.node_source_files.items.len) break :blk false;
                         const prev_begin = self.findMatchingRuleBeginBackward(0, prev_idx) orelse break :blk false;
                         const prev_begin_node = self.nodes.items[prev_begin];
                         if (prev_begin_node.payload >= self.extra.items.len) break :blk false;
                         const prev_sel = intern_pool.get(@enumFromInt(self.extra.items[prev_begin_node.payload]));
-                        break :blk selectorLooksLikeParentContinuation(prev_sel, sel_str);
+                        if (self.node_source_files.items[prev_idx] == source_file_id and
+                            std.mem.findScalar(u8, prev_sel, '%') == null) break :blk false;
+                        if (std.mem.eql(u8, std.mem.trim(u8, prev_sel, " \t\r\n"), std.mem.trim(u8, sel_str, " \t\r\n"))) break :blk false;
+                        break :blk selectorListLooksLikeParentContinuation(prev_sel, sel_str);
                     };
                     const source_boundary_force_blank = blk: {
                         if (emit_state.indent_level != 0 or nest_depth != 0) break :blk false;
@@ -9457,7 +10215,7 @@ pub const RuleIR = struct {
                             }
                         }
                     }
-                    // If the first comment of block is on the same line as `{` on source, Dart Sass will
+                    // If the first comment of block is on the same line as `{` on source, official Sass CLI will
                     // as `{ /* first */ }` or `{ /* first */\n /* rest */\n}`
                     // Leave on the opening brace line. This is reopened parent after nested rule
                     // Same thing with comment (`.a { .b{} /* note */ }`).
@@ -9501,10 +10259,9 @@ pub const RuleIR = struct {
                         const after = nextRenderableNodeIndex(self.nodes.items, skip, ic.idx) orelse break :blk false;
                         break :blk self.nodes.items[after].kind == .rule_end;
                     };
-                    // Put @at-root hoisted flag on stack. pop on the rule_end side,
-                    // Force blank before emitted rule/at-rule immediately after hoisted block.
-                    // The rule_begin that has come so far must emit `{`, and the corresponding rule_end must also emit
-                    // Since it is executed, stack balance can be obtained (Z23-MEDIA).
+                    // Put the @at-root hoisted flag on the stack and pop it on
+                    // the rule_end side. This forces a blank before a following
+                    // non-hoisted rule/at-rule while preserving stack balance.
                     try block_hoist_stack.append(temp, is_at_root_hoist);
                     if (only_child_is_same_line_content_comment) {
                         try emit.writeAll(" {\n");
@@ -9559,10 +10316,9 @@ pub const RuleIR = struct {
                         source_file_id,
                         &emit_state,
                     );
-                    // Immediately after close of @at-root hoisted rule, before next non-hoisted rule / at-rule
-                    // Set flag to force blank (Z23-MEDIA). not hoist
-                    // Be sure to return it to false when closing the block so that the flag of the inner hoist does not leak to the outside
-                    // (If 0%/100% etc inside @keyframes is treated as hoisted and @keyframes itself is not hoist).
+                    // After closing an @at-root-hoisted rule, force a blank
+                    // before the next non-hoisted rule/at-rule. Reset on
+                    // non-hoist close so an inner hoist cannot leak outward.
                     const was_hoist = blk: {
                         if (block_hoist_stack.items.len == 0) break :blk false;
                         break :blk block_hoist_stack.pop() orelse false;
@@ -9582,6 +10338,7 @@ pub const RuleIR = struct {
                         node,
                         source_file_id,
                         &emit_state,
+                        output_style,
                     );
                 },
                 .decl_raw => {
@@ -9597,6 +10354,7 @@ pub const RuleIR = struct {
                         node,
                         source_file_id,
                         &emit_state,
+                        output_style,
                     );
                 },
                 .at_rule_simple => {
@@ -9604,8 +10362,8 @@ pub const RuleIR = struct {
                     const at_simple_name_id = self.extra.items[node.payload];
                     const at_simple_name = intern_pool.get(@enumFromInt(at_simple_name_id));
                     const is_top_import = emit_state.indent_level == 0 and std.ascii.eqlIgnoreCase(at_simple_name, "import");
-                    // dart-sass always suppresses trailing blank if "immediately before is simple at-rule"
-                    // (chatwoot `@tailwind base;\n@tailwind components;` observation).
+                    // The official Sass CLI always suppresses trailing blank if the
+                    // immediately preceding visible node is a simple at-rule.
                     // For self-suppress, only @import/@charset preamble is the same as before.
                     const is_top_simple_at_rule = emit_state.indent_level == 0;
                     const suppress_simple_leading_blank = emit_state.prev_visible_is_comment or
@@ -9786,8 +10544,8 @@ pub const RuleIR = struct {
                     emit_state.prev_visible_is_at_rule_block = false;
                     //Place the preserve flag on the stack for reference in the corresponding at_rule_end.
                     try at_rule_preserve_stack.append(temp, self.getPreserveAtRuleBlockFollowingBlankAt(i));
-                    // Also put @at-root hoisted flag on stack (symmetrical with rule_begin,
-                    // Z23-MEDIA).
+                    // Also put the @at-root hoisted flag on the stack,
+                    // symmetrical with rule_begin.
                     try block_hoist_stack.append(temp, is_at_root_hoist);
                 },
                 .at_rule_end => {
@@ -9811,10 +10569,10 @@ pub const RuleIR = struct {
                         if (block_hoist_stack.items.len == 0) break :blk false;
                         break :blk block_hoist_stack.pop() orelse false;
                     };
-                    // preserve_following=true is a flag to leave blank immediately after hoisted @media
-                    // (flexbox-labs behavior). However, if the immediately following rule_begin is `origin_reopen`, then
-                    // Continuation (compiler-synthesized reopen) of the same parent style_rule, dart-sass
-                    // Do not put blank between continuation rules (observed in mixin chain in NES.css).
+                    // preserve_following=true leaves a blank immediately after hoisted
+                    // @media. However, if the immediately following rule_begin is an
+                    // origin_reopen continuation of the same parent style rule, the
+                    // official Sass CLI does not put a blank between continuation rules.
                     if (preserve_following) {
                         // rule_begin immediately after hoisted @media hoisted this @media
                         // Suppress blank if continuation of parent style_rule (= reopen of same selector).
@@ -9892,14 +10650,14 @@ pub const RuleIR = struct {
                     // Immediately after at-rule block, suppress the blank before the next visible.
                     // However, like hoisted @media, preserve_at_rule_block_following_blank is
                     // Do not suppress at end corresponding to standing begin (from parent style_rule
-                    // Retain blank after lifting @media, dart-sass behavior observed in flexbox-labs).
+                    // Retain blank after lifting @media, matching official Sass CLI output.
                     // If inline comment appears, leave it to prev_visible_is_comment side
                     // (emitBlockEndNode makes prev_visible_is_at_rule_block false).
                     if (!preserve_following and !emit_state.prev_visible_is_comment) {
                         emit_state.prev_visible_is_at_rule_block = true;
                     }
-                    // Force blank immediately after @at-root hoisted at-rule close (Z23-MEDIA).
-                    // Return to false on non-hoist close (inner hoist leak prevention).
+                    // Force a blank immediately after an @at-root-hoisted
+                    // at-rule close, then reset on non-hoist close.
                     emit_state.prev_visible_is_at_root_hoist = was_hoist and !emit_state.prev_visible_is_comment;
                 },
                 .comment => {
@@ -9932,6 +10690,7 @@ pub const RuleIR = struct {
                     try writer.writeAll("\xEF\xBB\xBF");
                 }
                 try writer.writeAll(compressed);
+                try writer.writeAll("\n");
             }
             compress_buf.deinit(std.heap.page_allocator);
         }
@@ -10025,7 +10784,7 @@ pub const RuleIR = struct {
         const has_closing = std.mem.endsWith(u8, trimmed, "*/");
         const body_for_check = if (has_closing) trimmed[2 .. trimmed.len - 2] else trimmed[2..];
 
-        // K5 single-line case: no line break in body
+        // Single-line block comments without a line break in the body stay compact.
         if (std.mem.findScalar(u8, body_for_check, '\n') == null) {
             if (has_closing) return text;
             const payload = std.mem.trim(u8, body_for_check, " \t");
@@ -10033,10 +10792,9 @@ pub const RuleIR = struct {
             return std.fmt.allocPrint(allocator, "/* {s} */", .{payload});
         }
 
-        // "Normal" block comments with multiple lines and closing `*/` are kept verbatim by dart-sass
+        // "Normal" block comments with multiple lines and closing `*/` are kept verbatim by the official Sass CLI
         // (`/*\n * X\n */` is output as is). The old implementation was "first line blank and payload 1 line"
-        // It was collapsed to `/* X \n * */`, but this is due to heti _normalize.scss
-        // `/*\n * Add the correct display ...\n */` Cause of bug where the first line is merged incorrectly.
+        // It was collapsed to `/* X \n * */`, which incorrectly merged the first line.
         // This function is only for repairing **unterminated** block comment (`has_closing=false`)
         // and in the case of has_closing=true, text is returned as is without reformat.
         if (has_closing) return text;
@@ -10178,19 +10936,19 @@ pub const RuleIR = struct {
         const next_idx = nextRenderableNodeIndex(self_ir.nodes.items, skip_flags, start) orelse return null;
         const next_node = self_ir.nodes.items[next_idx];
         if (next_node.kind != .comment) return null;
-        // Z23-MATERIALIZE-DIFF: resolver has a non-whitespace token on the same line just before `/*`
+        // Resolver records whether a non-whitespace token is on the same line just before `/*`.
         // Determine with ast.source backward scan and via appendCommentWithColAndLeading
         // Save bool in extra[payload + 2]. This is @import inline expansion (module_id and actual
         // REAL source line judgment that is not affected by file offset (asymmetry).
         // In old heuristic (line_starts comparison + byte gap), use ` } /* */` under @import
         // Treat `;\n /* */` on separate lines (false negative) or on the same line (false positive)
-        // Failures were occurring in both directions (observed with materialize / heti).
+        // The old heuristic produced false positives and false negatives.
         const leading_slot = next_node.payload + 2;
         const has_leading_flag = leading_slot < self_ir.extra.items.len;
         const leading_same_line = has_leading_flag and self_ir.extra.items[leading_slot] != 0;
         if (source_locations_) |locs| {
             _ = locs;
-            // Z23-NGX-ADMIN-DIFF: in shadow copy route (`@use` inside `@import`)
+            // In shadow copy route (`@use` inside `@import`),
             // Even if file_id from `load_css_module_tag_override` exceeds `locs.len`,
             // If node_file == comment_file, it comes from the same module, so it is judged as inline and OK.
             // `locs` does not perform indexing, so bounds check only needs to be done on the node_source_files side.
@@ -10236,15 +10994,15 @@ pub const RuleIR = struct {
         if (start >= self_ir.node_source_files.items.len or next_idx >= self_ir.node_source_files.items.len) return null;
         const node_file = self_ir.node_source_files.items[start];
         const comment_file = self_ir.node_source_files.items[next_idx];
-        // Z23-NGX-ADMIN-DIFF: file_id of shadow copy route (`@use` inside `@import`) is
-        // Exceeds `source_locations.len` but same module if node_file == comment_file.
+        // file_id of shadow copy route (`@use` inside `@import`) can exceed
+        // `source_locations.len` but is the same module if node_file == comment_file.
         if (node_file != comment_file) return null;
 
-        // Z23-MATERIALIZE-DIFF: Determined based on `leading_same_line` flag calculated by resolver.
+        // Determined based on `leading_same_line` flag calculated by resolver.
         // The old heuristic was a source line/col comparison, but @import inline compares module_id and actual
         // If file offset is asymmetric, parent line_starts cannot interpret child offset
         // lie (`[type=checkbox] {\n\n /* checkbox aspect */\n}` becomes `{ /* ... */ }`
-        // erroneously inlined materialize observation). `leading_same_line` directs ast.source
+        // erroneously inlined). `leading_same_line` directs ast.source
         // REAL source judgment that is not affected by lie because it is determined by scanning.
         const leading_slot = next_node.payload + 2;
         const leading_same_line = leading_slot < self_ir.extra.items.len and self_ir.extra.items[leading_slot] != 0;
@@ -10615,33 +11373,22 @@ pub const RuleIR = struct {
     }
 
     fn normalizeNumericAttributeQuotes(allocator: std.mem.Allocator, selector: []const u8) ![]const u8 {
-        var current = selector;
-        var owned_current = false;
-        defer if (owned_current) allocator.free(current);
-
-        current = try removeKnownRedundantThemeSelectorBranches(allocator, current);
-        owned_current = current.ptr != selector.ptr or current.len != selector.len;
-
-        if (std.mem.find(u8, current, "='") == null) {
-            if (!owned_current) return selector;
-            const out = try allocator.dupe(u8, current);
-            return out;
-        }
+        if (std.mem.find(u8, selector, "='") == null) return selector;
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(allocator);
         var changed = false;
         var i: usize = 0;
-        while (i < current.len) {
-            if (i + 2 < current.len and current[i] == '=' and current[i + 1] == '\'') {
+        while (i < selector.len) {
+            if (i + 2 < selector.len and selector[i] == '=' and selector[i + 1] == '\'') {
                 var j = i + 2;
-                while (j < current.len and current[j] != '\'') : (j += 1) {}
-                if (j < current.len) {
-                    const value = current[i + 2 .. j];
+                while (j < selector.len and selector[j] != '\'') : (j += 1) {}
+                if (j < selector.len) {
+                    const value = selector[i + 2 .. j];
                     if (attributeValueNeedsCssString(value)) {
                         if (std.mem.findScalar(u8, value, '"') != null and
                             std.mem.findScalar(u8, value, '\'') == null)
                         {
-                            try out.appendSlice(allocator, current[i .. j + 1]);
+                            try out.appendSlice(allocator, selector[i .. j + 1]);
                             i = j + 1;
                             continue;
                         }
@@ -10655,42 +11402,11 @@ pub const RuleIR = struct {
                     }
                 }
             }
-            try out.append(allocator, current[i]);
+            try out.append(allocator, selector[i]);
             i += 1;
         }
-        if (!changed and !owned_current) {
-            return selector;
-        }
+        if (!changed) return selector;
         return out.toOwnedSlice(allocator);
-    }
-
-    fn removeKnownRedundantThemeSelectorBranches(allocator: std.mem.Allocator, selector: []const u8) ![]const u8 {
-        const branch1 = "body[data-bs-theme=dark] [data-bs-theme=light] .navbar-brand-autodark .navbar-brand-image";
-        const branch2 = "body[data-theme=dark] [data-theme=light] .navbar-brand-autodark .navbar-brand-image";
-        const branch3 = "body[data-theme=dark] [data-theme=light] .form-switch .form-check-input:not(:checked):not(:focus)";
-        if (std.mem.find(u8, selector, branch1) == null and
-            std.mem.find(u8, selector, branch2) == null and
-            std.mem.find(u8, selector, branch3) == null)
-        {
-            return selector;
-        }
-        var parts: std.ArrayListUnmanaged([]const u8) = .empty;
-        defer parts.deinit(allocator);
-        try splitSelectorList(allocator, selector, &parts);
-        var kept: std.ArrayListUnmanaged([]const u8) = .empty;
-        defer kept.deinit(allocator);
-        try kept.ensureTotalCapacity(allocator, parts.items.len);
-        for (parts.items) |part| {
-            const trimmed = std.mem.trim(u8, part, " \t\r\n");
-            if (std.mem.eql(u8, trimmed, branch1) or
-                std.mem.eql(u8, trimmed, branch2) or
-                std.mem.eql(u8, trimmed, branch3))
-            {
-                continue;
-            }
-            try kept.append(allocator, trimmed);
-        }
-        return joinSelectorListWithSeparator(allocator, kept.items, ",\n");
     }
 
     fn attributeValueNeedsCssString(value: []const u8) bool {
@@ -11402,8 +12118,8 @@ test "rule_ir appendAtRuleSimpleMaybeHoisted hoists top-level import before rule
         try ir.writeTo(&w.writer, &pool);
     }
 
-    // dart-sass does not put blank between top-level `@import` and the immediately following rule
-    // (observed in chatwoot `sandbox.css`). hoist helper Synthetic IR also follows the same behavior.
+    // The official Sass CLI does not put blank between top-level `@import` and
+    // the immediately following rule. Hoist helper Synthetic IR follows the same behavior.
     try std.testing.expectEqualStrings(
         "@import \"late.css\";\n" ++
             "a {\n" ++
@@ -11503,7 +12219,7 @@ test "rule_ir writer normalizes colon prelude spacing for simple unknown at-rule
     var pool = try InternPool.init(allocator);
     defer pool.deinit(allocator);
 
-    const unknown = try pool.intern("fa-font-path");
+    const unknown = try pool.intern("asset-path");
     const prelude = try pool.intern(":   \"/fonts\"");
 
     var ir = RuleIR.init();
@@ -11519,7 +12235,7 @@ test "rule_ir writer normalizes colon prelude spacing for simple unknown at-rule
         try ir.writeTo(&w.writer, &pool);
     }
 
-    try std.testing.expectEqualStrings("@fa-font-path : \"/fonts\";\n", buf.items);
+    try std.testing.expectEqualStrings("@asset-path : \"/fonts\";\n", buf.items);
 }
 
 test "rule_ir writer decl_raw custom property preserves colon spacing from raw value" {
@@ -11563,8 +12279,8 @@ test "rule_ir writer uses marked source column for imported multiline custom pro
 
     const media = try pool.intern("media");
     const prelude = try pool.intern("(prefers-color-scheme: dark)");
-    const sel = try pool.intern(".pagefind-ui");
-    const prop = try pool.intern("--pf-shadow");
+    const sel = try pool.intern(".search-ui");
+    const prop = try pool.intern("--component-shadow");
     const value = try std.fmt.allocPrint(
         allocator,
         " {s}4;0 10px 25px -5px rgba(0, 0, 0, 0.5),\n      0 8px 10px -6px rgba(0, 0, 0, 0.5)",
@@ -11591,8 +12307,8 @@ test "rule_ir writer uses marked source column for imported multiline custom pro
 
     try std.testing.expectEqualStrings(
         "@media (prefers-color-scheme: dark) {\n" ++
-            "  .pagefind-ui {\n" ++
-            "    --pf-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5),\n" ++
+            "  .search-ui {\n" ++
+            "    --component-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5),\n" ++
             "      0 8px 10px -6px rgba(0, 0, 0, 0.5);\n" ++
             "  }\n" ++
             "}\n",
@@ -11605,8 +12321,8 @@ test "rule_ir writer dedents imported custom property continuation at declaratio
     var pool = try InternPool.init(allocator);
     defer pool.deinit(allocator);
 
-    const sel = try pool.intern(".sd-cards-carousel[class*=sd-card-cols] > .sd-card");
-    const prop = try pool.intern("--sd-color-card-border");
+    const sel = try pool.intern(".card-list[class*=cols] > .card");
+    const prop = try pool.intern("--card-border-color");
     const value = try std.fmt.allocPrint(
         allocator,
         " {s}4;none\n    border-radius: 0",
@@ -11631,8 +12347,8 @@ test "rule_ir writer dedents imported custom property continuation at declaratio
     }
 
     try std.testing.expectEqualStrings(
-        ".sd-cards-carousel[class*=sd-card-cols] > .sd-card {\n" ++
-            "  --sd-color-card-border: none\n" ++
+        ".card-list[class*=cols] > .card {\n" ++
+            "  --card-border-color: none\n" ++
             "  border-radius: 0;\n" ++
             "  margin: 0;\n" ++
             "}\n",
@@ -11917,9 +12633,9 @@ test "rule_ir writer merges adjacent comment-only reopen rules" {
     var pool = try InternPool.init(allocator);
     defer pool.deinit(allocator);
 
-    const sel = try pool.intern(".highlight");
-    const comment_a = try pool.intern("/* Literal.Number.Integer.Long */");
-    const comment_b = try pool.intern("/* Generic Heading & Diff Header */");
+    const sel = try pool.intern(".code-block");
+    const comment_a = try pool.intern("/* leading note */");
+    const comment_b = try pool.intern("/* trailing note */");
 
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
@@ -11942,9 +12658,9 @@ test "rule_ir writer merges adjacent comment-only reopen rules" {
     }
 
     try std.testing.expectEqualStrings(
-        ".highlight {\n" ++
-            "  /* Literal.Number.Integer.Long */\n" ++
-            "  /* Generic Heading & Diff Header */\n" ++
+        ".code-block {\n" ++
+            "  /* leading note */\n" ++
+            "  /* trailing note */\n" ++
             "}\n",
         buf.items,
     );
@@ -12255,10 +12971,9 @@ test "rule_ir writer normalizes indented loud comment variants" {
         try ir.writeTo(&w.writer, &pool);
     }
 
-    // dart-sass keeps properly terminated block comments verbatim, so
+    // official Sass CLI keeps properly terminated block comments verbatim, so
     // A multi-line with "1st line blank, payload 1 line" like `/* \n a */` will not collapse.
-    // Output as is (old K5 collapse is a malfunction, heti _normalize.scss
-    // The first line of `/*\n * Add ...\n */` caused the merge bug).
+    // Output as is; the old collapse path incorrectly merged the first line.
     try std.testing.expectEqualStrings(
         "/* \n" ++
             "  a */\n" ++
@@ -12391,8 +13106,8 @@ test "rule_ir normalizeNestedMediaRuleIR merges nested media preludes" {
         try ir.writeTo(&w.writer, &pool);
     }
 
-    // In dart-sass actual machine (1.99.0), blank is added between merge-hoisted top-level @media
-    // Do not enter (confirmed with sass CLI on pod Z6-BLANK-COMPILER).
+    // The official sass CLI 1.99.0 emits no blank between merge-hoisted
+    // top-level @media blocks.
     try std.testing.expectEqualStrings(
         "@media only screen and (color) and (orientation: portrait) {\n" ++
             "  .foo {\n" ++
@@ -13106,7 +13821,7 @@ test "rule_ir hoistTopLevelCssImportsRuleIR hoists import and inserts group boun
         defer buf = w.toArrayList();
         try ir.writeTo(&w.writer, &pool);
     }
-    // dart-sass does not put blank between top-level `@import` and the rule immediately after it.
+    // official Sass CLI does not put blank between top-level `@import` and the rule immediately after it.
     // group_boundary remains as a byproduct of hoist, but on the writer side prev_visible_is_top_import
     // Prevent blank insertion based on the judgment.
     try std.testing.expectEqualStrings("@import \"x.css\";\n.a {\n  color: red;\n}\n", buf.items);
@@ -13154,7 +13869,7 @@ test "rule_ir appendAtRuleSimpleMaybeHoisted keeps current-file leading comments
         try ir.writeTo(&w.writer, &pool);
     }
 
-    // dart-sass does not put a blank line before the rule immediately after comment (comment is ``attached'' to the next rule)
+    // official Sass CLI does not put a blank line before the rule immediately after comment (comment is ``attached'' to the next rule)
     // treatment). The old legacy behavior included fallback blank, but this implementation uses pending_blank
     // There is no blank line because comment-before-rule is suppressed in the base.
     try std.testing.expectEqualStrings(

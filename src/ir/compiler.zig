@@ -291,7 +291,7 @@ pub const Program = struct {
     static_eval_lists: []const []const Value = &.{},
     /// User module fallback search paths (from embedder). Referenced by runtime `meta.load-css`.
     load_paths: []const []const u8 = &.{},
-    /// dart-sass parity: `pkg:` URL resolution is rejected at runtime
+    /// official Sass CLI parity: `pkg:` URL resolution is rejected at runtime
     /// `meta.load-css` unless this is `true`. Set from
     /// `RunOpts.pkg_importer_enabled` / `CompileOptions.pkg_importer_enabled`
     /// at compile entry; the VM consults it before delegating to
@@ -902,11 +902,10 @@ const CompileCtx = struct {
     emit_comments: bool = true,
     callable_local_slot_base: u32 = std.math.maxInt(u32),
     callable_local_slot_bias: u32 = 0,
-    /// Flag for outer interp of loud comment text. in the set state
-    /// Compile `.interp` and preserve_empty_separators in make_selector
-    /// is added to suppress white space collapse around `#{""}` (Bootstrap bsBanner("")
-    /// `Bootstrap v5.3.8` double-space support, Z23-BOOTSTRAP-P3 pod). sub-expr
-    // When descending to ///, reset to false (selector / decl side collapse is maintained).
+    /// Flag for outer interpolation of loud comment text. While set, `.interp`
+    /// compiles with preserve_empty_separators so `#{""}` cannot collapse an
+    /// intentional separator. Reset for nested expressions so selectors and
+    /// declarations keep their normal whitespace collapse.
     in_loud_comment_text_outer: bool = false,
     skip_decimal_normalize: bool = false,
 };
@@ -938,6 +937,7 @@ fn remapLocalSlotHint(ctx: CompileCtx, slot: u32) u32 {
 }
 
 fn moduleIsPlainCss(ctx: CompileCtx) bool {
+    if (std.mem.endsWith(u8, ctx.resolved.module_path, ".css")) return true;
     return ctx.module_id < ctx.modules.len and std.mem.endsWith(u8, ctx.modules[ctx.module_id].module_path, ".css");
 }
 
@@ -1475,10 +1475,10 @@ fn literalColorValue(ctx: CompileCtx, payload: u32) CompileError!Value {
         .missing = 0,
         .legacy = true,
         .prefer_long_hex = alpha_bearing,
-        .inspect_repr = if ((lit.flags & 0b0000_1000) != 0)
-            .legacy_rgb_function
-        else if (alpha_bearing)
+        .inspect_repr = if (alpha_bearing)
             .auto
+        else if ((lit.flags & 0b0000_1000) != 0)
+            .legacy_rgb_function
         else if ((lit.flags & 0b0000_0001) != 0)
             .literal_long_hex
         else
@@ -2265,7 +2265,7 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
                 var preserve_calc_slash_text = false;
                 if (part_ex.kind == .literal_string) {
                     // literal interval of Interpolation is SVG data URL (`url("...#{x}...")`)
-                    // may contain raw data such as, dart-sass will not parse it as a value
+                    // may contain raw data such as, official Sass CLI will not parse it as a value
                     // Pass through. This also does not apply leading-zero normalize.
                     const s = resolver.unpackLiteralStringPayload(part_ex.payload);
                     const raw_lit = ctx.pool.get(s.id);
@@ -2656,10 +2656,10 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
             // Put the `/*` source column (AST source standard) calculated by the resolver into arg_a.
             // Used in determining the dedent width of loud comment continuation lines (rule_ir emitCommentNode).
             // Situation where module_id of compile chunk and actual file differ with @import inline
-            // For (pattern where zola site.scss @imports _normalize.scss),
+            // (for example, a root stylesheet importing a partial),
             // `sourceOffsetToLineCol(source_file_id, source_start)` returns wrong col
             // Defenses for. truncate to u15 (32767) and set bit 15 to leading_same_line
-            // Reserved for flag (resolver calculation) (Z23-MATERIALIZE-DIFF).
+            // Reserved for the resolver-calculated leading_same_line flag.
             const col_raw: u32 = c.source_col;
             const col_trunc: u16 = if (col_raw <= 0x7FFF)
                 @intCast(col_raw)
@@ -2680,10 +2680,10 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
         .module_dep => {
             const dep = resolved.module_dep_stmts.items[st.payload];
             // arg_b bit 0: rerun_each_call, bit 1: is_forward
-            // dep via forward is module-universal with preceding loud comment
-            // (Example: `/*! Bootstrap */ @forward "..."`) Therefore, replay on the second visit.
-            // use preceding dep via module-local (sass-spec diamond use_only::comment_order)
-            // so don't replay.
+            // A dependency reached through @forward is module-universal with
+            // its preceding loud comment, so replay it on the second visit. A
+            // dependency reached through @use remains module-local and is not
+            // replayed.
             var arg_b: u16 = if (dep.rerun_each_call) @as(u16, 1) else 0;
             if (dep.is_forward) arg_b |= 0b10;
             try ctx.cb.emit(.run_dependency, try checkedU16(dep.module_id, "dependency module"), arg_b);
@@ -2725,9 +2725,10 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                     try ctx.cb.noteIntern(d.prop_intern);
                     const raw_info = shouldEmitRawDeclForValueInfo(resolved, ctx.pool, d.value_expr);
                     if (raw_info.enabled) {
-                        // pure literal strips source `/* */`. From interp (e.g.
-                        // `var(--x) #{"/* rtl: ..."}`) is preserved (Z23-BOOTSTRAP-P3).
+                        // Pure literals strip source `/* */`; interpolation
+                        // preserves the authored comment text.
                         var flag: u16 = if (!raw_info.has_interp) opcode_mod.emit_raw_decl_flag_strip_source_comments else 0;
+                        if (raw_info.has_interp) flag |= opcode_mod.emit_raw_decl_flag_value_has_interp;
                         if ((d.emit_decl_flags & opcode_mod.emit_decl_flag_custom_property_leading_space) != 0) {
                             flag |= opcode_mod.emit_raw_decl_flag_custom_property_leading_space;
                         }
@@ -2742,15 +2743,16 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                     if (resolver.isDirectSlashListValueExpr(resolved, d.value_expr)) {
                         emit_decl_flags |= opcode_mod.emit_decl_flag_preserve_slash;
                     }
-                    // If there is no interp in value subtree, source `/* */` strip OK
-                    // (Z23-BOOTSTRAP-P3 pod, supports plain CSS `font-family: a, /* h */ b;`).
+                    // If there is no interpolation in the value subtree, source
+                    // `/* */` comments are plain CSS comments and may be stripped.
                     if (!exprContainsInterp(resolved, d.value_expr)) {
                         emit_decl_flags |= opcode_mod.emit_decl_flag_strip_source_comments;
+                    } else {
+                        emit_decl_flags |= opcode_mod.emit_decl_flag_value_has_interp;
                     }
-                    // If the source file is `.css` (plain CSS), use something like calc(... calc(...))
-                    // plain CSS literal is simplified at VM stage (dart-sass compatible, chatwoot
-                    // node_modules `.css`). From SCSS source (= bootstrap function return value
-                    // The flag is not set because the nested calc) assembled with // is preserved.
+                    // If the source file is `.css` (plain CSS), nested calc literals
+                    // are simplified at VM stage. From SCSS source, runtime-built
+                    // nested calc values are preserved.
                     if (moduleIsPlainCss(ctx)) {
                         emit_decl_flags |= opcode_mod.emit_decl_flag_plain_css_origin;
                     }
@@ -2885,7 +2887,7 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                         have_decl_in_open_block = true;
                     } else if (ch.kind == .declaration) {
                         // If a rule starts with a nested second-pass construct and
-                        // only then emits declarations, Dart Sass keeps the nested
+                        // only then emits declarations, official Sass CLI keeps the nested
                         // rule before the later declarations. The same source-order
                         // split applies after a mixin has already closed/reopened the
                         // outer block: nested rules that occur before later
@@ -3004,7 +3006,7 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                 // Situation where `emit_rule_end_if_open` has already closed outer. may_emit_decl
                 // Even if you set have_decl_in_open_block=true because of this, subsequent decl/include
                 // outer remains closed unless parent is reopened, leaving plain emit_rule_end
-                // yields `rule_end span=0..0` twice (observed in NES.css buttons.scss).
+                // yields `rule_end span=0..0` twice.
                 // Relax to "close if open", flush if reopened, otherwise no-op.
                 try inner_ctx.cb.emit(.emit_rule_end_if_open, 0, 0);
                 outer_rule_closed = true;
@@ -3206,9 +3208,9 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
             try ctx.cb.emit(.jmp, 0, 0);
             const pop_pc = ctx.cb.code.items.len;
             try ctx.cb.emit(.pop_flow_scope, 0, 0);
-            // Z21: synthetic iter holders + return exposed loop var to undeclared.
-            // If there is a reuse in the same lexical hierarchy (of the form `@if $x == nil ... else $x = $x`
-            // Prevent stale values from leaking in !default check, etc.).
+            // Return synthetic iter holders and exposed loop variables to undeclared.
+            // Otherwise a later read in the same lexical hierarchy can observe
+            // stale cursor bounds after the flow scope closes.
             try ctx.cb.emit(.clear_local, 0, remapLocalSlot(ctx, f.cursor_slot));
             try ctx.cb.emit(.clear_local, 0, remapLocalSlot(ctx, f.to_slot));
             try ctx.cb.emit(.clear_local, 0, remapLocalSlot(ctx, f.step_slot));
@@ -3268,10 +3270,9 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
             try ctx.cb.emit(.jmp, 0, 0);
             const pop_pc = ctx.cb.code.items.len;
             try ctx.cb.emit(.pop_flow_scope, 0, 0);
-            // Z21: @each iter holder / index and user-visible loop var back to undeclared
-            // (top-chunk @each iter list loads next !default check load_local
-            // It slipped through and was read as a stale list, causing load_emit_decl to fail:
-            // adminlte modal.scss + bootstrap util slot reuse).
+            // Reset synthetic loop slots and user-visible loop vars to undeclared
+            // before leaving the flow scope so later reads cannot observe stale
+            // list/index values from the previous iteration.
             try ctx.cb.emit(.clear_local, 0, remapLocalSlot(ctx, e.list_temp_slot));
             try ctx.cb.emit(.clear_local, 0, remapLocalSlot(ctx, e.index_slot));
             {
@@ -3912,12 +3913,12 @@ fn compileStmtRange(ctx: CompileCtx, start: StmtIndex, len: u32) CompileError!vo
     while (i > 0) {
         i -= 1;
         const root = roots.items[i];
-        // Z23-BULMA-V2: @each/@for/@while also emit_stmt_gap between sibling stmt in body
-        // Insert to reproduce the blank retention behavior of dart-sass. VM has selector_stack depth 0 and
+        // @each/@for/@while also emit_stmt_gap between sibling statements in the body.
+        // Insert to reproduce the blank retention behavior of the official Sass CLI. VM has selector_stack depth 0 and
         // Load into rule_ir only when open_block_depth 0, so in loop inside rule/at-rule
         // no-op. hoisted nested rule (`&:hover`) has writer fallback because nest_depth>0
         // blank does not fire and blank falls if there is no pending_blank derived from this gap
-        // (observed in bulma helpers/color.scss, diff with Dart Sass 1.99.0).
+        // Matches an observable CLI blank-retention case for loop body siblings.
         if (emitted != 0) {
             ctx.cb.setSourceSpan(ctx.resolved.stmts.items[root].span);
             try ctx.cb.emit(.emit_stmt_gap, 0, 0);
@@ -3929,8 +3930,9 @@ fn compileStmtRange(ctx: CompileCtx, start: StmtIndex, len: u32) CompileError!vo
 
 /// `@if` / Compile the branch body of loop. The nested rule (needs_mid_close) inside the branch
 /// When exiting, insert `emit_rule_end_if_open` just before it to close the outer rule block.
-/// No-op if the parent rule is not open in the first place (top level). This makes pico-like
-/// Prevent `.a { @if { decl; .b {...} } }` from being nested with `.a { decl; .a .b {...} }`.
+/// No-op if the parent rule is not open in the first place (top level). This
+/// prevents `.a { @if { decl; .b {...} } }` from being nested as
+/// `.a { decl; .a .b {...} }`.
 /// The final close on the outer rule side uses emit_rule_end_if_open to avoid double closes in runtime.
 fn compileStmtRangeHoistNested(ctx: CompileCtx, start: StmtIndex, len: u32) CompileError!void {
     if (len == 0) return;
@@ -3959,8 +3961,8 @@ fn compileStmtRangeHoistNested(ctx: CompileCtx, start: StmtIndex, len: u32) Comp
         }
         // Insert blank line marker between stmt hoisted to top-level. The VM is
         // Stack into rule_ir only if selector_stack depth is 0 and open_block_depth is 0.
-        // A case that enumerates multiple sub-rules in a huge @if like pico themes/default,
-        // Reproduce the dart-sass side inserting blank between rules.
+        // When a branch emits multiple top-level rules, preserve the blank
+        // line that the official Sass CLI emits between adjacent rules.
         if (emitted != 0) {
             ctx.cb.setSourceSpan(ctx.resolved.stmts.items[root].span);
             try ctx.cb.emit(.emit_stmt_gap, 0, 0);
@@ -4621,10 +4623,10 @@ fn compileChunkIntoArena(
             const candidate = callableStmtCompilesInOpenParentFirstPass(resolved, pool, si);
             effective_first_pass[body_idx] = switch (st.kind) {
                 // If declaration / include comes after nested rule,
-                // dart-sass puts `.a { rule; decl; }` after `.a { rule; }`
+                // official Sass CLI puts `.a { rule; decl; }` after `.a { rule; }`
                 // Reopen and output as `.a { decl; }`. The same goes for @include,
                 // Since decl/rule is emitted internally, if the source order is changed, the output will be swapped
-                // (heti: case where @include non-cjk-block comes immediately after letter-spacing decl).
+                // This includes cases where @include comes immediately after a declaration.
                 // Preceded like assign_var to maintain the same order within the mixin body
                 // first-pass is not possible if there is a non-first-pass stmt.
                 .assign_var, .declaration, .include, .content_call => candidate and !seen_non_first_pass_stmt,
@@ -5397,7 +5399,7 @@ fn compileStderrPrint(comptime fmt: []const u8, args: anytype) void {
 }
 
 /// CLI-FIX-E Step 1: Add debug line by phase (`zsass-compile phase=...`) to ZSASS_VERBOSE_ERRORS env
-/// Gate with var. Default suppress for dart-sass compatibility. See src/runtime/error_format.zig.
+/// Gate with var. Default suppress for official Sass CLI compatibility. See src/runtime/error_format.zig.
 inline fn verboseCompileErrorsEnabled() bool {
     return error_format.verboseErrorsEnabled();
 }

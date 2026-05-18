@@ -1,4 +1,4 @@
-//! Deprecation warning foundation -- dart-sass compatible deprecation management.
+//! Deprecation warning support for official Sass CLI-compatible deprecation management.
 //! `DeprecationOpts` is parsed in the CLI and passed to the builtin / resolver through the VM.
 const std = @import("std");
 const zsass_io = @import("io.zig");
@@ -46,7 +46,7 @@ pub const DeprecationKind = enum {
         return null;
     }
 
-    /// Sass language version when this deprecation became active (dart-sass compatible thresholds).
+    /// Sass language version when this deprecation became active (official Sass CLI compatible thresholds).
     pub fn activatedIn(self: DeprecationKind) ?SassVersion {
         return switch (self) {
             .import => .{ .major = 1, .minor = 80, .patch = 0 },
@@ -69,7 +69,7 @@ pub const SassVersion = struct {
     minor: u16,
     patch: u16,
 
-    /// Highest Sass version accepted by `--fatal-deprecation=<version>` (dart-sass CLI parity).
+    /// Highest Sass version accepted by `--fatal-deprecation=<version>` (official Sass CLI parity).
     pub const known_max: SassVersion = .{ .major = 1, .minor = 99, .patch = 0 };
 
     pub fn parse(raw: []const u8) ?SassVersion {

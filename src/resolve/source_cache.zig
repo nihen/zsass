@@ -1,9 +1,9 @@
 //! Thread-safe cache to share source file across worker pool.
 //!
-//! In large multi-entry compilations, hundreds of entries share the same vendor
-//! To `@import` partials (compass / fontawesome, etc.), disk is required without cache.
-//!IO runs for the number of entries x number of dependencies. `SharedSourceCache` in legacy zsass
-//! Provide an equivalent mechanism on the rewrite side.
+//! In large multi-entry compilations, hundreds of entries can share the same
+//! partials. Without a cache, disk I/O grows with entries times dependencies.
+//! This cache keeps one source buffer per resolved path and returns borrowed
+//! slices to worker threads.
 //!
 //! API:
 //! - `init(alloc)` / `deinit()`: lifetime management of cache itself

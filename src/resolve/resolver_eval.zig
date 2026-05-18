@@ -7,6 +7,7 @@ fn fuzzyNumberOrder(a: f64, b: f64) std.math.Order {
 const builtin_mod = @import("../builtin/mod.zig");
 const meta_dispatch_abi = @import("../builtin/meta_dispatch_abi.zig");
 const color_mod = @import("../color/color.zig");
+const color_format = @import("../color/color_format.zig");
 const value_mod = @import("../runtime/value.zig");
 const value_format = @import("../runtime/value_format.zig");
 const css_utils = @import("../runtime/css_utils.zig");
@@ -30,6 +31,7 @@ const literal_string_named_color_bit: u32 = 0x4000_0000;
 const literal_string_raw_text_bit: u32 = 0x2000_0000;
 const literal_string_flag_mask: u32 =
     literal_string_quoted_bit | literal_string_named_color_bit | literal_string_raw_text_bit;
+const calc_arg_marker = "\x01zsass-calc-arg:";
 
 const LiteralStringPayload = struct {
     id: InternId,
@@ -74,6 +76,7 @@ pub fn eval(env: anytype, prog: anytype, expr_idx: anytype) Error!Value {
         .list => try evalList(env, prog, ex.payload),
         .if_builtin => try evalIfBuiltin(env, prog, ex.payload),
         .builtin_call => try evalBuiltinCall(env, prog, ex.payload),
+        .call => try evalCssCall(env, prog, ex.payload),
         else => error.NonStaticExpr,
     };
 }
@@ -174,14 +177,18 @@ fn evalInterp(env: anytype, prog: anytype, payload: u32) Error!Value {
     const parts = prog.interp_parts.items[interp.part_start .. interp.part_start + interp.part_count];
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(env.allocator());
+    var contains_calc_text = false;
     for (parts) |part_idx| {
         const part = try eval(env, prog, part_idx);
         const text = try valueToInterpolationText(env, part);
         defer env.allocator().free(text);
+        if (std.mem.indexOf(u8, text, "calc(") != null) contains_calc_text = true;
         try out.appendSlice(env.allocator(), text);
     }
     const id = try env.pool().intern(out.items);
-    return Value.string(id, interp.preserve_quote);
+    const result = Value.string(id, interp.preserve_quote);
+    if (!interp.preserve_quote and contains_calc_text) return result.withPreserveLiteralText();
+    return result;
 }
 
 fn evalList(env: anytype, prog: anytype, payload: u32) Error!Value {
@@ -207,6 +214,45 @@ fn evalIfBuiltin(env: anytype, prog: anytype, payload: u32) Error!Value {
         try eval(env, prog, true_expr)
     else
         try eval(env, prog, false_expr);
+}
+
+fn evalCssCall(env: anytype, prog: anytype, payload: u32) Error!Value {
+    const call = prog.call_exprs.items[payload];
+    if (!call.callee_is_css) return error.NonStaticExpr;
+    if (call.callee_name == .none) return error.NonStaticExpr;
+
+    const arg_exprs = prog.call_args.items[call.arg_start .. call.arg_start + call.arg_count];
+    const arg_names = prog.call_arg_names.items[call.arg_start .. call.arg_start + call.arg_count];
+    const name = env.pool().get(call.callee_name);
+
+    if (std.ascii.eqlIgnoreCase(name, "calc") and arg_exprs.len == 1 and arg_names[0] == .none) {
+        const arg = try eval(env, prog, arg_exprs[0]);
+        if (arg.kind() == .number) return arg;
+        const text = try valueToCssCallArgText(env, arg);
+        defer env.allocator().free(text);
+        const rendered = try std.fmt.allocPrint(env.allocator(), "calc({s})", .{text});
+        defer env.allocator().free(rendered);
+        const id = try env.pool().intern(rendered);
+        const out = Value.string(id, false);
+        if (std.mem.indexOf(u8, text, "calc(") != null) return out.withPreserveLiteralText();
+        return out;
+    }
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(env.allocator());
+    try out.appendSlice(env.allocator(), name);
+    try out.append(env.allocator(), '(');
+    for (arg_exprs, 0..) |arg_expr, i| {
+        if (i >= arg_names.len or arg_names[i] != .none) return error.NonStaticExpr;
+        if (i != 0) try out.appendSlice(env.allocator(), ", ");
+        const arg = try eval(env, prog, arg_expr);
+        const text = try valueToCssCallArgText(env, arg);
+        defer env.allocator().free(text);
+        try out.appendSlice(env.allocator(), text);
+    }
+    try out.append(env.allocator(), ')');
+    const id = try env.pool().intern(out.items);
+    return Value.string(id, false).withPreserveLiteralText();
 }
 
 fn evalBuiltinCall(env: anytype, prog: anytype, payload: u32) Error!Value {
@@ -348,6 +394,33 @@ fn unaryPrefixValue(env: anytype, prefix: []const u8, v: Value, calc_policy: Una
     return Value.string(id, false);
 }
 
+fn calcArgMarkedText(env: anytype, v: Value) ?[]const u8 {
+    if (v.kind() != .string or v.stringQuoted(env.stringFlagsPool().items)) return null;
+    const raw = env.pool().get(v.stringIntern());
+    if (!std.mem.startsWith(u8, raw, calc_arg_marker)) return null;
+    return raw[calc_arg_marker.len..];
+}
+
+fn valueToCssCallArgText(env: anytype, v: Value) Error![]const u8 {
+    if (calcArgMarkedText(env, v)) |text| {
+        return try env.allocator().dupe(u8, text);
+    }
+    return valueToOpString(env, v);
+}
+
+fn calcBinaryIfMarked(env: anytype, lhs: Value, rhs: Value, op: []const u8) Error!?Value {
+    if (calcArgMarkedText(env, lhs) == null and calcArgMarkedText(env, rhs) == null) return null;
+
+    const lhs_text = try valueToCssCallArgText(env, lhs);
+    defer env.allocator().free(lhs_text);
+    const rhs_text = try valueToCssCallArgText(env, rhs);
+    defer env.allocator().free(rhs_text);
+    const merged = try std.fmt.allocPrint(env.allocator(), "{s}{s} {s} {s}", .{ calc_arg_marker, lhs_text, op, rhs_text });
+    defer env.allocator().free(merged);
+    const id = try env.pool().intern(merged);
+    return Value.string(id, false);
+}
+
 fn addValues(env: anytype, a: Value, b: Value) Error!Value {
     const lhs = try coerceCalcStringToNumberish(env, a);
     const rhs = try coerceCalcStringToNumberish(env, b);
@@ -377,6 +450,7 @@ fn addValues(env: anytype, a: Value, b: Value) Error!Value {
             else => return err,
         }
     }
+    if (try calcBinaryIfMarked(env, lhs, rhs, "+")) |v| return v;
     if (lhs.kind() == .string and rhs.kind() == .string) {
         const sa = env.pool().get(lhs.stringIntern());
         const sb = env.pool().get(rhs.stringIntern());
@@ -426,6 +500,7 @@ fn subValues(env: anytype, a: Value, b: Value) Error!Value {
             return try Value.number(lhs.asF64(env.numberPool()) - resolved.rhs, resolved.unit, env.numberPool(), env.poolAlloc());
         } else |_| return error.SassError;
     }
+    if (try calcBinaryIfMarked(env, lhs, rhs, "-")) |v| return v;
     const sa = try valueToArithmeticOperandText(env, lhs);
     defer env.allocator().free(sa);
     const sb = try valueToArithmeticOperandText(env, rhs);
@@ -455,6 +530,7 @@ fn mulValues(env: anytype, a: Value, b: Value) Error!Value {
             return try Value.number(lf * rf * combined.factor, combined.unit, env.numberPool(), env.poolAlloc());
         }
     }
+    if (try calcBinaryIfMarked(env, lhs, rhs, "*")) |v| return v;
     return error.SassError;
 }
 
@@ -528,6 +604,7 @@ fn divValues(env: anytype, a: Value, b: Value) Error!Value {
         return try Value.number((numerator / denominator) * factor, out_unit, env.numberPool(), env.poolAlloc());
     }
 
+    if (try calcBinaryIfMarked(env, lhs, rhs, "/")) |v| return v;
     const sa_raw = try valueToArithmeticOperandText(env, lhs);
     defer env.allocator().free(sa_raw);
     const sb_raw = try valueToArithmeticOperandText(env, rhs);
@@ -614,19 +691,7 @@ fn valueToOpString(env: anytype, v: Value) Error![]const u8 {
         .color => blk: {
             const color_pool = env.colorPool() orelse return error.NonStaticExpr;
             const entry = v.colorEntry(color_pool).*;
-            const source = color_mod.Color.init(
-                entry.channels[0],
-                entry.channels[1],
-                entry.channels[2],
-                entry.channels[3],
-                entry.space,
-            );
-            const srgb = if (entry.space == .srgb) source else color_mod.convert(source, .srgb);
-            break :blk std.fmt.allocPrint(env.allocator(), "#{x:0>2}{x:0>2}{x:0>2}", .{
-                color_mod.clampByte(clampUnit(srgb.channels[0]) * 255.0),
-                color_mod.clampByte(clampUnit(srgb.channels[1]) * 255.0),
-                color_mod.clampByte(clampUnit(srgb.channels[2]) * 255.0),
-            }) catch error.OutOfMemory;
+            break :blk color_format.formatColorCss(env.allocator(), entry) catch error.OutOfMemory;
         },
         else => error.NonStaticExpr,
     };
@@ -1293,8 +1358,4 @@ fn combineUnitIdsForMul(
     }
     defer alloc.free(combined_text.?);
     return .{ .unit = try pool.intern(combined_text.?), .factor = scale };
-}
-
-fn clampUnit(v: f64) f64 {
-    return std.math.clamp(v, 0.0, 1.0);
 }

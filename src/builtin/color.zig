@@ -2,7 +2,6 @@
 const std = @import("std");
 const calculation = @import("../color/calculation.zig");
 const color_mod = @import("../color/color.zig");
-const color_sentinels = @import("../color/color_sentinels.zig");
 const value_mod = @import("../runtime/value.zig");
 const deprecation_mod = @import("../runtime/deprecation.zig");
 const shared = @import("shared.zig");
@@ -112,13 +111,17 @@ fn tryCoerceColorArg(ctx: *BuiltinContext, v: Value) ?Value {
     const raw = ctx.intern_pool.get(v.stringIntern());
     if (tryCoerceHexColorLiteral(ctx, raw)) |hex| return hex;
     const named = color_mod.lookupNamedColor(raw) orelse return null;
-    return rgbaToValue(
+    const out = rgbaToValue(
         ctx,
         color_mod.clampByte(named.r),
         color_mod.clampByte(named.g),
         color_mod.clampByte(named.b),
         alphaToByte(named.a),
     ) catch null;
+    if (out) |coerced| {
+        coerced.colorEntryMut(ctx.color_pool).prefer_long_hex = true;
+    }
+    return out;
 }
 
 fn isLegacyAlphaFilterName(name: []const u8) bool {
@@ -582,10 +585,10 @@ fn rgbaFromCoercedColorAndAlpha(
         return error.BuiltinType;
     };
     if (alpha.missing) return error.BuiltinType;
-    // dart-sass maintains channel precision of original color in 2-arg format of `rgba($color, $alpha)`
+    // official Sass CLI maintains channel precision of original color in 2-arg format of `rgba($color, $alpha)`
     // (byte rounding prohibited). Keeps f64 channel in srgb space and returns legacy rgb color.
     const srgb = colorCompatSrgb(ctx, coerced_color);
-    return pushColorEntry(ctx, .{
+    const out = try pushColorEntry(ctx, .{
         .channels = .{
             srgb.channels[0],
             srgb.channels[1],
@@ -596,6 +599,10 @@ fn rgbaFromCoercedColorAndAlpha(
         .missing = 0,
         .legacy = true,
     });
+    if (coerced_color.kind() == .color and coerced_color.colorEntry(ctx.color_pool).prefer_long_hex) {
+        maybePreferLongHexResult(ctx, out, true);
+    }
+    return out;
 }
 
 fn color_rgbImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId, fallback_name: []const u8) BuiltinError!Value {
@@ -665,6 +672,12 @@ fn color_rgbImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
             if (source_entry.inspect_repr == .literal_short_hex or source_entry.inspect_repr == .literal_long_hex) {
                 maybePreferLongHexResult(ctx, out, true);
             }
+            if (source_entry.prefer_long_hex) {
+                maybePreferLongHexResult(ctx, out, true);
+            }
+        }
+        if (c.kind() == .color and c.colorEntry(ctx.color_pool).prefer_long_hex) {
+            maybePreferLongHexResult(ctx, out, true);
         }
         return out;
     }
@@ -675,9 +688,6 @@ fn color_rgbImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
         }
         return err;
     };
-    if (try tryRecoverCollapsedRgbCalcArg3Fallback(ctx, args, arg_names)) |fallback| {
-        return fallback;
-    }
     if (shouldSerializeConstructorFallback(ctx, args)) {
         return serializeLegacyConstructorFallback(ctx, fallback_name, args);
     }
@@ -705,9 +715,8 @@ fn color_rgbImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
     if (alpha.missing) missing |= 0x8;
 
     const primitive = color_mod.Color.init(red.value, green.value, blue.value, alpha.value, .srgb);
-    // legacy oracle (`src/builtin/color_constructors.zig:467-478`):
-    // rgb()/rgba() always prefer legacy rgb function expression as constructor
-    // (including missing alpha of `/ none`).
+    // Sass constructor output keeps rgb()/rgba() in legacy function form
+    // even when the alpha channel is explicitly missing with `/ none`.
     const legacy_rgb_fn = true;
     const out = try colorValueFromDeclaredColor(ctx, primitive, .srgb, missing, legacy_rgb_fn);
     return markLegacyRgbFunctionResult(ctx, out);
@@ -990,7 +999,7 @@ fn serializeConstructorListFallback(
     }
 
     try buf.append(ctx.allocator, ')');
-    const preserve_relative_slash_text = relative_color_slash and isPreservedSlashList(ctx, top);
+    const preserve_relative_slash_text = top_was_slash and top.listFromBuiltinSlash();
     const rendered = if (preserve_relative_slash_text)
         try normalizeRelativeColorSlashSpacing(ctx, buf.items)
     else
@@ -1074,9 +1083,6 @@ fn color_hslImpl(
         }
         return err;
     };
-    if (try tryRecoverCollapsedHslCalcArg3Fallback(ctx, args, arg_names, fallback_name)) |fallback| {
-        return fallback;
-    }
     if (shouldSerializeConstructorFallback(ctx, args)) {
         return serializeLegacyConstructorFallback(ctx, fallback_name, args);
     }
@@ -1121,8 +1127,7 @@ fn color_hslImpl(
     if (alpha.missing) missing |= 0x8;
 
     const constructed = normalizeChannelColor(color_mod.Color.init(h.value, s.value, l.value, alpha.value, .hsl));
-    // legacy oracle (`src/builtin/color_constructors.zig:1025-1029`):
-    // HSL containing `none` is kept as modern color.
+    // HSL with a missing channel serializes as modern color syntax.
     return colorValueFromDeclaredColor(ctx, constructed, .hsl, missing, missing == 0);
 }
 
@@ -1353,8 +1358,7 @@ fn color_hwbImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
     if (alpha.missing) missing |= 0x8;
 
     const constructed = normalizeChannelColor(color_mod.Color.init(h.value, w.value, b.value, alpha.value, .hwb));
-    // legacy oracle (`src/builtin/color_constructors.zig:1558-1560`):
-    // HWB containing `none` is kept as modern color.
+    // HWB with a missing channel serializes as modern color syntax.
     return colorValueFromDeclaredColor(ctx, constructed, .hwb, missing, missing == 0);
 }
 
@@ -2438,8 +2442,8 @@ fn applyColorOperation(
         projected_missing
     else
         mapMissingChannels(projected_missing, working_space, source_declared_space);
-    // legacy oracle (`src/builtin/color.zig:2104-2107`):
-    // The result of processing the legacy rgb/hsl expression in a separate space is normalized to the actual color without preserving missing.
+    // Processing a legacy rgb/hsl value through another color space normalizes
+    // the result as an actual color rather than preserving missing channels.
     const had_mapped_missing = output_missing != 0;
     if (source_legacy and working_space != source_declared_space) {
         output_missing = 0;
@@ -2554,182 +2558,6 @@ fn parseColorFunctionAlpha(ctx: *BuiltinContext, v: Value) BuiltinError!ParsedCo
     return .{ .value = clamped, .missing = false };
 }
 
-fn unitlessNumberApprox(ctx: *BuiltinContext, v: Value, expected: f64, tol: f64) bool {
-    if (v.kind() != .number) return false;
-    if (v.unitId(ctx.number_pool) != .none) return false;
-    return @abs(v.asF64(ctx.number_pool) - expected) <= tol;
-}
-
-fn percentNumberApprox(ctx: *BuiltinContext, v: Value, expected: f64, tol: f64) bool {
-    if (v.kind() != .number) return false;
-    const unit_id = v.unitId(ctx.number_pool);
-    if (unit_id == .none) return false;
-    const unit = ctx.intern_pool.get(unit_id);
-    if (!std.ascii.eqlIgnoreCase(unit, "%")) return false;
-    return @abs(v.asF64(ctx.number_pool) - expected) <= tol;
-}
-
-fn noNamedArgs(arg_names: []const InternId) bool {
-    for (arg_names) |name_id| {
-        if (name_id != .none) return false;
-    }
-    return true;
-}
-
-fn tryRecoverCollapsedRgbCalcArg3Fallback(
-    ctx: *BuiltinContext,
-    args: []const Value,
-    arg_names: []const InternId,
-) BuiltinError!?Value {
-    if (args.len != 1 or !noNamedArgs(arg_names)) return null;
-    if (args[0].kind() != .list or args[0].listComma(ctx.list_meta_pool.items) or args[0].listBracketed(ctx.list_meta_pool.items) or args[0].listSlash(ctx.list_meta_pool.items)) return null;
-    const items = ctx.list_pool.items[args[0].listHandle()];
-    if (items.len != 3) return null;
-    if (!unitlessNumberApprox(ctx, items[0], 1.0, 1e-12)) return null;
-    if (!unitlessNumberApprox(ctx, items[1], 2.0, 1e-12)) return null;
-    if (!unitlessNumberApprox(ctx, items[2], 7.5, 1e-12)) return null;
-    const id = try internString(ctx, "rgb(1, 2, calc(3), 0.4)");
-    return Value.string(id, false);
-}
-
-fn tryRecoverCollapsedHslCalcArg3Fallback(
-    ctx: *BuiltinContext,
-    args: []const Value,
-    arg_names: []const InternId,
-    fallback_name: []const u8,
-) BuiltinError!?Value {
-    if (args.len != 1 or !noNamedArgs(arg_names)) return null;
-    if (args[0].kind() != .list or args[0].listComma(ctx.list_meta_pool.items) or args[0].listBracketed(ctx.list_meta_pool.items) or args[0].listSlash(ctx.list_meta_pool.items)) return null;
-    const items = ctx.list_pool.items[args[0].listHandle()];
-    if (items.len != 3) return null;
-    if (!unitlessNumberApprox(ctx, items[0], 1.0, 1e-12)) return null;
-    if (!percentNumberApprox(ctx, items[1], 2.0, 1e-10)) return null;
-    if (!percentNumberApprox(ctx, items[2], 7.5, 1e-10)) return null;
-    const text = try std.fmt.allocPrint(ctx.allocator, "{s}(1, 2%, calc(3%), 0.4)", .{fallback_name});
-    defer ctx.allocator.free(text);
-    const id = try internString(ctx, text);
-    return Value.string(id, false);
-}
-
-fn tryRecoverCollapsedLabCalcArg3Fallback(
-    ctx: *BuiltinContext,
-    args: []const Value,
-    arg_names: []const InternId,
-) BuiltinError!?Value {
-    if (args.len != 1 or !noNamedArgs(arg_names)) return null;
-    if (args[0].kind() != .list or args[0].listComma(ctx.list_meta_pool.items) or args[0].listBracketed(ctx.list_meta_pool.items) or args[0].listSlash(ctx.list_meta_pool.items)) return null;
-    const items = ctx.list_pool.items[args[0].listHandle()];
-    if (items.len != 3) return null;
-    if (!percentNumberApprox(ctx, items[0], 1.0, 1e-10)) return null;
-    if (!unitlessNumberApprox(ctx, items[1], 2.0, 1e-12)) return null;
-    if (!unitlessNumberApprox(ctx, items[2], 7.5, 1e-12)) return null;
-    const id = try internString(ctx, "lab(1% 2 calc(3)/0.4)");
-    return Value.string(id, false);
-}
-
-fn tryRecoverCollapsedModernAlphaDegenerate(
-    ctx: *BuiltinContext,
-    args: []const Value,
-    space: color_mod.ColorSpace,
-) BuiltinError!?Value {
-    if (!(space == .lab or space == .lch or space == .oklab or space == .oklch)) return null;
-    if (args.len != 1) return null;
-    const arg = args[0];
-    if (arg.kind() != .list or arg.listComma(ctx.list_meta_pool.items) or arg.listBracketed(ctx.list_meta_pool.items) or arg.listSlash(ctx.list_meta_pool.items)) return null;
-    const items = ctx.list_pool.items[arg.listHandle()];
-    if (items.len != 3) return null;
-    if (!percentNumberApprox(ctx, items[0], 1.0, 1e-10)) return null;
-
-    const second_ok = switch (space) {
-        .oklch => unitlessNumberApprox(ctx, items[1], 0.2, 1e-10),
-        else => unitlessNumberApprox(ctx, items[1], 2.0, 1e-10),
-    };
-    if (!second_ok) return null;
-    if (items[2].kind() != .number) return null;
-    switch (space) {
-        .lab, .oklab => {
-            if (items[2].unitId(ctx.number_pool) != .none) return null;
-        },
-        .lch, .oklch => {
-            if (items[2].unitId(ctx.number_pool) == .none) return null;
-            const unit = ctx.intern_pool.get(items[2].unitId(ctx.number_pool));
-            if (!std.ascii.eqlIgnoreCase(unit, "deg")) return null;
-        },
-        else => return null,
-    }
-
-    const c0: f64 = switch (space) {
-        .oklab, .oklch => 0.01,
-        else => 1.0,
-    };
-    const c1: f64 = switch (space) {
-        .oklch => 0.2,
-        else => 2.0,
-    };
-    const c2: f64 = switch (space) {
-        .lab, .oklab => -3.0,
-        .lch, .oklch => 3.0,
-        else => return null,
-    };
-    const c2_sign = std.math.signbit(c2);
-    const collapsed = items[2].asF64(ctx.number_pool);
-    const alpha: f64 = if (collapsed == 0.0)
-        (if (std.math.signbit(collapsed) == c2_sign) 1.0 else 0.0)
-    else
-        return null;
-
-    const recovered = try colorValueFromDeclaredColor(
-        ctx,
-        color_mod.Color.init(c0, c1, c2, alpha, space),
-        space,
-        0,
-        false,
-    );
-    return @as(?Value, recovered);
-}
-
-fn tryRecoverCollapsedColorConstructorDegenerate(
-    ctx: *BuiltinContext,
-    description: Value,
-) BuiltinError!?Value {
-    if (description.kind() != .list or description.listComma(ctx.list_meta_pool.items) or description.listBracketed(ctx.list_meta_pool.items) or description.listSlash(ctx.list_meta_pool.items)) return null;
-    const items = ctx.list_pool.items[description.listHandle()];
-    if (items.len != 4) return null;
-    if (items[0].kind() != .string or items[0].stringQuoted(ctx.string_flags_pool.items)) return null;
-    if (!colorSpaceNameEq(ctx.intern_pool.get(items[0].stringIntern()), "srgb")) return null;
-    if (!unitlessNumberApprox(ctx, items[1], 0.0, 1e-12)) return null;
-    if (!unitlessNumberApprox(ctx, items[2], 0.0, 1e-12)) return null;
-    if (items[3].kind() != .number) return null;
-
-    const collapsed = items[3].asF64(ctx.number_pool);
-    var c2 = collapsed;
-    var alpha: f64 = 1.0;
-    if (std.math.isInf(collapsed)) {
-        //Restore the path where `calc(+/-infinity) / 0.5` is calculated before slash alpha judgment.
-        alpha = 0.5;
-        c2 = collapsed;
-    } else if (std.math.isNan(collapsed)) {
-        // Treat alpha derived from `0 / calc(NaN)` as 0.
-        alpha = 0.0;
-        c2 = 0.0;
-    } else if (collapsed == 0.0 and std.math.signbit(collapsed)) {
-        // `0 / calc(-infinity)` represents alpha=0 via -0.
-        alpha = 0.0;
-        c2 = 0.0;
-    } else {
-        return null;
-    }
-
-    const recovered = try colorValueFromDeclaredColor(
-        ctx,
-        color_mod.Color.init(0.0, 0.0, c2, alpha, .srgb),
-        .srgb,
-        0,
-        false,
-    );
-    return @as(?Value, recovered);
-}
-
 fn isRelativeColorDescription(ctx: *BuiltinContext, list_value: Value) bool {
     if (list_value.kind() != .list or list_value.listBracketed(ctx.list_meta_pool.items) or list_value.listComma(ctx.list_meta_pool.items)) return false;
     const items = ctx.list_pool.items[list_value.listHandle()];
@@ -2744,13 +2572,6 @@ fn isRelativeColorDescription(ctx: *BuiltinContext, list_value: Value) bool {
         return std.ascii.eqlIgnoreCase(ctx.intern_pool.get(head[0].stringIntern()), "from");
     }
     return false;
-}
-
-fn isPreservedSlashList(ctx: *BuiltinContext, value: Value) bool {
-    if (value.kind() != .list or !value.listSlash(ctx.list_meta_pool.items)) return false;
-    if (value.listFromBuiltinSlash()) return true;
-    const preserve = ctx.slash_list_preserve orelse return false;
-    return preserve.contains(value.listHandle());
 }
 
 fn parseColorConstructorSlots(
@@ -2936,9 +2757,6 @@ fn color_colorImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const
     }
 
     const description = description_opt orelse return error.BuiltinType;
-    if (try tryRecoverCollapsedColorConstructorDegenerate(ctx, description)) |recovered| {
-        return recovered;
-    }
     if (isRelativeColorDescription(ctx, description)) {
         return serializeConstructorListFallback(ctx, "color", &.{description}, false);
     }
@@ -3076,9 +2894,8 @@ fn colorLegacyFlagFromValue(ctx: *BuiltinContext, c: Value) bool {
 fn colorLegacyCompatFlagFromValue(ctx: *BuiltinContext, c: Value) bool {
     const entry = colorEntryOf(ctx, c);
     if (entry.legacy) return true;
-    // legacy oracle (`src/builtin/color_constructors.zig:1025-1029`, `1558-1560`):
-    // Missing channel of `hsl()/hwb()` is displayed as modern, but it is displayed as compatible with legacy color function.
-    // Implicit routes are treated the same as legacy.
+    // hsl()/hwb() with missing channels serialize with modern syntax, while
+    // later legacy-compatible routes still treat them as legacy-capable colors.
     return entry.missing != 0 and (entry.space == .hsl or entry.space == .hwb);
 }
 
@@ -3254,518 +3071,6 @@ fn projectChannelReadForSpace(
     };
 }
 
-fn isCanonicalWhiteToHslSource(entry: *const value_mod.ColorEntry) ?[3]f64 {
-    if (entry.missing != 0 or @abs(entry.channels[3] - 1.0) > 1e-12) return null;
-    switch (entry.space) {
-        .oklab, .oklch => {
-            if (@abs(entry.channels[0] - 1.0) <= 1e-12 and
-                @abs(entry.channels[1]) <= 1e-12 and
-                @abs(entry.channels[2]) <= 1e-12)
-            {
-                return .{ 161.8181818182, 266.6666666667, 100.0 };
-            }
-        },
-        .prophoto_rgb => {
-            if (@abs(entry.channels[0] - 1.0) <= 1e-12 and
-                @abs(entry.channels[1] - 1.0) <= 1e-12 and
-                @abs(entry.channels[2] - 1.0) <= 1e-12)
-            {
-                return .{ 180.0, 50.0, 100.0 };
-            }
-        },
-        else => {},
-    }
-    return null;
-}
-
-fn approxEq(value: f64, expected: f64, tol: f64) bool {
-    return @abs(value - expected) <= tol;
-}
-
-fn toSpaceExactString(ctx: *BuiltinContext, css: []const u8) BuiltinError!Value {
-    return Value.string(try internString(ctx, css), false);
-}
-
-fn toSpaceExactColor(
-    ctx: *BuiltinContext,
-    space: color_mod.ColorSpace,
-    c0: f64,
-    c1: f64,
-    c2: f64,
-    legacy: bool,
-) BuiltinError!Value {
-    return pushColorEntry(ctx, .{
-        .channels = .{ c0, c1, c2, 1.0 },
-        .space = space,
-        .missing = 0,
-        .legacy = legacy,
-    });
-}
-
-fn toSpaceExactHsl(ctx: *BuiltinContext, h: f64, s: f64, l: f64) BuiltinError!Value {
-    return toSpaceExactColor(ctx, .hsl, h, s, l, true);
-}
-
-fn toSpaceExactHwb(ctx: *BuiltinContext, h: f64, w: f64, b: f64) BuiltinError!Value {
-    return toSpaceExactColor(ctx, .hwb, h, w, b, true);
-}
-
-const SentinelLegacyFilter = enum { any, only_legacy, only_non_legacy };
-
-const SentinelDispatchFn = *const fn (
-    ctx: *BuiltinContext,
-    target_space: color_mod.ColorSpace,
-    legacy_rgb_target: bool,
-) BuiltinError!?Value;
-
-const SentinelMatch = struct {
-    space: color_mod.ColorSpace,
-    legacy: SentinelLegacyFilter = .any,
-    c0: f64,
-    c0_tol: f64,
-    c1: f64,
-    c1_tol: f64,
-    c2: f64,
-    c2_tol: f64,
-    dispatch: SentinelDispatchFn,
-};
-
-const sentinel_matchers = [_]SentinelMatch{
-    .{ .space = .a98_rgb, .c0 = -999999.0, .c0_tol = 1e-12, .c1 = 0.0, .c1_tol = 1e-12, .c2 = 0.0, .c2_tol = 1e-12, .dispatch = &dispatchSentinelA98Rgb },
-    .{ .space = .display_p3, .c0 = -999999.0, .c0_tol = 1e-12, .c1 = 0.0, .c1_tol = 1e-12, .c2 = 0.0, .c2_tol = 1e-12, .dispatch = &dispatchSentinelDisplayP3 },
-    .{ .space = .display_p3_linear, .c0 = -999999.0, .c0_tol = 1e-12, .c1 = 0.0, .c1_tol = 1e-12, .c2 = 0.0, .c2_tol = 1e-12, .dispatch = &dispatchSentinelDisplayP3Linear },
-    .{ .space = .hsl, .c0 = 20.0, .c0_tol = 1e-12, .c1 = 999999.0, .c1_tol = 1e-9, .c2 = 50.0, .c2_tol = 1e-12, .dispatch = &dispatchSentinelHsl },
-    .{ .space = .hwb, .c0 = 20.0, .c0_tol = 1e-12, .c1 = 999999.0, .c1_tol = 1e-9, .c2 = -999950.0, .c2_tol = 1e-9, .dispatch = &dispatchSentinelHwb },
-    .{ .space = .lch, .c0 = 10.0, .c0_tol = 1e-12, .c1 = 999999.0, .c1_tol = 1e-6, .c2 = 0.0, .c2_tol = 1e-12, .dispatch = &dispatchSentinelLch },
-    .{ .space = .oklab, .c0 = 0.5, .c0_tol = 1e-12, .c1 = -999999.0, .c1_tol = 1e-6, .c2 = 0.0, .c2_tol = 1e-12, .dispatch = &dispatchSentinelOklab },
-    .{ .space = .oklch, .c0 = 0.1, .c0_tol = 1e-12, .c1 = 999999.0, .c1_tol = 1e-6, .c2 = 0.0, .c2_tol = 1e-12, .dispatch = &dispatchSentinelOklch },
-    .{ .space = .prophoto_rgb, .c0 = -999999.0, .c0_tol = 1e-6, .c1 = 0.0, .c1_tol = 1e-12, .c2 = 0.0, .c2_tol = 1e-12, .dispatch = &dispatchSentinelProphotoRgb },
-    .{ .space = .rec2020, .c0 = -999999.0, .c0_tol = 1e-6, .c1 = 0.0, .c1_tol = 1e-12, .c2 = 0.0, .c2_tol = 1e-12, .dispatch = &dispatchSentinelRec2020 },
-    .{ .space = .srgb, .legacy = .only_non_legacy, .c0 = -999999.0, .c0_tol = 1e-6, .c1 = 0.0, .c1_tol = 1e-8, .c2 = 0.0, .c2_tol = 1e-8, .dispatch = &dispatchSentinelSrgbWide },
-    .{ .space = .srgb, .legacy = .only_legacy, .c0 = -999999.0 / 255.0, .c0_tol = 1e-8, .c1 = 0.0, .c1_tol = 1e-8, .c2 = 0.0, .c2_tol = 1e-8, .dispatch = &dispatchSentinelSrgbLegacy },
-    .{ .space = .xyz_d65, .c0 = -999999.0, .c0_tol = 1e-6, .c1 = 0.0, .c1_tol = 1e-8, .c2 = 0.0, .c2_tol = 1e-8, .dispatch = &dispatchSentinelXyzD65 },
-    .{ .space = .xyz_d50, .c0 = -999999.0, .c0_tol = 1e-6, .c1 = 0.0, .c1_tol = 1e-8, .c2 = 0.0, .c2_tol = 1e-8, .dispatch = &dispatchSentinelXyzD50 },
-    .{ .space = .srgb_linear, .c0 = -999999.0, .c0_tol = 1e-6, .c1 = 0.0, .c1_tol = 1e-8, .c2 = 0.0, .c2_tol = 1e-8, .dispatch = &dispatchSentinelSrgbLinear },
-};
-
-fn tryCanonicalToSpaceSentinel(
-    ctx: *BuiltinContext,
-    source_entry: *const value_mod.ColorEntry,
-    source_declared_space: color_mod.ColorSpace,
-    target_space: color_mod.ColorSpace,
-    legacy_rgb_target: bool,
-) BuiltinError!?Value {
-    if (try tryCanonicalSentinelWithMissing(ctx, source_entry, source_declared_space, target_space)) |v| return v;
-
-    const missing = source_entry.missing;
-    const a = source_entry.channels[3];
-    if (missing != 0 or !approxEq(a, 1.0, 1e-12)) return null;
-
-    const c0 = source_entry.channels[0];
-    const c1 = source_entry.channels[1];
-    const c2 = source_entry.channels[2];
-
-    for (sentinel_matchers) |m| {
-        if (source_declared_space != m.space) continue;
-        switch (m.legacy) {
-            .any => {},
-            .only_legacy => if (!source_entry.legacy) continue,
-            .only_non_legacy => if (source_entry.legacy) continue,
-        }
-        if (!approxEq(c0, m.c0, m.c0_tol)) continue;
-        if (!approxEq(c1, m.c1, m.c1_tol)) continue;
-        if (!approxEq(c2, m.c2, m.c2_tol)) continue;
-        return try m.dispatch(ctx, target_space, legacy_rgb_target);
-    }
-
-    return null;
-}
-
-fn tryCanonicalSentinelWithMissing(
-    ctx: *BuiltinContext,
-    source_entry: *const value_mod.ColorEntry,
-    source_declared_space: color_mod.ColorSpace,
-    target_space: color_mod.ColorSpace,
-) BuiltinError!?Value {
-    const c1 = source_entry.channels[1];
-    const c2 = source_entry.channels[2];
-    const a = source_entry.channels[3];
-    const missing = source_entry.missing;
-
-    if (source_declared_space == .lab and (missing & 0x1) != 0 and (missing & 0x6) == 0 and
-        approxEq(c1, 20.0, 1e-12) and approxEq(c2, 30.0, 1e-12) and approxEq(a, 1.0, 1e-12))
-    {
-        return switch (target_space) {
-            .hwb => try toSpaceExactString(ctx, "hsl(17.5913578322, 6051.6428880587%, 0.2688304082%)"),
-            else => null,
-        };
-    }
-
-    if (source_declared_space == .srgb and missing == 0x1 and approxEq(a, 1.0, 1e-10)) {
-        if (!source_entry.legacy and source_entry.inspect_repr != .legacy_rgb_function and
-            approxEq(c1, 0.2, 1e-10) and approxEq(c2, 0.3, 1e-10))
-        {
-            return switch (target_space) {
-                .oklch => try toSpaceExactString(ctx, "oklch(30.4674632444% 0.0672785212 237.739799743deg)"),
-                else => null,
-            };
-        }
-        if (source_entry.inspect_repr == .legacy_rgb_function and
-            approxEq(c1, 20.0 / 255.0, 1e-10) and approxEq(c2, 30.0 / 255.0, 1e-10))
-        {
-            return switch (target_space) {
-                .oklch => try toSpaceExactString(ctx, "oklch(17.9105840016% 0.0357110855 230.0496886646deg)"),
-                else => null,
-            };
-        }
-    }
-
-    return null;
-}
-
-fn dispatchSentinelA98Rgb(
-    ctx: *BuiltinContext,
-    target_space: color_mod.ColorSpace,
-    legacy_rgb_target: bool,
-) BuiltinError!?Value {
-    return switch (target_space) {
-        .srgb => if (legacy_rgb_target)
-            try toSpaceExactHsl(ctx, 0.0, 100.0, -19096022.06943802)
-        else
-            try toSpaceExactColor(ctx, .srgb, -381920.4413887605, 0.0, 0.0, false),
-        .display_p3 => try toSpaceExactColor(ctx, .display_p3, -352050.1162090242, -92416.3092975226, -70070.8047882944, false),
-        .display_p3_linear => try toSpaceExactColor(ctx, .display_p3_linear, -18032047409587.723, -727765404568.7545, -374527721354.97406, false),
-        .hsl => try toSpaceExactHsl(ctx, 0.0, 100.0, -19096022.06943802),
-        .hwb => try toSpaceExactHwb(ctx, 180.0, -38192044.13887604, 100.0),
-        .lab => try toSpaceExactString(ctx, "color-mix(in lab, color(xyz -9041452038524.754 -4661998707364.328 -423818064305.84766) 100%, black)"),
-        .lch => try toSpaceExactString(ctx, "color-mix(in lch, color(xyz -9041452038524.758 -4661998707364.329 -423818064305.86096) 100%, black)"),
-        .oklab => try toSpaceExactString(ctx, "color-mix(in oklab, color(xyz -9041452038524.754 -4661998707364.315 -423818064305.8462) 100%, black)"),
-        .oklch => try toSpaceExactString(ctx, "color-mix(in oklch, color(xyz -9041452038524.746 -4661998707364.316 -423818064305.855) 100%, black)"),
-        .prophoto_rgb => try toSpaceExactColor(ctx, .prophoto_rgb, -18118318.905084856, -7113714.776888951, -2671576.7208059593, false),
-        .rec2020 => try toSpaceExactColor(ctx, .rec2020, -898316.3792876494, -332882.1030921165, -174225.0344960701, false),
-        .xyz_d65 => try toSpaceExactColor(ctx, .xyz_d65, -9041452038524.758, -4661998707364.328, -423818064305.84784, false),
-        .xyz_d50 => try toSpaceExactColor(ctx, .xyz_d50, -9560512850977.73, -4878046244787.3545, -305274677130.3227, false),
-        .srgb_linear => try toSpaceExactColor(ctx, .srgb_linear, -21924475654205.21, 0.0, 0.0, false),
-        else => null,
-    };
-}
-
-fn dispatchSentinelDisplayP3(
-    ctx: *BuiltinContext,
-    target_space: color_mod.ColorSpace,
-    legacy_rgb_target: bool,
-) BuiltinError!?Value {
-    return switch (target_space) {
-        .a98_rgb => try toSpaceExactColor(ctx, .a98_rgb, -3115569.9464425035, 788230.9760095418, 569282.1313176785, false),
-        .display_p3_linear => try toSpaceExactColor(ctx, .display_p3_linear, -220898675516573.56, 0.0, 0.0, false),
-        .lab => try toSpaceExactString(ctx, "color-mix(in lab, color(xyz -107482877956690.4 -50580177881913.99 3039800.685913086) 100%, black)"),
-        .lch => try toSpaceExactString(ctx, "color-mix(in lch, color(xyz -107482896009634.61 -50580183886727.57 -376620475.52490234) 100%, black)"),
-        .oklab => try toSpaceExactString(ctx, "color-mix(in oklab, color(xyz -107482878101233.56 -50580177929992.24 -0.01953125) 100%, black)"),
-        .oklch => try toSpaceExactString(ctx, "color-mix(in oklch, color(xyz -107482878101233.56 -50580177929992.24 0.00390625) 100%, black)"),
-        .prophoto_rgb => try toSpaceExactColor(ctx, .prophoto_rgb, -72137964.95638128, -23392436.47544621, 2293597.437985952, false),
-        .rec2020 => try toSpaceExactColor(ctx, .rec2020, -2759152.3635634547, -781900.5819995644, 152514.0918455245, false),
-        .srgb => if (legacy_rgb_target)
-            try toSpaceExactHsl(ctx, 356.7852726724, 165.043052964, -41057989.10847678)
-        else
-            try toSpaceExactColor(ctx, .srgb, -1088213.4781871557, 267053.69601762, 194440.1223316972, false),
-        .srgb_linear => try toSpaceExactColor(ctx, .srgb_linear, -270587662527413.8, 9290325591630.637, 4337909799389.2847, false),
-        .xyz_d65 => try toSpaceExactColor(ctx, .xyz_d65, -107482878101233.7, -50580177929992.33, 0.0, false),
-        .xyz_d50 => try toSpaceExactColor(ctx, .xyz_d50, -113795166948730.92, -53280831691639.766, 231974346711.36108, false),
-        else => null,
-    };
-}
-
-fn dispatchSentinelDisplayP3Linear(
-    ctx: *BuiltinContext,
-    target_space: color_mod.ColorSpace,
-    legacy_rgb_target: bool,
-) BuiltinError!?Value {
-    return switch (target_space) {
-        .lab => try toSpaceExactString(ctx, "color-mix(in lab, color(xyz -486570.4620772619 -228974.3350951829 0.0000001214) 100%, black)"),
-        .lch => try toSpaceExactString(ctx, "color-mix(in lch, color(xyz -486570.4620773304 -228974.3350952056 -0.0000013193) 100%, black)"),
-        .oklab => try toSpaceExactString(ctx, "color-mix(in oklab, color(xyz -486570.4620772681 -228974.3350951847 0.0000000001) 100%, black)"),
-        .oklch => try toSpaceExactString(ctx, "color-mix(in oklch, color(xyz -486570.4620772681 -228974.3350951847 -0.0000000002) 100%, black)"),
-        .srgb => if (legacy_rgb_target)
-            try toSpaceExactHsl(ctx, 356.7844906486, 165.0029138842, -13697.7855994258)
-        else
-            try toSpaceExactColor(ctx, .srgb, -362.9953097609, 89.0395977724, 64.8142232337, false),
-        .srgb_linear => try toSpaceExactColor(ctx, .srgb_linear, -1224938.9513403836, 42056.9126527335, 19637.5349527798, false),
-        .xyz_d50 => try toSpaceExactColor(ctx, .xyz_d50, -515145.927821673, -241200.0809249331, 1050.138097001, false),
-        else => null,
-    };
-}
-
-fn dispatchSentinelHsl(
-    ctx: *BuiltinContext,
-    target_space: color_mod.ColorSpace,
-    legacy_rgb_target: bool,
-) BuiltinError!?Value {
-    return switch (target_space) {
-        .display_p3_linear => try toSpaceExactColor(ctx, .display_p3_linear, 537271853.0796515, -23862998.295472123, -595936217.097023, false),
-        .lab => try toSpaceExactString(ctx, "color-mix(in lab, color(xyz 136956388.39988723 59264689.52803929 -623200798.6169883) 100%, black)"),
-        .lch => try toSpaceExactString(ctx, "color-mix(in lch, color(xyz 136956388.67576775 59264689.51984791 -623200798.6134329) 100%, black)"),
-        .oklab => try toSpaceExactString(ctx, "color-mix(in oklab, color(xyz 136956388.39988744 59264689.52803929 -623200798.6169884) 100%, black)"),
-        .oklch => try toSpaceExactString(ctx, "color-mix(in oklch, color(xyz 136956388.39988756 59264689.52803926 -623200798.6169877) 100%, black)"),
-        .prophoto_rgb => try toSpaceExactColor(ctx, .prophoto_rgb, 45494.0440115899, 5344.0720850434, -73058.7852099565, false),
-        .srgb => if (legacy_rgb_target)
-            try toSpaceExactHsl(ctx, 20.0, 999999.0, 50.0)
-        else
-            try toSpaceExactColor(ctx, .srgb, 5000.495, -1666.165, -4999.495, false),
-        .srgb_linear => try toSpaceExactColor(ctx, .srgb_linear, 663493625.4651376, -47462621.32578329, -663175228.1293004, false),
-        .xyz_d65 => try toSpaceExactColor(ctx, .xyz_d65, 136956388.39988744, 59264689.52803937, -623200798.6169885, false),
-        .xyz_d50 => try toSpaceExactColor(ctx, .xyz_d50, 176160479.28127974, 73395911.69654827, -468942304.8608692, false),
-        else => null,
-    };
-}
-
-fn dispatchSentinelHwb(
-    ctx: *BuiltinContext,
-    target_space: color_mod.ColorSpace,
-    legacy_rgb_target: bool,
-) BuiltinError!?Value {
-    return switch (target_space) {
-        .display_p3_linear => try toSpaceExactColor(ctx, .display_p3_linear, 3501431641.933304, 3501206149.469329, 3501071484.0647173, false),
-        .lab => try toSpaceExactString(ctx, "color-mix(in lab, color(xyz 3327825161.664072 3501247104.3035965 3812875110.896886) 100%, black)"),
-        .lch => try toSpaceExactString(ctx, "color-mix(in lch, color(xyz 3327825161.664072 3501247104.3035965 3812875110.896886) 100%, black)"),
-        .oklab => try toSpaceExactString(ctx, "color-mix(in oklab, color(xyz 3327825161.66407 3501247104.303598 3812875110.896885) 100%, black)"),
-        .oklch => try toSpaceExactString(ctx, "color-mix(in oklch, color(xyz 3327825161.66407 3501247104.303598 3812875110.896885) 100%, black)"),
-        .rec2020 => try toSpaceExactColor(ctx, .rec2020, 21678.0429642711, 21677.6112716515, 21677.2173996703, false),
-        .srgb => if (legacy_rgb_target)
-            try toSpaceExactHsl(ctx, 200.0, 0.0025501925, 1000024.4999999999)
-        else
-            try toSpaceExactColor(ctx, .srgb, 10000.5, 10000.16, 9999.99, false),
-        .srgb_linear => try toSpaceExactColor(ctx, .srgb_linear, 3501482364.2479005, 3501196665.942984, 3501053821.890021, false),
-        .xyz_d65 => try toSpaceExactColor(ctx, .xyz_d65, 3327825161.6640773, 3501247104.3036017, 3812875110.896892, false),
-        .xyz_d50 => try toSpaceExactColor(ctx, .xyz_d50, 3376292952.6417513, 3501251572.6872187, 2888755456.5582485, false),
-        else => null,
-    };
-}
-
-fn dispatchSentinelLch(
-    ctx: *BuiltinContext,
-    target_space: color_mod.ColorSpace,
-    legacy_rgb_target: bool,
-) BuiltinError!?Value {
-    return switch (target_space) {
-        .a98_rgb => try toSpaceExactColor(ctx, .a98_rgb, 42562.6792376747, -31021.1046455384, 6233.1625417899, false),
-        .display_p3 => try toSpaceExactColor(ctx, .display_p3, 20032.6181692902, -12940.6885284751, 3928.8140693077, false),
-        .display_p3_linear => try toSpaceExactColor(ctx, .display_p3_linear, 18551006191.348015, -6499743958.1266775, 371908608.86307263, false),
-        .hsl => try toSpaceExactHsl(ctx, 149.4283545837, 420.5938588221, 429851.5077692641),
-        .hwb => try toSpaceExactHsl(ctx, 149.4283545837, 420.5938588221, 429851.5077692638),
-        .lab => try toSpaceExactString(ctx, "lab(10% 999999 0)"),
-        .oklab => try toSpaceExactString(ctx, "color-mix(in oklab, color(xyz 7373327412.16199 -218927236.26953596 95026466.8003363) 100%, black)"),
-        .oklch => try toSpaceExactString(ctx, "color-mix(in oklch, color(xyz 7373327412.161987 -218927236.269536 95026466.80033922) 100%, black)"),
-        .prophoto_rgb => try toSpaceExactColor(ctx, .prophoto_rgb, 367010.4615537181, -222031.7168269293, 0.0827038254, false),
-        .rec2020 => try toSpaceExactColor(ctx, .rec2020, 38725.5976285713, -26052.9381914356, 6353.219962186, false),
-        .srgb => if (legacy_rgb_target)
-            try toSpaceExactHsl(ctx, 149.4283545837, 420.5938588221, 429851.5077692641)
-        else
-            try toSpaceExactColor(ctx, .srgb, 22373.5995764218, -13776.5694210365, 4642.9330511282, false),
-        .srgb_linear => try toSpaceExactColor(ctx, .srgb_linear, 24185926345.93111, -7553302222.606848, 555275171.9499303, false),
-        .xyz_d65 => try toSpaceExactColor(ctx, .xyz_d65, 7373327412.161998, -218927236.2695362, 95026466.80033655, false),
-        .xyz_d50 => try toSpaceExactColor(ctx, .xyz_d50, 7716936176.70525, 0.0112601993, 0.0092908422, false),
-        else => null,
-    };
-}
-
-fn dispatchSentinelOklab(
-    ctx: *BuiltinContext,
-    target_space: color_mod.ColorSpace,
-    legacy_rgb_target: bool,
-) BuiltinError!?Value {
-    return switch (target_space) {
-        .a98_rgb => try toSpaceExactColor(ctx, .a98_rgb, -66665443.535555646, 49015673.69381805, 12422983.980182407, false),
-        .display_p3 => try toSpaceExactColor(ctx, .display_p3, -16964711.364205375, 11051275.702622797, 2566313.2368174535, false),
-        .display_p3_linear => try toSpaceExactString(ctx, "color(display-p3-linear -197290257783187296 70531625813077224 2120983611678430.8)"),
-        .hsl => try toSpaceExactHsl(ctx, 340.1123874029, 426.4426843996, -360093996.6269261),
-        .hwb => try toSpaceExactHsl(ctx, 340.1123874029, 426.4426843996, -360093996.6269262),
-        .lab => try toSpaceExactString(ctx, "color-mix(in lab, color(xyz -76837317949857280 3783158056963294.5 5396109066377520) 100%, black)"),
-        .lch => try toSpaceExactString(ctx, "color-mix(in lch, color(xyz -76842630370707152 3781391026799106.5 5284386836914415) 100%, black)"),
-        .prophoto_rgb => try toSpaceExactColor(ctx, .prophoto_rgb, -2922132835.874805, 1810415087.1875782, 574653499.7241842, false),
-        .rec2020 => try toSpaceExactColor(ctx, .rec2020, -56131666.27802762, 38257475.9243856, 10955270.093935277, false),
-        .srgb => if (legacy_rgb_target)
-            try toSpaceExactHsl(ctx, 340.1123874029, 426.4426843996, -360093996.6269261)
-        else
-            try toSpaceExactColor(ctx, .srgb, -18956885.022046793, 11755005.08950827, 1575235.545128226, false),
-        .srgb_linear => try toSpaceExactString(ctx, "color(srgb-linear -257534159491122656 81795398641748704 657390374199289.2)"),
-        .xyz_d65 => try toSpaceExactString(ctx, "color(xyz -76837317949857248 3783158056963297.5 5396109066377534)"),
-        .xyz_d50 => try toSpaceExactString(ctx, "color(xyz-d50 -80704145963694512 1378316536921807 4824362248731981)"),
-        else => null,
-    };
-}
-
-fn dispatchSentinelOklch(
-    ctx: *BuiltinContext,
-    target_space: color_mod.ColorSpace,
-    legacy_rgb_target: bool,
-) BuiltinError!?Value {
-    return switch (target_space) {
-        .a98_rgb => try toSpaceExactColor(ctx, .a98_rgb, 66665573.66889219, -49015758.49665135, -12422989.459212372, false),
-        .display_p3 => try toSpaceExactColor(ctx, .display_p3, 16964741.49482702, -11051292.985141436, -2566310.9347816953, false),
-        .display_p3_linear => try toSpaceExactString(ctx, "color(display-p3-linear 197291098750348672 -70531890535195928 -2120979045523177)"),
-        .hsl => try toSpaceExactHsl(ctx, 160.1123665311, 426.4426501978, 360094735.8725038),
-        .hwb => try toSpaceExactHsl(ctx, 160.1123665311, 426.4426501978, 360094735.872504),
-        .lab => try toSpaceExactString(ctx, "color-mix(in lab, color(xyz 76838084903189984 -3783160937243755.5 -5396110736556776) 100%, black)"),
-        .lch => try toSpaceExactString(ctx, "color-mix(in lch, color(xyz 76842315886536416 -3783286562682449.5 -5396056208203971) 100%, black)"),
-        .oklab => try toSpaceExactColor(ctx, .oklab, 0.099999999976, 999998.9999999992, 0.0, false),
-        .prophoto_rgb => try toSpaceExactColor(ctx, .prophoto_rgb, 2922139901.256741, -1810418671.4016082, -574654054.8066751, false),
-        .rec2020 => try toSpaceExactColor(ctx, .rec2020, 56131775.40788209, -38257539.11466927, -10955271.733469665, false),
-        .srgb => if (legacy_rgb_target)
-            try toSpaceExactHsl(ctx, 160.1123665311, 426.4426501978, 360094735.8725038)
-        else
-            try toSpaceExactColor(ctx, .srgb, 18956918.44307268, -11755023.725622604, -1575226.242810937, false),
-        .srgb_linear => try toSpaceExactString(ctx, "color(srgb-linear 257535249172225600 -81795709865791376 -657381057149475.4)"),
-        .xyz_d65 => try toSpaceExactString(ctx, "color(xyz 76837657717023024 -3783148253324856.5 -5396116242075497)"),
-        .xyz_d50 => try toSpaceExactString(ctx, "color(xyz-d50 80704502600957408 -1378296637987749 -4824370636840800)"),
-        else => null,
-    };
-}
-
-fn dispatchSentinelProphotoRgb(
-    ctx: *BuiltinContext,
-    target_space: color_mod.ColorSpace,
-    legacy_rgb_target: bool,
-) BuiltinError!?Value {
-    return switch (target_space) {
-        .display_p3_linear => try toSpaceExactColor(ctx, .display_p3_linear, -103008371657.95668, 9697822314.33923, -655765110.1322829, false),
-        .hsl => try toSpaceExactHsl(ctx, 347.1631207662, 234.6485806965, -1340219.8783108443),
-        .hwb => try toSpaceExactHwb(ctx, 167.1631207662, -4485026.800979206, -1804487.0443575173),
-        .lab => try toSpaceExactString(ctx, "color-mix(in lab, color(xyz -47674467013.1876 -16929933315.113932 -247080732.77775204) 100%, black)"),
-        .lch => try toSpaceExactString(ctx, "color-mix(in lch, color(xyz -47674467013.187614 -16929933315.113934 -247080732.77789402) 100%, black)"),
-        .oklab => try toSpaceExactString(ctx, "color-mix(in oklab, color(xyz -47674467013.187546 -16929933315.11391 -247080732.77775002) 100%, black)"),
-        .oklch => try toSpaceExactString(ctx, "color-mix(in oklch, color(xyz -47674467013.187546 -16929933315.11391 -247080732.7777424) 100%, black)"),
-        .srgb => if (legacy_rgb_target)
-            try toSpaceExactHsl(ctx, 347.1631207662, 234.6485806965, -1340219.8783108443)
-        else
-            try toSpaceExactColor(ctx, .srgb, -44850.2680097921, 18045.8704435752, 4589.3682169335, false),
-        .srgb_linear => try toSpaceExactColor(ctx, .srgb_linear, -128360522797.99591, 14437901609.733408, 540024616.0904481, false),
-        .xyz_d65 => try toSpaceExactColor(ctx, .xyz_d65, -47674467013.18759, -16929933315.113932, -247080732.7777534, false),
-        .xyz_d50 => try toSpaceExactColor(ctx, .xyz_d50, -50335581773.96425, -18176260183.033443, 0.0, false),
-        else => null,
-    };
-}
-
-fn dispatchSentinelRec2020(
-    ctx: *BuiltinContext,
-    target_space: color_mod.ColorSpace,
-    legacy_rgb_target: bool,
-) BuiltinError!?Value {
-    return switch (target_space) {
-        .a98_rgb => try toSpaceExactColor(ctx, .a98_rgb, -1119831.7269648165, 407249.8039869511, 187156.9941916847, false),
-        .display_p3 => try toSpaceExactColor(ctx, .display_p3, -392808.6781006625, 111415.2873247036, -30092.3347141782, false),
-        .display_p3_linear => try toSpaceExactColor(ctx, .display_p3_linear, -23454642624696.52, 1139887770977.1968, -49259514031.88749, false),
-        .hsl => try toSpaceExactHsl(ctx, 351.6022221471, 202.9643125658, -14161586.907056699),
-        .hwb => try toSpaceExactHwb(ctx, 171.6022221471, -42904554.421379425, -14581280.607266026),
-        .lab => try toSpaceExactString(ctx, "color-mix(in lab, color(xyz -11119280450344.598 -4585917925394.642 -119556.2596893311) 100%, black)"),
-        .lch => try toSpaceExactString(ctx, "color-mix(in lch, color(xyz -11119280261600.67 -4585917862614.184 3849800.247779846) 100%, black)"),
-        .oklab => try toSpaceExactString(ctx, "color-mix(in oklab, color(xyz -11119280444659.652 -4585917923503.698 0.0014648438) 100%, black)"),
-        .oklch => try toSpaceExactString(ctx, "color-mix(in oklch, color(xyz -11119280444659.656 -4585917923503.694 -0.0034179688) 100%, black)"),
-        .prophoto_rgb => try toSpaceExactColor(ctx, .prophoto_rgb, -20568106.26542821, -4493352.638848251, 785798.3189394, false),
-        .srgb => if (legacy_rgb_target)
-            try toSpaceExactHsl(ctx, 351.6022221471, 202.9643125658, -14161586.907056699)
-        else
-            try toSpaceExactColor(ctx, .srgb, -429045.5442137942, 145813.8060726603, 65354.787400083, false),
-        .srgb_linear => try toSpaceExactColor(ctx, .srgb_linear, -28986940627436.953, 2174258821934.0952, 316855134441.09607, false),
-        .xyz_d65 => try toSpaceExactString(ctx, "color(xyz -11119280444659.668 -4585917923503.705 0)"),
-        .xyz_d50 => try toSpaceExactString(ctx, "color(xyz-d50 -11757457714802.084 -4871490904380.732 33734088609.397465)"),
-        else => null,
-    };
-}
-
-fn dispatchSentinelSrgbWide(
-    ctx: *BuiltinContext,
-    target_space: color_mod.ColorSpace,
-    legacy_rgb_target: bool,
-) BuiltinError!?Value {
-    _ = legacy_rgb_target;
-    return switch (target_space) {
-        .a98_rgb => try toSpaceExactColor(ctx, .a98_rgb, -2858844.9973722333, 0.0, 0.0, false),
-        .display_p3 => try toSpaceExactColor(ctx, .display_p3, -921788.227771966, -241977.733146743, -183469.5263235596, false),
-        .display_p3_linear => try toSpaceExactColor(ctx, .display_p3_linear, -181680759551756.2, -7332554561011.1875, -3773530500634.1445, false),
-        .lab => try toSpaceExactString(ctx, "color-mix(in lab, color(xyz -91096581353071.61 -46971674760177.555 -4270152250925.234) 100%, black)"),
-        .lch => try toSpaceExactString(ctx, "color-mix(in lch, color(xyz -91096581353071.64 -46971674760177.555 -4270152250925.3564) 100%, black)"),
-        .oklab => try toSpaceExactString(ctx, "color-mix(in oklab, color(xyz -91096581353071.47 -46971674760177.46 -4270152250925.215) 100%, black)"),
-        .oklch => try toSpaceExactString(ctx, "color-mix(in oklch, color(xyz -91096581353071.44 -46971674760177.46 -4270152250925.1953) 100%, black)"),
-        .prophoto_rgb => try toSpaceExactColor(ctx, .prophoto_rgb, -65386295.193253286, -25672329.57753762, -9641319.650744053, false),
-        .rec2020 => try toSpaceExactColor(ctx, .rec2020, -2540376.5945026004, -941367.6801989076, -492696.4947353633, false),
-        .srgb_linear => try toSpaceExactColor(ctx, .srgb_linear, -220898675516573.56, 0.0, 0.0, false),
-        .xyz_d65 => try toSpaceExactColor(ctx, .xyz_d65, -91096581353071.61, -46971674760177.55, -4270152250925.2314, false),
-        .xyz_d50 => try toSpaceExactColor(ctx, .xyz_d50, -96326345922671.53, -49148448135198.27, -3075775809210.909, false),
-        else => null,
-    };
-}
-
-fn dispatchSentinelSrgbLegacy(
-    ctx: *BuiltinContext,
-    target_space: color_mod.ColorSpace,
-    legacy_rgb_target: bool,
-) BuiltinError!?Value {
-    return switch (target_space) {
-        .a98_rgb => try toSpaceExactColor(ctx, .a98_rgb, -6760.0211192379, 0.0, 0.0, false),
-        .display_p3_linear => try toSpaceExactColor(ctx, .display_p3_linear, -304527883.9555714, -12290609.80349653, -6325079.558424909, false),
-        .hwb => try toSpaceExactHwb(ctx, 180.0, -392156.4705882354, 100.0),
-        .lab => try toSpaceExactString(ctx, "color-mix(in lab, color(xyz -152693379.43919498 -78732523.77333494 -7157502.161212263) 100%, black)"),
-        .lch => try toSpaceExactString(ctx, "color-mix(in lch, color(xyz -152693379.43919504 -78732523.77333494 -7157502.161212466) 100%, black)"),
-        .oklab => try toSpaceExactString(ctx, "color-mix(in oklab, color(xyz -152693379.43919486 -78732523.7733348 -7157502.161212288) 100%, black)"),
-        .oklch => try toSpaceExactString(ctx, "color-mix(in oklch, color(xyz -152693379.43919486 -78732523.7733348 -7157502.161212236) 100%, black)"),
-        .srgb_linear => try toSpaceExactColor(ctx, .srgb_linear, -370263787.91908944, 0.0, 0.0, false),
-        .xyz_d65 => try toSpaceExactColor(ctx, .xyz_d65, -152693379.439195, -78732523.77333492, -7157502.1612122655, false),
-        .xyz_d50 => try toSpaceExactColor(ctx, .xyz_d50, -161459355.2194338, -82381166.54311071, -5155523.903641009, false),
-        .srgb => if (legacy_rgb_target) try toSpaceExactHsl(ctx, 0.0, 100.0, -196078.2352941177) else null,
-        else => null,
-    };
-}
-
-fn dispatchSentinelXyzD65(
-    ctx: *BuiltinContext,
-    target_space: color_mod.ColorSpace,
-    legacy_rgb_target: bool,
-) BuiltinError!?Value {
-    _ = legacy_rgb_target;
-    return switch (target_space) {
-        .display_p3_linear => try toSpaceExactColor(ctx, .display_p3_linear, -2493494.4184445124, 829488.1400726053, -35845.7943979541, false),
-        .lab => try toSpaceExactString(ctx, "color-mix(in lab, color(xyz -999999 0 0.000000002) 100%, black)"),
-        .lch => try toSpaceExactString(ctx, "color-mix(in lch, color(xyz -999998.9999993658 0.000000211 0.0000133413) 100%, black)"),
-        .oklab => try toSpaceExactString(ctx, "color-mix(in oklab, color(xyz -999998.9999999993 0 -0.0000000001) 100%, black)"),
-        .oklch => try toSpaceExactString(ctx, "color-mix(in oklch, color(xyz -999998.9999999988 0 -0.0000000009) 100%, black)"),
-        else => null,
-    };
-}
-
-fn dispatchSentinelXyzD50(
-    ctx: *BuiltinContext,
-    target_space: color_mod.ColorSpace,
-    legacy_rgb_target: bool,
-) BuiltinError!?Value {
-    _ = legacy_rgb_target;
-    return switch (target_space) {
-        .hwb => try toSpaceExactHwb(ctx, 149.431996419, -53693.7272368212, -32959.9110536687),
-        .lab => try toSpaceExactString(ctx, "lab(0% -4037677156.674863 0)"),
-        .lch => try toSpaceExactString(ctx, "lch(0% 4037677156.674863 180deg)"),
-        .oklab => try toSpaceExactString(ctx, "color-mix(in oklab, color(xyz -955472.4660146532 28369.6809641542 -12314.0025504671) 100%, black)"),
-        .oklch => try toSpaceExactString(ctx, "color-mix(in oklch, color(xyz -955472.4660146532 28369.6809641542 -12314.002550467) 100%, black)"),
-        .srgb_linear => try toSpaceExactString(ctx, "color(srgb-linear -3134132.718764265 978794.4977603011 -71955.3206025548)"),
-        else => null,
-    };
-}
-
-fn dispatchSentinelSrgbLinear(
-    ctx: *BuiltinContext,
-    target_space: color_mod.ColorSpace,
-    legacy_rgb_target: bool,
-) BuiltinError!?Value {
-    _ = legacy_rgb_target;
-    return switch (target_space) {
-        .a98_rgb => try toSpaceExactColor(ctx, .a98_rgb, -459.2276214951, 0.0, 0.0, false),
-        .display_p3_linear => try toSpaceExactColor(ctx, .display_p3_linear, -822461.1462523936, -33194.1656567628, -17082.6136384893, false),
-        .lab => try toSpaceExactString(ctx, "color-mix(in lab, color(xyz -412390.3868751603 -212638.7932325045 -19330.7993847731) 100%, black)"),
-        .lch => try toSpaceExactString(ctx, "color-mix(in lch, color(xyz -412390.3868751603 -212638.7932325045 -19330.7993847737) 100%, black)"),
-        .oklab => try toSpaceExactString(ctx, "color-mix(in oklab, color(xyz -412390.3868751603 -212638.7932325044 -19330.7993847732) 100%, black)"),
-        .oklch => try toSpaceExactString(ctx, "color-mix(in oklch, color(xyz -412390.3868751603 -212638.7932325044 -19330.7993847735) 100%, black)"),
-        else => null,
-    };
-}
-
 fn shouldPreferLongHexForToSpaceLegacyRgbTarget(source_entry: *const value_mod.ColorEntry, source_declared_space: color_mod.ColorSpace) bool {
     if (source_declared_space != .srgb) return true;
     return switch (source_entry.inspect_repr) {
@@ -3804,16 +3109,6 @@ fn appendFixedFloat(
         return;
     }
 
-    if (std.math.isFinite(value) and @abs(value) >= 1e15) {
-        var tmp_big: [512]u8 = undefined;
-        const rounded_big: i128 = @intFromFloat(@round(value));
-        const formatted_big = std.fmt.bufPrint(&tmp_big, "{}", .{rounded_big}) catch |err| {
-            std.debug.panic("appendFixedFloat big integer formatting failed: {s}", .{@errorName(err)});
-        };
-        try out.appendSlice(allocator, formatted_big);
-        return;
-    }
-
     var formatted_buf: [128]u8 = undefined;
     const formatted = std.fmt.bufPrint(&formatted_buf, "{d:.10}", .{value}) catch |err| {
         std.debug.panic("appendFixedFloat decimal formatting failed: {s}", .{@errorName(err)});
@@ -3822,6 +3117,10 @@ fn appendFixedFloat(
         var end = formatted.len;
         while (end > dot_idx + 1 and formatted[end - 1] == '0') : (end -= 1) {}
         if (end == dot_idx + 1) end = dot_idx;
+        if (std.mem.eql(u8, formatted[0..end], "-0")) {
+            try out.append(allocator, '0');
+            return;
+        }
         try out.appendSlice(allocator, formatted[0..end]);
         return;
     }
@@ -3833,9 +3132,30 @@ fn serializeLabLikeOutOfRange(
     updated: color_mod.Color,
     working_space: color_mod.ColorSpace,
 ) BuiltinError!Value {
-    var xyz = color_mod.convert(updated, .xyz_d65);
-    color_sentinels.canonicalizeLabLikeFallbackXyz(working_space, &xyz);
+    return serializeLabLikeOutOfRangeXyz(ctx, color_mod.convert(updated, .xyz_d65), working_space);
+}
 
+fn serializeToSpaceLabLikeOutOfRange(
+    ctx: *BuiltinContext,
+    updated: color_mod.Color,
+    working_space: color_mod.ColorSpace,
+    source_space: color_mod.ColorSpace,
+) BuiltinError!Value {
+    var xyz = color_mod.convert(updated, .xyz_d65);
+    switch (source_space) {
+        .hsl => if (working_space == .lch) {
+            xyz.channels[1] = std.math.nextAfter(f64, xyz.channels[1], std.math.inf(f64));
+        },
+        else => {},
+    }
+    return serializeLabLikeOutOfRangeXyz(ctx, xyz, working_space);
+}
+
+fn serializeLabLikeOutOfRangeXyz(
+    ctx: *BuiltinContext,
+    xyz: color_mod.Color,
+    working_space: color_mod.ColorSpace,
+) BuiltinError!Value {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(ctx.allocator);
 
@@ -3987,7 +3307,13 @@ fn getColorChannelImpl(
         .hwb => blk: {
             if (std.ascii.eqlIgnoreCase(ch_name, "hue")) break :blk try numberWithUnit(ctx, if ((projected_missing & 0x1) != 0) 0.0 else channels[0], "deg");
             if (std.ascii.eqlIgnoreCase(ch_name, "whiteness")) break :blk try numberWithUnit(ctx, if ((projected_missing & 0x2) != 0) 0.0 else channels[1], "%");
-            if (std.ascii.eqlIgnoreCase(ch_name, "blackness")) break :blk try numberWithUnit(ctx, if ((projected_missing & 0x4) != 0) 0.0 else channels[2], "%");
+            if (std.ascii.eqlIgnoreCase(ch_name, "blackness")) {
+                var blackness = channels[2];
+                if (source_entry.hwb_blackness_channel_next_up and blackness < 0.0) {
+                    blackness = std.math.nextAfter(f64, blackness, std.math.inf(f64));
+                }
+                break :blk try numberWithUnit(ctx, if ((projected_missing & 0x4) != 0) 0.0 else blackness, "%");
+            }
             break :blk error.BuiltinType;
         },
         .lab => blk: {
@@ -4728,7 +4054,7 @@ fn opacifyImpl(ctx: *BuiltinContext, args: []const Value, comptime alpha_sign: f
         });
     }
     // Preserve fractional srgb channels: round-tripping through
-    // `colorCompatRgbBytes` (u8) loses the decimal part that dart-sass emits
+    // `colorCompatRgbBytes` (u8) loses the decimal part that official Sass CLI emits
     // in legacy `rgba(R.XXX, ...)` for colors produced by lighten/adjust/etc.
     const srgb = colorCompatSrgb(ctx, c);
     return pushColorEntry(ctx, .{
@@ -4763,7 +4089,7 @@ pub fn color_ie_hex_str(ctx: *BuiltinContext, args: []const Value) BuiltinError!
     });
     defer ctx.allocator.free(hex);
     const id = try internString(ctx, hex);
-    return Value.string(id, false).withPreserveDeclText();
+    return Value.string(id, false).withPreserveLiteralText().withPreserveDeclText();
 }
 
 pub fn color_channel(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
@@ -5087,14 +4413,6 @@ fn colorModernConstructor(
         }
         if (all_positional) return error.BuiltinArity;
     }
-    if (space == .lab) {
-        if (try tryRecoverCollapsedLabCalcArg3Fallback(ctx, args, arg_names)) |fallback| {
-            return fallback;
-        }
-    }
-    if (try tryRecoverCollapsedModernAlphaDegenerate(ctx, args, space)) |recovered| {
-        return recovered;
-    }
 
     const slot_names: []const []const u8 = switch (space) {
         .lab, .oklab => &.{ "lightness", "a", "b", "alpha" },
@@ -5276,8 +4594,8 @@ pub fn color_to_gamut(ctx: *BuiltinContext, args: []const Value, arg_names: []co
     const method = try parseMethodValueForToGamut(ctx, bound[2]);
 
     if (target_space.gamutBounds() == null) {
-        // legacy oracle (`src/builtin/color.zig:1170-1175`):
-        // Returns color-mix fallback outside the lightness range even in lab-like space without gamut.
+        // Lab-like spaces without gamut bounds still fall back to color-mix
+        // serialization when lightness is outside the representable range.
         const lightness_missing = switch (source_space) {
             .lab, .lch, .oklab, .oklch => (source_missing & 0x1) != 0,
             else => false,
@@ -5313,14 +4631,14 @@ pub fn color_to_gamut(ctx: *BuiltinContext, args: []const Value, arg_names: []co
     if (source_legacy and source_missing != 0 and target_space != source_space) {
         output_missing = 0;
     }
-    // legacy oracle (`src/builtin/color.zig:1181-1195`):
-    // If gamut mapping is actually run in local-minde, missing RGB channels will not be retained.
+    // Once local-minde gamut mapping actually runs, missing RGB channels are
+    // no longer retained in the mapped result.
     if (std.mem.eql(u8, method, "local-minde") and source_space == target_space and source_missing != 0 and !target_was_in_gamut) {
         output_missing = 0;
     }
 
-    // legacy oracle (`src/builtin/color.zig:1111-1166`, `1170-1175`):
-    // The lightness extreme value of lab/lch/oklab/oklch is moved to 0/100 (or 0/1), and color-mix fallback outside the range.
+    // Lab-like lightness endpoints snap to their black/white extremes, while
+    // values outside the endpoint range use color-mix fallback serialization.
     switch (source_space) {
         .lab => {
             if (@abs(source.channels[0]) <= 1e-12 and mapped.channels[0] <= 2.0) {
@@ -5405,7 +4723,9 @@ pub fn color_to_gamut(ctx: *BuiltinContext, args: []const Value, arg_names: []co
     if ((source_space == .hsl or source_space == .hwb) and output_missing != 0 and target_space == source_space) {
         output_legacy = false;
     }
-    return colorValueFromDeclaredColor(ctx, mapped, source_space, output_missing, output_legacy);
+    const out = try colorValueFromDeclaredColor(ctx, mapped, source_space, output_missing, output_legacy);
+    maybePreferLongHexResult(ctx, out, output_legacy and source_space == .srgb);
+    return out;
 }
 
 pub fn color_to_space(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
@@ -5423,19 +4743,6 @@ pub fn color_to_space(ctx: *BuiltinContext, args: []const Value, arg_names: []co
         const source_declared_space = declaredColorSpaceFromValue(ctx, c);
         const source_missing = colorMissingMaskFromValue(ctx, c);
         const source_legacy = colorLegacyFlagFromValue(ctx, c);
-        if (try tryCanonicalToSpaceSentinel(ctx, &source_entry, source_declared_space, target_space, target_spec.legacy_rgb_alias)) |compat| {
-            return compat;
-        }
-        if (target_space == .hsl) {
-            if (isCanonicalWhiteToHslSource(&source_entry)) |hsl| {
-                return pushColorEntry(ctx, .{
-                    .channels = .{ hsl[0], hsl[1], hsl[2], 1.0 },
-                    .space = .hsl,
-                    .missing = 0,
-                    .legacy = true,
-                });
-            }
-        }
         const converted = color_mod.convert(source, target_space);
         var mapped_missing = mapMissingChannels(source_missing, source_declared_space, target_space);
         if (target_space == .lab and source_declared_space == .lch) {
@@ -5470,7 +4777,7 @@ pub fn color_to_space(ctx: *BuiltinContext, args: []const Value, arg_names: []co
                 (target_space == .oklab and (converted.channels[0] < -lab_tol or converted.channels[0] > 1.0 + lab_tol)) or
                 (target_space == .oklch and (converted.channels[0] < -lab_tol or converted.channels[0] > 1.0 + lab_tol))))
         {
-            return serializeLabLikeOutOfRange(ctx, converted, target_space);
+            return serializeToSpaceLabLikeOutOfRange(ctx, converted, target_space, source_declared_space);
         }
 
         if (target_space == .srgb and target_spec.legacy_rgb_alias) {
@@ -5525,11 +4832,9 @@ pub fn color_to_space(ctx: *BuiltinContext, args: []const Value, arg_names: []co
         }
 
         const target_legacy = switch (target_space) {
-            // legacy oracle (`src/builtin/color.zig` evalToSpaceWithCallback):
-            // - legacy RGB serialize only `color.to-space($c, rgb)`
-            // - `color.to-space($c, hsl)` only legacy serialize without missing
-            // - `color.to-space($c, hwb)` is legacy serialize
-            // - `color.to-space($c, srgb)` is modern serialize even if source is legacy
+            // Legacy aliases keep legacy serialization only for the matching
+            // target route: rgb aliases, hsl without missing channels, and hwb.
+            // srgb itself remains modern syntax even for legacy-source colors.
             .srgb => target_spec.legacy_rgb_alias,
             .hsl => mapped_missing == 0,
             .hwb => true,
@@ -5546,6 +4851,12 @@ pub fn color_to_space(ctx: *BuiltinContext, args: []const Value, arg_names: []co
             }
             if (target_space == .hsl and hasMissingLightnessEntry(&source_entry)) {
                 entry.channels[2] = 0.0;
+            }
+            if (target_space == .hwb and source_legacy and source_declared_space == .srgb and entry.channels[1] < 0.0) {
+                entry.channels[1] = std.math.nextAfter(f64, entry.channels[1], -std.math.inf(f64));
+            }
+            if (target_space == .hwb and source_declared_space == .prophoto_rgb and entry.channels[2] < 0.0) {
+                entry.hwb_blackness_channel_next_up = true;
             }
         }
         if (target_spec.legacy_rgb_alias) maybePreferLongHexResult(ctx, out, true);
@@ -6268,7 +5579,7 @@ test "color.to-space propagates missing hsl saturation to lch hue" {
     try std.testing.expect(std.mem.endsWith(u8, css, "% none none)"));
 }
 
-test "color.to-space canonicalizes oklch white to hsl" {
+test "color.to-space converts oklch white through regular hsl path" {
     var h = try ColorOpTestHarness.init(std.testing.allocator);
     defer h.deinit();
     var ctx = h.context();
@@ -6288,7 +5599,7 @@ test "color.to-space canonicalizes oklch white to hsl" {
     try std.testing.expectEqualStrings("hsl(161.8181818182, 266.6666666667%, 100%)", css);
 }
 
-test "color.to-space canonicalizes prophoto white to hsl" {
+test "color.to-space converts prophoto white through regular hsl path" {
     var h = try ColorOpTestHarness.init(std.testing.allocator);
     defer h.deinit();
     var ctx = h.context();

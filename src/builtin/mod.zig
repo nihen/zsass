@@ -98,7 +98,7 @@ fn identifierEqSassCase(raw: []const u8, expected: []const u8) bool {
 fn resolveCssMathLegacyGlobal(name: []const u8) ?Id {
     // CSS Values L4 math globals. `exp`/`sign`/`mod`/`rem` reach the dispatch
     // ids directly because they are deliberately not exposed as `sass:math`
-    // members (matching dart-sass), so `resolve("math", ...)` cannot find them.
+    // members (matching official Sass CLI), so `resolve("math", ...)` cannot find them.
     const mappings = [_]struct { query: []const u8, id: Id }{
         .{ .query = "abs", .id = 0 },
         .{ .query = "min", .id = 4 },
@@ -217,12 +217,11 @@ pub fn resolveLegacyGlobal(name: []const u8) ?Id {
     return null;
 }
 
-/// A case-sensitive version of `resolve`. dart-sass's legacy global lookup is
-/// Name conflicts with CSS builtin (rgb/rgba/hsl/.../length/nth/append/...)
-/// is treated as case-sensitive, mixed-case calls are plain CSS functions
-// Pass-through as /// (Bootstrap's `RGBA(var(...))` workaround is a typical example).
-/// CSS math functions (min/max/abs/round/...) only `resolveCssMathLegacyGlobal`
-// Resolved case-insensitive via ///.
+/// A case-sensitive version of `resolve`. Legacy global lookup keeps CSS
+/// builtin name conflicts (rgb/rgba/hsl/.../length/nth/append/...)
+/// case-sensitive, so mixed-case calls remain plain CSS functions. CSS math
+/// functions (min/max/abs/round/...) resolve case-insensitively through
+/// `resolveCssMathLegacyGlobal` only.
 fn resolveCaseSensitive(module: []const u8, name: []const u8) ?Id {
     const table = buildResolveTable();
     for (table) |row| {

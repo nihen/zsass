@@ -256,6 +256,28 @@ fn isTopLevelBinaryAdditive(text: []const u8, pos: usize) bool {
     return false;
 }
 
+fn isTopLevelTrailingAdditive(text: []const u8, pos: usize) bool {
+    const c = text[pos];
+    if (c != '+' and c != '-') return false;
+
+    var prev: ?u8 = null;
+    var p = pos;
+    while (p > 0) {
+        p -= 1;
+        const pc = text[p];
+        if (pc == ' ' or pc == '\t' or pc == '\n' or pc == '\r') continue;
+        prev = pc;
+        break;
+    }
+    if (prev == null or !calcOperandCanEndWith(prev.?)) return false;
+
+    var n = pos + 1;
+    while (n < text.len) : (n += 1) {
+        if (text[n] != ' ' and text[n] != '\t' and text[n] != '\n' and text[n] != '\r') return false;
+    }
+    return true;
+}
+
 fn calcOperandCanEndWith(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '%' or c == ')' or c == '_' or c == '-';
 }
@@ -307,7 +329,7 @@ fn simplifyCompleteCalcTerm(allocator: std.mem.Allocator, term: []const u8) !?[]
 }
 
 /// Normalize the literal (non-`#{...}`) pieces of an interpolated `calc()`
-/// argument. Dart Sass still evaluates complete static multiplicative terms
+/// argument. official Sass CLI still evaluates complete static multiplicative terms
 /// around interpolation, e.g. `calc(#{$x} + 4px * 2)` serializes as
 /// `calc(8px + 8px)`, while terms whose operand is produced by interpolation
 /// such as `calc(#{$x} * 2)` keep their surface form.
@@ -344,7 +366,7 @@ pub fn simplifyInterpolatedCalcLiteralChunk(allocator: std.mem.Allocator, text: 
             if (depth > 0) depth -= 1;
             continue;
         }
-        if (depth == 0 and isTopLevelBinaryAdditive(text, i)) {
+        if (depth == 0 and (isTopLevelBinaryAdditive(text, i) or isTopLevelTrailingAdditive(text, i))) {
             const term = text[term_start..i];
             if (try simplifyCompleteCalcTerm(allocator, term)) |simplified| {
                 defer allocator.free(simplified);
@@ -454,6 +476,18 @@ fn containsSpecialVariableString(args: []const u8) bool {
 /// So `a + (b * c)` can be simplified to `a + b * c`, but `a * (b + c)` cannot.
 /// Also handles associative cases: `a + (b + c)`  ->  `a + b + c`, `a + (b - c)`  ->  `a + b - c`.
 pub fn removeUnnecessaryCalcParens(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
+    return removeUnnecessaryCalcParensImpl(allocator, expr, true);
+}
+
+fn removeUnnecessaryCalcParensPlainCss(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
+    return removeUnnecessaryCalcParensImpl(allocator, expr, false);
+}
+
+fn removeUnnecessaryCalcParensImpl(
+    allocator: std.mem.Allocator,
+    expr: []const u8,
+    preserve_trailing_additive_after_plus: bool,
+) ![]const u8 {
     // Scan for parenthesized groups and check if they can be removed
     var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
@@ -546,9 +580,11 @@ pub fn removeUnnecessaryCalcParens(allocator: std.mem.Allocator, expr: []const u
                     // Inner expr has only * / -- but still needed if
                     // preceded by / (a / (b * c) != a / b * c)
                     if (preceding_op == '/') break :blk false;
+                    if (preceding_op == '-' and !calcExprHasMultiplicativeOp(inner)) break :blk false;
+                    if ((following_op == '*' or following_op == '/') and !calcExprHasMultiplicativeOp(inner)) break :blk false;
                     const trimmed_inner = std.mem.trim(u8, inner, " \t\n\r");
                     // Preserve explicit parens around a single calc-like function
-                    // call to match Dart Sass serialization for cases like
+                    // call to match official Sass CLI serialization for cases like
                     // calc(100vh - (calc(3.5rem + 1px))).
                     if (isSingleCalcLikeFunctionCall(trimmed_inner)) break :blk false;
                     // Preserve parens around bare var()/env() calls
@@ -556,7 +592,7 @@ pub fn removeUnnecessaryCalcParens(allocator: std.mem.Allocator, expr: []const u
                         // Check if inner is just a single function call
                         if (isSingleFunctionCall(trimmed_inner)) break :blk false;
                     }
-                    // Dart Sass preserves explicit parens around signed numeric
+                    // official Sass CLI preserves explicit parens around signed numeric
                     // operands after additive operators: calc(100% + (-4px)).
                     if ((preceding_op == '+' or preceding_op == '-') and isSignedNumberLikeToken(trimmed_inner)) break :blk false;
                     break :blk true;
@@ -572,6 +608,9 @@ pub fn removeUnnecessaryCalcParens(allocator: std.mem.Allocator, expr: []const u
                     // a - (b + c)  ->  NOT safe
                     break :blk false;
                 }
+                if (preserve_trailing_additive_after_plus and preceding_op == '+' and following_op == 0) {
+                    break :blk false;
+                }
                 // a + (b + c)  ->  safe
                 break :blk true;
             };
@@ -580,7 +619,7 @@ pub fn removeUnnecessaryCalcParens(allocator: std.mem.Allocator, expr: []const u
                 // without the wrapper. Surrounding whitespace is insignificant once
                 // the parentheses are gone and should not leak into the result.
                 const trimmed_inner = std.mem.trim(u8, inner, " \t\n\r");
-                const optimized_inner = try removeUnnecessaryCalcParens(allocator, trimmed_inner);
+                const optimized_inner = try removeUnnecessaryCalcParensImpl(allocator, trimmed_inner, preserve_trailing_additive_after_plus);
                 defer if (optimized_inner.ptr != trimmed_inner.ptr) allocator.free(optimized_inner);
                 try result.appendSlice(allocator, optimized_inner);
             } else {
@@ -592,7 +631,7 @@ pub fn removeUnnecessaryCalcParens(allocator: std.mem.Allocator, expr: []const u
                     std.mem.trimStart(u8, inner, " \t\n\r")
                 else
                     inner;
-                const optimized_inner = try removeUnnecessaryCalcParens(allocator, trimmed_inner);
+                const optimized_inner = try removeUnnecessaryCalcParensImpl(allocator, trimmed_inner, preserve_trailing_additive_after_plus);
                 defer if (optimized_inner.ptr != trimmed_inner.ptr) allocator.free(optimized_inner);
                 try result.append(allocator, '(');
                 try result.appendSlice(allocator, optimized_inner);
@@ -612,7 +651,7 @@ pub fn removeUnnecessaryCalcParens(allocator: std.mem.Allocator, expr: []const u
     return result.toOwnedSlice(allocator);
 }
 
-/// For calc text assembled through interpolation, Dart Sass keeps explicit
+/// For calc text assembled through interpolation, official Sass CLI keeps explicit
 /// parentheses around additive groups such as `(0.5rem + 2px)`, but still
 /// drops wrappers around purely multiplicative terms like `(30px / 2)`.
 pub fn removeNonAdditiveCalcParens(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
@@ -667,6 +706,7 @@ pub fn removeNonAdditiveCalcParens(allocator: std.mem.Allocator, expr: []const u
         const inner = expr[i + 1 .. j - 1];
         const trimmed_inner = std.mem.trim(u8, inner, " \t\n\r");
         const inner_has_interpolation_preserve = std.mem.indexOf(u8, trimmed_inner, calc_interp_preserve_start) != null;
+        const preserve_only_wraps_calc = inner_has_interpolation_preserve and preserveMarkersOnlyWrapCalcFunctions(trimmed_inner);
         const preceding_op = blk: {
             var k = i;
             while (k > 0) {
@@ -687,15 +727,20 @@ pub fn removeNonAdditiveCalcParens(allocator: std.mem.Allocator, expr: []const u
             break :blk @as(u8, 0);
         };
         const inner_has_additive = calcExprHasAdditiveOp(inner);
-        const can_remove =
-            !inner_has_additive and
-            !inner_has_interpolation_preserve and
-            !(preceding_op == 0 and following_op == 0) and
-            preceding_op != '/' and
-            !(preceding_op == '-' and !calcExprHasMultiplicativeOp(inner)) and
-            !((preceding_op == '+' or preceding_op == '-') and isSignedNumberLikeToken(trimmed_inner)) and
-            !isSingleCalcLikeFunctionCall(trimmed_inner) and
-            !(containsSpecialVariableString(trimmed_inner) and isSingleFunctionCall(trimmed_inner));
+        const can_remove = blk: {
+            if (inner_has_interpolation_preserve and !preserve_only_wraps_calc) break :blk false;
+            if (preceding_op == 0 and following_op == 0) break :blk false;
+            if (inner_has_additive) {
+                if (preceding_op == 0 and following_op == '-') break :blk true;
+                break :blk false;
+            }
+            if (preceding_op == '/') break :blk false;
+            if (preceding_op == '-' and !calcExprHasMultiplicativeOp(inner)) break :blk false;
+            if ((preceding_op == '+' or preceding_op == '-') and isSignedNumberLikeToken(trimmed_inner)) break :blk false;
+            if (isSingleCalcLikeFunctionCall(trimmed_inner)) break :blk false;
+            if (containsSpecialVariableString(trimmed_inner) and isSingleFunctionCall(trimmed_inner)) break :blk false;
+            break :blk true;
+        };
         if (can_remove) {
             const optimized_inner = try removeNonAdditiveCalcParens(allocator, trimmed_inner);
             defer if (!sameSliceStorage(optimized_inner, trimmed_inner)) allocator.free(optimized_inner);
@@ -714,6 +759,25 @@ pub fn removeNonAdditiveCalcParens(allocator: std.mem.Allocator, expr: []const u
         return expr;
     }
     return result.toOwnedSlice(allocator);
+}
+
+fn preserveMarkersOnlyWrapCalcFunctions(expr: []const u8) bool {
+    var saw_marker = false;
+    var i: usize = 0;
+    while (i < expr.len) {
+        if (!std.mem.startsWith(u8, expr[i..], calc_interp_preserve_start)) {
+            i += 1;
+            continue;
+        }
+        saw_marker = true;
+        const body_start = i + calc_interp_preserve_start.len;
+        const end_rel = std.mem.indexOf(u8, expr[body_start..], calc_interp_preserve_end) orelse return false;
+        const body_end = body_start + end_rel;
+        const body = std.mem.trim(u8, expr[body_start..body_end], " \t\r\n");
+        if (!isSingleCalcLikeFunctionCall(body)) return false;
+        i = body_end + calc_interp_preserve_end.len;
+    }
+    return saw_marker;
 }
 
 fn isSignedNumberLikeToken(expr: []const u8) bool {
@@ -1121,20 +1185,77 @@ pub fn stripCalcInterpolationPreserveMarkers(allocator: std.mem.Allocator, expr:
 /// The inner calc() is replaced with parentheses.
 /// Normalize calc() expressions embedded in a plain-CSS decl value.
 /// For each top-level `calc(X)` occurrence, flatten nested `calc(Y)`  ->  `(Y)`
-/// inside X and remove unnecessary parens, mirroring dart-sass's serialization
+/// inside X and remove unnecessary parens, mirroring official Sass CLI's serialization
 /// of calc-only values. Outer calc() wrappers are preserved.
 /// Returns the input slice unchanged when no normalization was needed;
 /// otherwise returns a newly allocated buffer owned by the caller.
 pub fn normalizeCalcInDeclValue(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
-    return normalizeCalcInDeclValueImpl(allocator, expr, true, false);
+    return normalizeCalcInDeclValueImpl(allocator, expr, true, false, false);
+}
+
+pub fn normalizeCalcInPlainCssDeclValue(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
+    return normalizeCalcInDeclValueImpl(allocator, expr, true, false, true);
 }
 
 pub fn normalizeCalcInDeclValueNoFlatten(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
-    return normalizeCalcInDeclValueImpl(allocator, expr, false, false);
+    return normalizeCalcInDeclValueImpl(allocator, expr, false, false, false);
 }
 
 pub fn normalizeCalcInDeclValueForMarkedInterpolation(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
-    return normalizeCalcInDeclValueImpl(allocator, expr, false, true);
+    return normalizeCalcInDeclValueImpl(allocator, expr, false, true, false);
+}
+
+pub fn trimParenEdgeWhitespace(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var changed = false;
+    var i: usize = 0;
+    while (i < expr.len) {
+        const c = expr[i];
+        if (c == '"' or c == '\'') {
+            const q = c;
+            try out.append(allocator, q);
+            i += 1;
+            while (i < expr.len) {
+                if (expr[i] == '\\' and i + 1 < expr.len) {
+                    try out.append(allocator, expr[i]);
+                    try out.append(allocator, expr[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                const b = expr[i];
+                try out.append(allocator, b);
+                i += 1;
+                if (b == q) break;
+            }
+            continue;
+        }
+        if (c == '(') {
+            try out.append(allocator, c);
+            i += 1;
+            const ws_start = i;
+            while (i < expr.len and std.ascii.isWhitespace(expr[i])) : (i += 1) {}
+            if (i != ws_start) changed = true;
+            continue;
+        }
+        if (std.ascii.isWhitespace(c)) {
+            const ws_start = i;
+            while (i < expr.len and std.ascii.isWhitespace(expr[i])) : (i += 1) {}
+            if (i < expr.len and expr[i] == ')') {
+                changed = true;
+                continue;
+            }
+            try out.appendSlice(allocator, expr[ws_start..i]);
+            continue;
+        }
+        try out.append(allocator, c);
+        i += 1;
+    }
+    if (!changed) {
+        out.deinit(allocator);
+        return expr;
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 fn isWholeWrappedParens(expr: []const u8) bool {
@@ -1169,7 +1290,13 @@ fn nextTokenIsIeHack(expr: []const u8, idx: usize) bool {
     return k + 2 <= expr.len and expr[k] == '\\' and expr[k + 1] == '0';
 }
 
-fn normalizeCalcInDeclValueImpl(allocator: std.mem.Allocator, expr: []const u8, flatten: bool, unwrap_interpolated_outer_parens: bool) ![]const u8 {
+fn normalizeCalcInDeclValueImpl(
+    allocator: std.mem.Allocator,
+    expr: []const u8,
+    flatten: bool,
+    unwrap_interpolated_outer_parens: bool,
+    plain_css_parens: bool,
+) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     var i: usize = 0;
@@ -1210,9 +1337,7 @@ fn normalizeCalcInDeclValueImpl(allocator: std.mem.Allocator, expr: []const u8, 
                     const ie_hack_suffix = nextTokenIsIeHack(expr, j);
                     const inner_wrapped = isWholeWrappedParens(inner);
                     const inner_unwrapped = if (inner_wrapped) std.mem.trim(u8, inner[1 .. inner.len - 1], " \t\n\r") else inner;
-                    const unwrap_for_interp = unwrap_interpolated_outer_parens and inner_wrapped and
-                        (calcExprHasAdditiveOp(inner_unwrapped) or calcExprHasMultiplicativeOp(inner_unwrapped));
-                    const inner_for_norm = if ((ie_hack_suffix and inner_wrapped and calcExprHasAdditiveOp(inner_unwrapped)) or unwrap_for_interp)
+                    const inner_for_norm = if (ie_hack_suffix and inner_wrapped and calcExprHasAdditiveOp(inner_unwrapped))
                         std.mem.trim(u8, inner[1 .. inner.len - 1], " \t\n\r")
                     else
                         inner;
@@ -1225,13 +1350,17 @@ fn normalizeCalcInDeclValueImpl(allocator: std.mem.Allocator, expr: []const u8, 
                     defer if ((flatten or unwrap_interpolated_outer_parens) and !sameSliceStorage(after_flatten, inner_for_norm)) allocator.free(after_flatten);
                     const optimized = if (!flatten and unwrap_interpolated_outer_parens)
                         try removeNonAdditiveCalcParens(allocator, after_flatten)
+                    else if (plain_css_parens)
+                        try removeUnnecessaryCalcParensPlainCss(allocator, after_flatten)
                     else
                         try removeUnnecessaryCalcParens(allocator, after_flatten);
                     defer if (!sameSliceStorage(optimized, after_flatten)) allocator.free(optimized);
                     const spaced = try normalizeCalcOperatorSpacing(allocator, optimized);
                     defer if (!sameSliceStorage(spaced, optimized)) allocator.free(spaced);
-                    const unmarked = try stripCalcInterpolationPreserveMarkers(allocator, spaced);
-                    defer if (!sameSliceStorage(unmarked, spaced)) allocator.free(unmarked);
+                    const compact = try trimParenEdgeWhitespace(allocator, spaced);
+                    defer if (!sameSliceStorage(compact, spaced)) allocator.free(compact);
+                    const unmarked = try stripCalcInterpolationPreserveMarkers(allocator, compact);
+                    defer if (!sameSliceStorage(unmarked, compact)) allocator.free(unmarked);
                     try out.appendSlice(allocator, "calc(");
                     try out.appendSlice(allocator, unmarked);
                     try out.append(allocator, ')');
@@ -1258,6 +1387,15 @@ pub fn flattenNestedCalc(allocator: std.mem.Allocator, expr: []const u8) ![]cons
     var i: usize = 0;
     var changed = false;
     while (i < expr.len) {
+        if (std.mem.startsWith(u8, expr[i..], calc_interp_preserve_start)) {
+            const body_start = i + calc_interp_preserve_start.len;
+            if (std.mem.indexOf(u8, expr[body_start..], calc_interp_preserve_end)) |end_rel| {
+                const end = body_start + end_rel + calc_interp_preserve_end.len;
+                try result.appendSlice(allocator, expr[i..end]);
+                i = end;
+                continue;
+            }
+        }
         // Check for "calc(" at current position
         if (i + 5 <= expr.len and std.mem.eql(u8, expr[i .. i + 5], "calc(")) {
             // Make sure it's not part of a larger identifier
@@ -1350,13 +1488,22 @@ pub fn flattenNestedCalc(allocator: std.mem.Allocator, expr: []const u8) ![]cons
 /// inner expression has NO top-level binary operators (e.g. `calc(var(--x))`  ->
 /// `(var(--x))`).  When the inner expression contains operators (e.g.
 /// `calc(0.75em - 1px)`) it is preserved as `calc(...)` because the `calc`
-/// keyword came from an interpolated variable and Dart Sass preserves it.
-fn flattenNestedCalcForInterpolated(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
+/// keyword came from an interpolated variable and official Sass CLI preserves it.
+pub fn flattenNestedCalcForInterpolated(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
     var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
     var i: usize = 0;
     var changed = false;
     while (i < expr.len) {
+        if (std.mem.startsWith(u8, expr[i..], calc_interp_preserve_start)) {
+            const body_start = i + calc_interp_preserve_start.len;
+            if (std.mem.indexOf(u8, expr[body_start..], calc_interp_preserve_end)) |end_rel| {
+                const end = body_start + end_rel + calc_interp_preserve_end.len;
+                try result.appendSlice(allocator, expr[i..end]);
+                i = end;
+                continue;
+            }
+        }
         if (i + 5 <= expr.len and std.mem.eql(u8, expr[i .. i + 5], "calc(")) {
             if (i > 0 and (std.ascii.isAlphanumeric(expr[i - 1]) or expr[i - 1] == '-' or expr[i - 1] == '_')) {
                 try result.append(allocator, expr[i]);

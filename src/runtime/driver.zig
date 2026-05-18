@@ -25,7 +25,7 @@ const zsass_io_mod = @import("io.zig");
 const watch_backend_mod = @import("watch_backend.zig");
 
 // Used only to format `[YYYY-MM-DD HH:MM:SS]` timestamps for the watch
-// loop's "Compiled X to Y." line, matching dart-sass output. Includes
+// loop's "Compiled X to Y." line, matching official Sass CLI output. Includes
 // the local TZ-aware breakdown which Zig's std does not currently
 // expose. zsass already links libc on every supported target.
 const c_time = @cImport({
@@ -192,7 +192,7 @@ fn exitCodeForError(err: anyerror) u8 {
         // CLI usage misuse surfaced from runEnd2EndWithPool (was previously
         // a direct std.process.exit(EX_USAGE)).
         error.TraceDiffStdoutMisuse => EX_USAGE,
-        // CLI-FIX-E: All user-fixable Sass errors are EX_DATAERR=65 (dart-sass compatible).
+        // CLI-FIX-E: All user-fixable Sass errors are EX_DATAERR=65 (official Sass CLI compatible).
         // Internal compiler error / OOM only branch to EX_SOFTWARE=70.
         error.OutOfMemory,
         error.InternalError,
@@ -209,7 +209,7 @@ fn exitCodeForError(err: anyerror) u8 {
     };
 }
 
-/// CLI-FIX-E Step 1+2/2c: Format error with dart-sass compatible `Error: {message}` prefix + source frame.
+/// CLI-FIX-E Step 1+2/2c: Format error with official Sass CLI compatible `Error: {message}` prefix + source frame.
 /// If span is included in thread-local error context (record in vm.step / resolver errdefer),
 /// Reload the source of the module and frame (`| | |` + caret + `{path} {line}:{col} root stylesheet`)
 // Output ///. file_id == 0 is input_path of entry, != 0 needs to be obtained via ResolvedBundle.
@@ -529,30 +529,27 @@ fn writeErrorCssIfNeeded(
     };
 }
 
-/// A dart-sass CLI compatible flag whose behavior completely matches that of zsass and can be accepted.
+/// An official Sass CLI-compatible flag whose behavior completely matches that of zsass and can be accepted.
 /// Explicitly no-op as "compatible" instead of silent drop.
 const compat_noop_flags = std.StaticStringMap(void).initComptime(.{
     .{ "--stop-on-error", {} },
     .{ "--no-stop-on-error", {} },
     .{ "--no-embed-source-map", {} },
     .{ "--no-stdin", {} },
+    .{ "--no-quiet-deps", {} },
 });
 
-/// dart-sass CLI compatible flags that return error 64 because they are not implemented.
-const not_implemented_bool_flags = std.StaticStringMap([]const u8).initComptime(.{});
+/// official Sass CLI-compatible flags that return error 64 because they are not implemented.
+const not_implemented_bool_flags = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "--quiet-deps", "--quiet-deps is not implemented in zsass; use --quiet to suppress all deprecation warnings" },
+});
 
-/// Of dart-sass CLI flags that accept values, only default values are accepted.
+/// Of official Sass CLI flags that accept values, only default values are accepted.
 /// key: flag name, value: Acceptable default value.
 const value_checked_flags = std.StaticStringMap([]const u8).initComptime(.{
     .{ "--indent-type", "space" },
     .{ "--indent-width", "2" },
     .{ "--linefeed", "lf" },
-});
-
-/// Noop related to deprecation that cannot be handled by the deprecation infrastructure.
-const deprecation_compat_flags = std.StaticStringMap(void).initComptime(.{
-    .{ "--quiet-deps", {} },
-    .{ "--no-quiet-deps", {} },
 });
 
 fn isValueFlag(flag_name: []const u8) bool {
@@ -782,7 +779,7 @@ const RunOpts = struct {
     stdin_module_path: ?[]const u8 = null,
     deprecation: deprecation_mod.DeprecationOpts = .{},
     /// CLI-FIX-E Step 3 (C-6): Use error CSS template when error occurs in file output mode
-    /// Write to the output file. The dart-sass default is on, `--no-error-css` turns it off.
+    /// Write to the output file. The official Sass CLI default is on, `--no-error-css` turns it off.
     error_css_enabled: bool = true,
     /// Emit @charset "UTF-8" for non-ASCII output (default on, --no-charset suppresses).
     charset: bool = true,
@@ -804,6 +801,8 @@ const RunOpts = struct {
     diagnostic_ansi: bool = true,
     /// Unicode box-drawing in source frames (`--unicode` / `--no-unicode`).
     diagnostic_unicode: bool = true,
+    /// Print user-facing diagnostics when compilation fails.
+    diagnostics_enabled: bool = true,
     /// When non-null, runEnd2EndWithPool refills this carrier with the
     /// resolved module paths after a successful compile so the `--watch`
     /// loop can stat dependency mtimes (not just the entry). Paths are
@@ -813,7 +812,7 @@ const RunOpts = struct {
     /// Force a particular source-syntax interpretation regardless of the
     /// entry path's extension. `null` means "infer from the path" (`.sass`
     /// -> indented, `.css` -> plain CSS, anything else -> SCSS), matching
-    /// dart-sass `--scss` (default) / `--indented` / `--no-indented` /
+    /// official Sass CLI `--scss` (default) / `--indented` / `--no-indented` /
     /// `--plain-css` semantics.
     syntax_override: ?syntax_override_mod.SyntaxOverride = null,
 };
@@ -1156,14 +1155,14 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, a, "--env-report") or std.mem.eql(u8, a, "--env-report=json")) {
             env_report_mode = true;
         } else if (std.mem.eql(u8, a, "--compile-only")) {
-            // `--compile-only` is the legacy zsass alias for the lightweight
+            // `--compile-only` is an alias for the lightweight
             // parse / resolve / compile path -- it skips VM execution and
             // CSS emission. Useful for "did this file at least parse?"
             // checks but cannot detect `@error`, runtime-only failures, or
             // emit bugs.
             compile_only_alias = true;
         } else if (std.mem.eql(u8, a, "--check") or std.mem.eql(u8, a, "--dry-run")) {
-            // dart-sass `--check` / `--dry-run`: run the entire pipeline
+            // official Sass CLI `--check` / `--dry-run`: run the entire pipeline
             // and report failures, but never write CSS / source-map files.
             opts.check_mode = true;
         } else if (std.mem.eql(u8, a, "--stdin-filepath")) {
@@ -1254,13 +1253,11 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, a, "--plain-css")) {
             opts.syntax_override = .css;
         } else if (compat_noop_flags.has(a)) {
-            // compatible no-op flags (dart-sass CLI superset)
+            // compatible no-op flags (official Sass CLI superset)
         } else if (not_implemented_bool_flags.has(a)) {
             const msg = not_implemented_bool_flags.get(a).?;
             cliErrPrint("error: {s}\n", .{msg});
             std.process.exit(64);
-        } else if (deprecation_compat_flags.has(a)) {
-            // --quiet-deps / --no-quiet-deps accepted (cross-module deprecation filter not implemented yet)
         } else if (std.mem.indexOfScalar(u8, a, '=')) |eq| {
             const flag = a[0..eq];
             const val = a[eq + 1 ..];
@@ -1284,14 +1281,14 @@ pub fn main(init: std.process.Init) !void {
                 handleDeprecationValueFlag(&opts, flag, val) catch {
                     std.process.exit(64);
                 };
-            } else if (compat_noop_flags.has(flag) or deprecation_compat_flags.has(flag)) {
+            } else if (compat_noop_flags.has(flag)) {
                 // compat flag with '=' form, accept
             } else if (not_implemented_bool_flags.has(flag)) {
                 const msg = not_implemented_bool_flags.get(flag).?;
                 cliErrPrint("error: {s}\n", .{msg});
                 std.process.exit(64);
             } else if (isUnsupportedPkgImporterFlag(flag) or isUnsupportedPkgImporterFlag(a)) {
-                cliErrPrint("error: --pkg-importer / -p is not supported in zsass v0.1.x; the dart-sass `pkg:` URL importer is on the roadmap (see CHANGELOG)\n", .{});
+                cliErrPrint("error: --pkg-importer / -p is not supported in zsass v0.1.x; the official Sass CLI `pkg:` URL importer is on the roadmap (see CHANGELOG)\n", .{});
                 std.process.exit(64);
             } else {
                 cliErrPrint("error: unknown flag {s}\n", .{a});
@@ -1336,7 +1333,7 @@ pub fn main(init: std.process.Init) !void {
             };
         } else if (std.mem.startsWith(u8, a, "-")) {
             if (isUnsupportedPkgImporterFlag(a)) {
-                cliErrPrint("error: --pkg-importer / -p is not supported in zsass v0.1.x; the dart-sass `pkg:` URL importer is on the roadmap (see CHANGELOG)\n", .{});
+                cliErrPrint("error: --pkg-importer / -p is not supported in zsass v0.1.x; the official Sass CLI `pkg:` URL importer is on the roadmap (see CHANGELOG)\n", .{});
                 std.process.exit(64);
             }
             cliErrPrint("error: unknown flag {s}\n", .{a});
@@ -1456,10 +1453,10 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // dart-sass compatible positional format:
-    // 1 argument `in:out` -- single (used by realworld_suite.sh)
-    // 2 arguments `in out` (no `:` in either) -- single (space separated)
-    // N arguments `in1:out1 in2:out2 ...` -- multiple batch (used by bench.sh)
+    // Sass CLI-compatible positional format:
+    // 1 argument `in:out` -- single
+    // 2 arguments `in out` (no `:` in either) -- single, space-separated
+    // N arguments `in1:out1 in2:out2 ...` -- batch
     if (positional.items.len == 0) {
         cliErrPrint("{s}", .{USAGE});
         std.process.exit(EX_USAGE);
@@ -1680,7 +1677,7 @@ fn compileFiles(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
         runEnd2End(allocator, job.input_path, job.output_path, job.opts) catch |err| {
             // Match the multi-job path: emit the user-facing diagnostic
             // before bubbling the error tag up for exit-code mapping.
-            printUserFacingError(err, job.input_path);
+            if (job.opts.diagnostics_enabled) printUserFacingError(err, job.input_path);
             return err;
         };
         return;
@@ -1691,8 +1688,8 @@ fn compileFiles(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
     const threads = try allocator.alloc(std.Thread, worker_count);
     defer allocator.free(threads);
 
-    // Worker over source shared cache (legacy zsass equivalent). Many entries have the same partial
-    // Eliminate disk IO duplication in large-scale compilation with `@import`.
+    // Worker over the shared source cache. Many entries can reference the
+    // same partial, so cache file contents to avoid repeated disk I/O.
     var source_cache = source_cache_mod.SharedSourceCache.init(std.heap.c_allocator);
     defer source_cache.deinit();
 
@@ -1701,6 +1698,7 @@ fn compileFiles(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
         order: []const usize,
         source_cache: *source_cache_mod.SharedSourceCache,
         phase_aggregator: ?*PhaseAggregator,
+        disable_persistent: bool,
         next_index: usize = 0,
         mutex: std.Io.Mutex = .init,
         // Serializes per-worker user-facing error printing so stderr frames
@@ -1717,11 +1715,31 @@ fn compileFiles(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
     var phase_agg: PhaseAggregator = .{};
     const phase_agg_ptr: ?*PhaseAggregator = if (jobs.len > 0 and jobs[0].opts.phase_timer) &phase_agg else null;
 
+    var disable_persistent = false;
+    if (jobs.len > 1) {
+        for (jobs) |job| {
+            if (job.opts.stdin_source) |stdin_source| {
+                if (sourceMayConfigureModule(stdin_source)) {
+                    disable_persistent = true;
+                    break;
+                }
+            } else {
+                const src = readFileToStringAlloc(allocator, job.input_path) catch continue;
+                defer allocator.free(src);
+                if (sourceMayConfigureModule(src)) {
+                    disable_persistent = true;
+                    break;
+                }
+            }
+        }
+    }
+
     var shared: Shared = .{
         .jobs = jobs,
         .order = order,
         .source_cache = &source_cache,
         .phase_aggregator = phase_agg_ptr,
+        .disable_persistent = disable_persistent,
     };
 
     var started: usize = 0;
@@ -1787,17 +1805,20 @@ fn compileFiles(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
                     };
                     const job = maybe_job orelse return;
                     const arena_alloc = arena.allocator();
-                    runEnd2EndWithPool(arena_alloc, job.input_path, job.output_path, job.opts, &shared_pool, state.source_cache, &local_ast_cache, state.phase_aggregator, &persistent_state) catch |err| {
-                        // Print this job's user-facing error in the worker
-                        // thread (the diagnostic context lives in
-                        // thread-local error_state). Serialize stderr
-                        // writes across workers so source frames don't
-                        // interleave. Match dart-sass: keep compiling the
-                        // remaining files instead of bailing on first
-                        // failure.
-                        state.print_mutex.lockUncancelable(zsass_io_mod.io);
-                        printUserFacingError(err, job.input_path);
-                        state.print_mutex.unlock(zsass_io_mod.io);
+                    const persistent_ptr = if (state.disable_persistent) null else &persistent_state;
+                    runEnd2EndWithPool(arena_alloc, job.input_path, job.output_path, job.opts, &shared_pool, state.source_cache, &local_ast_cache, state.phase_aggregator, persistent_ptr) catch |err| {
+                        if (job.opts.diagnostics_enabled) {
+                            // Print this job's user-facing error in the worker
+                            // thread (the diagnostic context lives in
+                            // thread-local error_state). Serialize stderr
+                            // writes across workers so source frames don't
+                            // interleave. Match official Sass CLI: keep compiling the
+                            // remaining files instead of bailing on first
+                            // failure.
+                            state.print_mutex.lockUncancelable(zsass_io_mod.io);
+                            printUserFacingError(err, job.input_path);
+                            state.print_mutex.unlock(zsass_io_mod.io);
+                        }
 
                         state.mutex.lockUncancelable(zsass_io_mod.io);
                         if (state.first_err == null) {
@@ -2049,7 +2070,7 @@ fn formatWatchTimestamp(
 
 /// Returns a slice into `buf` holding the current local time formatted as
 /// `[YYYY-MM-DD HH:MM:SS]`. The watch loop uses this to prefix per-file
-/// "Compiled X to Y." lines for dart-sass parity. `buf` must be at least
+/// "Compiled X to Y." lines for official Sass CLI parity. `buf` must be at least
 /// 21 bytes.
 fn currentLocalTimestamp(buf: []u8) []const u8 {
     // `time(NULL)` + `localtime` is the lowest-common-denominator libc
@@ -2077,7 +2098,7 @@ fn currentLocalTimestamp(buf: []u8) []const u8 {
 }
 
 /// Emits `[YYYY-MM-DD HH:MM:SS] Compiled <input> to <output>.\n` on stdout
-/// (dart-sass parity). Lines that exceed `path_buf` are silently dropped.
+/// (official Sass CLI parity). Lines that exceed `path_buf` are silently dropped.
 fn writeWatchCompiledLine(input_path: []const u8, output_path: []const u8) void {
     var ts_buf: [32]u8 = undefined;
     const ts = currentLocalTimestamp(&ts_buf);
@@ -2397,6 +2418,17 @@ fn runEnd2End(
     return runEnd2EndWithPool(allocator, input_path, output_path, opts, null, null, null, null, null);
 }
 
+fn sourceMayConfigureModule(source: []const u8) bool {
+    if (std.mem.indexOf(u8, source, "with") == null) return false;
+    return std.mem.indexOf(u8, source, "@use") != null or
+        std.mem.indexOf(u8, source, "@forward") != null;
+}
+
+fn sourceMayReachUnknownConfiguration(source: []const u8) bool {
+    return sourceMayConfigureModule(source) or
+        std.mem.indexOf(u8, source, "@import") != null;
+}
+
 fn runEnd2EndWithPool(
     allocator: std.mem.Allocator,
     input_path: []const u8,
@@ -2466,7 +2498,10 @@ fn runEnd2EndWithPool(
     // SAFETY: Assigned from shared or owned compile result before any use.
     var program_ptr: *compiler_mod.Program = undefined;
     if (shared_pool) |pool| {
-        const persistent_ctx: ?compiler_mod.PersistentCompileContext = if (persistent_state) |ps| ps.compileContext() else null;
+        const persistent_ctx: ?compiler_mod.PersistentCompileContext = if (persistent_state) |ps|
+            if (sourceMayReachUnknownConfiguration(source)) null else ps.compileContext()
+        else
+            null;
         borrowed_result = try compiler_mod.parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(allocator, source, module_path, opts.load_paths, phase_timer_ptr, pool, source_cache, ast_cache, persistent_ctx, &deprecation_opts);
         pool_ptr = pool;
         color_pool_ptr = &borrowed_result.?.color_pool;
@@ -3471,10 +3506,10 @@ test "buildJobOrderByFileSize sorts larger files first" {
 }
 
 // Pure formatting check for the watch-loop "Compiled X to Y." prefix. The
-// shape `[YYYY-MM-DD HH:MM:SS]` (21 ASCII bytes) is what dart-sass emits and
+// shape `[YYYY-MM-DD HH:MM:SS]` (21 ASCII bytes) is what official Sass CLI emits and
 // downstream tooling may grep for; zero-padding and bracket placement must
 // not regress.
-test "formatWatchTimestamp matches the dart-sass `[YYYY-MM-DD HH:MM:SS]` shape" {
+test "formatWatchTimestamp matches the official Sass CLI `[YYYY-MM-DD HH:MM:SS]` shape" {
     var buf: [32]u8 = undefined;
 
     try std.testing.expectEqualStrings(
@@ -3548,7 +3583,7 @@ test "compileFiles batch with one failing job does not double-join" {
 
     // No source map / no error CSS keeps the side effects minimal and
     // independent of test process cwd quirks.
-    const opts: RunOpts = .{ .source_map_mode = .off, .error_css_enabled = false };
+    const opts: RunOpts = .{ .source_map_mode = .off, .error_css_enabled = false, .diagnostics_enabled = false };
 
     const jobs = [_]FileJob{
         .{ .input_path = ok1_in, .output_path = ok1_out, .opts = opts },
@@ -3560,7 +3595,7 @@ test "compileFiles batch with one failing job does not double-join" {
     try std.testing.expectError(error.SassError, compileFiles(allocator, &jobs));
 }
 
-// dart-sass parity: when one entry in a batch fails, the worker pool must keep
+// official Sass CLI parity: when one entry in a batch fails, the worker pool must keep
 // pulling and compiling the remaining inputs instead of bailing as soon as the
 // first error is recorded. The previous fail-fast behavior left OK entries
 // past `worker_count` unprocessed -- their output `.css` files were never
@@ -3622,7 +3657,7 @@ test "compileFiles batch continues processing after one entry fails" {
     try bad_buf.appendSlice(allocator, " */\n@import \"definitely-missing-stylesheet\";\n");
     try writeFileAll(bad_in, bad_buf.items);
 
-    const opts: RunOpts = .{ .source_map_mode = .off, .error_css_enabled = false };
+    const opts: RunOpts = .{ .source_map_mode = .off, .error_css_enabled = false, .diagnostics_enabled = false };
 
     var jobs: std.ArrayListUnmanaged(FileJob) = .empty;
     defer jobs.deinit(allocator);

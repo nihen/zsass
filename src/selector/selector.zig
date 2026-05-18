@@ -1350,7 +1350,7 @@ fn estimateComplexSelectorCssLen(complex: *const ComplexSelector) usize {
     for (complex.components.items) |comp| {
         switch (comp) {
             .compound => |c| {
-                // Extend-heavy realworld selectors often exceed the old 16-byte
+                // Extend-heavy selector lists often exceed the old 16-byte
                 // per-simple heuristic; a wider upper-ish bound avoids ArrayList
                 // remaps without walking every selector name on this hot path.
                 n += c.simple_selectors.items.len * 32;
@@ -1755,7 +1755,7 @@ pub fn resolveParent(allocator: std.mem.Allocator, selector_list: *const Selecto
 }
 
 /// @at-root variant: child members without `&` stay as-is (no parent prepend).
-/// Parent-major ordering for `&` members to match Dart Sass output.
+/// Parent-major ordering for `&` members to match official Sass CLI output.
 pub fn resolveParentAtRoot(allocator: std.mem.Allocator, selector_list: *const SelectorList, parent: *const SelectorList) ResolveParentError!SelectorList {
     var result = SelectorList.init(allocator);
     errdefer result.deinit();
@@ -1799,7 +1799,7 @@ fn propagateParentReferenceSeparatorNewlines(
     if (selector_list.selectors.items.len == 0 or parent.selectors.items.len == 0) return;
     if (result.selectors.items.len != parent.selectors.items.len * selector_list.selectors.items.len) return;
 
-    // dart-sass rule per-item:
+    // official Sass CLI rule per-item:
     //- out_idx==0  ->  None
     //- child_idx==0  ->  parent's newline flag
     //- parent_idx>0 and parent newline  ->  forced newline (align within parent boundaries)
@@ -1954,7 +1954,7 @@ fn resolveParentInComplex(allocator: std.mem.Allocator, complex: *const ComplexS
                             //In cases where the parent ends in a trailing combinator (such as `b ~`),
                             //Don't merge parent_last into child compound, parent's
                             //All components (including trailing combinator) as prefix
-                            //Needs to be restored. dart-sass behavior:
+                            //Needs to be restored. official Sass CLI behavior:
                             //parent `b ~` + child `& c`  ->  `b ~ c`
                             const child_is_pure_parent = !compoundUsesParentAsCompoundTail(&c);
                             const parent_has_trailing_combinator = complexEndsWithCombinator(&parent_complex);

@@ -465,7 +465,7 @@ pub fn validatePlainCssSelector(sel: []const u8, is_top_level: bool) EvalError!v
 }
 
 test "validate: plain css selector allows escaped ampersand literal" {
-    try validatePlainCssSelector(".\\[\\.histoire-story-list-folder-button\\:hover_\\&\\]\\:htw-opacity-100", true);
+    try validatePlainCssSelector(".\\[\\.component-button\\:hover_\\&\\]\\:u-opacity-100", true);
 }
 
 // ---------------------------------------------------------------------------

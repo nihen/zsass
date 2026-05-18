@@ -249,7 +249,7 @@ fn cleanPlaceholdersInPseudos(allocator: std.mem.Allocator, selector: []const u8
             } else if (def.drop_if_empty) {
                 const after_paren_idx = if (args_end < selector.len) args_end + 1 else args_end;
                 if (std.mem.eql(u8, def.name, ":not(") and pseudoIsStandalone(selector, i, after_paren_idx)) {
-                    // Standalone `:not(%ph)` with no args left matches every element (dart-sass).
+                    // Standalone `:not(%ph)` with no args left matches every element (official Sass CLI).
                     result.deinit(allocator);
                     return "*";
                 }

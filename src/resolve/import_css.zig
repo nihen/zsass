@@ -12,7 +12,7 @@ pub fn stripOuterQuotes(s: []const u8) []const u8 {
 /// Normalize quote chars for a plain-CSS @import url_emit_text.
 /// Returns null if no change is needed; otherwise returns a newly-allocated
 /// buffer that the caller must free.
-/// Rules (dart-sass compatible):
+/// Rules (official Sass CLI compatible):
 /// * url('X')  ->  url("X") (always, regardless of source mode)
 /// * bare 'X'  ->  "X" (only when in_plain_css_module, i.e. .css source)
 /// The bare-string rewrite is skipped in .scss mode to preserve quote style.
@@ -76,7 +76,7 @@ pub fn importSourceNeedsConfigSnapshot(source: []const u8) bool {
 }
 
 test "importUrlHasDynamicDollar treats quoted dollar as literal path text" {
-    try std.testing.expect(!importUrlHasDynamicDollar("\"$bootstrap/bootstrap\""));
-    try std.testing.expect(!importUrlHasDynamicDollar("'$bootstrap/bootstrap'"));
-    try std.testing.expect(importUrlHasDynamicDollar("$bootstrap/bootstrap"));
+    try std.testing.expect(!importUrlHasDynamicDollar("\"$pkg/module\""));
+    try std.testing.expect(!importUrlHasDynamicDollar("'$pkg/module'"));
+    try std.testing.expect(importUrlHasDynamicDollar("$pkg/module"));
 }

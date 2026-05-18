@@ -54,6 +54,7 @@ pub const ColorEntry = struct {
     prefer_long_hex: bool = false,
     inspect_repr: InspectColorRepr = .auto,
     inspect_uppercase_hex: bool = false,
+    hwb_blackness_channel_next_up: bool = false,
 };
 
 pub const ColorPool = std.ArrayListUnmanaged(ColorEntry);

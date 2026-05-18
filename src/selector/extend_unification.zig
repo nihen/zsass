@@ -251,9 +251,9 @@ pub fn unifyCompound(
     // added extender selectors) to preserve intentional duplicates like .foo.foo.
     //
     // When the original compound contributes NOTHING besides the target (i.e.
-    // `%p` extended by `input:not([type]):not(.browser-default).valid` where
+    // `%p` extended by `input:not([type]):not(.native).valid` where
     // source is just `%p`), emit the extender's simple selectors verbatim to
-    // preserve dart-sass's source-order output. When the original contributes a
+    // preserve source-order output. When the original contributes a
     // type selector or other simples, unify by kind-order so the final compound
     //follows the canonical order (type  ->  class/id/attr  ->  pseudo-class  ->
     //pseudo-element) -- e.g. `input.err` extended by `input:hover.err` yields
@@ -500,11 +500,8 @@ pub fn weavePaths(
 
         // Child combinator (>): when the non-descendant base has an
         // ancestor segment before its direct-parent compound, weave that
-        // ancestor segment with the descendant extender base. For example,
-        // extending `.was-validated .input-group > .form-control` with
-        // `.widget select` must keep both
-        // `.was-validated .widget .input-group > select` and
-        // `.widget .was-validated .input-group > select`.
+        // ancestor segment with the descendant extender base. Both possible
+        // ancestor orders must be preserved.
         if (nonDesc_comb == .child) {
             const non_desc_last = getLastCompoundFromSlice(nonDesc_base);
             const non_desc_rest = getSliceBeforeLastCompound(nonDesc_base);
@@ -512,7 +509,7 @@ pub fn weavePaths(
                 const comb_before_non_desc_last = getCombinatorBeforeLastCompound(nonDesc_base);
                 // Only descendant-separated ancestor chains can accept the
                 // extender base in multiple positions. If the direct parent
-                // is itself constrained by `>` (e.g. `.input-group > .floating >`),
+                // is itself constrained by `>` (e.g. `.outer > .floating >`),
                 // inserting an unrelated ancestor before that parent would
                 // imply a different DOM shape than Sass permits.
                 if (comb_before_non_desc_last == .descendant) {
@@ -633,7 +630,7 @@ pub fn weavePaths(
     }
 
     // Case 5: > + sibling (or sibling + >)
-    // In dart-sass, the child combinator's context is placed first (descendant),
+    // Observed official Sass CLI output places the child combinator's context first (descendant),
     // then the sibling combinator's compound follows with its combinator.
     // e.g., `.a > x` extended by `.b ~ y`: orig=.a(>), ext=.b(~)
     // ->  result: `.a > .b ~ target` (child base, then sibling compound with ~)
@@ -781,7 +778,7 @@ fn weaveTildeTilde(
     const can_merge = if (last1 != null and last2 != null) canMergeCompounds(last1.?, last2.?) else true;
 
     // Check if one compound is a superselector of the other.
-    // If so, only produce the merged result (dart-sass compat).
+    // If so, only produce the merged result.
     const is_superselector = if (last1 != null and last2 != null)
         compoundContainsTarget(last1.?, last2.?) or compoundContainsTarget(last2.?, last1.?)
     else
@@ -890,7 +887,7 @@ fn weaveTildePlus(
     const can_merge = if (tilde_last != null and plus_last != null) canMergeCompounds(tilde_last.?, plus_last.?) else true;
 
     // If the tilde compound is a superselector of the plus compound,
-    // only produce the merged result (dart-sass compat).
+    // only produce the merged result.
     const tilde_is_superselector = if (tilde_last != null and plus_last != null)
         compoundContainsTarget(plus_last.?, tilde_last.?)
     else
@@ -1209,7 +1206,7 @@ fn appendDescIfNeeded(allocator: std.mem.Allocator, sel: *ComplexSelector) !void
 }
 
 // ============================================================================
-// Group-based helpers for weave (sass-spec/legacy-zsass behavior equivalent)
+// Group-based helpers for weave (sass-spec-covered behavior)
 // ============================================================================
 
 /// A "group" is a slice of components connected by non-descendant combinators,
@@ -1427,7 +1424,7 @@ fn unifyTwoCompounds(
 // ============================================================================
 
 /// Interleave the components of two complex selector prefixes using group-based
-/// LCS with superselector matching (dart-sass compat).
+/// LCS with superselector matching.
 /// Produces all possible orderings via cartesian product of per-gap chunks.
 fn weave(
     allocator: std.mem.Allocator,
@@ -1455,7 +1452,7 @@ fn weave(
         return results;
     }
 
-    // Group-based LCS weaving (dart-sass compatible).
+    // Group-based LCS weaving.
     // Groups are sequences of compounds connected by non-descendant combinators.
     //E.g., `a + b c`  ->  groups: [a + b], [c]
     // LCS operates on groups, preserving non-descendant combinators within groups.
@@ -1907,7 +1904,7 @@ pub fn trimWithMetadata(
             //Skip cross-group supersedence via :not() extras -- selectors from
             // different originals (.b:focus from extending orig0 vs
             // .b:focus:not(:hover) from extending orig1) are independent and
-            // the broader one must survive for correct dart-sass output.
+            // the broader one must survive for correct output.
             {
                 const cross_group = i < orig_groups.len and j < orig_groups.len and
                     orig_groups[i] != orig_groups[j];
@@ -1916,7 +1913,15 @@ pub fn trimWithMetadata(
                 const same_group_both_fp = both_first_pass and
                     i < orig_groups.len and j < orig_groups.len and
                     orig_groups[i] == orig_groups[j];
-                if (!cross_group and !same_group_both_fp and complexIsSupersededBy(&selectors.items[i], &selectors.items[j])) {
+                if (!cross_group and !same_group_both_fp and
+                    complexIsSupersededBy(&selectors.items[i], &selectors.items[j]))
+                {
+                    if ((complexHasSiblingCombinator(&selectors.items[j]) or
+                        complexHasSiblingCombinator(&selectors.items[i])) and
+                        narrowerKeepsFinalTrimStatefulExtras(&selectors.items[j], &selectors.items[i]))
+                    {
+                        continue;
+                    }
                     removal_reason[i] = .superseded;
                     superseded_by[i] = j;
                     break;
@@ -1934,9 +1939,7 @@ pub fn trimWithMetadata(
                 //SAME original group -- they come from different extenders
                 // (per-ext_i dedup in the first pass ensures one entry per
                 // extension per compound) and must both survive regardless of
-                // whether one is a superset of the other (e.g. `.a` vs
-                // `.a.dark` extending the same placeholder: dart-sass emits
-                // both selectors in the output).
+                // whether one is a superset of the other.
                 const same_group_both_fp = blk_sg: {
                     if (!both_first_pass) break :blk_sg false;
                     if (i >= orig_groups.len or j >= orig_groups.len) break :blk_sg false;
@@ -1966,11 +1969,10 @@ pub fn trimWithMetadata(
                 if (same_group_transitive_specificity) continue;
                 // Selectors produced from different original selector branches
                 // must both survive even when one is broader than the other.
-                // They represent distinct originals such as `> i` and
-                // `> i.material-icons` in the same comma list.
+                // They represent distinct originals in the same comma list.
                 // Exception: when j is a true superselector of i (matches every
                 // element i matches), i is fully redundant and can be removed.
-                // e.g., `.foo[nbButtonToggle]` supersedes `.foo[nbButtonToggle]:hover`.
+                // e.g., `.foo[data-toggle]` supersedes `.foo[data-toggle]:hover`.
                 if (i < orig_groups.len and j < orig_groups.len and
                     orig_groups[i] != orig_groups[j])
                 {

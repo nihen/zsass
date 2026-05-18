@@ -36,7 +36,7 @@ pub const OutputStyle = rule_ir_mod.OutputStyle;
 /// `CompileOptions.diagnostic_sink`. `err` corresponds to compilation
 /// failure (the same condition the API also surfaces via the returned
 /// `anyerror`); `warning` covers `@warn` / lexer-level warnings;
-/// `deprecation` is dart-sass-style deprecation notices.
+/// `deprecation` is official Sass CLI-style deprecation notices.
 pub const DiagnosticLevel = enum { warning, deprecation, err };
 
 /// Structured per-event payload delivered to a `DiagnosticSink`. All
@@ -66,7 +66,7 @@ pub const DiagnosticSink = *const fn (diag: *const Diagnostic, ctx: ?*anyopaque)
 
 /// Per-call options shared by the in-memory compile entry points.
 pub const CompileOptions = struct {
-    /// `.expanded` (default, dart-sass `expanded`) or `.compressed`.
+    /// `.expanded` (default, official Sass CLI `expanded`) or `.compressed`.
     output_style: OutputStyle = .expanded,
     /// Suppress `@warn` / `@debug` output (mirrors the CLI `--quiet`).
     quiet: bool = false,
@@ -196,6 +196,7 @@ pub fn compileSourceToCss(
     load_paths: []const []const u8,
     opts: CompileOptions,
 ) anyerror![]u8 {
+    error_format_mod.clearContextMessage();
     const prev_diag = pushDiagnosticSink(opts);
     defer restoreDiagnosticSink(prev_diag);
     errdefer |err| reportFinalErrorDiagnostic(err, file_path, opts);
@@ -243,6 +244,7 @@ pub fn compileSourceToCssWithSourceMap(
     source_map_output_css_path: ?[]const u8,
     opts: CompileOptions,
 ) anyerror!CompileCssWithSourceMapResult {
+    error_format_mod.clearContextMessage();
     const prev_diag = pushDiagnosticSink(opts);
     defer restoreDiagnosticSink(prev_diag);
     errdefer |err| reportFinalErrorDiagnostic(err, file_path, opts);
@@ -328,6 +330,40 @@ test "api: compile arithmetic" {
     try std.testing.expectEqualStrings(".a {\n  width: 20px;\n}\n", css);
 }
 
+test "api: compile clears stale context message before final diagnostic" {
+    const alloc = std.testing.allocator;
+
+    const type_error_src = "@use \"sass:map\"; a { b: map.get(1, 2) }";
+    _ = compileSourceToCss(alloc, type_error_src, "", &.{}, .{}) catch {};
+
+    const Capture = struct {
+        messages: std.ArrayList(u8) = .empty,
+
+        fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            self.messages.deinit(allocator);
+        }
+
+        fn sink(diag: *const Diagnostic, ctx: ?*anyopaque) void {
+            if (diag.level != .err) return;
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.messages.appendSlice(alloc, diag.message) catch {};
+            self.messages.append(alloc, '\n') catch {};
+        }
+    };
+
+    var capture = Capture{};
+    defer capture.deinit(alloc);
+
+    const unknown_function_src = "@use \"sass:map\"; a { b: map.map-get((c: d), c) }";
+    _ = compileSourceToCss(alloc, unknown_function_src, "", &.{}, .{
+        .diagnostic_sink = Capture.sink,
+        .diagnostic_ctx = &capture,
+    }) catch {};
+
+    try std.testing.expect(std.mem.indexOf(u8, capture.messages.items, "Undefined function.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.messages.items, "$map: 1 is not a map.") == null);
+}
+
 test "api: plain css import condition preserves raw condition text" {
     const alloc = std.testing.allocator;
     const src = "@import \"a\" b(c);\n";
@@ -374,12 +410,12 @@ test "api: interpolation body ignores comment text that looks like nested interp
 test "api: plain css selector accepts escaped ampersand literal" {
     const alloc = std.testing.allocator;
     const src =
-        \\.\\[\\.histoire-story-list-folder-button\\:hover_\\&\\]\\:htw-opacity-100 { opacity: 1; }
+        \\.\\[\\.component-button\\:hover_\\&\\]\\:u-opacity-100 { opacity: 1; }
     ;
     const css = try compileSourceToCss(alloc, src, "/tmp/in.scss", &.{}, .{});
     defer alloc.free(css);
     try std.testing.expectEqualStrings(
-        \\.\\[\\.histoire-story-list-folder-button\\:hover_\\&\\]\\:htw-opacity-100 {
+        \\.\\[\\.component-button\\:hover_\\&\\]\\:u-opacity-100 {
         \\  opacity: 1;
         \\}
         \\
@@ -604,6 +640,60 @@ test "api: mixin import url interpolation errors for undeclared caller local var
         \\}
     ;
     try std.testing.expectError(error.SassError, compileSourceToCss(alloc, src, "/tmp/input.scss", &.{}, .{}));
+}
+
+fn writeApiTmpFileAll(tmp_dir: *std.testing.TmpDir, rel_path: []const u8, bytes: []const u8) !void {
+    if (std.fs.path.dirname(rel_path)) |parent| {
+        try tmp_dir.dir.createDirPath(zsass_io.io, parent);
+    }
+    const file = try tmp_dir.dir.createFile(zsass_io.io, rel_path, .{ .truncate = true });
+    defer file.close(zsass_io.io);
+    var fb: [4096]u8 = undefined;
+    var fw = file.writerStreaming(zsass_io.io, &fb);
+    try fw.interface.writeAll(bytes);
+    try fw.flush();
+}
+
+test "api: import-forwarded callables override prior local hyphen aliases" {
+    const alloc = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    try writeApiTmpFileAll(&tmp_dir, "_upstream.scss",
+        \\@mixin foo_bar { .from { mixin: upstream; } }
+        \\@function foo_bar() { @return upstream; }
+    );
+    try writeApiTmpFileAll(&tmp_dir, "_bridge.scss",
+        \\@forward "upstream";
+    );
+
+    const tmp_path = try zsass_io.realPathAlloc(tmp_dir.dir, ".", alloc);
+    defer alloc.free(tmp_path);
+    const entry_path = try std.fs.path.join(alloc, &.{ tmp_path, "entry.scss" });
+    defer alloc.free(entry_path);
+
+    const src =
+        \\@mixin foo-bar { .from { mixin: local; } }
+        \\@function foo-bar() { @return local; }
+        \\@import "bridge";
+        \\.x {
+        \\  @include foo_bar;
+        \\  y: foo_bar();
+        \\}
+    ;
+    const css = try compileSourceToCss(alloc, src, entry_path, &.{}, .{});
+    defer alloc.free(css);
+
+    try std.testing.expectEqualStrings(
+        \\.x .from {
+        \\  mixin: upstream;
+        \\}
+        \\.x {
+        \\  y: upstream;
+        \\}
+        \\
+    , css);
 }
 
 test "api: callable body can still read a global declared after the mixin" {

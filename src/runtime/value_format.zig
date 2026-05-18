@@ -1,7 +1,7 @@
 //! Value  ->  format helper for CSS strings. `formatNumberCore` / which was duplicated in vm.zig and builtin.zig
 //! Unify `formatNumberCoreCss`.
 //!
-//! dart-sass number output rule:
+//! official Sass CLI number output rule:
 //! - Integer value is `{d}` as is (up to about 1e18)
 //! - Output decimals with 10-digit precision and drop trailing zero (`1.500000`  ->  `1.5`)
 //! - `.5` / `-.5` pad leading zero (`0.5` / `-0.5`)
@@ -183,7 +183,7 @@ fn hasMathFunctionCallCandidate(input: []const u8) bool {
 }
 
 /// Fill in leading zero in token units of CSS value. `.5`  ->  `0.5`, `-.5`  ->  `-0.5`,
-/// Normalize the decimal shorthand in decl value to be compatible with dart-sass, like `all .2s`  ->  `all 0.2s`.
+/// Normalize the decimal shorthand in decl value to be compatible with official Sass CLI, like `all .2s`  ->  `all 0.2s`.
 /// Do not touch the contents of quoted string (`content: "foo .5"`). Parts of identifier (`.foo`, `a.5`) are also not touched.
 /// Return value comes from `alloc`, caller is `alloc.free`. If the input does not need to be changed, dupe the input and return it as is.
 pub fn normalizeLeadingZeros(alloc: std.mem.Allocator, input: []const u8) std.mem.Allocator.Error![]u8 {
@@ -251,7 +251,7 @@ pub fn normalizeLeadingZeros(alloc: std.mem.Allocator, input: []const u8) std.me
 
 /// CSS math function (`calc()` / `min()` / `max()` / `clamp()` / `mod()` / `rem()` /
 /// Supplement leading zero only within the body of `round()` / `abs()` / `sign()` / trigonometric functions, etc.).
-/// dart-sass does not touch the numerical representation of the top-level unquoted string value (from interp),
+/// official Sass CLI does not touch the numerical representation of the top-level unquoted string value (from interp),
 /// Post-process on the rule emit side to normalize to `0.5` only if the math function is directly parsed
 /// uses this function.
 /// Return value comes from `alloc`, caller is `alloc.free`. If the input does not need to be changed, dupe the input and return it as is.
@@ -419,7 +419,7 @@ fn isIdentByte(c: u8) bool {
         (c >= '0' and c <= '9') or c == '-' or c == '_' or c == '\\' or c >= 0x80;
 }
 
-/// dart-sass plain CSS path: `#rrggbbaa` (8-digit) and `#rgba` (4-digit) hex colors
+/// official Sass CLI plain CSS path: `#rrggbbaa` (8-digit) and `#rgba` (4-digit) hex colors
 /// Expand. If alpha is 1.0 (=ff/f), shorten with named color or 6-digit hex,
 /// If alpha is less than 1.0, output `rgba(R, G, B, alpha)` (alpha is 10-digit precision).
 /// 3-digit `#rgb` / 6-digit `#rrggbb` (without alpha) is verbatim.

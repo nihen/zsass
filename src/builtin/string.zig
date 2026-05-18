@@ -2,6 +2,7 @@
 const std = @import("std");
 const shared = @import("shared.zig");
 const css_utils = @import("../runtime/css_utils.zig");
+const calc_utils = @import("../runtime/calc_utils.zig");
 
 const Value = shared.Value;
 const BuiltinContext = shared.BuiltinContext;
@@ -603,13 +604,39 @@ pub fn string_quote(ctx: *BuiltinContext, args: []const Value) BuiltinError!Valu
     return Value.string(args[0].stringIntern(), true);
 }
 
+fn unquotedStringNeedsDeclTextPreserve(raw: []const u8) bool {
+    return std.mem.indexOf(u8, raw, "calc(") != null or
+        std.mem.indexOf(u8, raw, "min(") != null or
+        std.mem.indexOf(u8, raw, "max(") != null or
+        std.mem.indexOf(u8, raw, "clamp(") != null;
+}
+
+fn markUnquotedStringPreserve(raw: []const u8, value: Value) Value {
+    const literal = value.withPreserveLiteralText();
+    return if (unquotedStringNeedsDeclTextPreserve(raw)) literal.withPreserveDeclText() else literal;
+}
+
 pub fn string_unquote(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 1);
     if (!args[0].isString()) return reportArgumentTypeMismatch(ctx, "string", args[0], "string");
     // unquote() is a SassScript-computed string -> declaration serialize
     // plain CSS normalization (space after comma / space before !important / ' / ' in color function)
     // Add a marker to skip.
-    if (!args[0].stringQuoted(ctx.string_flags_pool.items)) return args[0].withPreserveLiteralText();
+    if (!args[0].stringQuoted(ctx.string_flags_pool.items)) {
+        const raw = ctx.intern_pool.get(args[0].stringIntern());
+        if (std.mem.startsWith(u8, raw, calc_utils.calc_interp_marker)) {
+            const unmarked = raw[calc_utils.calc_interp_marker.len..];
+            if (css_utils.containsCalcFunction(unmarked)) {
+                const normalized = try calc_utils.normalizeCalcInDeclValueForMarkedInterpolation(ctx.allocator, unmarked);
+                defer if (normalized.ptr != unmarked.ptr) ctx.allocator.free(normalized);
+                const compact = try calc_utils.trimParenEdgeWhitespace(ctx.allocator, normalized);
+                defer if (compact.ptr != normalized.ptr) ctx.allocator.free(compact);
+                const id = try internString(ctx, compact);
+                return markUnquotedStringPreserve(compact, Value.string(id, false));
+            }
+        }
+        return args[0].withPreserveLiteralText();
+    }
     const raw = ctx.intern_pool.get(args[0].stringIntern());
     if (quotedUnquoteShouldPreserveRawEscapes(raw)) {
         return Value.string(args[0].stringIntern(), false).withPreserveLiteralText();
@@ -617,7 +644,7 @@ pub fn string_unquote(ctx: *BuiltinContext, args: []const Value) BuiltinError!Va
     var decoded = try decodeStringArgForOps(ctx, "string", args[0]);
     defer decoded.deinit(ctx.allocator);
     const id = try internString(ctx, decoded.bytes);
-    return Value.string(id, false).withPreserveLiteralText();
+    return markUnquotedStringPreserve(decoded.bytes, Value.string(id, false));
 }
 
 pub fn string_unique_id(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {

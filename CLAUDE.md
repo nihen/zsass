@@ -21,6 +21,48 @@ zsass is a clean-room Sass implementation.
 
 This policy avoids license contamination and is non-negotiable.
 
+## Anti-Hardcoding / Fixture Integrity (MUST)
+
+Real-world fixtures are for finding general zsass bugs, not for teaching zsass
+about individual projects.
+
+- Do not add project-, package-, repository-, theme-, vendor-, framework-, or
+  fixture-specific branches to `src/**` to make a compatibility fixture pass.
+- Do not key compiler/runtime behavior on names such as a package name, theme
+  name, repository name, npm scope, framework, design-system helper function, or
+  fixture path.
+- A fix in `src/**` must be justified by one of:
+  1. Sass/CSS specification text,
+  2. sass-spec coverage, or
+  3. a minimal clean-room reproducer whose behavior is verified by the official
+     `sass` CLI.
+- If a real-world fixture exposes behavior through project-defined helpers,
+  reduce it to the underlying Sass semantics first. Implement the semantics, not
+  the helper name.
+- Fixture runner workarounds belong only in `scripts/**` or fixture metadata,
+  and only for environment/setup issues. They must never change compiler
+  semantics or hide zsass compile failures or CSS diffs.
+- When a `zsass_compile_error` or `css_diff` is found, stop increasing counts.
+  Reduce and fix the general bug. Do not skip, normalize away, or special-case
+  the failing project.
+- Before committing any compatibility fix, perform a semantic line review of the
+  changed files. Search is only a prefilter; it is not sufficient. For every new
+  branch, exception, or normalizer rule, record why it is general Sass/CSS
+  behavior.
+
+## Semantic Audit Mode
+
+When auditing for hardcoded compatibility hacks:
+
+- Read every line of the target files, not just search hits.
+- For each conditional, lookup table, normalization rule, fallback, or setup
+  workaround, classify it as `spec`, `sass-cli-observed`,
+  `fixture-setup-only`, or `suspect`.
+- Treat `suspect` as blocking until it is removed, generalized, or documented
+  with a minimal clean-room reproducer.
+- Keep an audit ledger in `.plans/` with file, line/range, classification,
+  evidence, and action.
+
 ## Repository Layout
 
 - `src/` - compiler, organized as `frontend/` (lexer/parser/AST),

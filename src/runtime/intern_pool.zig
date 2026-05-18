@@ -61,8 +61,8 @@ pub const InternPool = struct {
     pub fn intern(self: *InternPool, s: []const u8) std.mem.Allocator.Error!InternId {
         perf.note(.intern_lookup);
         // Use getOrPut so misses hash the input string only once. The old
-        // get()+put() path hashed large generated strings twice; NES.css hits
-        // this with tens of thousands of long unique strings.
+        // get()+put() path hashed large generated strings twice; extension-heavy
+        // inputs can produce tens of thousands of long unique strings.
         const gop = try self.index.getOrPutAdapted(self.arena, s, std.hash_map.StringContext{});
         if (gop.found_existing) return gop.value_ptr.*;
         errdefer self.index.removeByPtr(gop.key_ptr);

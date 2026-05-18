@@ -1,4 +1,4 @@
-//! User-facing error message formatting. Zig internal error tag  ->  converted to dart-sass compatible English text.
+//! User-facing error message formatting. Zig internal error tag  ->  converted to official Sass CLI compatible English text.
 //!
 //! CLI-FIX-E Step 1: Format the driver's error output with a dart-compatible `Error: {message}.` prefix.
 //! source frame (`| | |`) and stack trace line (`{path} {line}:{col} root stylesheet`) are
@@ -74,7 +74,7 @@ pub fn formatTooManyArguments(buf: []u8, expected: usize, got: usize) ![]u8 {
     return std.fmt.bufPrint(buf, "Only {d} {s} allowed, but {d} were passed.", .{ expected, arg_noun, got });
 }
 
-/// Zig error tag  ->  dart-sass compatible user-facing message.
+/// Zig error tag  ->  official Sass CLI compatible user-facing message.
 /// tag that is not in table returns generic `An error occurred.`.
 /// Include the period (`.`) at the end to match dart.
 /// Callers who want to prioritize thread-local context messages (rich error messages)
@@ -176,7 +176,7 @@ pub fn errorToUserMessageWithContext(err: anyerror) []const u8 {
 }
 
 /// CLI-FIX-E Step 1: Gate the debug line for each phase/VM with `ZSASS_VERBOSE_ERRORS` env var.
-/// dart-sass doesn't output any debug lines, so you can set it to default suppress. Cache once per-thread.
+/// official Sass CLI doesn't output any debug lines, so you can set it to default suppress. Cache once per-thread.
 /// `threadlocal` here means each batch worker reads / writes its own slot, so
 /// the previous process-global cache that could race when several workers
 /// hit `verboseErrorsEnabled()` for the first time concurrently is gone.
@@ -370,7 +370,7 @@ pub fn lastErrorOr(fallback: anyerror) anyerror {
     return error_state.last_error_ctx.last_err orelse fallback;
 }
 
-/// Write dart-sass compatible source frame to stderr.
+/// Write official Sass CLI compatible source frame to stderr.
 /// Example output:
 /// |
 /// 1 | .foo { color: 1px + 1em; }
@@ -615,7 +615,7 @@ fn formatLinenoText(lineno: u32) []const u8 {
 }
 
 /// CLI-FIX-E Step 3 (C-6): error CSS template to write to the output file when an error occurs in file output mode.
-/// dart-sass compatible: CSS comment block (frame ASCII fallback `,/|/'`) + body::before content
+/// official Sass CLI compatible: CSS comment block (frame ASCII fallback `,/|/'`) + body::before content
 // Embed frame in /// with Unicode escape (`\2577 ` `\2502 ` `\2575 ` `\a `).
 ///
 /// If there is an error without input (such as an error before parse), only message and path are output without frame.

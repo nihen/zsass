@@ -12,7 +12,7 @@ inline fn saturateNestDepth(depth: usize) u8 {
     return std.math.cast(u8, depth) orelse std.math.maxInt(u8);
 }
 
-/// Used in dart-sass's re-emit pattern. From the beginning of the top chunk of module M
+/// Used for the official Sass CLI module re-emit pattern. From the beginning of the top chunk of module M
 /// Append consecutive emit_comments to rule_ir. enter_frame / emit_stmt_gap
 /// / nop is skip. Stops at first non-preamble inst.
 pub fn emitModulePreambleComments(self: anytype, module_id: u32) !void {
@@ -97,7 +97,7 @@ pub fn appendCurrentRuleBegin(self: anytype, suppress_top_level_blank: bool) !vo
     // rule_begin is treated as hoisted. In adjacent merge judgment, reopen immediately after hoisted block is
     // Do not merge. A hoisted rule is treated as an escape from its parent rule, so
     // On the writer side, "blank suppression with previous rule + blank enforcement with next non-hoisted rule"
-    // To achieve this, suppress_leading_blank is also set here (Z23-MEDIA).
+    // To achieve this, suppress_leading_blank is also set here.
     if (self.at_root_saved_selector_frames.items.len > 0) {
         self.rule_ir.setOriginAtRootHoistedAt(new_idx, true);
         self.rule_ir.setSuppressLeadingBlankAt(new_idx, true);

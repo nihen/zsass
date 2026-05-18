@@ -8,7 +8,7 @@ const tokenStartsWithDoubleHyphenIdentifier = expr_scan.tokenStartsWithDoubleHyp
 const EvalError = anyerror;
 
 /// Strip `/*...*/` comments from a plain-CSS decl value.
-/// dart-sass drops inline comments inside decl values (non-custom properties).
+/// official Sass CLI drops inline comments inside decl values (non-custom properties).
 /// Whitespace around the comment is collapsed: if both sides had whitespace,
 /// one is kept; if neither, a single space is inserted to keep tokens apart.
 /// Quoted segments are passed through verbatim.
@@ -977,7 +977,7 @@ pub fn normalizeCssValueEscapes(allocator: std.mem.Allocator, text: []const u8) 
                     // Always add trailing space (CSS hex escape delimiter)
                     try buf.append(allocator, ' ');
                     // When a quote follows immediately, preserve an additional
-                    // space so adjacent token reparsing matches Dart Sass for
+                    // space so adjacent token reparsing matches official Sass CLI for
                     // escaped interpolation literals like `\\#{"\\9"}`.
                     if (i < text.len and (text[i] == '"' or text[i] == '\'')) {
                         try buf.append(allocator, ' ');
@@ -1016,7 +1016,7 @@ pub fn normalizeCssValueEscapes(allocator: std.mem.Allocator, text: []const u8) 
                         continue;
                     }
                 }
-                if (isPrivateUseCodePoint(code_point)) {
+                if (isPrivateUseCodePoint(@intCast(code_point))) {
                     // Keep Unicode private-use escapes as hex escapes to avoid
                     // emitting raw control glyphs in unquoted output.
                     try buf.append(allocator, '\\');
@@ -1090,7 +1090,7 @@ pub fn normalizeCssValueEscapes(allocator: std.mem.Allocator, text: []const u8) 
 
     return try buf.toOwnedSlice(allocator);
 }
-fn isPrivateUseCodePoint(code_point: u32) bool {
+pub fn isPrivateUseCodePoint(code_point: u21) bool {
     return (code_point >= 0xE000 and code_point <= 0xF8FF) or
         (code_point >= 0xF0000 and code_point <= 0xFFFFD) or
         (code_point >= 0x100000 and code_point <= 0x10FFFD);
@@ -1309,7 +1309,7 @@ test "normalizeAttributeSelectors keeps lone hyphen value quoted" {
 }
 
 test "normalizeAttributeSelectors trims whitespace before unquoted values" {
-    const normalized = try normalizeAttributeSelectors(std.testing.allocator, "[data-coreui-theme= dark] .x");
+    const normalized = try normalizeAttributeSelectors(std.testing.allocator, "[data-theme= dark] .x");
     defer std.testing.allocator.free(normalized);
-    try std.testing.expectEqualStrings("[data-coreui-theme=dark] .x", normalized);
+    try std.testing.expectEqualStrings("[data-theme=dark] .x", normalized);
 }

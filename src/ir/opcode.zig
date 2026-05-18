@@ -22,7 +22,7 @@ pub const Opcode = enum(u8) {
     /// Reset slot to nil and undeclared. Compiler emits this for `@for`/`@each` synthetic
     /// iter holders + loop variables after `pop_flow_scope`. Without it the iter list /
     /// counter / loop var values leak into subsequent reads at the same lexical level
-    /// (Z21: adminlte top-chunk @each iter holder slot 1503 stale-list bug).
+    /// This prevents a stale iter holder from being read after the loop scope closes.
     /// argB: slot index
     clear_local,
     unpack, // argA: expected count (destructuring @each)
@@ -175,7 +175,7 @@ pub const Opcode = enum(u8) {
     pop_prop_namespace,
     /// Push the parent selector (value of `&`) as a SelectorList value, or nil if no parent.
     /// Resolves eagerly at expression-evaluation time so `$x: &;` captures the current parent
-    /// (matching dart-sass), rather than deferring until the stored value is used.
+    /// (matching official Sass CLI), rather than deferring until the stored value is used.
     load_parent_selector,
 
     //-- sentinel (opcode count) --------------------
@@ -200,9 +200,8 @@ pub const Instruction = extern struct {
 pub const make_selector_flag_source_name_interp: u32 = 1 << 0;
 pub const make_selector_flag_source_args_interp: u32 = 1 << 1;
 pub const make_selector_flag_interpolation_context: u32 = 1 << 2;
-/// When constructing text for loud comment (`/*! ... #{...} ... */`), empty interp is
-/// Suppress the collapse that pops the previous space. Bootstrap bsBanner("")
-/// To keep `Bootstrap v5.3.8` (double spaces) (Z23-BOOTSTRAP-P3 pod).
+/// When constructing text for loud comments (`/*! ... #{...} ... */`), empty
+/// interpolation must not collapse an intentionally preserved separator.
 pub const make_selector_flag_preserve_empty_separators: u32 = 1 << 3;
 /// Low-byte transport flag for emit_at_rule_begin. Plain CSS nested
 /// conditional at-rules preserve CSS nesting semantics, so RuleIR must not
@@ -217,27 +216,29 @@ pub const emit_decl_flag_bare_multiline_comma_syntax: u16 = 1 << 2;
 /// (e.g. `var(--x) #{"/* rtl: ..."}`) preserves without setting flag.
 pub const emit_decl_flag_strip_source_comments: u16 = 1 << 3;
 /// For emit_decl, if source is a raw value written in a plain CSS file (`.css` extension)
-/// Stand up. The plain CSS literal calc(... calc(...)) is simplified in dart-sass (chatwoot
-/// `.css` etc. from node_modules). On the other hand, SCSS evaluation (variable / function return value / interp
-// calc assembled via ///) is preserved as plain CSS unparsed (via bootstrap add()
-/// via the return value of helper nested calc). Since the difference between the two routes cannot be identified at text-level, the source file
-/// Differentiate by extension (CSS spec: plain CSS is dart-sass simplify, SCSS computed is preserve).
+/// Plain CSS literal calc(... calc(...)) in `.css` inputs is simplified, while
+/// SCSS-evaluated values from variables, function returns, or interpolation are
+/// preserved as unparsed CSS. The source extension distinguishes those routes.
 pub const emit_decl_flag_plain_css_origin: u16 = 1 << 4;
-/// For emit_raw_decl, when value text is pure literal (not from interp)
-/// Strip source `/* */`. plain CSS `font-family: a, /* hint */ b;`
-// To remove /// etc. like dart-sass. From interp (e.g. `#{"/* rtl: ..."}`)
-/// preserves without setting flag (Z23-BOOTSTRAP-P3 pod).
+/// For emit_raw_decl, strip source `/* */` comments only when value text is
+/// a pure literal. Values produced by interpolation preserve their text.
 pub const emit_raw_decl_flag_strip_source_comments: u16 = 1 << 0;
 /// For emit_raw_decl, custom property source is like `--x: <value>`
 /// If you had a horizontal space after the colon, it would be lost via interpolation
 /// Restore leading spaces on the VM side.
 pub const emit_raw_decl_flag_custom_property_leading_space: u16 = 1 << 1;
+/// For emit_raw_decl, the value came from interpolation and compressed
+/// minification must preserve its decimal surface text.
+pub const emit_raw_decl_flag_value_has_interp: u16 = 1 << 2;
 /// resolver -> compiler For internal transmission. emit_decl ignores it, emit_raw_decl
 /// Copy to `emit_raw_decl_flag_custom_property_leading_space`.
 pub const emit_decl_flag_custom_property_leading_space: u16 = 1 << 5;
 /// For emit_decl_dynamic. If the source value of dynamic custom property itself is multiple lines,
 /// Keep raw special-function text after interpolation without single-line serializing.
 pub const emit_decl_flag_value_source_multiline: u16 = 1 << 6;
+/// For emit_decl, the value subtree contains Sass interpolation. The writer
+/// preserves decimal surface text through compressed minification.
+pub const emit_decl_flag_value_has_interp: u16 = 1 << 7;
 
 /// Internal marker prepended to raw multiline custom-property values by the
 /// resolver. It carries the declaration line's source column, which remains

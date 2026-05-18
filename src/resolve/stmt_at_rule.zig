@@ -367,8 +367,6 @@ pub fn resolveAtRootStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: an
         }
     }
 
-    // Legacy/eval2 oracle:
-    // - src/eval2.zig:classifyAtRootSelectorText / evalAtRoot
     // Query-only empty blocks (and empty @at-root) emit nothing.
     if (body_roots.len == 0) {
         if (body_extra == std.math.maxInt(u32)) {
