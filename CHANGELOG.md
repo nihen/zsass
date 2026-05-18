@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.1 (2026-05-18)
+
+### Fixed
+- Improve Sass output compatibility for selector extension, color conversion
+  and formatting, calculations, and module resolution edge cases (#16).
+- Prevent configured modules from leaking through persistent resolver reuse
+  when batch entries may reach `@use ... with (...)` directly or through
+  imported sources (#16).
+- Harden sass-spec expected-error matching so generic Sass nouns such as
+  `function`, `mixin`, and `variable` no longer mask clear diagnostic
+  mismatches (#16).
+
+### Changed
+- Make real-world fixture normalized CSS comparison diagnostic-only; raw CSS
+  differences remain failures (#16).
+- Remove project/fixture-specific compatibility shortcuts and replace them
+  with general Sass/CSS semantics backed by sass-spec or clean-room Sass CLI
+  observations (#16).
+- Harden disposable fixture source checks so GitHub SSH/scp URLs for
+  prohibited clean-room sources are normalized before denylist validation
+  (#16).
+
 ## 0.3.0 (2026-05-11)
 
 ### Removed
