@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.2 (2026-05-19)
+
+### Added
+- Publish multi-arch Linux container images to GitHub Container Registry,
+  built from the signed GitHub Release archives with SHA256 verification.
+- Add a manual workflow for publishing GHCR images for existing release tags.
+
+### Changed
+- Document GHCR usage and package the container image on Debian 13
+  `trixie-slim` with the project MIT license included in the image.
+
 ## 0.3.1 (2026-05-18)
 
 ### Fixed
