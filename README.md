@@ -76,9 +76,30 @@ brew install nihen/tap/zsass
 
 The formula lives in [`nihen/homebrew-tap`](https://github.com/nihen/homebrew-tap)
 and is regenerated on every release by
-[`.github/workflows/publish-homebrew.yml`](.github/workflows/publish-homebrew.yml).
+[`.github/workflows/release.yml`](.github/workflows/release.yml).
 Each upgrade reuses the same SHA256 sidecars that the release workflow
 publishes alongside the archives.
+
+### Container image (Linux amd64 / arm64)
+
+Release images are published to GitHub Container Registry:
+
+```bash
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD":/work -w /work ghcr.io/nihen/zsass:latest input.scss output.css
+```
+
+For reproducible builds, pin the release tag instead of `latest`:
+
+```bash
+docker run --rm ghcr.io/nihen/zsass:0.3.1 --version
+```
+
+The `--user` flag keeps generated files owned by your host user on
+Linux. The image is built from the same Linux release archives that are
+published on GitHub Releases. The Docker build verifies the downloaded
+archive against its `.sha256` sidecar before extraction; Sigstore
+provenance materials (`.sig` / `.pem`) are still published with each
+release for separate provenance checks.
 
 ### Manual download
 

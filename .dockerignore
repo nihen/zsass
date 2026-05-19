@@ -1,0 +1,10 @@
+.git
+.github
+.claude
+.plans
+.zig-cache
+zig-cache
+zig-out
+bench-results.diffs
+dist
+*.tmp
