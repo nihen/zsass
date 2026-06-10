@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.3.3 (2026-06-10)
+
+### Changed
+- Improve real-world batch compilation throughput by optimizing resolver, VM,
+  driver, emitter, builtins, and selector extend hot paths (#20).
+- Add import preamble checkpoint reuse and pure-top module state replay across
+  batch entries, with guards for configuration, `meta.load-css`, and stateful
+  builtins (#20).
+- Reduce hot lookup, selector/declaration scan, map, unit, and VM dispatch
+  overhead while preserving Sass semantics (#20).
+
 ## 0.3.2 (2026-05-19)
 
 ### Added
