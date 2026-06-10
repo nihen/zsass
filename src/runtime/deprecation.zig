@@ -132,6 +132,68 @@ pub const DeprecationOpts = struct {
     }
 };
 
+/// Pre-dedup record of one `emitDeprecation` call, captured while an
+/// import-preamble checkpoint is being built so checkpoint forks can replay
+/// the exact same calls (dedup/fatal state then evolves per entry as usual).
+pub const RecordedDeprecation = struct {
+    kind: DeprecationKind,
+    msg: []const u8,
+    path: []const u8,
+    line: u32,
+    col: u32,
+};
+
+pub const DeprecationRecorder = struct {
+    alloc: std.mem.Allocator,
+    items: std.ArrayListUnmanaged(RecordedDeprecation) = .empty,
+    /// Set on any allocation failure; the capture is then rejected instead of
+    /// risking an incomplete replay.
+    failed: bool = false,
+
+    pub fn deinit(self: *DeprecationRecorder) void {
+        for (self.items.items) |item| {
+            self.alloc.free(item.msg);
+            self.alloc.free(item.path);
+        }
+        self.items.deinit(self.alloc);
+        self.* = undefined;
+    }
+
+    fn record(self: *DeprecationRecorder, kind: DeprecationKind, msg: []const u8, path: []const u8, line: u32, col: u32) void {
+        if (self.failed) return;
+        const msg_copy = self.alloc.dupe(u8, msg) catch {
+            self.failed = true;
+            return;
+        };
+        const path_copy = self.alloc.dupe(u8, path) catch {
+            self.alloc.free(msg_copy);
+            self.failed = true;
+            return;
+        };
+        self.items.append(self.alloc, .{
+            .kind = kind,
+            .msg = msg_copy,
+            .path = path_copy,
+            .line = line,
+            .col = col,
+        }) catch {
+            self.alloc.free(msg_copy);
+            self.alloc.free(path_copy);
+            self.failed = true;
+        };
+    }
+};
+
+threadlocal var active_recorder: ?*DeprecationRecorder = null;
+
+/// Installs (or clears) the calling thread's deprecation recorder and returns
+/// the previous one so nested windows restore correctly.
+pub fn swapActiveRecorder(recorder: ?*DeprecationRecorder) ?*DeprecationRecorder {
+    const prev = active_recorder;
+    active_recorder = recorder;
+    return prev;
+}
+
 pub fn emitDeprecation(
     opts: *DeprecationOpts,
     kind: DeprecationKind,
@@ -140,6 +202,7 @@ pub fn emitDeprecation(
     line: u32,
     col: u32,
 ) !void {
+    if (active_recorder) |recorder| recorder.record(kind, msg, path, line, col);
     if (opts.quiet) return;
     if (opts.silenced.contains(kind)) return;
     if (opts.fatal.contains(kind)) {

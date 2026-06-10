@@ -210,6 +210,30 @@ pub fn pushCommaList(ctx: *BuiltinContext, items: []const Value) BuiltinError!Va
     return pushListWithMeta(ctx, items, .comma, false, false);
 }
 
+/// Like `pushListWithMeta`, but takes ownership of `owned` (an exactly-sized
+/// slice allocated with `ctx.allocator`) instead of duplicating it. Hot map
+/// builtins build their result buffer once and hand it to the pool directly.
+/// On error the slice is freed; the caller must not touch it afterwards.
+pub fn pushListOwnedWithMeta(
+    ctx: *BuiltinContext,
+    owned: []Value,
+    separator: ListSeparator,
+    bracketed: bool,
+    is_map: bool,
+) BuiltinError!Value {
+    const handle: u32 = @intCast(ctx.list_pool.items.len);
+    {
+        errdefer ctx.allocator.free(owned);
+        try ctx.list_pool.append(ctx.allocator, owned);
+    }
+    errdefer {
+        _ = ctx.list_pool.pop();
+        ctx.allocator.free(owned);
+    }
+    try maybeNoteListParentSelNoneHook(ctx, handle, owned);
+    return Value.listWithMeta(handle, separator, bracketed, is_map);
+}
+
 /// Called immediately after builtin appends a new handle to list_pool.
 /// All elements are known no-`&` (number / quoted-string / preserved-`&` string /
 /// non-`&` unquoted string / color / boolean / nil / list with bits already set, etc.)
@@ -288,7 +312,7 @@ pub fn argNameMatches(ctx: *BuiltinContext, name_id: InternId, expected: []const
     return i == raw.len and j == expected.len;
 }
 
-pub fn bindNamedOrPositionalArgs(
+pub inline fn bindNamedOrPositionalArgs(
     ctx: *BuiltinContext,
     args: []const Value,
     arg_names: []const InternId,
@@ -321,7 +345,7 @@ pub fn bindNamedOrPositionalArgs(
     return out;
 }
 
-pub fn bindNamedOrPositionalArgsStrict(
+pub inline fn bindNamedOrPositionalArgsStrict(
     ctx: *BuiltinContext,
     args: []const Value,
     arg_names: []const InternId,

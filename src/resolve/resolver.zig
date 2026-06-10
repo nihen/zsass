@@ -421,7 +421,7 @@ const Ctx = struct {
     ambiguous_star_mixins: std.StringHashMapUnmanaged(void) = .empty,
     star_functions: std.StringHashMapUnmanaged(CrossCallableTarget) = .empty,
     ambiguous_star_functions: std.StringHashMapUnmanaged(void) = .empty,
-    /// True once a star-imported mixin key contains both `-` and `_` (same rule as `global_slots_have_mixed_alias_keys`).
+    /// True once a star-imported mixin key contains both `-` and `_`.
     /// While false, star mixin lookups can skip the rare O(map) identifierEq fallback.
     star_mixins_have_mixed_alias_keys: bool = false,
     /// Same as `star_mixins_have_mixed_alias_keys` for `@use ... as *` function exports.
@@ -890,7 +890,8 @@ const Ctx = struct {
         }
         self.prog.max_slot = @max(self.prog.max_slot, slot + 1);
         if (hasMixedIdentifierAliasChars(name)) {
-            self.prog.global_slots_have_mixed_alias_keys = true;
+            const canon = try name_lookup.canonicalAliasKeyAlloc(self.a, name);
+            try self.prog.global_slots_mixed_alias.put(self.a, canon, slot);
         }
         try self.prog.global_slots.put(self.a, name, slot);
         return slot;
@@ -1268,6 +1269,24 @@ const lookupVoidFlagInsensitive = name_lookup.lookupVoidFlagInsensitive;
 const lookupUseBindingInsensitive = name_lookup.lookupUseBindingInsensitive;
 const lookupStringMapIdentifierInsensitive = name_lookup.lookupStringMapIdentifierInsensitive;
 const lookupStringMapIdentifierInsensitiveNoMixedKeys = name_lookup.lookupStringMapIdentifierInsensitiveNoMixedKeys;
+const lookupStringMapIdentifierInsensitiveGated = name_lookup.lookupStringMapIdentifierInsensitiveGated;
+const ModuleExports = data_mod.ModuleExports;
+
+fn lookupExportsVarTarget(ex: *const ModuleExports, name: []const u8) ?VarTarget {
+    return lookupStringMapIdentifierInsensitiveGated(VarTarget, &ex.vars, name, ex.vars_has_mixed_alias_keys);
+}
+
+fn lookupExportsDefaultVarTarget(ex: *const ModuleExports, name: []const u8) ?VarTarget {
+    return lookupStringMapIdentifierInsensitiveGated(VarTarget, &ex.default_vars, name, ex.default_vars_has_mixed_alias_keys);
+}
+
+fn lookupExportsMixinTarget(ex: *const ModuleExports, name: []const u8) ?CallableTarget {
+    return lookupStringMapIdentifierInsensitiveGated(CallableTarget, &ex.mixins, name, ex.mixins_has_mixed_alias_keys);
+}
+
+fn lookupExportsFunctionTarget(ex: *const ModuleExports, name: []const u8) ?CallableTarget {
+    return lookupStringMapIdentifierInsensitiveGated(CallableTarget, &ex.functions, name, ex.functions_has_mixed_alias_keys);
+}
 
 const map_copy = @import("map_copy.zig");
 const copyStringMapWithOwnedKeys = map_copy.copyStringMapWithOwnedKeys;
@@ -1831,10 +1850,11 @@ fn lookupSlotInsensitive(
 }
 
 fn lookupGlobalSlot(prog: *const ResolvedProgram, name: []const u8) ?SlotId {
-    if (prog.global_slots_have_mixed_alias_keys) {
-        return lookupSlotInsensitive(&prog.global_slots, name);
-    }
-    return lookupStringMapIdentifierInsensitiveNoMixedKeys(SlotId, &prog.global_slots, name);
+    if (lookupStringMapIdentifierInsensitiveNoMixedKeys(SlotId, &prog.global_slots, name)) |s| return s;
+    if (prog.global_slots_mixed_alias.count() == 0) return null;
+    var scratch: [256]u8 = undefined;
+    const canon = name_lookup.canonicalAliasKey(name, &scratch) orelse return null;
+    return prog.global_slots_mixed_alias.get(canon);
 }
 
 fn packUserFunctionLookupCacheKey(module_id: u32, name_id: InternId) u64 {
@@ -2387,7 +2407,7 @@ fn applyImplicitImportConfigEntries(
     const ex = try requireModuleExports(loader, module_id);
     for (entries) |entry| {
         if (lookupVoidFlagInsensitive(&ex.ambiguous_default_vars, entry.name)) continue;
-        const target = lookupConfigVarTargetInsensitive(&ex.default_vars, entry.name) orelse continue;
+        const target = lookupExportsDefaultVarTarget(ex, entry.name) orelse continue;
         try applyConfigTarget(loader, target, entry.value, false);
     }
 }
@@ -2597,7 +2617,7 @@ fn mergeForwardRuleIntoImportScope(ctx: *Ctx, fr: ForwardRuleResolved, remove_lo
                 const name = entry.key_ptr.*;
                 const out_name = try withForwardPrefix(ctx.prog, fr.prefix, name);
                 if (!forwardAllowsVar(out_name, fr.show, fr.hide)) continue;
-                const is_default_export = if (lookupConfigVarTargetInsensitive(&ex.default_vars, name)) |default_target|
+                const is_default_export = if (lookupExportsDefaultVarTarget(ex, name)) |default_target|
                     (default_target.module_id == entry.value_ptr.*.module_id and default_target.slot == entry.value_ptr.*.slot)
                 else
                     false;
@@ -3001,7 +3021,7 @@ fn resolveExprNamespacedVar(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, spa
                 if (lazy_callable_error) return try appendSassErrorExpr(ctx, span);
                 return error.SassError;
             }
-            const target = lookupConfigVarTargetInsensitive(&ex.vars, ctx.pool.get(name_id)) orelse {
+            const target = lookupExportsVarTarget(ex, ctx.pool.get(name_id)) orelse {
                 if (lazy_callable_error) return try appendSassErrorExpr(ctx, span);
                 return error.UnknownVar;
             };
@@ -3603,7 +3623,7 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
                     });
                     return try appendExpr(ctx.prog, ctx.a, .{ .kind = .builtin_call, .payload = bidx, .span = span });
                 }
-                const target = lookupCallableTargetInsensitive(&ex.functions, name_slice) orelse return error.UnknownFunctionInUserNs;
+                const target = lookupExportsFunctionTarget(ex, name_slice) orelse return error.UnknownFunctionInUserNs;
                 try ctx.user_function_lookup_cache.put(ctx.a, user_fn_cache_key, target);
                 const astart = try appendCallArgsWithNames(ctx.prog, ctx.a, arg_buf.items, arg_name_buf.items);
                 const cidx: u32 = @intCast(ctx.prog.call_exprs.items.len);
@@ -7911,7 +7931,7 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
                     const ex = try requireModuleExports(loader, mid);
                     if (lookupVoidFlagInsensitive(&ex.ambiguous_vars, namespaced.member)) return error.SassError;
                     const target = lookupConfigVarTargetInsensitive(&ex.shadowed_forward_vars, namespaced.member) orelse
-                        lookupConfigVarTargetInsensitive(&ex.vars, namespaced.member) orelse
+                        lookupExportsVarTarget(ex, namespaced.member) orelse
                         return error.UnknownVar;
                     const val_e = try resolveExpr(ctx.ast, ctx, val_n);
                     const idx: StmtIndex = @intCast(ctx.prog.stmts.items.len);
@@ -8639,6 +8659,7 @@ const isVisiting = module_resolver_state.isVisiting;
 
 const isPlainCssImport = import_css.isPlainCssImport;
 const stripOuterQuotes = import_css.stripOuterQuotes;
+const importUrlHasDynamicDollar = import_css.importUrlHasDynamicDollar;
 const identifierEqSass = names.identifierEqSass;
 const defaultNamespaceForUse = names.defaultNamespaceForUse;
 const forwardMatchesVarToken = names.forwardMatchesVarToken;
@@ -8971,7 +8992,7 @@ fn resolveIncludeStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex 
                             .id = mid,
                         });
                     } else {
-                        const target = lookupCallableTargetInsensitive(&ex.mixins, name_slice) orelse return error.UnknownMixin;
+                        const target = lookupExportsMixinTarget(ex, name_slice) orelse return error.UnknownMixin;
                         try ctx.user_mixin_lookup_cache.put(ctx.a, user_mixin_cache_key, target);
                         mid = @intCast(target.id);
                         callee_module = target.module_id;
@@ -9731,6 +9752,865 @@ fn resolveRootStmtSequence(
     }
 }
 
+// =============================================================================
+// Import-preamble checkpoint (multi-entry batches)
+//
+// Entries whose FIRST root statement is the same single-URL textual `@import`
+// share the resolver state reached just after that import subtree resolves.
+// The first sighting per worker resolves the import normally and deep-copies
+// the boundary state into the per-worker checkpoint store; later entries with
+// the same resolved import path clone that state back into their fresh
+// prog/ctx (and replay the recorded resolve-time deprecations), then resume
+// with the remaining root statements. Worker-lifetime value/color/static-eval
+// pools and import origins (pools-only persistent mode) keep all handles in
+// the copied state valid across entries.
+// Design: `.plans/20260610-import-preamble-checkpoint.md`.
+// =============================================================================
+
+pub const PreambleCheckpointStore = data_mod.PreambleCheckpointStore;
+
+// Clone policy lists. Every field of ResolvedProgram / Ctx must appear in
+// exactly one list (checked at comptime below), so adding a field without
+// deciding its checkpoint policy breaks the build.
+
+/// Per-entry wiring or per-entry source metadata; never cloned.
+const preamble_prog_skip = [_][]const u8{
+    "arena",
+    "value_number_pool",
+    "value_list_meta_pool",
+    "value_string_flags_pool",
+    "value_callable_payload_pool",
+    "module_path",
+    "line_starts",
+    "source_len",
+    // Built from top_list at end of module; empty at the boundary.
+    "top_stmts",
+};
+
+/// Append-only arrays of POD rows (u32 indices / InternIds / pool handles).
+const preamble_prog_pod_lists = [_][]const u8{
+    "exprs",
+    "binary_exprs",
+    "unary_exprs",
+    "call_exprs",
+    "builtin_calls",
+    "cross_var_refs",
+    "list_exprs",
+    "interp_exprs",
+    "call_args",
+    "call_arg_names",
+    "list_elems",
+    "interp_parts",
+    "number_pool",
+    "color_literals",
+    "static_slot_values",
+    "flow_local_fallbacks",
+    "stmts",
+    "selector_part_exprs",
+    "decl_stmts",
+    "comment_stmts",
+    "module_dep_stmts",
+    "decl_prop_part_exprs",
+    "if_stmts",
+    "if_branches",
+    "for_stmts",
+    "each_stmts",
+    "while_stmts",
+    "each_slots",
+    "include_stmts",
+    "content_stmts",
+    "extend_stmts",
+    "return_stmts",
+    "assign_stmts",
+};
+
+/// Rows carrying a nested `body_direct: []StmtIndex` slice (read-only after
+/// creation, so forks may share the checkpoint copy).
+const preamble_prog_body_rows = [_][]const u8{ "rule_stmts", "at_rule_stmts" };
+
+/// Rows carrying param_names/param_slots/defaults/body_roots slices.
+/// `defaults` is written in place at end-of-module
+/// (resolvePendingCallableDefaults), so forks dupe it; the rest is shared.
+const preamble_prog_callable_rows = [_][]const u8{ "mixins", "functions", "content_blocks" };
+
+/// String-keyed maps with POD values. Capture dupes keys into the checkpoint
+/// arena; forks share them (the store outlives every fork in the worker).
+const preamble_prog_string_maps = .{
+    .{ "mixin_names", MixinId },
+    .{ "function_names", FunctionId },
+    .{ "global_slots", SlotId },
+    .{ "global_slots_mixed_alias", SlotId },
+    .{ "declared_global_names", void },
+    .{ "default_vars", SlotId },
+    .{ "star_vars", VarTarget },
+    .{ "ambiguous_star_vars", void },
+    .{ "star_mixins", CallableTarget },
+    .{ "ambiguous_star_mixins", void },
+    .{ "star_functions", CallableTarget },
+    .{ "ambiguous_star_functions", void },
+    .{ "star_builtin_fns", u32 },
+    .{ "exported_mixins", CallableTarget },
+    .{ "ambiguous_export_mixins", void },
+    .{ "exported_functions", CallableTarget },
+    .{ "ambiguous_export_functions", void },
+    .{ "exported_builtin_fns", u32 },
+    .{ "exported_vars", VarTarget },
+    .{ "ambiguous_export_vars", void },
+    .{ "exported_default_vars", VarTarget },
+    .{ "ambiguous_export_default_vars", void },
+};
+
+const preamble_prog_scalars = [_][]const u8{
+    "next_global_slot",
+    "max_slot",
+};
+
+// "use_map" is special: UseBinding.builtin_module holds a slice.
+
+/// Per-entry wiring; never cloned.
+const preamble_ctx_skip = [_][]const u8{
+    "ast",
+    "pool",
+    "prog",
+    "a",
+    "root_alloc",
+    "module_path",
+    "loader",
+    "static_eval_store",
+    "color_pool",
+};
+
+/// Empty or at their default at any top-level statement boundary (verified by
+/// preambleBoundaryValid at capture); the fork's fresh Ctx already has them.
+const preamble_ctx_default_only = [_][]const u8{
+    "scopes",
+    "scope_flags",
+    "undo_layers",
+    "visiting_imports",
+    "pending_extra_top",
+    "origin_stack",
+    "initial_config_entries",
+    "deferred_callable_default_use_bindings",
+    "in_callable",
+    "resolving_callable_default",
+    "flow_control_depth",
+    "while_body_depth",
+    "callable_decl_context",
+    "nested_stmt_depth",
+    "style_rule_depth",
+    "plain_css_style_rule_depth",
+    "property_namespace_depth",
+    "allow_unknown_var_literal",
+    "calc_arg_mode",
+    "calc_arg_allow_numberish_ident_literals",
+    "in_declaration_value",
+    "plain_css_validate_values",
+    "mixin_accepts_content",
+};
+
+const preamble_ctx_string_maps = .{
+    .{ "star_vars", CrossVarTarget },
+    .{ "ambiguous_star_vars", void },
+    .{ "star_mixins", CrossCallableTarget },
+    .{ "ambiguous_star_mixins", void },
+    .{ "star_functions", CrossCallableTarget },
+    .{ "ambiguous_star_functions", void },
+    .{ "star_placeholders", u32 },
+    .{ "star_builtin_fns", u32 },
+    .{ "import_star_vars", bool },
+    .{ "seen_mixin_decls", void },
+    .{ "seen_function_decls", void },
+    .{ "pending_next_mixin_bindings", MixinId },
+};
+
+/// Pure resolve-time caches with POD keys/values; cloned so a fork resolves
+/// its tail exactly like the capture entry would have.
+const preamble_ctx_auto_maps = .{
+    .{ "literal_selector_syntax_cache", InternId, bool },
+    .{ "user_function_lookup_cache", u64, CallableTarget },
+    .{ "user_mixin_lookup_cache", u64, CallableTarget },
+};
+
+const preamble_ctx_scalars = [_][]const u8{
+    "star_mixins_have_mixed_alias_keys",
+    "star_functions_have_mixed_alias_keys",
+    "next_local_slot",
+    "next_mixin_id",
+    "next_function_id",
+    "module_directive_locked",
+};
+
+const preamble_ctx_special = [_][]const u8{
+    "forward_rules",
+    "static_config_vars",
+    "pending_callable_defaults",
+};
+
+comptime {
+    @setEvalBranchQuota(100000);
+    for (@typeInfo(ResolvedProgram).@"struct".fields) |f| {
+        var hits: usize = 0;
+        for (preamble_prog_skip) |n| {
+            if (std.mem.eql(u8, n, f.name)) hits += 1;
+        }
+        for (preamble_prog_pod_lists) |n| {
+            if (std.mem.eql(u8, n, f.name)) hits += 1;
+        }
+        for (preamble_prog_body_rows) |n| {
+            if (std.mem.eql(u8, n, f.name)) hits += 1;
+        }
+        for (preamble_prog_callable_rows) |n| {
+            if (std.mem.eql(u8, n, f.name)) hits += 1;
+        }
+        for (preamble_prog_string_maps) |entry| {
+            if (std.mem.eql(u8, entry[0], f.name)) hits += 1;
+        }
+        for (preamble_prog_scalars) |n| {
+            if (std.mem.eql(u8, n, f.name)) hits += 1;
+        }
+        if (std.mem.eql(u8, "use_map", f.name)) hits += 1;
+        if (hits != 1) @compileError("import-preamble checkpoint: missing or duplicate clone policy for ResolvedProgram." ++ f.name);
+    }
+    for (@typeInfo(Ctx).@"struct".fields) |f| {
+        var hits: usize = 0;
+        for (preamble_ctx_skip) |n| {
+            if (std.mem.eql(u8, n, f.name)) hits += 1;
+        }
+        for (preamble_ctx_default_only) |n| {
+            if (std.mem.eql(u8, n, f.name)) hits += 1;
+        }
+        for (preamble_ctx_string_maps) |entry| {
+            if (std.mem.eql(u8, entry[0], f.name)) hits += 1;
+        }
+        for (preamble_ctx_auto_maps) |entry| {
+            if (std.mem.eql(u8, entry[0], f.name)) hits += 1;
+        }
+        for (preamble_ctx_scalars) |n| {
+            if (std.mem.eql(u8, n, f.name)) hits += 1;
+        }
+        for (preamble_ctx_special) |n| {
+            if (std.mem.eql(u8, n, f.name)) hits += 1;
+        }
+        if (hits != 1) @compileError("import-preamble checkpoint: missing or duplicate clone policy for Ctx." ++ f.name);
+    }
+}
+
+fn PreambleListElem(comptime Owner: type, comptime name: []const u8) type {
+    return std.meta.Child(@TypeOf(@field(@as(Owner, undefined), name).items));
+}
+
+fn PreambleListsSnapshot(comptime Owner: type, comptime list_names: []const []const u8) type {
+    comptime var field_names: [list_names.len][:0]const u8 = undefined;
+    comptime var field_types: [list_names.len]type = undefined;
+    inline for (list_names, 0..) |name, i| {
+        field_names[i] = name ++ "";
+        field_types[i] = []const PreambleListElem(Owner, name);
+    }
+    return @Struct(.auto, null, &field_names, &field_types, &@splat(.{}));
+}
+
+fn PreambleMapsSnapshot(comptime maps: anytype) type {
+    comptime var field_names: [maps.len][:0]const u8 = undefined;
+    comptime var field_types: [maps.len]type = undefined;
+    inline for (maps, 0..) |entry, i| {
+        field_names[i] = entry[0] ++ "";
+        field_types[i] = []const MapEntry(entry[1]);
+    }
+    return @Struct(.auto, null, &field_names, &field_types, &@splat(.{}));
+}
+
+fn PreambleAutoMapEntry(comptime K: type, comptime V: type) type {
+    return struct { key: K, value: V };
+}
+
+fn PreambleAutoMapsSnapshot(comptime maps: anytype) type {
+    comptime var field_names: [maps.len][:0]const u8 = undefined;
+    comptime var field_types: [maps.len]type = undefined;
+    inline for (maps, 0..) |entry, i| {
+        field_names[i] = entry[0] ++ "";
+        field_types[i] = []const PreambleAutoMapEntry(entry[1], entry[2]);
+    }
+    return @Struct(.auto, null, &field_names, &field_types, &@splat(.{}));
+}
+
+fn PreambleScalarsSnapshot(comptime Owner: type, comptime scalar_names: []const []const u8) type {
+    comptime var field_names: [scalar_names.len][:0]const u8 = undefined;
+    comptime var field_types: [scalar_names.len]type = undefined;
+    inline for (scalar_names, 0..) |name, i| {
+        field_names[i] = name ++ "";
+        field_types[i] = @TypeOf(@field(@as(Owner, undefined), name));
+    }
+    return @Struct(.auto, null, &field_names, &field_types, &@splat(.{}));
+}
+
+const PreambleDeprecation = struct {
+    kind: deprecation_mod.DeprecationKind,
+    msg: []const u8,
+    path: []const u8,
+    line: u32,
+    col: u32,
+    /// True when the recorded path was the capturing entry's own module path
+    /// (the `@import` deprecation of the first statement itself); forks re-emit
+    /// it with their own path and import-statement position.
+    entry_relative: bool,
+};
+
+const PreambleCheckpoint = struct {
+    prog_lists: PreambleListsSnapshot(ResolvedProgram, &preamble_prog_pod_lists),
+    prog_maps: PreambleMapsSnapshot(preamble_prog_string_maps),
+    prog_scalars: PreambleScalarsSnapshot(ResolvedProgram, &preamble_prog_scalars),
+    rule_stmts: []const PreambleListElem(ResolvedProgram, "rule_stmts"),
+    at_rule_stmts: []const PreambleListElem(ResolvedProgram, "at_rule_stmts"),
+    mixins: []const ResolvedMixin,
+    functions: []const ResolvedFunction,
+    content_blocks: []const ResolvedContentBlock,
+    use_map: []const MapEntry(UseBinding),
+
+    ctx_maps: PreambleMapsSnapshot(preamble_ctx_string_maps),
+    ctx_auto_maps: PreambleAutoMapsSnapshot(preamble_ctx_auto_maps),
+    ctx_scalars: PreambleScalarsSnapshot(Ctx, &preamble_ctx_scalars),
+    forward_rules: []const ForwardRuleResolved,
+    static_config_vars: []const Ctx.StaticConfigVar,
+    pending_callable_defaults: []const PendingCallableDefault,
+
+    // Per-entry sidecar store prefixes at the boundary. The capture entry's
+    // stores start empty and the import is statement #0, so these are exactly
+    // the chain's contribution; the fork seeds its own empty stores with them,
+    // which preserves every handle/OriginId a cloned Value or statement holds.
+    value_number_pool: []const PreambleListElem(SharedValuePoolStorage, "number_pool"),
+    value_list_meta_pool: []const PreambleListElem(SharedValuePoolStorage, "list_meta_pool"),
+    value_string_flags_pool: []const PreambleListElem(SharedValuePoolStorage, "string_flags_pool"),
+    value_callable_payload_pool: []const PreambleListElem(SharedValuePoolStorage, "callable_payload_pool"),
+    color_pool: []const value_mod.ColorEntry,
+    static_eval_lists: []const []const value_mod.Value,
+    import_origins: []const origin_mod.CssOrigin,
+
+    top_list: []const StmtIndex,
+    deprecations: []const PreambleDeprecation,
+};
+
+fn preambleSnapshotStringMap(
+    comptime V: type,
+    arena: std.mem.Allocator,
+    map: *const std.StringHashMapUnmanaged(V),
+) error{OutOfMemory}![]MapEntry(V) {
+    const out = try arena.alloc(MapEntry(V), map.count());
+    var i: usize = 0;
+    var it = map.iterator();
+    while (it.next()) |e| {
+        out[i] = .{ .key = try arena.dupe(u8, e.key_ptr.*), .value = e.value_ptr.* };
+        i += 1;
+    }
+    return out;
+}
+
+fn preambleRestoreStringMap(
+    comptime V: type,
+    alloc: std.mem.Allocator,
+    dst: *std.StringHashMapUnmanaged(V),
+    snap: []const MapEntry(V),
+) error{OutOfMemory}!void {
+    if (snap.len == 0) return;
+    try dst.ensureTotalCapacity(alloc, @intCast(snap.len));
+    for (snap) |e| dst.putAssumeCapacity(e.key, e.value);
+}
+
+fn preambleSnapshotAutoMap(
+    comptime K: type,
+    comptime V: type,
+    arena: std.mem.Allocator,
+    map: *const std.AutoHashMapUnmanaged(K, V),
+) error{OutOfMemory}![]PreambleAutoMapEntry(K, V) {
+    const out = try arena.alloc(PreambleAutoMapEntry(K, V), map.count());
+    var i: usize = 0;
+    var it = map.iterator();
+    while (it.next()) |e| {
+        out[i] = .{ .key = e.key_ptr.*, .value = e.value_ptr.* };
+        i += 1;
+    }
+    return out;
+}
+
+fn preambleRestoreAutoMap(
+    comptime K: type,
+    comptime V: type,
+    alloc: std.mem.Allocator,
+    dst: *std.AutoHashMapUnmanaged(K, V),
+    snap: []const PreambleAutoMapEntry(K, V),
+) error{OutOfMemory}!void {
+    if (snap.len == 0) return;
+    try dst.ensureTotalCapacity(alloc, @intCast(snap.len));
+    for (snap) |e| dst.putAssumeCapacity(e.key, e.value);
+}
+
+fn preambleDupUseBinding(arena: std.mem.Allocator, binding: UseBinding) error{OutOfMemory}!UseBinding {
+    return switch (binding) {
+        .builtin_module => |s| .{ .builtin_module = try arena.dupe(u8, s) },
+        .user_module => |mid| .{ .user_module = mid },
+    };
+}
+
+fn preambleSnapshotUseMap(
+    arena: std.mem.Allocator,
+    map: *const std.StringHashMapUnmanaged(UseBinding),
+) error{OutOfMemory}![]MapEntry(UseBinding) {
+    const out = try arena.alloc(MapEntry(UseBinding), map.count());
+    var i: usize = 0;
+    var it = map.iterator();
+    while (it.next()) |e| {
+        out[i] = .{
+            .key = try arena.dupe(u8, e.key_ptr.*),
+            .value = try preambleDupUseBinding(arena, e.value_ptr.*),
+        };
+        i += 1;
+    }
+    return out;
+}
+
+fn preambleDupBodyRows(
+    comptime T: type,
+    arena: std.mem.Allocator,
+    rows: []const T,
+) error{OutOfMemory}![]T {
+    const out = try arena.dupe(T, rows);
+    for (out) |*row| row.body_direct = try arena.dupe(StmtIndex, row.body_direct);
+    return out;
+}
+
+fn preambleDupCallableRows(
+    comptime T: type,
+    arena: std.mem.Allocator,
+    rows: []const T,
+) error{OutOfMemory}![]T {
+    const out = try arena.dupe(T, rows);
+    for (out) |*row| {
+        row.param_names = try arena.dupe(InternId, row.param_names);
+        row.param_slots = try arena.dupe(SlotId, row.param_slots);
+        row.defaults = try arena.dupe(?ExprIndex, row.defaults);
+        row.body_roots = try arena.dupe(StmtIndex, row.body_roots);
+    }
+    return out;
+}
+
+fn preambleRestoreCallableRows(
+    comptime T: type,
+    alloc: std.mem.Allocator,
+    list: *std.ArrayListUnmanaged(T),
+    rows: []const T,
+) error{OutOfMemory}!void {
+    const base = list.items.len;
+    try list.appendSlice(alloc, rows);
+    for (list.items[base..]) |*row| {
+        // resolvePendingCallableDefaults writes defaults in place at
+        // end-of-module; the fork must not write into the shared checkpoint.
+        row.defaults = try alloc.dupe(?ExprIndex, row.defaults);
+    }
+}
+
+fn preambleDupStringList(
+    arena: std.mem.Allocator,
+    list: []const []const u8,
+) error{OutOfMemory}![]const []const u8 {
+    const out = try arena.alloc([]const u8, list.len);
+    for (list, 0..) |s, i| out[i] = try arena.dupe(u8, s);
+    return out;
+}
+
+fn preambleDupForwardRules(
+    arena: std.mem.Allocator,
+    rows: []const ForwardRuleResolved,
+) error{OutOfMemory}![]ForwardRuleResolved {
+    const out = try arena.dupe(ForwardRuleResolved, rows);
+    for (out) |*row| {
+        switch (row.target) {
+            .builtin_module => |s| row.target = .{ .builtin_module = try arena.dupe(u8, s) },
+            .user_module => {},
+        }
+        if (row.prefix) |p| row.prefix = try arena.dupe(u8, p);
+        if (row.show) |list| row.show = try preambleDupStringList(arena, list);
+        if (row.hide) |list| row.hide = try preambleDupStringList(arena, list);
+    }
+    return out;
+}
+
+fn preambleDupPendingDefaults(
+    arena: std.mem.Allocator,
+    rows: []const PendingCallableDefault,
+) error{OutOfMemory}![]PendingCallableDefault {
+    const out = try arena.dupe(PendingCallableDefault, rows);
+    for (out) |*row| {
+        row.expr_text = try arena.dupe(u8, row.expr_text);
+        const bindings = try arena.dupe(PendingUseBinding, row.use_bindings);
+        for (bindings) |*b| {
+            b.key = try arena.dupe(u8, b.key);
+            b.value = try preambleDupUseBinding(arena, b.value);
+        }
+        row.use_bindings = bindings;
+    }
+    return out;
+}
+
+const PreambleFirstImport = struct {
+    node: NodeIndex,
+    span: Span,
+};
+
+fn preambleEligibleFirstImport(ctx: *Ctx, raw: []const u32) ?PreambleFirstImport {
+    if (raw.len == 0) return null;
+    const first_node: NodeIndex = @enumFromInt(raw[0]);
+    const n = ctx.ast.getNode(first_node);
+    if (n.tag != .stmt_import) return null;
+    if (raw.len > 1) {
+        // A same-span sibling import = multi-URL `@import "a", "b"` group:
+        // resolveRootStmtSequence reorders those css-first; excluded.
+        const second = ctx.ast.getNode(@enumFromInt(raw[1]));
+        if (second.tag == .stmt_import and
+            second.span_start == n.span_start and
+            second.span_end == n.span_end) return null;
+    }
+    // predeclareTopLevelCallables pre-registers tail mixin/function names
+    // before the import resolves, making the boundary state tail-dependent;
+    // exclude entries with any top-level callable declaration.
+    for (raw) |u| {
+        const tag = ctx.ast.getNode(@enumFromInt(u)).tag;
+        if (tag == .stmt_mixin_decl or tag == .stmt_function_decl) return null;
+    }
+    if (ctx.initial_config_entries.len != 0) return null;
+    return .{ .node = first_node, .span = .{ .start = n.span_start, .end = n.span_end } };
+}
+
+/// Mirrors resolveImportStmt's textual-vs-css decision and resolveImportedFile's
+/// top-level path resolution (visiting_imports is empty at the entry root, so
+/// the load paths are unfiltered). Returns the canonical resolved path of the
+/// first import when it is a plain single-URL textual import, else null.
+fn preambleFirstImportKey(
+    ctx: *Ctx,
+    mr: *ModuleResolver,
+    first: PreambleFirstImport,
+) error{OutOfMemory}!?[]const u8 {
+    const n = ctx.ast.getNode(first.node);
+    const off: ExtraIndex = n.payload;
+    const url_node: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(off));
+    const cond_slot = ctx.ast.getExtraU32(off + 1);
+    if (cond_slot != std.math.maxInt(u32)) return null;
+    if (astTextNodeHasInterpolation(ctx.ast, url_node)) return null;
+    if (isPlainCssStylesheetPath(ctx.module_path)) return null;
+    const url_raw_storage = astTextNodeRawAlloc(ctx.a, ctx.ast, ctx.pool, url_node) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // The normal path reproduces this error; just skip the checkpoint.
+        error.SassError => return null,
+    };
+    defer ctx.a.free(url_raw_storage);
+    const url_raw = std.mem.trim(u8, url_raw_storage, " \t\n\r");
+    const url_inner = stripOuterQuotes(url_raw);
+    if (importUrlHasDynamicDollar(url_raw)) return null;
+    if (isPlainCssImport(url_raw, url_inner)) return null;
+    if (std.mem.endsWith(u8, ctx.module_path, ".sass")) {
+        // Indented syntax errors on a comma+newline between `@import` and the
+        // URL (resolveImportStmt); keep such entries on the normal path.
+        const stmt_start: usize = @min(ctx.ast.source.len, @as(usize, first.span.start));
+        const url_ast = ctx.ast.getNode(url_node);
+        const url_prefix_end: usize = @min(ctx.ast.source.len, @as(usize, url_ast.span_start));
+        if (url_prefix_end > stmt_start) {
+            const prefix = ctx.ast.source[stmt_start..url_prefix_end];
+            if (std.mem.indexOfScalar(u8, prefix, ',') != null and
+                std.mem.indexOfAny(u8, prefix, "\r\n") != null) return null;
+        }
+    }
+    return try resolveImportModulePathWithPolicy(ctx.a, ctx.module_path, url_inner, mr.load_paths, true, .{
+        .pkg_importer_enabled = mr.pkg_importer_enabled,
+    });
+}
+
+/// True when this entry's per-entry sidecar stores are empty: pools, color
+/// pool, static-eval lists and import origins all start at index 0, which is
+/// what makes checkpoint handle/OriginId numbering align between the capture
+/// entry and every fork.
+fn preambleSidecarsEmpty(ctx: *const Ctx, mr: *const ModuleResolver) bool {
+    const pools = mr.shared_value_pools;
+    if (pools.number_pool.items.len != 0) return false;
+    if (pools.list_meta_pool.items.len != 0) return false;
+    if (pools.string_flags_pool.items.len != 0) return false;
+    if (pools.callable_payload_pool.items.len != 0) return false;
+    const color_pool = ctx.color_pool orelse return false;
+    if (color_pool.items.len != 0) return false;
+    if (ctx.static_eval_store.lists.items.len != 0) return false;
+    if (mr.import_origins_ptr.items.len != 0) return false;
+    return true;
+}
+
+/// Boundary validity at capture. On violation the key is blocked and the
+/// entry continues on the normal path; nothing is lost.
+fn preambleBoundaryValid(
+    ctx: *const Ctx,
+    mr: *const ModuleResolver,
+    records_before: usize,
+    top_list: *const std.ArrayListUnmanaged(StmtIndex),
+) bool {
+    // A records delta means a module load inside the chain; per-entry records
+    // cannot be shared across forks (the persistent-records validity problem
+    // sourceMayReachUnknownConfiguration exists for).
+    if (mr.records_ptr.items.len != records_before) return false;
+    if (mr.config_seed_accum.count() != 0) return false;
+    if (ctx.scopes.items.len != 0 or ctx.scope_flags.items.len != 0) return false;
+    if (ctx.undo_layers.items.len != 0) return false;
+    if (ctx.origin_stack.items.len != 0) return false;
+    if (ctx.visiting_imports.items.len != 0) return false;
+    if (ctx.pending_extra_top.items.len != 0) return false;
+    if (ctx.in_callable or ctx.resolving_callable_default) return false;
+    if (ctx.flow_control_depth != 0 or ctx.while_body_depth != 0) return false;
+    if (ctx.callable_decl_context != .none) return false;
+    if (ctx.nested_stmt_depth != 0 or ctx.style_rule_depth != 0) return false;
+    if (ctx.plain_css_style_rule_depth != 0 or ctx.property_namespace_depth != 0) return false;
+    if (ctx.deferred_callable_default_use_bindings.len != 0) return false;
+    if (ctx.initial_config_entries.len != 0) return false;
+    if (ctx.allow_unknown_var_literal or ctx.calc_arg_mode) return false;
+    if (ctx.calc_arg_allow_numberish_ident_literals or ctx.in_declaration_value) return false;
+    if (!ctx.plain_css_validate_values) return false;
+    if (ctx.mixin_accepts_content) return false;
+    if (ctx.prog.top_stmts.len != 0) return false;
+    if (top_list.items.len == 0) return false;
+    const last = top_list.items[top_list.items.len - 1];
+    if (last >= ctx.prog.stmts.items.len) return false;
+    // appendResolvedRootStmt flushes the expansion then appends the import's
+    // own noop last; the fork rewrites that noop's span.
+    if (ctx.prog.stmts.items[last].kind != .noop) return false;
+    return true;
+}
+
+fn capturePreambleCheckpoint(
+    store: *PreambleCheckpointStore,
+    ctx: *Ctx,
+    mr: *ModuleResolver,
+    top_list: []const StmtIndex,
+    recorded_deps: []const deprecation_mod.RecordedDeprecation,
+) error{OutOfMemory}!*const PreambleCheckpoint {
+    const arena = store.arena.allocator();
+    const cp = try arena.create(PreambleCheckpoint);
+    const prog = ctx.prog;
+
+    inline for (preamble_prog_pod_lists) |name| {
+        @field(cp.prog_lists, name) = try arena.dupe(PreambleListElem(ResolvedProgram, name), @field(prog, name).items);
+    }
+    inline for (preamble_prog_string_maps) |entry| {
+        @field(cp.prog_maps, entry[0]) = try preambleSnapshotStringMap(entry[1], arena, &@field(prog, entry[0]));
+    }
+    inline for (preamble_prog_scalars) |name| {
+        @field(cp.prog_scalars, name) = @field(prog, name);
+    }
+    cp.rule_stmts = try preambleDupBodyRows(PreambleListElem(ResolvedProgram, "rule_stmts"), arena, prog.rule_stmts.items);
+    cp.at_rule_stmts = try preambleDupBodyRows(PreambleListElem(ResolvedProgram, "at_rule_stmts"), arena, prog.at_rule_stmts.items);
+    cp.mixins = try preambleDupCallableRows(ResolvedMixin, arena, prog.mixins.items);
+    cp.functions = try preambleDupCallableRows(ResolvedFunction, arena, prog.functions.items);
+    cp.content_blocks = try preambleDupCallableRows(ResolvedContentBlock, arena, prog.content_blocks.items);
+    cp.use_map = try preambleSnapshotUseMap(arena, &prog.use_map);
+
+    inline for (preamble_ctx_string_maps) |entry| {
+        @field(cp.ctx_maps, entry[0]) = try preambleSnapshotStringMap(entry[1], arena, &@field(ctx, entry[0]));
+    }
+    inline for (preamble_ctx_auto_maps) |entry| {
+        @field(cp.ctx_auto_maps, entry[0]) = try preambleSnapshotAutoMap(entry[1], entry[2], arena, &@field(ctx, entry[0]));
+    }
+    inline for (preamble_ctx_scalars) |name| {
+        @field(cp.ctx_scalars, name) = @field(ctx, name);
+    }
+    cp.forward_rules = try preambleDupForwardRules(arena, ctx.forward_rules.items);
+    cp.static_config_vars = blk: {
+        const out = try arena.dupe(Ctx.StaticConfigVar, ctx.static_config_vars.items);
+        for (out) |*row| row.name = try arena.dupe(u8, row.name);
+        break :blk out;
+    };
+    cp.pending_callable_defaults = try preambleDupPendingDefaults(arena, ctx.pending_callable_defaults.items);
+
+    const pools = mr.shared_value_pools;
+    cp.value_number_pool = try arena.dupe(PreambleListElem(SharedValuePoolStorage, "number_pool"), pools.number_pool.items);
+    cp.value_list_meta_pool = try arena.dupe(PreambleListElem(SharedValuePoolStorage, "list_meta_pool"), pools.list_meta_pool.items);
+    cp.value_string_flags_pool = try arena.dupe(PreambleListElem(SharedValuePoolStorage, "string_flags_pool"), pools.string_flags_pool.items);
+    cp.value_callable_payload_pool = try arena.dupe(PreambleListElem(SharedValuePoolStorage, "callable_payload_pool"), pools.callable_payload_pool.items);
+    cp.color_pool = try arena.dupe(value_mod.ColorEntry, ctx.color_pool.?.items);
+    cp.static_eval_lists = blk: {
+        const lists = ctx.static_eval_store.lists.items;
+        const out = try arena.alloc([]const value_mod.Value, lists.len);
+        for (lists, 0..) |items, i| out[i] = try arena.dupe(value_mod.Value, items);
+        break :blk out;
+    };
+    cp.import_origins = blk: {
+        const rows = try arena.dupe(origin_mod.CssOrigin, mr.import_origins_ptr.items);
+        for (rows) |*row| {
+            row.source_path = try arena.dupe(u8, row.source_path);
+            row.preamble_comment_ids = try arena.dupe(u32, row.preamble_comment_ids);
+        }
+        break :blk rows;
+    };
+
+    cp.top_list = try arena.dupe(StmtIndex, top_list);
+    cp.deprecations = blk: {
+        const out = try arena.alloc(PreambleDeprecation, recorded_deps.len);
+        for (recorded_deps, 0..) |d, i| {
+            out[i] = .{
+                .kind = d.kind,
+                .msg = try arena.dupe(u8, d.msg),
+                .path = try arena.dupe(u8, d.path),
+                .line = d.line,
+                .col = d.col,
+                .entry_relative = std.mem.eql(u8, d.path, ctx.module_path),
+            };
+        }
+        break :blk out;
+    };
+    return cp;
+}
+
+fn preambleReplayDeprecations(
+    cp: *const PreambleCheckpoint,
+    ctx: *Ctx,
+    mr: *ModuleResolver,
+    fork_import_span: Span,
+) ResolveError!void {
+    if (cp.deprecations.len == 0) return;
+    const dep_opts = mr.deprecation_opts orelse return;
+    for (cp.deprecations) |d| {
+        if (d.entry_relative) {
+            const pos = data_mod.spanStartLineColOneBased(ctx.ast.source.len, ctx.prog.line_starts, fork_import_span.start);
+            try deprecation_mod.emitDeprecation(dep_opts, d.kind, d.msg, ctx.module_path, pos.line, pos.col);
+        } else {
+            try deprecation_mod.emitDeprecation(dep_opts, d.kind, d.msg, d.path, d.line, d.col);
+        }
+    }
+}
+
+fn forkPreambleCheckpoint(
+    cp: *const PreambleCheckpoint,
+    ctx: *Ctx,
+    mr: *ModuleResolver,
+    top_list: *std.ArrayListUnmanaged(StmtIndex),
+    fork_import_span: Span,
+) error{OutOfMemory}!void {
+    const prog = ctx.prog;
+    const a = ctx.a;
+
+    // Seed the empty per-entry sidecar stores with the boundary prefixes so
+    // every handle/OriginId in the cloned state lands on identical content.
+    // Pool/color rows grow with the same allocators the entry itself uses
+    // (poolAlloc/colorAllocator = root_alloc); static-eval list buffers and
+    // origin strings are shared with the store (it outlives the entry, and
+    // bundle/program builders deep-copy what they keep).
+    const pools = mr.shared_value_pools;
+    try pools.number_pool.appendSlice(ctx.root_alloc, cp.value_number_pool);
+    try pools.list_meta_pool.appendSlice(ctx.root_alloc, cp.value_list_meta_pool);
+    try pools.string_flags_pool.appendSlice(ctx.root_alloc, cp.value_string_flags_pool);
+    try pools.callable_payload_pool.appendSlice(ctx.root_alloc, cp.value_callable_payload_pool);
+    try ctx.color_pool.?.appendSlice(ctx.root_alloc, cp.color_pool);
+    try ctx.static_eval_store.lists.appendSlice(ctx.static_eval_store.alloc, cp.static_eval_lists);
+    try mr.import_origins_ptr.appendSlice(mr.records_alloc, cp.import_origins);
+
+    inline for (preamble_prog_pod_lists) |name| {
+        try @field(prog, name).appendSlice(a, @field(cp.prog_lists, name));
+    }
+    inline for (preamble_prog_string_maps) |entry| {
+        try preambleRestoreStringMap(entry[1], a, &@field(prog, entry[0]), @field(cp.prog_maps, entry[0]));
+    }
+    inline for (preamble_prog_scalars) |name| {
+        @field(prog, name) = @field(cp.prog_scalars, name);
+    }
+    // body_direct slices are read-only after creation; shared with the store.
+    try prog.rule_stmts.appendSlice(a, cp.rule_stmts);
+    try prog.at_rule_stmts.appendSlice(a, cp.at_rule_stmts);
+    try preambleRestoreCallableRows(ResolvedMixin, a, &prog.mixins, cp.mixins);
+    try preambleRestoreCallableRows(ResolvedFunction, a, &prog.functions, cp.functions);
+    try preambleRestoreCallableRows(ResolvedContentBlock, a, &prog.content_blocks, cp.content_blocks);
+    try preambleRestoreStringMap(UseBinding, a, &prog.use_map, cp.use_map);
+
+    inline for (preamble_ctx_string_maps) |entry| {
+        try preambleRestoreStringMap(entry[1], a, &@field(ctx, entry[0]), @field(cp.ctx_maps, entry[0]));
+    }
+    inline for (preamble_ctx_auto_maps) |entry| {
+        try preambleRestoreAutoMap(entry[1], entry[2], a, &@field(ctx, entry[0]), @field(cp.ctx_auto_maps, entry[0]));
+    }
+    inline for (preamble_ctx_scalars) |name| {
+        @field(ctx, name) = @field(cp.ctx_scalars, name);
+    }
+    try ctx.forward_rules.appendSlice(a, cp.forward_rules);
+    {
+        // removeStaticConfigVar / truncateStaticConfigVars free names
+        // individually, so each fork owns its own copies.
+        try ctx.static_config_vars.ensureUnusedCapacity(a, cp.static_config_vars.len);
+        for (cp.static_config_vars) |row| {
+            ctx.static_config_vars.appendAssumeCapacity(.{
+                .name = try a.dupe(u8, row.name),
+                .value = row.value,
+            });
+        }
+    }
+    // expr_text / use_bindings are read-only during deferred default
+    // resolution; shared with the store.
+    try ctx.pending_callable_defaults.appendSlice(a, cp.pending_callable_defaults);
+
+    try top_list.appendSlice(a, cp.top_list);
+    // The trailing noop carries the capturing entry's import-statement span;
+    // rewrite it to this entry's own.
+    const last = top_list.items[top_list.items.len - 1];
+    prog.stmts.items[last].span = fork_import_span;
+}
+
+/// Checkpoint dispatch for the entry root's statement sequence. Returns the
+/// statements still to resolve normally: the full `raw` when the checkpoint
+/// does not apply, or `raw[1..]` after the first import was forked from (or
+/// captured into) the per-worker store.
+fn resolvePreambleCheckpointPrefix(
+    ctx: *Ctx,
+    mr: *ModuleResolver,
+    raw: []const u32,
+    top_list: *std.ArrayListUnmanaged(StmtIndex),
+) ResolveError![]const u32 {
+    const store = mr.preamble_store orelse return raw;
+    // Consume: child module resolves within this entry must not see the store.
+    mr.preamble_store = null;
+    const first = preambleEligibleFirstImport(ctx, raw) orelse return raw;
+    // Capture and fork both require the per-entry sidecar stores to start
+    // empty (handle/OriginId numbering must begin at 0 on both sides).
+    if (!preambleSidecarsEmpty(ctx, mr)) return raw;
+    const key = (try preambleFirstImportKey(ctx, mr, first)) orelse return raw;
+    defer ctx.a.free(key);
+    // Importing the entry itself is an error on the normal path; never fork it
+    // (and never let another entry's checkpoint mask the error).
+    if (std.mem.eql(u8, ctx.module_path, key)) return raw;
+
+    switch (store.lookup(key)) {
+        .hit => |payload| {
+            const cp: *const PreambleCheckpoint = @ptrCast(@alignCast(payload));
+            const fork_t = perf.timeBegin();
+            try preambleReplayDeprecations(cp, ctx, mr, first.span);
+            try forkPreambleCheckpoint(cp, ctx, mr, top_list, first.span);
+            perf.timeEnd(.preamble_checkpoint_fork, fork_t);
+            perf.note(.preamble_checkpoint_fork);
+            return raw[1..];
+        },
+        .blocked => return raw,
+        .absent => {},
+    }
+
+    const records_before = mr.records_ptr.items.len;
+    var recorder: deprecation_mod.DeprecationRecorder = .{ .alloc = ctx.a };
+    defer recorder.deinit();
+    {
+        const prev = deprecation_mod.swapActiveRecorder(&recorder);
+        defer _ = deprecation_mod.swapActiveRecorder(prev);
+        try resolveRootStmtSequence(ctx, raw[0..1], top_list, false);
+    }
+    if (!recorder.failed and preambleBoundaryValid(ctx, mr, records_before, top_list)) {
+        const capture_t = perf.timeBegin();
+        const cp = try capturePreambleCheckpoint(store, ctx, mr, top_list.items, recorder.items.items);
+        try store.put(key, cp);
+        perf.timeEnd(.preamble_checkpoint_capture, capture_t);
+        perf.note(.preamble_checkpoint_capture);
+    } else {
+        try store.put(key, null);
+        perf.note(.preamble_checkpoint_reject);
+    }
+    return raw[1..];
+}
+
 fn resolveSingleAst(
     allocator: std.mem.Allocator,
     ast: *const ast_flat.Ast,
@@ -9786,7 +10666,8 @@ fn resolveSingleAst(
     try predeclareTopLevelCallables(&ctx, raw);
     var top_list: std.ArrayListUnmanaged(StmtIndex) = .empty;
     defer top_list.deinit(a2);
-    try resolveRootStmtSequence(&ctx, raw, &top_list, false);
+    const rest = try resolvePreambleCheckpointPrefix(&ctx, mr, raw, &top_list);
+    try resolveRootStmtSequence(&ctx, rest, &top_list, false);
     widenCallableLocalCounts(&ctx);
     try resolvePendingCallableDefaults(&ctx);
     try finalizeResolvedMixins(&ctx);
@@ -9848,9 +10729,13 @@ fn resolveParsedModule(self: *ModuleResolver, ast: *const ast_flat.Ast, module_p
     error_format.pushFrame(module_path, ast.source, _label);
     defer error_format.popFrame();
 
+    const t_single = perf.timeBegin();
     var tmp = try resolveSingleAst(self.prog_arena_alloc, ast, self.pool, module_path, self, &self.static_eval_store, self.color_pool);
+    perf.timeEnd(.resolve_single_ast_ns, t_single);
     const module_id: u32 = @intCast(self.records_ptr.items.len);
     patchLocalModuleRefs(&tmp.prog, module_id);
+    const t_exports = perf.timeBegin();
+    defer perf.timeEnd(.resolve_exports_build_ns, t_exports);
     var exports = buildModuleExports(self.records_alloc, &tmp.prog, module_id, tmp.forward_rules, self) catch |err| {
         tmp.prog.deinit();
         return err;
@@ -9968,6 +10853,7 @@ fn resolveWithEntryPathImpl(
     ast_cache: ?*ast_cache_mod.ParsedAstCache,
     persistent_ctx: ?PersistentResolveContext,
     deprecation_opts: ?*deprecation_mod.DeprecationOpts,
+    preamble_store: ?*PreambleCheckpointStore,
 ) ResolveError!ResolvedBundle {
     const t = perf.timeBegin();
     defer perf.timeEnd(.phase_resolve_ns, t);
@@ -10028,6 +10914,10 @@ fn resolveWithEntryPathImpl(
         bindRecordsToPersistent(&mr, ps.records, ps.id_by_path, ps.import_origins);
     } else {
         bindRecordsToSelf(&mr);
+        // Import-preamble checkpointing applies only to the non-persistent
+        // route: its capture/fork prefix seeding assumes per-entry pools,
+        // origins and static-eval stores that start empty.
+        mr.preamble_store = preamble_store;
     }
     // In cross-entry persistent mode, the module of the prior entry is treated as "unloaded" for this entry.
     // Get the baseline before resolveEntryAst and use it in the "already loaded" judgment of `@use ... with`.
@@ -10035,7 +10925,9 @@ fn resolveWithEntryPathImpl(
     var ok = false;
     defer if (!ok) deinitAll(&mr);
 
+    const t_entry = perf.timeBegin();
     const root_id = try resolveEntryAst(&mr, ast, entry_path);
+    perf.timeEnd(.resolve_entry_ast_ns, t_entry);
     var bundle = try buildResolvedBundleFromResolver(allocator, &mr, root_id);
     if (persistent_ctx != null) bundle.persistent_modules = true;
     // Success path: Transfer ownership of shared pool storage to bundle (single-entry only).
@@ -10055,7 +10947,7 @@ fn resolveWithEntryPath(
     entry_path: []const u8,
     load_paths: []const []const u8,
 ) ResolveError!ResolvedBundle {
-    return resolveWithEntryPathImpl(allocator, ast, intern_pool, entry_path, load_paths, null, null, null, null, null);
+    return resolveWithEntryPathImpl(allocator, ast, intern_pool, entry_path, load_paths, null, null, null, null, null, null);
 }
 
 pub fn resolveWithEntryPathAndColorPool(
@@ -10066,7 +10958,7 @@ pub fn resolveWithEntryPathAndColorPool(
     load_paths: []const []const u8,
     color_pool: *value_mod.ColorPool,
 ) ResolveError!ResolvedBundle {
-    return resolveWithEntryPathImpl(allocator, ast, intern_pool, entry_path, load_paths, color_pool, null, null, null, null);
+    return resolveWithEntryPathImpl(allocator, ast, intern_pool, entry_path, load_paths, color_pool, null, null, null, null, null);
 }
 
 pub fn resolveWithEntryPathColorPoolCachesAndPersistent(
@@ -10080,8 +10972,9 @@ pub fn resolveWithEntryPathColorPoolCachesAndPersistent(
     ast_cache: ?*ast_cache_mod.ParsedAstCache,
     persistent_ctx: ?PersistentResolveContext,
     deprecation_opts: ?*deprecation_mod.DeprecationOpts,
+    preamble_store: ?*PreambleCheckpointStore,
 ) ResolveError!ResolvedBundle {
-    return resolveWithEntryPathImpl(allocator, ast, intern_pool, entry_path, load_paths, color_pool, source_cache, ast_cache, persistent_ctx, deprecation_opts);
+    return resolveWithEntryPathImpl(allocator, ast, intern_pool, entry_path, load_paths, color_pool, source_cache, ast_cache, persistent_ctx, deprecation_opts, preamble_store);
 }
 
 fn parseAndResolve(allocator: std.mem.Allocator, source: []const u8) !ResolvedBundle {

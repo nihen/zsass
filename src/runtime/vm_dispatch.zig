@@ -86,30 +86,7 @@ pub fn dispatchBuiltinArgs(self: anytype, builtin_id: u32, args: []const Value, 
     perf.note(.vm_call_builtin);
     perf.note(.builtin_call);
     if (builtin_id == meta_keywords_builtin_id and args.len == 1) {
-        const keywords_single_arg = blk: {
-            if (arg_names.len == 0) break :blk true;
-            if (arg_names.len != 1) break :blk false;
-            if (arg_names[0] == .none) break :blk true;
-            var raw = self.intern_pool.get(arg_names[0]);
-            if (raw.len > 0 and raw[0] == '$') raw = raw[1..];
-            break :blk identifierEq(raw, "args");
-        };
-        if (keywords_single_arg) {
-            const arg = args[0];
-            if (arg.kind() != .list) {
-                self.recordArgumentTypeMismatchMessageForDispatch("args", arg, "argument list");
-                return error.BuiltinType;
-            }
-            if (self.lookupArglistKeywordHandle(arg.listHandle())) |kw_handle| {
-                _ = self.listItemsAt(kw_handle) catch {
-                    self.recordArgumentTypeMismatchMessageForDispatch("args", arg, "argument list");
-                    return error.BuiltinType;
-                }; // validate handle
-                return Value.listWithMeta(kw_handle, .comma, false, true);
-            }
-            self.recordArgumentTypeMismatchMessageForDispatch("args", arg, "argument list");
-            return error.BuiltinType;
-        }
+        if (try dispatchMetaKeywordsSingleArg(self, args, arg_names)) |out| return out;
     }
     var bctx = builtin_mod.BuiltinContext{
         .allocator = self.allocator,
@@ -129,27 +106,7 @@ pub fn dispatchBuiltinArgs(self: anytype, builtin_id: u32, args: []const Value, 
         .deprecation_opts = &self.deprecation_opts,
     };
     const out = builtin_mod.dispatch(&bctx, builtin_id, args, arg_names) catch |e| {
-        if (e == error.OutOfMemory) return error.OutOfMemory;
-        const name = builtin_mod.debugNameById(builtin_id) orelse "?";
-        if (error_format.verboseErrorsEnabled()) {
-            vmStderrPrint("zsass builtin failure id={d} name={s} err={}\n", .{
-                builtin_id,
-                name,
-                e,
-            });
-        }
-        // The TAGD sink fd is a POSIX concept; on Windows the field is
-        // unused, so skip the write entirely.
-        if (@import("builtin").target.os.tag != .windows) {
-            if (self.error_sink_fd) |fd| {
-                var buf: [128]u8 = undefined;
-                const line_opt = std.fmt.bufPrint(&buf, "TAGD={s}:{s}\n", .{ @errorName(e), name }) catch null;
-                if (line_opt) |line| {
-                    _ = std.c.write(fd, line.ptr, line.len);
-                }
-            }
-        }
-        return e;
+        return reportBuiltinDispatchFailure(self, builtin_id, e);
     };
     if (builtin_id == 29 and // string.quote
         args.len >= 1 and
@@ -158,16 +115,73 @@ pub fn dispatchBuiltinArgs(self: anytype, builtin_id: u32, args: []const Value, 
         out.kind() == .string and
         out.stringQuoted(self.string_flags_pool.items))
     {
-        const quoted_raw = self.stripCalcArgMarkerForDispatch(self.intern_pool.get(out.stringIntern()));
-        const normalized = try self.serializeUnquotedDeclStringForDispatch(quoted_raw);
-        defer self.allocator.free(normalized);
-        const normalized_id = try self.intern_pool.intern(normalized);
-        return Value.string(normalized_id, true);
+        return normalizeQuotedDispatchResult(self, out);
     }
     if (builtinPreservesSlashLists(builtin_id)) {
         try self.markSlashListPreserve(out);
     }
     return out;
+}
+
+/// `meta.keywords($args)` special case: serve keyword maps recorded for the
+/// arglist handle. Returns null when the single arg is named something other
+/// than `$args`, letting the regular dispatch path take over.
+noinline fn dispatchMetaKeywordsSingleArg(self: anytype, args: []const Value, arg_names: []const InternId) !?Value {
+    const keywords_single_arg = blk: {
+        if (arg_names.len == 0) break :blk true;
+        if (arg_names.len != 1) break :blk false;
+        if (arg_names[0] == .none) break :blk true;
+        var raw = self.intern_pool.get(arg_names[0]);
+        if (raw.len > 0 and raw[0] == '$') raw = raw[1..];
+        break :blk identifierEq(raw, "args");
+    };
+    if (!keywords_single_arg) return null;
+    const arg = args[0];
+    if (arg.kind() != .list) {
+        self.recordArgumentTypeMismatchMessageForDispatch("args", arg, "argument list");
+        return error.BuiltinType;
+    }
+    if (self.lookupArglistKeywordHandle(arg.listHandle())) |kw_handle| {
+        _ = self.listItemsAt(kw_handle) catch {
+            self.recordArgumentTypeMismatchMessageForDispatch("args", arg, "argument list");
+            return error.BuiltinType;
+        }; // validate handle
+        return Value.listWithMeta(kw_handle, .comma, false, true);
+    }
+    self.recordArgumentTypeMismatchMessageForDispatch("args", arg, "argument list");
+    return error.BuiltinType;
+}
+
+noinline fn reportBuiltinDispatchFailure(self: anytype, builtin_id: u32, e: builtin_mod.BuiltinError) builtin_mod.BuiltinError {
+    if (e == error.OutOfMemory) return error.OutOfMemory;
+    const name = builtin_mod.debugNameById(builtin_id) orelse "?";
+    if (error_format.verboseErrorsEnabled()) {
+        vmStderrPrint("zsass builtin failure id={d} name={s} err={}\n", .{
+            builtin_id,
+            name,
+            e,
+        });
+    }
+    // The TAGD sink fd is a POSIX concept; on Windows the field is
+    // unused, so skip the write entirely.
+    if (@import("builtin").target.os.tag != .windows) {
+        if (self.error_sink_fd) |fd| {
+            var buf: [128]u8 = undefined;
+            const line_opt = std.fmt.bufPrint(&buf, "TAGD={s}:{s}\n", .{ @errorName(e), name }) catch null;
+            if (line_opt) |line| {
+                _ = std.c.write(fd, line.ptr, line.len);
+            }
+        }
+    }
+    return e;
+}
+
+noinline fn normalizeQuotedDispatchResult(self: anytype, out: Value) !Value {
+    const quoted_raw = self.stripCalcArgMarkerForDispatch(self.intern_pool.get(out.stringIntern()));
+    const normalized = try self.serializeUnquotedDeclStringForDispatch(quoted_raw);
+    defer self.allocator.free(normalized);
+    const normalized_id = try self.intern_pool.intern(normalized);
+    return Value.string(normalized_id, true);
 }
 
 fn shouldSerializeIndirectBuiltinAsRgb(name: []const u8) bool {

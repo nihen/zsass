@@ -112,6 +112,44 @@ pub const InternPool = struct {
         return (self.string_meta.items[@intFromEnum(id)] & string_meta_has_backslash) != 0;
     }
 
+    /// Meta byte with the lazy calc bits guaranteed computed. Test the result
+    /// against `meta_has_calc_paren` / `meta_has_calc_marker`. Computed on
+    /// first query and cached in `string_meta`, so equality hot paths scan
+    /// each distinct string at most once instead of on every comparison.
+    /// Eager computation at intern time would instead scan every interned
+    /// string, including large generated output strings that never
+    /// participate in equality.
+    pub inline fn calcMetaByte(self: *InternPool, id: InternId) u8 {
+        std.debug.assert(id != .none);
+        const idx: usize = @intFromEnum(id);
+        const meta = self.string_meta.items[idx];
+        if ((meta & string_meta_calc_scanned) != 0) return meta;
+        return self.calcMetaSlow(idx);
+    }
+
+    fn calcMetaSlow(self: *InternPool, idx: usize) u8 {
+        var meta = self.string_meta.items[idx];
+        const s = self.strings.items[idx];
+        if (std.mem.find(u8, s, "calc(") != null) meta |= string_meta_has_calc_paren;
+        if (std.mem.startsWith(u8, s, calc_arg_marker) or std.mem.startsWith(u8, s, calc_interp_marker)) {
+            meta |= string_meta_has_calc_marker;
+        }
+        meta |= string_meta_calc_scanned;
+        self.string_meta.items[idx] = meta;
+        return meta;
+    }
+
+    /// True when the stored bytes contain the substring `calc(` (lazy).
+    pub inline fn hasCalcParen(self: *InternPool, id: InternId) bool {
+        return (self.calcMetaByte(id) & string_meta_has_calc_paren) != 0;
+    }
+
+    /// True when the stored bytes start with one of the internal calc
+    /// argument/interpolation marker prefixes (`\x01zsass-calc-...`) (lazy).
+    pub inline fn hasCalcMarkerPrefix(self: *InternPool, id: InternId) bool {
+        return (self.calcMetaByte(id) & string_meta_has_calc_marker) != 0;
+    }
+
     /// True if `a` and `b` refer to the same string (O(1)).
     pub fn eq(a: InternId, b: InternId) bool {
         return a == b;
@@ -136,6 +174,17 @@ pub const InternPool = struct {
 };
 
 const string_meta_has_backslash: u8 = 1 << 0;
+/// Public masks for `calcMetaByte` results.
+pub const meta_has_calc_paren: u8 = 1 << 1;
+pub const meta_has_calc_marker: u8 = 1 << 2;
+const string_meta_has_calc_paren = meta_has_calc_paren;
+const string_meta_has_calc_marker = meta_has_calc_marker;
+const string_meta_calc_scanned: u8 = 1 << 3;
+
+// Internal runtime marker prefixes (kept in sync with calc_utils / builtin
+// shared constants; they are stable engine-internal sentinels).
+const calc_arg_marker = "\x01zsass-calc-arg:";
+const calc_interp_marker = "\x01zsass-calc-interp:";
 
 fn computeStringMeta(s: []const u8) u8 {
     var meta: u8 = 0;
@@ -285,6 +334,16 @@ const well_known = struct {
 
 pub const intern_ampersand: InternId = well_known.ampersand;
 
+/// Comptime lookup of a pre-interned well-known string's id. Lets hot paths
+/// use a constant instead of hashing the same literal on every call.
+/// Compile error when `s` is not in the well-known table.
+pub fn wellKnownId(comptime s: []const u8) InternId {
+    inline for (well_known.strings, 0..) |w, i| {
+        if (comptime std.mem.eql(u8, w, s)) return well_known.id(i);
+    }
+    @compileError("not a well-known intern string: " ++ s);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -329,6 +388,34 @@ test "intern empty string is not none" {
     const empty_id = try pool.intern("");
     try std.testing.expect(empty_id != .none);
     try std.testing.expectEqualStrings("", pool.get(empty_id));
+}
+
+test "lazy calc meta bits" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var pool = try InternPool.init(arena);
+    const plain = try pool.intern("text-weak-invert");
+    const calc = try pool.intern("calc(1px + 2px)");
+    const marked = try pool.intern(calc_arg_marker ++ "calc(1px)");
+    try std.testing.expect(!pool.hasCalcParen(plain));
+    try std.testing.expect(!pool.hasCalcMarkerPrefix(plain));
+    try std.testing.expect(pool.hasCalcParen(calc));
+    try std.testing.expect(!pool.hasCalcMarkerPrefix(calc));
+    try std.testing.expect(pool.hasCalcMarkerPrefix(marked));
+    try std.testing.expect(pool.hasCalcParen(marked));
+    // Second query reads the cached scanned bits.
+    try std.testing.expect(pool.hasCalcParen(calc));
+    try std.testing.expect(!pool.hasCalcParen(plain));
+}
+
+test "wellKnownId resolves pre-interned strings" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var pool = try InternPool.init(arena);
+    try std.testing.expectEqual(wellKnownId("%"), try pool.intern("%"));
+    try std.testing.expectEqual(wellKnownId("deg"), try pool.intern("deg"));
 }
 
 test "all well-known strings round-trip" {

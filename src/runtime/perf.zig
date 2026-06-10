@@ -125,6 +125,70 @@ pub const Counter = enum {
     /// format string: actually insert leading zero.
     format_string_zero_filled,
 
+    //---------- Cross-entry module state cache ----------
+    /// Modules seeded (skipped) from the cross-entry cache.
+    cross_entry_seed,
+    /// Modules snapshotted into the cross-entry cache.
+    cross_entry_save,
+    /// Snapshot attempts rejected (non-movable value in globals).
+    cross_entry_save_rejected,
+    /// Modules that ran but whose top is not cross_entry_pure_top.
+    cross_entry_impure_top,
+
+    //---------- Import-preamble checkpoint ----------
+    /// Entries that captured a preamble checkpoint into the worker store.
+    preamble_checkpoint_capture,
+    /// Entries that forked resolver state from a stored checkpoint.
+    preamble_checkpoint_fork,
+    /// Capture attempts rejected by boundary validity checks (key blocked).
+    preamble_checkpoint_reject,
+
+    //---------- Arena alloc sites (temporary investigation) ----------
+    /// bytes: global band copy skipped via uses_global_band=false.
+    frame_band_skipped,
+    /// bytes: global band copied (legacy path).
+    frame_band_copied,
+    /// bytes: frame locals/declared via allocateCallLocals + enter_frame.
+    arena_frame_bytes,
+    /// bytes: list rows owned by arena (make_list / owned copies).
+    arena_list_bytes,
+    /// bytes: global_writeback bool slices.
+    arena_writeback_bytes,
+
+    //---------- Resolve sub-phase attribution (temporary investigation) ----------
+    /// ns: entry AST resolve incl. dep loads (resolveEntryAst).
+    resolve_entry_ast_ns,
+    /// ns: resolveSingleAst total (entry + record-miss modules).
+    resolve_single_ast_ns,
+    /// ns: buildModuleExports + export map copies per resolved module.
+    resolve_exports_build_ns,
+    /// ns: resolveUserModulePath filesystem candidate probing.
+    resolve_path_lookup_ns,
+    /// id_by_path hit in resolveUserModule (record reuse).
+    resolve_record_hit,
+    /// id_by_path miss -> fresh module resolve.
+    resolve_record_miss,
+    /// ns: buildResolvedBundleFromResolver total.
+    bundle_total_ns,
+    /// ns/bytes: bundle modules array alloc + ResolvedProgram copies.
+    bundle_modules_copy_ns,
+    /// ns: buildReachableMaskFromResolved BFS.
+    bundle_reachable_ns,
+    /// ns: buildExtendGroupOrderFromResolved DFS.
+    bundle_extend_order_ns,
+    /// ns: config seed accumulation iteration.
+    bundle_config_seeds_ns,
+    /// ns: copyStaticEvalLists.
+    bundle_static_lists_ns,
+    /// ns/bytes: copyOrigins flat-buffer copy.
+    bundle_origins_ns,
+
+    /// Linear-scan fallback in insensitive string-map lookup.
+    /// calls = scans, bytes = entries visited.
+    name_lookup_linear_scan,
+    /// ns: cumulative time inside the linear-scan fallback.
+    name_lookup_linear_scan_ns,
+
     //---------- Phase timer (ns cumulative) ----------
     /// ns: parse phase cumulative.
     phase_parse_ns,

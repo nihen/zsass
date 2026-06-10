@@ -3,6 +3,7 @@ const std = @import("std");
 const value_mod = @import("../runtime/value.zig");
 const origin_mod = @import("../runtime/origin.zig");
 const data = @import("data.zig");
+const perf = @import("../runtime/perf.zig");
 
 const ConfigSeed = data.ConfigSeed;
 const CssOrigin = origin_mod.CssOrigin;
@@ -95,18 +96,32 @@ pub fn buildResolvedBundleFromResolver(
     mr: *ModuleResolver,
     root_id: u32,
 ) ResolveError!ResolvedBundle {
+    const t_total = perf.timeBegin();
+    defer perf.timeEnd(.bundle_total_ns, t_total);
+
+    const t_modules = perf.timeBegin();
     const modules = try allocator.alloc(ResolvedProgram, mr.records_ptr.items.len);
     errdefer allocator.free(modules);
     for (mr.records_ptr.items, 0..) |*r, i| {
         modules[i] = r.prog;
     }
+    perf.bump(.bundle_modules_copy_ns, modules.len * @sizeOf(ResolvedProgram));
+    perf.timeEnd(.bundle_modules_copy_ns, t_modules);
 
     // Plan C: Since bundle.modules contains all cumulative records in cross-entry persistent mode,
     // Build a mask to skip compile / VM prologue for modules that are not reachable from root.
     // BFS resolve-time dep information (module_dep_stmts / forward_rules / use_map / cross_var_refs).
+    const t_reach = perf.timeBegin();
     const reachable_mask = try buildReachableMaskFromResolved(allocator, modules, root_id);
     errdefer allocator.free(reachable_mask);
+    perf.timeEnd(.bundle_reachable_ns, t_reach);
 
+    const t_order = perf.timeBegin();
+    const module_extend_group_order = try buildExtendGroupOrderFromResolved(allocator, modules, root_id);
+    errdefer allocator.free(module_extend_group_order);
+    perf.timeEnd(.bundle_extend_order_ns, t_order);
+
+    const t_seeds = perf.timeBegin();
     var config_seeds = try allocator.alloc(ConfigSeed, mr.config_seed_accum.count());
     errdefer if (config_seeds.len != 0) allocator.free(config_seeds);
     var si: usize = 0;
@@ -132,10 +147,16 @@ pub fn buildResolvedBundleFromResolver(
     if (si < config_seeds.len) {
         config_seeds = try allocator.realloc(config_seeds, si);
     }
+    perf.timeEnd(.bundle_config_seeds_ns, t_seeds);
+
+    const t_lists = perf.timeBegin();
     const static_eval_lists = try copyStaticEvalLists(allocator, mr.static_eval_store.lists.items);
     errdefer if (static_eval_lists.len != 0) allocator.free(static_eval_lists);
+    perf.timeEnd(.bundle_static_lists_ns, t_lists);
 
+    const t_origins = perf.timeBegin();
     const copied_origins = try copyOrigins(allocator, mr.import_origins_ptr.items);
+    perf.timeEnd(.bundle_origins_ns, t_origins);
     errdefer {
         if (copied_origins.origins.len != 0) allocator.free(copied_origins.origins);
         if (copied_origins.path_bytes.len != 0) allocator.free(copied_origins.path_bytes);
@@ -152,12 +173,62 @@ pub fn buildResolvedBundleFromResolver(
         .static_eval_lists = static_eval_lists,
         .alloc = allocator,
         .reachable_mask = reachable_mask,
+        .module_extend_group_order = module_extend_group_order,
         // shared pool ownership / pointer is set by caller (resolve*Impl) on success path
         // Overwrite. Here, we just transcribed the MR value for plumbing.
         .shared_value_pools = mr.shared_value_pools,
         .shared_value_pools_alloc = mr.shared_value_pools_alloc,
         .owns_shared_value_pools = false,
     };
+}
+
+/// Depth-first post-order numbering over `module_dep_stmts` from the entry
+/// root, visiting dependencies in statement order with first-visit dedup.
+/// This mirrors how a fresh single-entry resolve appends module records, so
+/// in non-persistent mode the resulting ordinal order equals the module id
+/// order. Modules never referenced by a dependency statement (unreachable
+/// records of earlier entries, or modules only referenced for variable
+/// lookup) stay at maxInt(u32); they never execute top-level code and thus
+/// never record @extend relations.
+fn buildExtendGroupOrderFromResolved(
+    allocator: std.mem.Allocator,
+    modules: []const ResolvedProgram,
+    root_id: u32,
+) ResolveError![]u32 {
+    const n = modules.len;
+    const order = try allocator.alloc(u32, n);
+    errdefer allocator.free(order);
+    @memset(order, std.math.maxInt(u32));
+    if (n == 0 or root_id >= n) return order;
+
+    const visited = try allocator.alloc(bool, n);
+    defer allocator.free(visited);
+    @memset(visited, false);
+
+    const Frame = struct { module: u32, dep_idx: usize };
+    var stack: std.ArrayListUnmanaged(Frame) = .empty;
+    defer stack.deinit(allocator);
+    try stack.append(allocator, .{ .module = root_id, .dep_idx = 0 });
+    visited[root_id] = true;
+
+    var next_order: u32 = 0;
+    while (stack.items.len > 0) {
+        const frame = &stack.items[stack.items.len - 1];
+        const deps = modules[frame.module].module_dep_stmts.items;
+        if (frame.dep_idx < deps.len) {
+            const dep = deps[frame.dep_idx].module_id;
+            frame.dep_idx += 1;
+            if (dep < n and !visited[dep]) {
+                visited[dep] = true;
+                try stack.append(allocator, .{ .module = dep, .dep_idx = 0 });
+            }
+            continue;
+        }
+        order[frame.module] = next_order;
+        if (next_order != std.math.maxInt(u32)) next_order += 1;
+        _ = stack.pop();
+    }
+    return order;
 }
 
 /// Follow ResolvedProgram.module_dep_stmts / forward_rules / use_map / cross_var_refs

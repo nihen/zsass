@@ -23,10 +23,31 @@ const forwardAllowsPlain = names.forwardAllowsPlain;
 const forwardAllowsVar = names.forwardAllowsVar;
 const isPrivateMemberName = names.isPrivateMemberName;
 const withForwardPrefix = names.withForwardPrefix;
+const hasMixedIdentifierAliasChars = name_lookup.hasMixedIdentifierAliasChars;
 const lookupCallableTargetInsensitive = name_lookup.lookupCallableTargetInsensitive;
 const lookupConfigVarTargetInsensitive = name_lookup.lookupConfigVarTargetInsensitive;
 const lookupIdentifierIdInsensitive = name_lookup.lookupIdentifierIdInsensitive;
 const lookupVoidFlagInsensitive = name_lookup.lookupVoidFlagInsensitive;
+
+fn noteMixedAliasKey(flag: *bool, name: []const u8) void {
+    if (!flag.* and hasMixedIdentifierAliasChars(name)) flag.* = true;
+}
+
+fn lookupVarTargetGated(
+    map: *const std.StringHashMapUnmanaged(VarTarget),
+    name: []const u8,
+    may_have_mixed_keys: bool,
+) ?VarTarget {
+    return name_lookup.lookupStringMapIdentifierInsensitiveGated(VarTarget, map, name, may_have_mixed_keys);
+}
+
+fn lookupCallableTargetGated(
+    map: *const std.StringHashMapUnmanaged(CallableTarget),
+    name: []const u8,
+    may_have_mixed_keys: bool,
+) ?CallableTarget {
+    return name_lookup.lookupStringMapIdentifierInsensitiveGated(CallableTarget, map, name, may_have_mixed_keys);
+}
 
 fn sameVarTarget(a: VarTarget, b: VarTarget) bool {
     return a.module_id == b.module_id and a.slot == b.slot;
@@ -157,9 +178,10 @@ fn mergeForwardVarExport(
     from_import: bool,
 ) ResolveError!void {
     if (lookupVoidFlagInsensitive(&out.ambiguous_vars, name)) return;
-    if (lookupConfigVarTargetInsensitive(&out.vars, name)) |existing| {
+    if (lookupVarTargetGated(&out.vars, name, out.vars_has_mixed_alias_keys)) |existing| {
         if (existing.module_id == module_id) {
             if (from_import) {
+                noteMixedAliasKey(&out.vars_has_mixed_alias_keys, name);
                 try out.vars.put(alloc, name, target);
                 try putExportSourceModule(alloc, &out.var_source_modules, name, source_module_id);
             } else {
@@ -170,12 +192,14 @@ fn mergeForwardVarExport(
         const existing_source_module_id = lookupIdentifierIdInsensitive(&out.var_source_modules, name) orelse existing.module_id;
         if (sameVarTarget(existing, target) or sameExportSourceModule(loader, existing_source_module_id, source_module_id)) return;
         if (from_import) {
+            noteMixedAliasKey(&out.vars_has_mixed_alias_keys, name);
             try out.vars.put(alloc, name, target);
             try putExportSourceModule(alloc, &out.var_source_modules, name, source_module_id);
             return;
         }
         return error.SassError;
     }
+    noteMixedAliasKey(&out.vars_has_mixed_alias_keys, name);
     try out.vars.put(alloc, name, target);
     try putExportSourceModule(alloc, &out.var_source_modules, name, source_module_id);
 }
@@ -188,7 +212,7 @@ fn markForwardAmbiguousVarExport(
     from_import: bool,
 ) !void {
     if (lookupVoidFlagInsensitive(&out.ambiguous_vars, name)) return;
-    if (lookupConfigVarTargetInsensitive(&out.vars, name)) |existing| {
+    if (lookupVarTargetGated(&out.vars, name, out.vars_has_mixed_alias_keys)) |existing| {
         if (existing.module_id == module_id and !from_import) return;
     }
     try markAmbiguousName(alloc, &out.ambiguous_vars, name);
@@ -205,9 +229,10 @@ fn mergeForwardDefaultVarExport(
     from_import: bool,
 ) ResolveError!void {
     if (lookupVoidFlagInsensitive(&out.ambiguous_default_vars, name)) return;
-    if (lookupConfigVarTargetInsensitive(&out.default_vars, name)) |existing| {
+    if (lookupVarTargetGated(&out.default_vars, name, out.default_vars_has_mixed_alias_keys)) |existing| {
         if (existing.module_id == module_id) {
             if (from_import) {
+                noteMixedAliasKey(&out.default_vars_has_mixed_alias_keys, name);
                 try out.default_vars.put(alloc, name, target);
                 try putExportSourceModule(alloc, &out.default_var_source_modules, name, source_module_id);
             }
@@ -216,12 +241,14 @@ fn mergeForwardDefaultVarExport(
         const existing_source_module_id = lookupIdentifierIdInsensitive(&out.default_var_source_modules, name) orelse existing.module_id;
         if (sameVarTarget(existing, target) or sameExportSourceModule(loader, existing_source_module_id, source_module_id)) return;
         if (from_import) {
+            noteMixedAliasKey(&out.default_vars_has_mixed_alias_keys, name);
             try out.default_vars.put(alloc, name, target);
             try putExportSourceModule(alloc, &out.default_var_source_modules, name, source_module_id);
             return;
         }
         return error.SassError;
     }
+    noteMixedAliasKey(&out.default_vars_has_mixed_alias_keys, name);
     try out.default_vars.put(alloc, name, target);
     try putExportSourceModule(alloc, &out.default_var_source_modules, name, source_module_id);
 }
@@ -234,7 +261,7 @@ fn markForwardAmbiguousDefaultVarExport(
     from_import: bool,
 ) !void {
     if (lookupVoidFlagInsensitive(&out.ambiguous_default_vars, name)) return;
-    if (lookupConfigVarTargetInsensitive(&out.default_vars, name)) |existing| {
+    if (lookupVarTargetGated(&out.default_vars, name, out.default_vars_has_mixed_alias_keys)) |existing| {
         if (existing.module_id == module_id and !from_import) return;
     }
     try markAmbiguousName(alloc, &out.ambiguous_default_vars, name);
@@ -243,6 +270,7 @@ fn markForwardAmbiguousDefaultVarExport(
 fn mergeForwardCallableExport(
     alloc: std.mem.Allocator,
     map: *std.StringHashMapUnmanaged(CallableTarget),
+    map_mixed_flag: *bool,
     source_map: *std.StringHashMapUnmanaged(u32),
     ambiguous: *std.StringHashMapUnmanaged(void),
     loader: *const ModuleResolver,
@@ -253,9 +281,10 @@ fn mergeForwardCallableExport(
     from_import: bool,
 ) ResolveError!void {
     if (lookupVoidFlagInsensitive(ambiguous, name)) return;
-    if (lookupCallableTargetInsensitive(map, name)) |existing| {
+    if (lookupCallableTargetGated(map, name, map_mixed_flag.*)) |existing| {
         if (existing.module_id == module_id) {
             if (from_import) {
+                noteMixedAliasKey(map_mixed_flag, name);
                 try map.put(alloc, name, target);
                 try putExportSourceModule(alloc, source_map, name, source_module_id);
             }
@@ -264,12 +293,14 @@ fn mergeForwardCallableExport(
         const existing_source_module_id = lookupIdentifierIdInsensitive(source_map, name) orelse existing.module_id;
         if (sameCallableTarget(existing, target) or sameExportSourceModule(loader, existing_source_module_id, source_module_id)) return;
         if (from_import) {
+            noteMixedAliasKey(map_mixed_flag, name);
             try map.put(alloc, name, target);
             try putExportSourceModule(alloc, source_map, name, source_module_id);
             return;
         }
         return error.SassError;
     }
+    noteMixedAliasKey(map_mixed_flag, name);
     try map.put(alloc, name, target);
     try putExportSourceModule(alloc, source_map, name, source_module_id);
 }
@@ -277,13 +308,14 @@ fn mergeForwardCallableExport(
 fn markForwardAmbiguousCallableExport(
     alloc: std.mem.Allocator,
     map: *const std.StringHashMapUnmanaged(CallableTarget),
+    map_mixed_flag: bool,
     ambiguous: *std.StringHashMapUnmanaged(void),
     module_id: u32,
     name: []const u8,
     from_import: bool,
 ) !void {
     if (lookupVoidFlagInsensitive(ambiguous, name)) return;
-    if (lookupCallableTargetInsensitive(map, name)) |existing| {
+    if (lookupCallableTargetGated(map, name, map_mixed_flag)) |existing| {
         if (existing.module_id == module_id and !from_import) return;
     }
     try markAmbiguousName(alloc, ambiguous, name);
@@ -305,6 +337,7 @@ pub fn buildModuleExports(
         if (isPrivateMemberName(name)) continue;
         if (!lookupVoidFlagInsensitive(&prog.declared_global_names, name)) continue;
         if (!out.vars.contains(name)) {
+            noteMixedAliasKey(&out.vars_has_mixed_alias_keys, name);
             try out.vars.put(meta_alloc, name, .{
                 .module_id = module_id,
                 .slot = e.value_ptr.*,
@@ -316,7 +349,8 @@ pub fn buildModuleExports(
     while (dvit.next()) |e| {
         const name = e.key_ptr.*;
         if (isPrivateMemberName(name)) {
-            if (lookupConfigVarTargetInsensitive(&out.private_default_vars, name) == null) {
+            if (lookupVarTargetGated(&out.private_default_vars, name, out.private_default_vars_has_mixed_alias_keys) == null) {
+                noteMixedAliasKey(&out.private_default_vars_has_mixed_alias_keys, name);
                 try out.private_default_vars.put(meta_alloc, name, .{
                     .module_id = module_id,
                     .slot = e.value_ptr.*,
@@ -325,6 +359,7 @@ pub fn buildModuleExports(
             continue;
         }
         if (!out.default_vars.contains(name)) {
+            noteMixedAliasKey(&out.default_vars_has_mixed_alias_keys, name);
             try out.default_vars.put(meta_alloc, name, .{
                 .module_id = module_id,
                 .slot = e.value_ptr.*,
@@ -337,6 +372,7 @@ pub fn buildModuleExports(
         const name = e.key_ptr.*;
         if (isPrivateMemberName(name)) continue;
         if (!out.mixins.contains(name)) {
+            noteMixedAliasKey(&out.mixins_has_mixed_alias_keys, name);
             try out.mixins.put(meta_alloc, name, .{
                 .module_id = module_id,
                 .id = e.value_ptr.*,
@@ -349,6 +385,7 @@ pub fn buildModuleExports(
         const name = e.key_ptr.*;
         if (isPrivateMemberName(name)) continue;
         if (!out.functions.contains(name)) {
+            noteMixedAliasKey(&out.functions_has_mixed_alias_keys, name);
             try out.functions.put(meta_alloc, name, .{
                 .module_id = module_id,
                 .id = e.value_ptr.*,
@@ -453,10 +490,11 @@ pub fn buildModuleExports(
                     if (!forwardAllowsPlain(out_name, fr.show, fr.hide)) continue;
                     const source_module_id = lookupIdentifierIdInsensitive(&dep.mixin_source_modules, name) orelse e.value_ptr.*.module_id;
                     if (fmixins_fast) {
+                        noteMixedAliasKey(&out.mixins_has_mixed_alias_keys, out_name);
                         out.mixins.putAssumeCapacity(out_name, e.value_ptr.*);
                         out.mixin_source_modules.putAssumeCapacity(out_name, source_module_id);
                     } else {
-                        try mergeForwardCallableExport(meta_alloc, &out.mixins, &out.mixin_source_modules, &out.ambiguous_mixins, loader, module_id, out_name, e.value_ptr.*, source_module_id, fr.from_import);
+                        try mergeForwardCallableExport(meta_alloc, &out.mixins, &out.mixins_has_mixed_alias_keys, &out.mixin_source_modules, &out.ambiguous_mixins, loader, module_id, out_name, e.value_ptr.*, source_module_id, fr.from_import);
                     }
                 }
                 var afmit = dep.ambiguous_mixins.iterator();
@@ -464,7 +502,7 @@ pub fn buildModuleExports(
                     const name = e.key_ptr.*;
                     const out_name = try withForwardPrefix(prog, fr.prefix, name);
                     if (!forwardAllowsPlain(out_name, fr.show, fr.hide)) continue;
-                    try markForwardAmbiguousCallableExport(meta_alloc, &out.mixins, &out.ambiguous_mixins, module_id, out_name, fr.from_import);
+                    try markForwardAmbiguousCallableExport(meta_alloc, &out.mixins, out.mixins_has_mixed_alias_keys, &out.ambiguous_mixins, module_id, out_name, fr.from_import);
                 }
                 const ffunctions_fast = out.functions.count() == 0 and out.ambiguous_functions.count() == 0;
                 if (ffunctions_fast) {
@@ -478,10 +516,11 @@ pub fn buildModuleExports(
                     if (!forwardAllowsPlain(out_name, fr.show, fr.hide)) continue;
                     const source_module_id = lookupIdentifierIdInsensitive(&dep.function_source_modules, name) orelse e.value_ptr.*.module_id;
                     if (ffunctions_fast) {
+                        noteMixedAliasKey(&out.functions_has_mixed_alias_keys, out_name);
                         out.functions.putAssumeCapacity(out_name, e.value_ptr.*);
                         out.function_source_modules.putAssumeCapacity(out_name, source_module_id);
                     } else {
-                        try mergeForwardCallableExport(meta_alloc, &out.functions, &out.function_source_modules, &out.ambiguous_functions, loader, module_id, out_name, e.value_ptr.*, source_module_id, fr.from_import);
+                        try mergeForwardCallableExport(meta_alloc, &out.functions, &out.functions_has_mixed_alias_keys, &out.function_source_modules, &out.ambiguous_functions, loader, module_id, out_name, e.value_ptr.*, source_module_id, fr.from_import);
                     }
                 }
                 var affit = dep.ambiguous_functions.iterator();
@@ -489,7 +528,7 @@ pub fn buildModuleExports(
                     const name = e.key_ptr.*;
                     const out_name = try withForwardPrefix(prog, fr.prefix, name);
                     if (!forwardAllowsPlain(out_name, fr.show, fr.hide)) continue;
-                    try markForwardAmbiguousCallableExport(meta_alloc, &out.functions, &out.ambiguous_functions, module_id, out_name, fr.from_import);
+                    try markForwardAmbiguousCallableExport(meta_alloc, &out.functions, out.functions_has_mixed_alias_keys, &out.ambiguous_functions, module_id, out_name, fr.from_import);
                 }
                 var fbit = dep.builtin_functions.iterator();
                 while (fbit.next()) |e| {
@@ -576,9 +615,9 @@ pub fn applyUseOrForwardConfig(
     const ex = try requireModuleExports(self, module_id);
     for (entries) |entry| {
         if (lookupVoidFlagInsensitive(&ex.ambiguous_default_vars, entry.name)) return error.SassError;
-        const target = lookupConfigVarTargetInsensitive(&ex.default_vars, entry.name) orelse
-            lookupConfigVarTargetInsensitive(&ex.private_default_vars, entry.name) orelse {
-            const already_configured = lookupConfigVarTargetInsensitive(&ex.vars, entry.name) orelse return error.SassError;
+        const target = lookupVarTargetGated(&ex.default_vars, entry.name, ex.default_vars_has_mixed_alias_keys) orelse
+            lookupVarTargetGated(&ex.private_default_vars, entry.name, ex.private_default_vars_has_mixed_alias_keys) orelse {
+            const already_configured = lookupVarTargetGated(&ex.vars, entry.name, ex.vars_has_mixed_alias_keys) orelse return error.SassError;
             if (loaderExplicitConfigValueForTarget(self, already_configured)) |existing| {
                 if (configValueEq(self, existing, entry.value)) continue;
             }

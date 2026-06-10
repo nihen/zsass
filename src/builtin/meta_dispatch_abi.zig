@@ -86,14 +86,14 @@ pub fn resolveMixinId(name: []const u8) ?Id {
     return null;
 }
 
-pub fn dispatchKindById(id: Id) ?DispatchKind {
+pub inline fn dispatchKindById(id: Id) ?DispatchKind {
     inline for (meta_builtin_specs) |spec| {
         if (spec.id == id) return spec.dispatch_kind;
     }
     return null;
 }
 
-pub fn isDispatchId(id: Id) bool {
+pub inline fn isDispatchId(id: Id) bool {
     return dispatchKindById(id) != null;
 }
 

@@ -400,6 +400,11 @@ pub fn normalizeLeadingZerosInMathFunctionsMaybeAlloc(
     alloc: std.mem.Allocator,
     input: []const u8,
 ) std.mem.Allocator.Error!?[]u8 {
+    // Mirror the no-op early-outs of normalizeLeadingZerosInMathFunctions so
+    // unchanged inputs skip the dupe/compare/free round trip entirely.
+    if (std.mem.indexOfAny(u8, input, ".(") == null) return null;
+    if (!hasDotDigitCandidate(input)) return null;
+    if (!hasMathFunctionCallCandidate(input)) return null;
     const normalized = try normalizeLeadingZerosInMathFunctions(alloc, input);
     if (std.mem.eql(u8, normalized, input)) {
         alloc.free(normalized);

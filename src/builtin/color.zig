@@ -4,6 +4,7 @@ const calculation = @import("../color/calculation.zig");
 const color_mod = @import("../color/color.zig");
 const value_mod = @import("../runtime/value.zig");
 const deprecation_mod = @import("../runtime/deprecation.zig");
+const intern_pool_mod = @import("../runtime/intern_pool.zig");
 const shared = @import("shared.zig");
 const error_format = @import("../runtime/error_format.zig");
 const value_format = @import("../runtime/value_format.zig");
@@ -3243,9 +3244,9 @@ fn colorSameComparisonColor(ctx: *BuiltinContext, c: Value) color_mod.Color {
     return source;
 }
 
-fn numberWithUnit(ctx: *BuiltinContext, value: f64, unit: ?[]const u8) BuiltinError!Value {
+fn numberWithUnit(ctx: *BuiltinContext, value: f64, comptime unit: ?[]const u8) BuiltinError!Value {
     if (unit) |u| {
-        const uid = try internString(ctx, u);
+        const uid = comptime intern_pool_mod.wellKnownId(u);
         return try Value.number(value, uid, ctx.number_pool, ctx.allocator);
     }
     return Value.numberUnitless(value);
@@ -4136,24 +4137,22 @@ pub fn color_channel(ctx: *BuiltinContext, args: []const Value, arg_names: []con
     if (ch.kind() != .string or !ch.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
 
     const ch_name = ctx.intern_pool.get(ch.stringIntern());
-    if (!std.mem.eql(u8, ch_name, "red") and
-        !std.mem.eql(u8, ch_name, "green") and
-        !std.mem.eql(u8, ch_name, "blue") and
-        !std.mem.eql(u8, ch_name, "hue") and
-        !std.mem.eql(u8, ch_name, "saturation") and
-        !std.mem.eql(u8, ch_name, "lightness") and
-        !std.mem.eql(u8, ch_name, "whiteness") and
-        !std.mem.eql(u8, ch_name, "blackness") and
-        !std.mem.eql(u8, ch_name, "alpha") and
-        !std.mem.eql(u8, ch_name, "a") and
-        !std.mem.eql(u8, ch_name, "b") and
-        !std.mem.eql(u8, ch_name, "chroma") and
-        !std.mem.eql(u8, ch_name, "x") and
-        !std.mem.eql(u8, ch_name, "y") and
-        !std.mem.eql(u8, ch_name, "z"))
-    {
-        return error.BuiltinType;
-    }
+    const known_channel_name = switch (ch_name.len) {
+        1 => switch (ch_name[0]) {
+            'a', 'b', 'x', 'y', 'z' => true,
+            else => false,
+        },
+        3 => std.mem.eql(u8, ch_name, "red") or std.mem.eql(u8, ch_name, "hue"),
+        4 => std.mem.eql(u8, ch_name, "blue"),
+        5 => std.mem.eql(u8, ch_name, "green") or std.mem.eql(u8, ch_name, "alpha"),
+        6 => std.mem.eql(u8, ch_name, "chroma"),
+        9 => std.mem.eql(u8, ch_name, "lightness") or
+            std.mem.eql(u8, ch_name, "whiteness") or
+            std.mem.eql(u8, ch_name, "blackness"),
+        10 => std.mem.eql(u8, ch_name, "saturation"),
+        else => false,
+    };
+    if (!known_channel_name) return error.BuiltinType;
     var target_space: ?color_mod.ColorSpace = null;
     var legacy_rgb_space = false;
     if (space_v) |sv| {
