@@ -1,5 +1,6 @@
 const std = @import("std");
 const data = @import("data.zig");
+const perf = @import("../runtime/perf.zig");
 
 const CallableTarget = data.CallableTarget;
 const UseBinding = data.UseBinding;
@@ -124,12 +125,47 @@ fn makeBothIdentifierAliasVariants(
     };
 }
 
+/// All-dash canonical form for identifier-insensitive keys: every `_`
+/// becomes `-`. Two names are `identifierEq` iff their canonical forms are
+/// byte-equal, so one hash probe on a canonical-keyed index replaces an
+/// exhaustive scan for mixed-alias keys. Returns `name` itself when already
+/// canonical, null when it does not fit in `scratch` (parity with the
+/// variant builders, which also bail on oversized names).
+pub fn canonicalAliasKey(name: []const u8, scratch: []u8) ?[]const u8 {
+    if (std.mem.indexOfScalar(u8, name, '_') == null) return name;
+    if (name.len > scratch.len) return null;
+    for (name, 0..) |c, i| {
+        scratch[i] = if (c == '_') '-' else c;
+    }
+    return scratch[0..name.len];
+}
+
+pub fn canonicalAliasKeyAlloc(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
+    const out = try alloc.dupe(u8, name);
+    for (out) |*c| {
+        if (c.* == '_') c.* = '-';
+    }
+    return out;
+}
+
 pub fn lookupStringMapIdentifierInsensitive(
     comptime V: type,
     map: *const std.StringHashMapUnmanaged(V),
     name: []const u8,
 ) ?V {
     return lookupStringMapIdentifierInsensitiveEx(V, map, name, true);
+}
+
+/// `may_have_mixed_keys` is the caller-tracked "some stored key contains both
+/// `-` and `_`" flag. When false the two spelling variants are exhaustive and
+/// the linear mixed-key fallback is skipped.
+pub fn lookupStringMapIdentifierInsensitiveGated(
+    comptime V: type,
+    map: *const std.StringHashMapUnmanaged(V),
+    name: []const u8,
+    may_have_mixed_keys: bool,
+) ?V {
+    return lookupStringMapIdentifierInsensitiveEx(V, map, name, may_have_mixed_keys);
 }
 
 pub fn lookupStringMapIdentifierInsensitiveNoMixedKeys(
@@ -162,6 +198,9 @@ fn lookupStringMapIdentifierInsensitiveEx(
     if (!allow_mixed_key_fallback) return null;
     if (!which.has_multiple_alias_chars) return null;
 
+    const t = perf.timeBegin();
+    defer perf.timeEnd(.name_lookup_linear_scan_ns, t);
+    perf.bump(.name_lookup_linear_scan, map.count());
     var it = map.iterator();
     while (it.next()) |entry| {
         if (identifierEq(entry.key_ptr.*, name)) return entry.value_ptr.*;

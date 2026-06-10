@@ -29,6 +29,15 @@ pub const meta_get_function_id: Id = meta_dispatch_abi.meta_get_function_id;
 /// Dispatch id for `meta.get-mixin` (function).
 pub const meta_get_mixin_id: Id = meta_dispatch_abi.meta_get_mixin_id;
 
+pub fn isCrossEntryStatefulFunction(id: Id) bool {
+    return switch (id) {
+        31, // string.unique-id
+        109, // math.random
+        => true,
+        else => false,
+    };
+}
+
 fn isMixinOnlyId(id: Id) bool {
     return meta_dispatch_abi.isMixinOnlyId(id);
 }

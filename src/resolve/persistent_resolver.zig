@@ -17,8 +17,11 @@ const source_cache_mod = @import("source_cache.zig");
 const ast_cache_mod = @import("ast_cache.zig");
 const resolver_mod = @import("resolver.zig");
 const compiler_mod = @import("../ir/compiler.zig");
+const preamble_checkpoint_mod = @import("preamble_checkpoint.zig");
 
 pub const PersistentResolverState = struct {
+    pub const PreambleStore = preamble_checkpoint_mod.PreambleCheckpointStore;
+
     /// Long-lived allocator (typically c_allocator). backing of records_arena.
     alloc: std.mem.Allocator,
     /// Shared InternPool (one per worker; cross-worker sharing is not allowed).
@@ -62,6 +65,12 @@ pub const PersistentResolverState = struct {
     /// Long-lived arena (alloc backed) for internal data of ModuleChunks in compiled_chunks.
     compile_arena: std.heap.ArenaAllocator,
 
+    /// Import-preamble checkpoint store for the worker's non-persistent
+    /// entries. Checkpoints carry the boundary prefixes of every per-entry
+    /// sidecar store (value/color pools, static-eval lists, import origins),
+    /// so forks seed their own empty stores and all handles stay valid.
+    preamble_checkpoints: preamble_checkpoint_mod.PreambleCheckpointStore,
+
     pub fn init(
         alloc: std.mem.Allocator,
         pool: *intern_pool_mod.InternPool,
@@ -75,6 +84,7 @@ pub const PersistentResolverState = struct {
             .ast_cache = ast_cache,
             .records_arena = std.heap.ArenaAllocator.init(alloc),
             .compile_arena = std.heap.ArenaAllocator.init(alloc),
+            .preamble_checkpoints = preamble_checkpoint_mod.PreambleCheckpointStore.init(alloc),
         };
     }
 
@@ -116,5 +126,6 @@ pub const PersistentResolverState = struct {
         self.color_pool.deinit(self.alloc);
         //shared_value_pools is a group of ArrayListUnmanaged with self.alloc as backend.
         self.shared_value_pools.deinit(self.alloc);
+        self.preamble_checkpoints.deinit();
     }
 };

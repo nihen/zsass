@@ -87,6 +87,43 @@ pub const Chunk = struct {
         local_slot_hint: u32 = std.math.maxInt(u32),
     };
 
+    /// Slot bundle for one fused `@for` loop (for_test / for_step operand).
+    pub const ForLoopMeta = struct {
+        cursor_slot: u32,
+        to_slot: u32,
+        step_slot: u32,
+        var_slot: u32,
+        through: bool,
+    };
+
+    pub const FusedCmpOp = enum(u8) { lt, gt, le, ge };
+
+    /// Slot bundle for branch_local_cmp_local_false.
+    pub const FusedCmpMeta = struct {
+        lhs_slot: u32,
+        rhs_slot: u32,
+        op: FusedCmpOp,
+    };
+
+    pub const FusedBinOp = enum(u8) { add, sub, mul };
+
+    /// Slot bundle for local_binop_local_store.
+    pub const FusedBinopMeta = struct {
+        lhs_slot: u32,
+        rhs_slot: u32,
+        dst_slot: u32,
+        op: FusedBinOp,
+    };
+
+    /// Slot bundle for one fused `@each` loop (each_test / each_bind /
+    /// each_step operand). var_slot is maxInt(u32) for destructuring loops
+    /// (those keep the legacy list_item + unpack bind sequence).
+    pub const EachLoopMeta = struct {
+        list_slot: u32,
+        index_slot: u32,
+        var_slot: u32,
+    };
+
     pub const max_param_default_call_args: usize = 8;
 
     pub const ParamDefaultBinaryOperand = union(enum) {
@@ -212,6 +249,10 @@ pub const Chunk = struct {
     string_pool: []InternId,
     builtin_call_meta: []BuiltinCallMeta,
     builtin_call_arg_names: []InternId,
+    for_loop_meta: []ForLoopMeta = &.{},
+    each_loop_meta: []EachLoopMeta = &.{},
+    fused_cmp_meta: []FusedCmpMeta = &.{},
+    fused_binop_meta: []FusedBinopMeta = &.{},
     source_locs: []SourceLoc = &.{},
     param_names: []InternId,
     /// formal parameter defaults (len = argc).
@@ -229,6 +270,13 @@ pub const Chunk = struct {
     has_content: bool = false,
     captures_callers_locals: bool = false,
     global_slot_base: u32 = 0,
+    /// True when this chunk's bytecode can observe the module-global slot
+    /// band [0, global_slot_base) of its own frame (directly, via fallback
+    /// slots, via meta variable probes, or by capturing the frame for
+    /// `@content`). When false, callers skip copying the global band into
+    /// the frame and skip global write-back on return. Defaults to true;
+    /// `analyzeModuleGlobalBandUsage` computes the precise value.
+    uses_global_band: bool = true,
 };
 
 pub const ModuleChunks = struct {
@@ -251,6 +299,15 @@ pub const ModuleChunks = struct {
     source_len: u32 = 0,
     /// local slot undeclared Fallback slot when reading (no fallback if index=slot, value=maxInt(u32)).
     local_fallback_slots: []u32 = &.{},
+
+    /// True when this module's top chunk performs no CSS-affecting work of
+    /// its own: no rule/at-rule/declaration/comment emission, no @extend
+    /// recording, no placeholder/mixin/content invocation, and no indirect
+    /// calls (meta.call / meta.load-css). Such a top only computes module
+    /// globals (running dependencies along the way), so once executed its
+    /// global end-state can be replayed across batch entries instead of
+    /// re-running the chunk. Computed in compileOneModule.
+    cross_entry_pure_top: bool = false,
 
     /// introspection metadata: name -> slot
     global_slots: std.StringHashMapUnmanaged(u32) = .empty,
@@ -303,6 +360,10 @@ pub const Program = struct {
     /// VM prologue gates with mask. If it is null, treat it as all true.
     /// Design: `.plans/ideal/20260502-cross-entry-resolve-reuse-design.md`
     reachable_mask: ?[]bool = null,
+    /// Per-entry module ordinal for @extend module-group ordering (see
+    /// ResolvedBundle.module_extend_group_order). Empty means "use the raw
+    /// module id" (legacy routes that construct a Program directly).
+    module_extend_group_order: []const u32 = &.{},
     /// P4 commit 3 Step B (NaN-box layout) prep: created at compile-time
     /// sidecar pool for unit-bearing number Value. whole program (= all modules
     /// common handle space in compile-time const_pool). vm.number_pool at VM startup
@@ -354,6 +415,8 @@ const ChunkBuilder = struct {
     string_pool: std.ArrayListUnmanaged(InternId) = .empty,
     builtin_call_meta: std.ArrayListUnmanaged(Chunk.BuiltinCallMeta) = .empty,
     builtin_call_arg_names: std.ArrayListUnmanaged(InternId) = .empty,
+    for_loop_meta: std.ArrayListUnmanaged(Chunk.ForLoopMeta) = .empty,
+    each_loop_meta: std.ArrayListUnmanaged(Chunk.EachLoopMeta) = .empty,
     source_locs: std.ArrayListUnmanaged(Chunk.SourceLoc) = .empty,
 
     fn deinit(self: *ChunkBuilder, alloc: std.mem.Allocator) void {
@@ -363,6 +426,8 @@ const ChunkBuilder = struct {
         self.string_pool.deinit(alloc);
         self.builtin_call_meta.deinit(alloc);
         self.builtin_call_arg_names.deinit(alloc);
+        self.for_loop_meta.deinit(alloc);
+        self.each_loop_meta.deinit(alloc);
         self.source_locs.deinit(alloc);
     }
 
@@ -377,6 +442,8 @@ const ChunkBuilder = struct {
         self.string_pool.clearRetainingCapacity();
         self.builtin_call_meta.clearRetainingCapacity();
         self.builtin_call_arg_names.clearRetainingCapacity();
+        self.for_loop_meta.clearRetainingCapacity();
+        self.each_loop_meta.clearRetainingCapacity();
         self.source_locs.clearRetainingCapacity();
     }
 
@@ -427,6 +494,8 @@ const ChunkBuilder = struct {
         const string_pool = try arena.dupe(InternId, cb.string_pool.items);
         const builtin_call_meta = try arena.dupe(Chunk.BuiltinCallMeta, cb.builtin_call_meta.items);
         const builtin_call_arg_names = try arena.dupe(InternId, cb.builtin_call_arg_names.items);
+        const for_loop_meta = try arena.dupe(Chunk.ForLoopMeta, cb.for_loop_meta.items);
+        const each_loop_meta = try arena.dupe(Chunk.EachLoopMeta, cb.each_loop_meta.items);
         const source_locs = try arena.dupe(Chunk.SourceLoc, cb.source_locs.items);
         const chunk_param_names = try arena.dupe(InternId, param_names);
         const defaults = try arena.dupe(Chunk.ParamDefault, param_defaults);
@@ -437,6 +506,8 @@ const ChunkBuilder = struct {
             .string_pool = string_pool,
             .builtin_call_meta = builtin_call_meta,
             .builtin_call_arg_names = builtin_call_arg_names,
+            .for_loop_meta = for_loop_meta,
+            .each_loop_meta = each_loop_meta,
             .source_locs = source_locs,
             .param_names = chunk_param_names,
             .param_defaults = defaults,
@@ -454,15 +525,24 @@ const ChunkBuilder = struct {
 const PeepholeFuseResult = struct {
     code: []Instruction,
     new_to_old: []u32,
+    fused_cmp_meta: []Chunk.FusedCmpMeta,
+    fused_binop_meta: []Chunk.FusedBinopMeta,
 };
 
 const LocalSlotUse = struct {
     max_exclusive: u32 = 0,
+    /// When set, note() also records whether any noted slot is a
+    /// module-global slot (used by analyzeChunkGlobalBandUse).
+    global_bits: ?*const std.DynamicBitSetUnmanaged = null,
+    global_hit: bool = false,
 
     fn note(self: *LocalSlotUse, slot: u32) void {
         if (slot == std.math.maxInt(u32)) return;
         const next = slot +| 1;
         if (next > self.max_exclusive) self.max_exclusive = next;
+        if (self.global_bits) |bits| {
+            if (slot < bits.bit_length and bits.isSet(slot)) self.global_hit = true;
+        }
     }
 };
 
@@ -610,6 +690,141 @@ fn noteParamDefaultLocalUse(
     }
 }
 
+/// Whether a module top chunk performs no CSS-affecting work of its own
+/// (see ModuleChunks.cross_entry_pure_top). emit_warn / emit_debug stay
+/// allowed: they touch stderr only, never the CSS document. emit_stmt_gap
+/// stays allowed: gaps stacked while nothing has been emitted yet are
+/// writer no-ops, and a pure top can never emit before them. Indirect calls
+/// disqualify even for functions: they can invoke stateful builtins such as
+/// math.random() or string.unique-id() through user functions or meta.call.
+fn topChunkIsCrossEntryPure(top: *const Chunk) bool {
+    for (top.code) |inst| {
+        switch (inst.opcode()) {
+            .call_indirect,
+            .call_function,
+            => return false,
+            .call_builtin => {
+                if (builtin_mod.isCrossEntryStatefulFunction(inst.arg_a)) return false;
+            },
+            .emit_rule_begin,
+            .emit_rule_begin_current,
+            .emit_rule_begin_current_maybe,
+            .emit_rule_begin_dynamic,
+            .emit_rule_end,
+            .emit_rule_end_maybe,
+            .emit_rule_end_if_open,
+            .emit_rule_end_pop,
+            .pop_rule_scope,
+            .push_selector_scope,
+            .push_selector_scope_dynamic,
+            .push_at_root_scope,
+            .pop_at_root_scope,
+            .push_at_root_bubble,
+            .pop_at_root_bubble,
+            .push_prop_namespace,
+            .pop_prop_namespace,
+            .emit_decl,
+            .emit_decl_raw,
+            .emit_decl_dynamic,
+            .emit_raw_decl,
+            .load_emit_decl,
+            .emit_fragment,
+            .emit_at_rule_simple,
+            .emit_at_rule_begin,
+            .emit_at_rule_end,
+            .emit_comment,
+            .emit_comment_dynamic,
+            .record_extend,
+            .call_placeholder,
+            .call_mixin,
+            .call_content,
+            .set_content,
+            .emit_error,
+            => return false,
+            else => {},
+        }
+    }
+    return true;
+}
+
+/// Compute `chunk.uses_global_band`: whether any reachable frame slot
+/// (directly, via fallback chains, via load_arg, param defaults, or meta
+/// variable probes) is a module-global slot. Global and callable-local slots
+/// share one interleaved numbering per module; `global_bits` is the precise
+/// global-slot set from resolver's `global_slots` map. When no reachable
+/// slot is global, the caller's global-band copy into this frame is
+/// unobservable and may be skipped.
+///
+/// `set_content` disqualifies the chunk: its frame becomes an `@content`
+/// capture that is copied wholesale (globals included) into content frames
+/// and written back on content return. `call_indirect` is fine -- a
+/// capturing callee refreshes a skipped caller band from the module-global
+/// row in allocateCallLocals.
+fn analyzeChunkGlobalBandUse(
+    resolved: *const ResolvedProgram,
+    chunk: *Chunk,
+    global_bits: *const std.DynamicBitSetUnmanaged,
+) void {
+    if (resolved.next_global_slot == 0) {
+        chunk.uses_global_band = false;
+        return;
+    }
+    var used: LocalSlotUse = .{ .global_bits = global_bits };
+    for (chunk.code) |inst| {
+        switch (inst.opcode()) {
+            .set_content => return, // stays true (frame is captured for @content)
+            .load_local,
+            .load_local_strict,
+            .store_local,
+            .store_local_writeback,
+            .clear_local,
+            => {
+                if (resolver.decodeCrossAssignSlot(inst.arg_b) == null) {
+                    noteFrameLocalSlotUse(resolved, &used, inst.arg_b);
+                }
+            },
+            .load_local_add_const,
+            .load_local_mul_const,
+            .load_local_ge_const,
+            .load_const_add_local,
+            .load_emit_decl,
+            .branch_if_false_local,
+            => noteFrameLocalSlotUse(resolved, &used, inst.arg_a),
+            .load_arg => noteFrameLocalSlotUse(resolved, &used, @as(u32, chunk.arg_base) + inst.arg_a),
+            .for_test, .for_step => {
+                const mi: usize = @intCast(inst.arg_a);
+                if (mi < chunk.for_loop_meta.len) {
+                    const m = chunk.for_loop_meta[mi];
+                    noteFrameLocalSlotUse(resolved, &used, m.cursor_slot);
+                    noteFrameLocalSlotUse(resolved, &used, m.to_slot);
+                    noteFrameLocalSlotUse(resolved, &used, m.step_slot);
+                    noteFrameLocalSlotUse(resolved, &used, m.var_slot);
+                }
+            },
+            .each_test, .each_bind, .each_step => {
+                const mi: usize = @intCast(inst.arg_a);
+                if (mi < chunk.each_loop_meta.len) {
+                    const m = chunk.each_loop_meta[mi];
+                    noteFrameLocalSlotUse(resolved, &used, m.list_slot);
+                    noteFrameLocalSlotUse(resolved, &used, m.index_slot);
+                    noteFrameLocalSlotUse(resolved, &used, m.var_slot);
+                }
+            },
+            else => {},
+        }
+        if (used.global_hit) break;
+    }
+    if (!used.global_hit) {
+        for (chunk.param_defaults) |default| {
+            noteParamDefaultLocalUse(resolved, &used, default);
+        }
+        for (chunk.builtin_call_meta) |meta| {
+            noteFrameLocalSlotUse(resolved, &used, meta.local_slot_hint);
+        }
+    }
+    chunk.uses_global_band = used.global_hit;
+}
+
 fn trimCallableLocalCount(resolved: *const ResolvedProgram, chunk: *Chunk, allow_zero: bool) void {
     for (chunk.code) |inst| {
         switch (inst.opcode()) {
@@ -652,6 +867,25 @@ fn trimCallableLocalCount(resolved: *const ResolvedProgram, chunk: *Chunk, allow
             .branch_if_false_local,
             => noteFrameLocalSlotUse(resolved, &used, inst.arg_a),
             .load_arg => noteFrameLocalSlotUse(resolved, &used, @as(u32, chunk.arg_base) + inst.arg_a),
+            .for_test, .for_step => {
+                const mi: usize = @intCast(inst.arg_a);
+                if (mi < chunk.for_loop_meta.len) {
+                    const m = chunk.for_loop_meta[mi];
+                    noteFrameLocalSlotUse(resolved, &used, m.cursor_slot);
+                    noteFrameLocalSlotUse(resolved, &used, m.to_slot);
+                    noteFrameLocalSlotUse(resolved, &used, m.step_slot);
+                    noteFrameLocalSlotUse(resolved, &used, m.var_slot);
+                }
+            },
+            .each_test, .each_bind, .each_step => {
+                const mi: usize = @intCast(inst.arg_a);
+                if (mi < chunk.each_loop_meta.len) {
+                    const m = chunk.each_loop_meta[mi];
+                    noteFrameLocalSlotUse(resolved, &used, m.list_slot);
+                    noteFrameLocalSlotUse(resolved, &used, m.index_slot);
+                    noteFrameLocalSlotUse(resolved, &used, m.var_slot);
+                }
+            },
             else => {},
         }
     }
@@ -677,7 +911,7 @@ fn peepholeFuseSuperinstructions(
 
     for (code, 0..) |inst, i| {
         switch (inst.opcode()) {
-            .jmp, .jmp_if_false, .jmp_if_true => {
+            .jmp, .jmp_if_false, .jmp_if_true, .for_test, .for_step, .branch_local_cmp_local_false, .each_test, .each_step => {
                 const off: i32 = @bitCast(inst.arg_b);
                 const dst: i64 = @as(i64, @intCast(i)) + 1 + @as(i64, off);
                 if (dst >= 0 and dst < n) {
@@ -694,17 +928,119 @@ fn peepholeFuseSuperinstructions(
     var new_to_old: std.ArrayListUnmanaged(u32) = .empty;
     defer new_to_old.deinit(temp_alloc);
     try new_to_old.ensureTotalCapacity(temp_alloc, n);
+    var cmp_meta: std.ArrayListUnmanaged(Chunk.FusedCmpMeta) = .empty;
+    defer cmp_meta.deinit(temp_alloc);
+    var binop_meta: std.ArrayListUnmanaged(Chunk.FusedBinopMeta) = .empty;
+    defer binop_meta.deinit(temp_alloc);
 
     //All old index in [0, n) must be in each iteration of the while loop below
-    // Written in the form `old_to_new[i..i+step] = new_pc` (for any branch with i += 1/2/3).
+    // Written in the form `old_to_new[i..i+step] = new_pc` (for any branch with i += 1/2/3/4).
     // Omit memset as no initialization value is required. jmp remap pass relies on this guarantee.
     const old_to_new = try temp_alloc.alloc(u32, n);
     defer temp_alloc.free(old_to_new);
 
     var i: usize = 0;
     while (i < n) {
+        const can_quad = i + 3 < n;
         const can_triple = i + 2 < n;
         const can_double = i + 1 < n;
+
+        if (can_quad) {
+            const a = code[i];
+            const b = code[i + 1];
+            const c = code[i + 2];
+            const d = code[i + 3];
+
+            // LOAD_LOCAL s + LOAD_CONST + ADD + STORE_LOCAL s (in-place increment)
+            if (a.opcode() == .load_local and b.opcode() == .load_const and
+                c.opcode() == .add and d.opcode() == .store_local and
+                a.arg_a == 0 and b.arg_a == 0 and c.arg_a == 0 and c.arg_b == 0 and d.arg_a == 0 and
+                a.arg_b == d.arg_b and
+                a.arg_b <= std.math.maxInt(u16) and
+                !is_target[i + 1] and !is_target[i + 2] and !is_target[i + 3])
+            {
+                const slot: u16 = @truncate(a.arg_b);
+                const new_pc: u32 = std.math.cast(u32, out.items.len) orelse return error.ProgramTooLarge;
+                old_to_new[i] = new_pc;
+                old_to_new[i + 1] = new_pc;
+                old_to_new[i + 2] = new_pc;
+                old_to_new[i + 3] = new_pc;
+                try out.append(temp_alloc, Instruction.make(.local_inc_const, slot, b.arg_b));
+                try new_to_old.append(temp_alloc, @intCast(i));
+                i += 4;
+                continue;
+            }
+
+            const plain_local_pair = a.opcode() == .load_local and b.opcode() == .load_local and
+                a.arg_a == 0 and b.arg_a == 0 and
+                resolver.decodeCrossAssignSlot(a.arg_b) == null and
+                resolver.decodeCrossAssignSlot(b.arg_b) == null and
+                !is_target[i + 1] and !is_target[i + 2] and !is_target[i + 3];
+
+            // LOAD_LOCAL a + LOAD_LOCAL b + (LT|GT|LE|GE) + JMP_IF_FALSE
+            if (plain_local_pair and d.opcode() == .jmp_if_false) {
+                const cmp_op: ?Chunk.FusedCmpOp = switch (c.opcode()) {
+                    .lt => .lt,
+                    .gt => .gt,
+                    .le => .le,
+                    .ge => .ge,
+                    else => null,
+                };
+                if (cmp_op != null and c.arg_a == 0 and c.arg_b == 0 and
+                    cmp_meta.items.len <= std.math.maxInt(u16))
+                {
+                    const meta_idx: u16 = @intCast(cmp_meta.items.len);
+                    try cmp_meta.append(temp_alloc, .{
+                        .lhs_slot = a.arg_b,
+                        .rhs_slot = b.arg_b,
+                        .op = cmp_op.?,
+                    });
+                    const new_pc: u32 = std.math.cast(u32, out.items.len) orelse return error.ProgramTooLarge;
+                    old_to_new[i] = new_pc;
+                    old_to_new[i + 1] = new_pc;
+                    old_to_new[i + 2] = new_pc;
+                    old_to_new[i + 3] = new_pc;
+                    // arg_b keeps the legacy jmp offset; the remap pass below
+                    // rewrites it through old_to_new like any branch.
+                    try out.append(temp_alloc, Instruction.make(.branch_local_cmp_local_false, meta_idx, d.arg_b));
+                    try new_to_old.append(temp_alloc, @intCast(i + 3));
+                    i += 4;
+                    continue;
+                }
+            }
+
+            // LOAD_LOCAL a + LOAD_LOCAL b + (ADD|SUB|MUL) + STORE_LOCAL c
+            if (plain_local_pair and d.opcode() == .store_local and
+                resolver.decodeCrossAssignSlot(d.arg_b) == null)
+            {
+                const bin_op: ?Chunk.FusedBinOp = switch (c.opcode()) {
+                    .add => .add,
+                    .sub => .sub,
+                    .mul => .mul,
+                    else => null,
+                };
+                if (bin_op != null and c.arg_a == 0 and c.arg_b == 0 and
+                    binop_meta.items.len <= std.math.maxInt(u16))
+                {
+                    const meta_idx: u16 = @intCast(binop_meta.items.len);
+                    try binop_meta.append(temp_alloc, .{
+                        .lhs_slot = a.arg_b,
+                        .rhs_slot = b.arg_b,
+                        .dst_slot = d.arg_b,
+                        .op = bin_op.?,
+                    });
+                    const new_pc: u32 = std.math.cast(u32, out.items.len) orelse return error.ProgramTooLarge;
+                    old_to_new[i] = new_pc;
+                    old_to_new[i + 1] = new_pc;
+                    old_to_new[i + 2] = new_pc;
+                    old_to_new[i + 3] = new_pc;
+                    try out.append(temp_alloc, Instruction.make(.local_binop_local_store, meta_idx, 0));
+                    try new_to_old.append(temp_alloc, @intCast(i));
+                    i += 4;
+                    continue;
+                }
+            }
+        }
 
         if (can_triple) {
             const a = code[i];
@@ -790,6 +1126,23 @@ fn peepholeFuseSuperinstructions(
         if (can_double) {
             const d0 = code[i];
             const d1 = code[i + 1];
+            // LOAD_CONST + STORE_LOCAL
+            // Slot must fit u16 arg_a; cross-assign-encoded slots carry bit 31
+            // so the u16 bound also excludes them.
+            if (d0.opcode() == .load_const and d1.opcode() == .store_local and
+                d0.arg_a == 0 and d1.arg_a == 0 and
+                d1.arg_b <= std.math.maxInt(u16) and
+                !is_target[i + 1])
+            {
+                const slot: u16 = @truncate(d1.arg_b);
+                const new_pc: u32 = std.math.cast(u32, out.items.len) orelse return error.ProgramTooLarge;
+                old_to_new[i] = new_pc;
+                old_to_new[i + 1] = new_pc;
+                try out.append(temp_alloc, Instruction.make(.store_const_local, slot, d0.arg_b));
+                try new_to_old.append(temp_alloc, @intCast(i));
+                i += 2;
+                continue;
+            }
             // LOAD_LOCAL + JMP_IF_FALSE
             // Fused form keeps jump remapping correct because old_to_new maps the
             // original jump PC to this instruction PC.
@@ -848,7 +1201,7 @@ fn peepholeFuseSuperinstructions(
 
     for (code, 0..) |inst, j| {
         switch (inst.opcode()) {
-            .jmp, .jmp_if_false, .jmp_if_true => {
+            .jmp, .jmp_if_false, .jmp_if_true, .for_test, .for_step, .branch_local_cmp_local_false, .each_test, .each_step => {
                 const new_j: usize = @intCast(old_to_new[j]);
                 const off_old: i32 = @bitCast(inst.arg_b);
                 const dst_old: i64 = @as(i64, @intCast(j)) + 1 + @as(i64, off_old);
@@ -865,6 +1218,8 @@ fn peepholeFuseSuperinstructions(
     return .{
         .code = try arena.dupe(Instruction, out.items),
         .new_to_old = try arena.dupe(u32, new_to_old.items),
+        .fused_cmp_meta = try arena.dupe(Chunk.FusedCmpMeta, cmp_meta.items),
+        .fused_binop_meta = try arena.dupe(Chunk.FusedBinopMeta, binop_meta.items),
     };
 }
 
@@ -873,6 +1228,8 @@ fn applySuperinstructionPeephole(temp_alloc: std.mem.Allocator, arena: std.mem.A
     const old_source_locs = chunk.source_locs;
     const fused = try peepholeFuseSuperinstructions(temp_alloc, arena, chunk.code);
     chunk.code = fused.code;
+    chunk.fused_cmp_meta = fused.fused_cmp_meta;
+    chunk.fused_binop_meta = fused.fused_binop_meta;
 
     if (old_source_locs.len == old_code_len and fused.new_to_old.len == fused.code.len) {
         const mapped = try arena.alloc(Chunk.SourceLoc, fused.code.len);
@@ -908,6 +1265,11 @@ const CompileCtx = struct {
     /// declarations keep their normal whitespace collapse.
     in_loud_comment_text_outer: bool = false,
     skip_decimal_normalize: bool = false,
+    /// True while compiling an `@function` body. Functions can't emit CSS,
+    /// so the blank-retention `emit_stmt_gap` markers between sibling
+    /// statements are dead weight there (the VM either early-outs on them or
+    /// accumulates markers no rule_begin ever consumes) and are skipped.
+    in_function_body: bool = false,
 };
 
 fn selectorContextChildCtx(ctx: CompileCtx) CompileCtx {
@@ -3162,6 +3524,45 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
             // top-chunk pop_flow_scope ops (docs.scss FAIL).
             try ctx.cb.emit(.push_flow_scope, 0, 0);
 
+            const cursor_slot = remapLocalSlot(ctx, f.cursor_slot);
+            const to_slot = remapLocalSlot(ctx, f.to_slot);
+            const step_slot = remapLocalSlot(ctx, f.step_slot);
+            const var_slot = remapLocalSlot(ctx, f.slot);
+            const fused_ok = ctx.cb.for_loop_meta.items.len <= std.math.maxInt(u16) and
+                resolver.decodeCrossAssignSlot(cursor_slot) == null and
+                resolver.decodeCrossAssignSlot(to_slot) == null and
+                resolver.decodeCrossAssignSlot(step_slot) == null and
+                resolver.decodeCrossAssignSlot(var_slot) == null;
+
+            if (fused_ok) {
+                const meta_idx: u16 = @intCast(ctx.cb.for_loop_meta.items.len);
+                try ctx.cb.for_loop_meta.append(ctx.cb.alloc, .{
+                    .cursor_slot = cursor_slot,
+                    .to_slot = to_slot,
+                    .step_slot = step_slot,
+                    .var_slot = var_slot,
+                    .through = f.through,
+                });
+                const head_pc = ctx.cb.code.items.len;
+                const j_end = ctx.cb.code.items.len;
+                try ctx.cb.emit(.for_test, meta_idx, 0);
+                // Top-level direct loop leaves stmt_gap marker for each iter (first time has_output=false
+                // treats the writer as no-op, and inserts a blank from the second time onwards).
+                if (!ctx.in_function_body) try ctx.cb.emit(.emit_stmt_gap, 0, 0);
+                try compileStmtRange(ctx, f.body_start, f.body_len);
+                const j_back = ctx.cb.code.items.len;
+                try ctx.cb.emit(.for_step, meta_idx, 0);
+                const pop_pc = ctx.cb.code.items.len;
+                try ctx.cb.emit(.pop_flow_scope, 0, 0);
+                try ctx.cb.emit(.clear_local, 0, cursor_slot);
+                try ctx.cb.emit(.clear_local, 0, to_slot);
+                try ctx.cb.emit(.clear_local, 0, step_slot);
+                try ctx.cb.emit(.clear_local, 0, var_slot);
+                ctx.cb.patchJmp(j_end, pop_pc);
+                ctx.cb.patchJmp(j_back, head_pc);
+                return;
+            }
+
             const head_pc = ctx.cb.code.items.len;
             // Switch the termination condition according to direction (+1 / -1).
             // step > 0: through ? i <= to : i < to
@@ -3198,7 +3599,7 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
             // Do not include as it will generate a nested rule.
             // Place marker at the beginning of each iter. When the VM looks at the `selector_stack` depth at runtime,
             //Actually loaded into rule_ir only in top-level context (depth 0).
-            try ctx.cb.emit(.emit_stmt_gap, 0, 0);
+            if (!ctx.in_function_body) try ctx.cb.emit(.emit_stmt_gap, 0, 0);
             try compileStmtRange(ctx, f.body_start, f.body_len);
             try ctx.cb.emit(.load_local, 0, remapLocalSlot(ctx, f.cursor_slot));
             try ctx.cb.emit(.load_local, 0, remapLocalSlot(ctx, f.step_slot));
@@ -3231,43 +3632,87 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
             // matched by a single pop at exit (see @for comment above).
             try ctx.cb.emit(.push_flow_scope, 0, 0);
 
-            const head_pc = ctx.cb.code.items.len;
-            try ctx.cb.emit(.load_local, 0, remapLocalSlot(ctx, e.index_slot));
-            try ctx.cb.emit(.load_local, 0, remapLocalSlot(ctx, e.list_temp_slot));
+            const list_slot = remapLocalSlot(ctx, e.list_temp_slot);
+            const index_slot = remapLocalSlot(ctx, e.index_slot);
+            const single_var_slot: u32 = if (e.slot_count == 1)
+                remapLocalSlot(ctx, resolved.each_slots.items[e.slot_start])
+            else
+                std.math.maxInt(u32);
+            const fused_ok = ctx.cb.each_loop_meta.items.len <= std.math.maxInt(u16) and
+                resolver.decodeCrossAssignSlot(list_slot) == null and
+                resolver.decodeCrossAssignSlot(index_slot) == null and
+                (e.slot_count != 1 or resolver.decodeCrossAssignSlot(single_var_slot) == null);
             const row_arity: u16 = if (e.slot_count > 1) try checkedU16(e.slot_count, "each row arity") else 0;
-            try ctx.cb.emit(.list_len, row_arity, 0);
-            try ctx.cb.emit(.lt, 0, 0);
-            const j_end = ctx.cb.code.items.len;
-            try ctx.cb.emit(.jmp_if_false, 0, 0);
 
-            try ctx.cb.emit(.load_local, 0, remapLocalSlot(ctx, e.list_temp_slot));
-            try ctx.cb.emit(.load_local, 0, remapLocalSlot(ctx, e.index_slot));
-            try ctx.cb.emit(.list_item, row_arity, 0);
-
-            if (e.slot_count == 1) {
-                try ctx.cb.emit(.store_local, 0, remapLocalSlot(ctx, resolved.each_slots.items[e.slot_start]));
+            var head_pc: usize = undefined;
+            var j_end: usize = undefined;
+            var meta_idx: u16 = undefined;
+            if (fused_ok) {
+                meta_idx = @intCast(ctx.cb.each_loop_meta.items.len);
+                try ctx.cb.each_loop_meta.append(ctx.cb.alloc, .{
+                    .list_slot = list_slot,
+                    .index_slot = index_slot,
+                    .var_slot = single_var_slot,
+                });
+                head_pc = ctx.cb.code.items.len;
+                j_end = ctx.cb.code.items.len;
+                try ctx.cb.emit(.each_test, meta_idx, 0);
+                if (e.slot_count == 1) {
+                    try ctx.cb.emit(.each_bind, meta_idx, 0);
+                } else {
+                    try ctx.cb.emit(.load_local, 0, list_slot);
+                    try ctx.cb.emit(.load_local, 0, index_slot);
+                    try ctx.cb.emit(.list_item, row_arity, 0);
+                    try ctx.cb.emit(.unpack, try checkedU16(e.slot_count, "each slot count"), 0);
+                    var uj: u32 = e.slot_count;
+                    while (uj > 0) {
+                        uj -= 1;
+                        try ctx.cb.emit(.store_local, 0, remapLocalSlot(ctx, resolved.each_slots.items[e.slot_start + uj]));
+                    }
+                }
             } else {
-                try ctx.cb.emit(.unpack, try checkedU16(e.slot_count, "each slot count"), 0);
-                var uj: u32 = e.slot_count;
-                while (uj > 0) {
-                    uj -= 1;
-                    try ctx.cb.emit(.store_local, 0, remapLocalSlot(ctx, resolved.each_slots.items[e.slot_start + uj]));
+                head_pc = ctx.cb.code.items.len;
+                try ctx.cb.emit(.load_local, 0, index_slot);
+                try ctx.cb.emit(.load_local, 0, list_slot);
+                try ctx.cb.emit(.list_len, row_arity, 0);
+                try ctx.cb.emit(.lt, 0, 0);
+                j_end = ctx.cb.code.items.len;
+                try ctx.cb.emit(.jmp_if_false, 0, 0);
+
+                try ctx.cb.emit(.load_local, 0, list_slot);
+                try ctx.cb.emit(.load_local, 0, index_slot);
+                try ctx.cb.emit(.list_item, row_arity, 0);
+
+                if (e.slot_count == 1) {
+                    try ctx.cb.emit(.store_local, 0, single_var_slot);
+                } else {
+                    try ctx.cb.emit(.unpack, try checkedU16(e.slot_count, "each slot count"), 0);
+                    var uj: u32 = e.slot_count;
+                    while (uj > 0) {
+                        uj -= 1;
+                        try ctx.cb.emit(.store_local, 0, remapLocalSlot(ctx, resolved.each_slots.items[e.slot_start + uj]));
+                    }
                 }
             }
 
             // Place marker at the beginning of each iter. When the VM looks at the `selector_stack` depth at runtime,
             //Actually loaded into rule_ir only in top-level context (depth 0).
-            try ctx.cb.emit(.emit_stmt_gap, 0, 0);
+            if (!ctx.in_function_body) try ctx.cb.emit(.emit_stmt_gap, 0, 0);
             try compileStmtRange(ctx, e.body_start, e.body_len);
 
-            try ctx.cb.emit(.load_local, 0, remapLocalSlot(ctx, e.index_slot));
-            const one = try ctx.cb.addConst(Value.numberUnitless(1));
-            try ctx.cb.emit(.load_const, 0, one);
-            try ctx.cb.emit(.add, 0, 0);
-            try ctx.cb.emit(.store_local, 0, remapLocalSlot(ctx, e.index_slot));
-
-            const j_back = ctx.cb.code.items.len;
-            try ctx.cb.emit(.jmp, 0, 0);
+            var j_back: usize = undefined;
+            if (fused_ok) {
+                j_back = ctx.cb.code.items.len;
+                try ctx.cb.emit(.each_step, meta_idx, 0);
+            } else {
+                try ctx.cb.emit(.load_local, 0, index_slot);
+                const one = try ctx.cb.addConst(Value.numberUnitless(1));
+                try ctx.cb.emit(.load_const, 0, one);
+                try ctx.cb.emit(.add, 0, 0);
+                try ctx.cb.emit(.store_local, 0, index_slot);
+                j_back = ctx.cb.code.items.len;
+                try ctx.cb.emit(.jmp, 0, 0);
+            }
             const pop_pc = ctx.cb.code.items.len;
             try ctx.cb.emit(.pop_flow_scope, 0, 0);
             // Reset synthetic loop slots and user-visible loop vars to undeclared
@@ -3285,6 +3730,10 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
             ctx.cb.patchJmp(j_back, head_pc);
         },
         .while_loop => {
+            // Do-while conversion was measured (2026-06) on foundation-sites:
+            // -1.9% retired instructions but cycle-neutral (the per-iteration
+            // unconditional jmp predicts perfectly), so the classic head-test
+            // layout stays.
             const w = resolved.while_stmts.items[st.payload];
             try ctx.cb.emit(.push_flow_scope, 0, 0);
             const head_pc = ctx.cb.code.items.len;
@@ -3293,7 +3742,7 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
             try ctx.cb.emit(.jmp_if_false, 0, 0);
             // Place marker at the beginning of each iter. When the VM looks at the `selector_stack` depth at runtime,
             //Actually loaded into rule_ir only in top-level context (depth 0).
-            try ctx.cb.emit(.emit_stmt_gap, 0, 0);
+            if (!ctx.in_function_body) try ctx.cb.emit(.emit_stmt_gap, 0, 0);
             try compileStmtRange(ctx, w.body_start, w.body_len);
             const j_back = ctx.cb.code.items.len;
             try ctx.cb.emit(.jmp, 0, 0);
@@ -3919,7 +4368,7 @@ fn compileStmtRange(ctx: CompileCtx, start: StmtIndex, len: u32) CompileError!vo
         // no-op. hoisted nested rule (`&:hover`) has writer fallback because nest_depth>0
         // blank does not fire and blank falls if there is no pending_blank derived from this gap
         // Matches an observable CLI blank-retention case for loop body siblings.
-        if (emitted != 0) {
+        if (emitted != 0 and !ctx.in_function_body) {
             ctx.cb.setSourceSpan(ctx.resolved.stmts.items[root].span);
             try ctx.cb.emit(.emit_stmt_gap, 0, 0);
         }
@@ -3963,7 +4412,7 @@ fn compileStmtRangeHoistNested(ctx: CompileCtx, start: StmtIndex, len: u32) Comp
         // Stack into rule_ir only if selector_stack depth is 0 and open_block_depth is 0.
         // When a branch emits multiple top-level rules, preserve the blank
         // line that the official Sass CLI emits between adjacent rules.
-        if (emitted != 0) {
+        if (emitted != 0 and !ctx.in_function_body) {
             ctx.cb.setSourceSpan(ctx.resolved.stmts.items[root].span);
             try ctx.cb.emit(.emit_stmt_gap, 0, 0);
         }
@@ -4611,6 +5060,7 @@ fn compileChunkIntoArena(
         .emit_comments = ret == .void_ret,
         .callable_local_slot_base = global_slot_base,
         .callable_local_slot_bias = slot_bias,
+        .in_function_body = ret == .value_ret,
     };
     if (mixin_close_parent) {
         const effective_first_pass = try parent_alloc.alloc(bool, body_roots.len);
@@ -4859,6 +5309,17 @@ fn compileOneModule(
     };
     defer cb_scratch.deinit(parent_alloc);
 
+    // Precise module-global slot set (globals interleave with callable
+    // locals in one numbering); used by analyzeChunkGlobalBandUse.
+    var global_slot_bits = try std.DynamicBitSetUnmanaged.initEmpty(parent_alloc, resolved.max_slot);
+    defer global_slot_bits.deinit(parent_alloc);
+    {
+        var git = resolved.global_slots.valueIterator();
+        while (git.next()) |slot| {
+            if (slot.* < resolved.max_slot) global_slot_bits.set(slot.*);
+        }
+    }
+
     var mixin_chunks: std.ArrayListUnmanaged(Chunk) = .empty;
     defer mixin_chunks.deinit(arena);
     try mixin_chunks.ensureTotalCapacity(arena, resolved.mixins.items.len);
@@ -4893,6 +5354,7 @@ fn compileOneModule(
         if (!ch.has_content and !ch.captures_callers_locals) {
             trimCallableLocalCount(resolved, &ch, false);
         }
+        analyzeChunkGlobalBandUse(resolved, &ch, &global_slot_bits);
         try mixin_chunks.append(arena, ch);
     }
 
@@ -4928,6 +5390,7 @@ fn compileOneModule(
         if (!ch.captures_callers_locals) {
             trimCallableLocalCount(resolved, &ch, false);
         }
+        analyzeChunkGlobalBandUse(resolved, &ch, &global_slot_bits);
         try fn_chunks.append(arena, ch);
     }
 
@@ -5052,6 +5515,7 @@ fn compileOneModule(
         .line_starts = try arena.dupe(u32, resolved.line_starts),
         .source_len = resolved.source_len,
         .local_fallback_slots = local_fallback_slots,
+        .cross_entry_pure_top = topChunkIsCrossEntryPure(&top),
     };
 
     // Copy metadata maps
@@ -5281,6 +5745,11 @@ fn compileWithColorAllocAndCache(
     else
         try buildReachableMask(a, mods, bundle.root_index);
 
+    const module_extend_group_order: []const u32 = if (bundle.module_extend_group_order.len != 0)
+        try a.dupe(u32, bundle.module_extend_group_order)
+    else
+        &.{};
+
     return .{
         .arena = arena,
         .modules = mods,
@@ -5289,6 +5758,7 @@ fn compileWithColorAllocAndCache(
         .module_config_seeds = seeds,
         .static_eval_lists = static_eval_lists,
         .reachable_mask = reachable_mask,
+        .module_extend_group_order = module_extend_group_order,
         .shared_value_pools = bundle.shared_value_pools,
     };
 }
@@ -5462,12 +5932,14 @@ fn parseResolveCompileWithPoolPhaseTimerAndCaches(
     ast_cache: ?*ast_cache_mod.ParsedAstCache,
     deprecation_opts: ?*deprecation_mod.DeprecationOpts,
 ) !ParseResolveCompileBorrowedPoolResult {
-    return parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(allocator, source, source_path, load_paths, phase_timer, pool, source_cache, ast_cache, null, deprecation_opts);
+    return parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(allocator, source, source_path, load_paths, phase_timer, pool, source_cache, ast_cache, null, deprecation_opts, null);
 }
 
 /// Plan C: Final entry point for cross-entry resolve/compile artifact reuse.
 /// If persistent_ctx is non-null, share records / id_by_path across workers,
 /// At the resolve stage, hit the module with the same canonical path and skip re-resolve.
+/// `preamble_store` (per-worker import-preamble checkpoints) applies only to
+/// the non-persistent route; the resolver ignores it when persistent_ctx is set.
 pub fn parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
     allocator: std.mem.Allocator,
     source: []const u8,
@@ -5479,6 +5951,7 @@ pub fn parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
     ast_cache: ?*ast_cache_mod.ParsedAstCache,
     persistent_ctx: ?PersistentCompileContext,
     deprecation_opts: ?*deprecation_mod.DeprecationOpts,
+    preamble_store: ?*resolver.PreambleCheckpointStore,
 ) !ParseResolveCompileBorrowedPoolResult {
     //Has persistent_ctx  ->  color_pool owns persistent state (retains color index across entries).
     //None  ->  alloc with per-call and free with errdefer.
@@ -5528,7 +6001,7 @@ pub fn parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
 
     const resolve_start: i128 = if (phase_timer != null) observe_mod.PhaseTimer.begin() else 0;
     var resolved = (if (source_path) |p|
-        resolver.resolveWithEntryPathColorPoolCachesAndPersistent(allocator, &ast, pool, p, load_paths, color_pool_ptr, source_cache, ast_cache, if (persistent_ctx) |ctx| ctx.resolve_ctx else null, deprecation_opts)
+        resolver.resolveWithEntryPathColorPoolCachesAndPersistent(allocator, &ast, pool, p, load_paths, color_pool_ptr, source_cache, ast_cache, if (persistent_ctx) |ctx| ctx.resolve_ctx else null, deprecation_opts, preamble_store)
     else
         resolver.resolveWithColorPool(allocator, &ast, pool, color_pool_ptr)) catch |err| {
         if (verboseCompileErrorsEnabled()) {

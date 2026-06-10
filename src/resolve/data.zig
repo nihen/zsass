@@ -5,6 +5,7 @@ const intern_pool_mod = @import("../runtime/intern_pool.zig");
 const source_cache_mod = @import("source_cache.zig");
 const ast_cache_mod = @import("ast_cache.zig");
 const deprecation_mod = @import("../runtime/deprecation.zig");
+const preamble_checkpoint_mod = @import("preamble_checkpoint.zig");
 
 const InternPool = intern_pool_mod.InternPool;
 const InternId = intern_pool_mod.InternId;
@@ -464,7 +465,11 @@ pub const ResolvedProgram = struct {
     function_names: std.StringHashMapUnmanaged(FunctionId) = .empty,
 
     global_slots: std.StringHashMapUnmanaged(SlotId) = .empty,
-    global_slots_have_mixed_alias_keys: bool = false,
+    /// Canonical (all-dash) key -> slot for the global names that contain both
+    /// `-` and `_`. Such keys are unreachable through the two spelling-variant
+    /// probes, so `lookupGlobalSlot` resolves them with one hash probe here
+    /// instead of scanning `global_slots`. Almost always empty.
+    global_slots_mixed_alias: std.StringHashMapUnmanaged(SlotId) = .empty,
     /// Global variable name to be exposed as an actual module member.
     /// Do not include auxiliary slots created by unresolved references in callables.
     declared_global_names: std.StringHashMapUnmanaged(void) = .empty,
@@ -561,6 +566,7 @@ pub const ResolvedProgram = struct {
         self.mixin_names.deinit(alloc);
         self.function_names.deinit(alloc);
         self.global_slots.deinit(alloc);
+        self.global_slots_mixed_alias.deinit(alloc);
         self.declared_global_names.deinit(alloc);
         self.default_vars.deinit(alloc);
         self.use_map.deinit(alloc);
@@ -651,6 +657,13 @@ pub const ResolvedBundle = struct {
     /// Null for non-persistent (single-entry) paths (VM side works without mask).
     /// Design: `.plans/ideal/20260502-cross-entry-resolve-reuse-design.md`
     reachable_mask: ?[]bool = null,
+    /// Per-entry module ordinal for @extend module-group ordering. Maps module
+    /// id -> the dependency post-order position a fresh single-entry resolve
+    /// would assign, maxInt(u32) when the module is not reachable through
+    /// module_dep_stmts. With cross-entry persistent records the raw module id
+    /// order reflects the resolve history of earlier entries, so sorting by it
+    /// is not deterministic per entry; this table restores the per-entry order.
+    module_extend_group_order: []u32 = &.{},
     /// True if modules / reachable_mask is owned by persistent state (does not free on deinit).
     /// False for non-persistent (single-entry) (free on deinit).
     persistent_modules: bool = false,
@@ -674,6 +687,10 @@ pub const ResolvedBundle = struct {
         if (self.reachable_mask) |mask| {
             self.alloc.free(mask);
             self.reachable_mask = null;
+        }
+        if (self.module_extend_group_order.len != 0) {
+            self.alloc.free(self.module_extend_group_order);
+            self.module_extend_group_order = &.{};
         }
         if (self.import_origins.len != 0) {
             self.alloc.free(self.import_origins);
@@ -760,6 +777,10 @@ pub const ModuleResolver = struct {
     /// Set with `bindRecordsToPersistent()`.
     import_origins_ptr: *std.ArrayListUnmanaged(CssOrigin),
     import_origins_storage: std.ArrayListUnmanaged(CssOrigin) = .empty,
+    /// Per-worker import-preamble checkpoint store. Non-null only while
+    /// resolving a non-persistent batch entry; consumed by the entry root's
+    /// `resolveSingleAst` so child module resolves never see it.
+    preamble_store: ?*preamble_checkpoint_mod.PreambleCheckpointStore = null,
     visiting: std.ArrayListUnmanaged([]const u8) = .empty,
     config_seed_accum: std.AutoHashMapUnmanaged(u64, ConfigSeedAccum) = .empty,
     /// Direct `@use ... with` / `@forward ... with` entries for the next module
@@ -833,6 +854,16 @@ pub const ModuleExports = struct {
     /// export name containing `@forward "sass:meta"` mixin-only builtins.
     builtin_mixins: std.StringHashMapUnmanaged(u32) = .empty,
     placeholders: std.StringHashMapUnmanaged(void) = .empty,
+    /// Per-map: true once a stored key contains both `-` and `_`. While
+    /// false, identifier-insensitive lookups against the map can skip the
+    /// exhaustive mixed-key fallback (the two spelling variants are then
+    /// provably sufficient). Large `@forward` aggregations otherwise turn
+    /// the per-insert duplicate checks quadratic.
+    vars_has_mixed_alias_keys: bool = false,
+    default_vars_has_mixed_alias_keys: bool = false,
+    private_default_vars_has_mixed_alias_keys: bool = false,
+    mixins_has_mixed_alias_keys: bool = false,
+    functions_has_mixed_alias_keys: bool = false,
 
     pub fn deinit(self: *ModuleExports, alloc: std.mem.Allocator) void {
         self.vars.deinit(alloc);
@@ -870,6 +901,8 @@ pub const PersistentResolveContext = struct {
     import_origins: *std.ArrayListUnmanaged(CssOrigin),
     shared_value_pools: *SharedValuePoolStorage,
 };
+
+pub const PreambleCheckpointStore = preamble_checkpoint_mod.PreambleCheckpointStore;
 
 pub const ConfigSeedAccum = struct {
     explicit_set: bool = false,

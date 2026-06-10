@@ -350,6 +350,7 @@ fn compileOnePathFallible(
         ast_cache,
         persistent_ctx,
         &deprecation_opts,
+        null,
     );
     defer {
         if (!borrowed.borrowed_color_pool) borrowed.color_pool.deinit(work_alloc);

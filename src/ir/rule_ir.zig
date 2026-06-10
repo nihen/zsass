@@ -528,15 +528,17 @@ fn hasNestedCalcInDeclValue(raw: []const u8) bool {
 
 fn normalizeCalcTrailingOperatorParens(allocator: std.mem.Allocator, raw: []const u8) !?[]u8 {
     const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-    if (std.mem.indexOf(u8, trimmed, calc_interp_preserve_start)) |marker_pos| {
-        const body_start = marker_pos + calc_interp_preserve_start.len;
-        if (std.mem.indexOf(u8, trimmed[body_start..], calc_interp_preserve_end)) |end_rel| {
-            const body_end = body_start + end_rel;
-            const body = trimmed[body_start..body_end];
-            if (body.len != 0) {
-                const tail = body[body.len - 1];
-                if (tail == '*' or tail == '/') {
-                    return try std.fmt.allocPrint(allocator, "calc(({s}))", .{body});
+    if (std.mem.findScalar(u8, trimmed, '\x01') != null) {
+        if (std.mem.indexOf(u8, trimmed, calc_interp_preserve_start)) |marker_pos| {
+            const body_start = marker_pos + calc_interp_preserve_start.len;
+            if (std.mem.indexOf(u8, trimmed[body_start..], calc_interp_preserve_end)) |end_rel| {
+                const body_end = body_start + end_rel;
+                const body = trimmed[body_start..body_end];
+                if (body.len != 0) {
+                    const tail = body[body.len - 1];
+                    if (tail == '*' or tail == '/') {
+                        return try std.fmt.allocPrint(allocator, "calc(({s}))", .{body});
+                    }
                 }
             }
         }
@@ -596,6 +598,10 @@ fn declarationValueEmptyAfterLeadingMarkers(text: []const u8) bool {
 }
 
 fn containsLiteralDeclMarker(text: []const u8) bool {
+    // Both marker spellings contain '\x01' or start with '\\'; most values
+    // contain neither byte, so two scalar scans replace the substring search.
+    if (std.mem.findScalar(u8, text, '\x01') == null and
+        std.mem.findScalar(u8, text, '\\') == null) return false;
     return std.mem.find(u8, text, literal_decl_marker) != null or
         std.mem.find(u8, text, "\\1 zsass-literal-decl:") != null;
 }
@@ -611,8 +617,14 @@ fn startsWithAnyCalcDeclMarker(text: []const u8) ?usize {
 }
 
 fn containsCalcDeclMarker(text: []const u8) bool {
+    // Every marker spelling starts with '\x01' or '\\'; skip the per-position
+    // prefix checks entirely when neither byte occurs.
+    if (std.mem.findScalar(u8, text, '\x01') == null and
+        std.mem.findScalar(u8, text, '\\') == null) return false;
     var i: usize = 0;
     while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (c != '\x01' and c != '\\') continue;
         if (startsWithAnyCalcDeclMarker(text[i..]) != null) return true;
     }
     return false;
@@ -657,6 +669,7 @@ fn stripAllLiteralDeclMarkers(allocator: std.mem.Allocator, text: []const u8) ![
 }
 
 fn stripCalcInterpolationPreserveMarkers(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    if (std.mem.findScalar(u8, text, '\x01') == null) return text;
     if (std.mem.indexOf(u8, text, calc_interp_preserve_start) == null) return text;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -3948,14 +3961,12 @@ pub const RuleIR = struct {
             normalized_parse_cache.deinit(temp);
         }
 
-        const module_simple_presence = try buildModuleSimplePresence(
-            self,
-            temp,
-            intern_pool,
-            rule_nodes_by_module,
-            &normalized_parse_cache,
-        );
-        defer deinitModuleSimplePresence(temp, module_simple_presence);
+        // Presence maps are consulted only for modules that appear as an
+        // edge's target_module; build them lazily per consulted module so
+        // entries without @extend targets skip the per-selector parse work.
+        const module_simple_presence = try temp.alloc(?ModuleSimplePresence, rule_nodes_by_module.len);
+        for (module_simple_presence) |*presence| presence.* = null;
+        defer deinitLazyModuleSimplePresence(temp, module_simple_presence);
 
         var suppress_cache: std.AutoHashMapUnmanaged(InternId, bool) = .empty;
         defer suppress_cache.deinit(temp);
@@ -4060,6 +4071,17 @@ pub const RuleIR = struct {
                 };
                 const raw_target_present = blk: {
                     if (raw_present_cache.get(raw_check_key)) |v| break :blk v;
+                    if (edge.target_module < module_simple_presence.len and
+                        module_simple_presence[@intCast(edge.target_module)] == null)
+                    {
+                        module_simple_presence[@intCast(edge.target_module)] = try buildOneModuleSimplePresence(
+                            self,
+                            temp,
+                            intern_pool,
+                            rule_nodes_by_module[@intCast(edge.target_module)],
+                            &normalized_parse_cache,
+                        );
+                    }
                     const v = moduleHasRawTargetCompound(
                         self,
                         temp,
@@ -4331,39 +4353,35 @@ pub const RuleIR = struct {
         }
     }
 
-    fn buildModuleSimplePresence(
+    fn buildOneModuleSimplePresence(
         self_ir: *const RuleIR,
         allocator: std.mem.Allocator,
         intern_pool: *const InternPool,
-        rule_nodes_by_module: []const std.ArrayListUnmanaged(u32),
+        rule_nodes: std.ArrayListUnmanaged(u32),
         normalized_parse_cache: *std.AutoHashMapUnmanaged(InternId, ?*selector_mod.SelectorList),
-    ) ![]ModuleSimplePresence {
-        const result = try allocator.alloc(ModuleSimplePresence, rule_nodes_by_module.len);
-        for (result) |*presence| presence.* = .{};
-        errdefer deinitModuleSimplePresence(allocator, result);
+    ) !ModuleSimplePresence {
+        var presence: ModuleSimplePresence = .{};
+        errdefer presence.deinit(allocator);
 
-        for (rule_nodes_by_module, 0..) |rule_nodes, module_id| {
-            const presence = &result[module_id];
-            for (rule_nodes.items) |node_idx_u32| {
-                const idx: usize = @intCast(node_idx_u32);
-                const node = self_ir.nodes.items[idx];
-                const selector_id = self_ir.extra.items[node.payload];
-                const selector_intern: InternId = @enumFromInt(selector_id);
-                const selector_raw = intern_pool.get(selector_intern);
-                try collectRawSelectorSimplePresence(allocator, presence, selector_raw);
-                const parsed = getOrParseNormalizedCached(
-                    normalized_parse_cache,
-                    allocator,
-                    intern_pool,
-                    selector_intern,
-                ) orelse {
-                    presence.complete = false;
-                    continue;
-                };
-                try collectSelectorListSimplePresence(allocator, presence, parsed);
-            }
+        for (rule_nodes.items) |node_idx_u32| {
+            const idx: usize = @intCast(node_idx_u32);
+            const node = self_ir.nodes.items[idx];
+            const selector_id = self_ir.extra.items[node.payload];
+            const selector_intern: InternId = @enumFromInt(selector_id);
+            const selector_raw = intern_pool.get(selector_intern);
+            try collectRawSelectorSimplePresence(allocator, &presence, selector_raw);
+            const parsed = getOrParseNormalizedCached(
+                normalized_parse_cache,
+                allocator,
+                intern_pool,
+                selector_intern,
+            ) orelse {
+                presence.complete = false;
+                continue;
+            };
+            try collectSelectorListSimplePresence(allocator, &presence, parsed);
         }
-        return result;
+        return presence;
     }
 
     fn deinitModuleSimplePresence(
@@ -4371,6 +4389,16 @@ pub const RuleIR = struct {
         presence: []ModuleSimplePresence,
     ) void {
         for (presence) |*module_presence| module_presence.deinit(allocator);
+        allocator.free(presence);
+    }
+
+    fn deinitLazyModuleSimplePresence(
+        allocator: std.mem.Allocator,
+        presence: []?ModuleSimplePresence,
+    ) void {
+        for (presence) |*module_presence| {
+            if (module_presence.*) |*built| built.deinit(allocator);
+        }
         allocator.free(presence);
     }
 
@@ -6908,47 +6936,54 @@ pub const RuleIR = struct {
                     }
                 };
 
-                const url_normalized = try normalizeUrlSingleQuotesInDeclarationValue(allocator, current);
-                if (!(url_normalized.ptr == current.ptr and url_normalized.len == current.len)) {
-                    current = url_normalized;
-                    owned_current = url_normalized;
-                }
+                // Every sub-normalizer below keys on a quote, backslash, or
+                // parenthesis (their needles each contain one of those bytes);
+                // plain values skip all of their substring scans.
+                const may_need_subnormalizers = std.mem.findAny(u8, current, "\\('\"") != null;
 
-                const escape_normalized = try css_utils.normalizeCssValueEscapes(allocator, current);
-                if (!(escape_normalized.ptr == current.ptr and escape_normalized.len == current.len)) {
-                    if (owned_current) |owned| allocator.free(owned);
-                    current = escape_normalized;
-                    owned_current = escape_normalized;
-                }
+                if (may_need_subnormalizers) {
+                    const url_normalized = try normalizeUrlSingleQuotesInDeclarationValue(allocator, current);
+                    if (!(url_normalized.ptr == current.ptr and url_normalized.len == current.len)) {
+                        current = url_normalized;
+                        owned_current = url_normalized;
+                    }
 
-                const escape_spaced = try normalizeDeclarationEscapeTokenSpacing(allocator, current);
-                if (!(escape_spaced.ptr == current.ptr and escape_spaced.len == current.len)) {
-                    if (owned_current) |owned| allocator.free(owned);
-                    current = escape_spaced;
-                    owned_current = escape_spaced;
-                }
+                    const escape_normalized = try css_utils.normalizeCssValueEscapes(allocator, current);
+                    if (!(escape_normalized.ptr == current.ptr and escape_normalized.len == current.len)) {
+                        if (owned_current) |owned| allocator.free(owned);
+                        current = escape_normalized;
+                        owned_current = escape_normalized;
+                    }
 
-                const legacy_progid = try normalizeLegacyProgidParenSpacing(allocator, current);
-                if (!(legacy_progid.ptr == current.ptr and legacy_progid.len == current.len)) {
-                    if (owned_current) |owned| allocator.free(owned);
-                    current = legacy_progid;
-                    owned_current = legacy_progid;
-                }
+                    const escape_spaced = try normalizeDeclarationEscapeTokenSpacing(allocator, current);
+                    if (!(escape_spaced.ptr == current.ptr and escape_spaced.len == current.len)) {
+                        if (owned_current) |owned| allocator.free(owned);
+                        current = escape_spaced;
+                        owned_current = escape_spaced;
+                    }
 
-                const expression_commas = try normalizeExpressionCommaSpacing(allocator, current);
-                if (!(expression_commas.ptr == current.ptr and expression_commas.len == current.len)) {
-                    if (owned_current) |owned| allocator.free(owned);
-                    current = expression_commas;
-                    owned_current = expression_commas;
-                }
+                    const legacy_progid = try normalizeLegacyProgidParenSpacing(allocator, current);
+                    if (!(legacy_progid.ptr == current.ptr and legacy_progid.len == current.len)) {
+                        if (owned_current) |owned| allocator.free(owned);
+                        current = legacy_progid;
+                        owned_current = legacy_progid;
+                    }
 
-                // WebKit gradient syntax does not preserve leading whitespace
-                // immediately after the opening parenthesis.
-                const webkit_linear = try replaceExact.run(allocator, current, "-webkit-linear-gradient( ", "-webkit-linear-gradient(");
-                if (!(webkit_linear.ptr == current.ptr and webkit_linear.len == current.len)) {
-                    if (owned_current) |owned| allocator.free(owned);
-                    current = webkit_linear;
-                    owned_current = webkit_linear;
+                    const expression_commas = try normalizeExpressionCommaSpacing(allocator, current);
+                    if (!(expression_commas.ptr == current.ptr and expression_commas.len == current.len)) {
+                        if (owned_current) |owned| allocator.free(owned);
+                        current = expression_commas;
+                        owned_current = expression_commas;
+                    }
+
+                    // WebKit gradient syntax does not preserve leading whitespace
+                    // immediately after the opening parenthesis.
+                    const webkit_linear = try replaceExact.run(allocator, current, "-webkit-linear-gradient( ", "-webkit-linear-gradient(");
+                    if (!(webkit_linear.ptr == current.ptr and webkit_linear.len == current.len)) {
+                        if (owned_current) |owned| allocator.free(owned);
+                        current = webkit_linear;
+                        owned_current = webkit_linear;
+                    }
                 }
 
                 const normalizeWebkitUrlGradient = struct {
@@ -6998,11 +7033,13 @@ pub const RuleIR = struct {
                     }
                 };
 
-                const webkit_url_gradient = try normalizeWebkitUrlGradient.run(allocator, current);
-                if (!(webkit_url_gradient.ptr == current.ptr and webkit_url_gradient.len == current.len)) {
-                    if (owned_current) |owned| allocator.free(owned);
-                    current = webkit_url_gradient;
-                    owned_current = webkit_url_gradient;
+                if (may_need_subnormalizers) {
+                    const webkit_url_gradient = try normalizeWebkitUrlGradient.run(allocator, current);
+                    if (!(webkit_url_gradient.ptr == current.ptr and webkit_url_gradient.len == current.len)) {
+                        if (owned_current) |owned| allocator.free(owned);
+                        current = webkit_url_gradient;
+                        owned_current = webkit_url_gradient;
+                    }
                 }
 
                 if (std.mem.find(u8, current, "/*") != null or std.mem.find(u8, current, "//") != null) return current;
@@ -9089,15 +9126,18 @@ pub const RuleIR = struct {
                 }
             }
 
-            if (local_matches_opt) |local_matches| {
-                var any_local_match = false;
+            // A module without any registered extensions behaves exactly like a
+            // module whose extensions all failed to match: the apply pass would
+            // just clone the parsed list and re-serialize it. Route both shapes
+            // through the same no-match fast paths below.
+            const no_local_match = if (local_matches_opt) |local_matches| blk: {
                 for (local_matches) |is_match| {
-                    if (is_match) {
-                        any_local_match = true;
-                        break;
-                    }
+                    if (is_match) break :blk false;
                 }
-                if (!any_local_match and shouldPreserveRawSelectorWithoutExtend(selector_text)) {
+                break :blk true;
+            } else !has_extensions;
+            if (no_local_match) {
+                if (shouldPreserveRawSelectorWithoutExtend(selector_text)) {
                     try splitSelectorList(temp, selector_text, &merged);
                     if (merged.items.len == 0) continue;
                     const preserve_duplicates = selectorListHasExactDuplicateBranches(selector_text);
@@ -9122,9 +9162,14 @@ pub const RuleIR = struct {
                     );
                     continue;
                 }
-                if (!any_local_match and
-                    !selector_mod.hasParentReference(&selector_list) and
+                // The no-extensions case must keep the slow path's bogus-
+                // combinator branch filtering (`.a > {}` is omitted from the
+                // generated CSS, sass-cli-observed); selectors that contain
+                // one keep using the apply path below.
+                if (!selector_mod.hasParentReference(&selector_list) and
                     !selectorContainsPlaceholder(selector_text) and
+                    (local_matches_opt != null or
+                        !selector_helpers_mod.hasBogusCombinatorsSimple(selector_text)) and
                     (!extend_state.moduleHasPropagatedExtensions(rule_module_idx) or
                         !try extend_state.selectorHasAnyExtensionTarget(rule_module_idx, &selector_list)))
                 {
@@ -9553,7 +9598,12 @@ pub const RuleIR = struct {
                             value_owned = calc_normalized;
                         }
                     }
-                    if (!marked_literal_decl and !css_utils.containsAsciiIgnoreCase(value_text, "progid:")) {
+                    // expandHexAlphaColors only rewrites `#...` hex tokens; a
+                    // value without '#' is always returned unchanged.
+                    if (!marked_literal_decl and
+                        std.mem.findScalar(u8, value_text, '#') != null and
+                        !css_utils.containsAsciiIgnoreCase(value_text, "progid:"))
+                    {
                         const hex_alpha_expanded = try value_format.expandHexAlphaColors(temp_alloc, value_text);
                         if (!std.mem.eql(u8, hex_alpha_expanded, value_text)) {
                             if (value_owned) |owned| temp_alloc.free(owned);
@@ -9743,7 +9793,12 @@ pub const RuleIR = struct {
                             value_owned = calc_normalized;
                         }
                     }
-                    if (!marked_literal_decl and !css_utils.containsAsciiIgnoreCase(value_text, "progid:")) {
+                    // expandHexAlphaColors only rewrites `#...` hex tokens; a
+                    // value without '#' is always returned unchanged.
+                    if (!marked_literal_decl and
+                        std.mem.findScalar(u8, value_text, '#') != null and
+                        !css_utils.containsAsciiIgnoreCase(value_text, "progid:"))
+                    {
                         const hex_alpha_expanded = try value_format.expandHexAlphaColors(temp_alloc, value_text);
                         if (!std.mem.eql(u8, hex_alpha_expanded, value_text)) {
                             if (value_owned) |owned| temp_alloc.free(owned);
@@ -11124,16 +11179,18 @@ pub const RuleIR = struct {
         target: *const selector_mod.CompoundSelector,
         rule_nodes_by_module: []const std.ArrayListUnmanaged(u32),
         normalized_parse_cache: *std.AutoHashMapUnmanaged(InternId, ?*selector_mod.SelectorList),
-        module_simple_presence: []const ModuleSimplePresence,
+        module_simple_presence: []const ?ModuleSimplePresence,
     ) bool {
         const dump_debug = std.c.getenv("ZSASS_DEBUG_EXTEND_MATCH") != null;
         if (module_id < rule_nodes_by_module.len) {
             if (module_id < module_simple_presence.len) {
-                if (modulePresenceKnowsSimpleTarget(&module_simple_presence[@intCast(module_id)], target)) |known| {
-                    return known;
-                }
-                if (!modulePresenceMayContainTarget(&module_simple_presence[@intCast(module_id)], target)) {
-                    return false;
+                if (module_simple_presence[@intCast(module_id)]) |*built| {
+                    if (modulePresenceKnowsSimpleTarget(built, target)) |known| {
+                        return known;
+                    }
+                    if (!modulePresenceMayContainTarget(built, target)) {
+                        return false;
+                    }
                 }
             }
             const rule_nodes = rule_nodes_by_module[@intCast(module_id)];
@@ -11157,15 +11214,15 @@ pub const RuleIR = struct {
             if (node.kind != .rule_begin) continue;
             const node_module: u32 = if (idx < self_ir.node_source_files.items.len) self_ir.node_source_files.items[idx] else 0;
             if (node_module != module_id) continue;
-            if (node_module < module_simple_presence.len and
-                modulePresenceKnowsSimpleTarget(&module_simple_presence[@intCast(node_module)], target) != null)
-            {
-                return modulePresenceKnowsSimpleTarget(&module_simple_presence[@intCast(node_module)], target).?;
-            }
-            if (node_module < module_simple_presence.len and
-                !modulePresenceMayContainTarget(&module_simple_presence[@intCast(node_module)], target))
-            {
-                return false;
+            if (node_module < module_simple_presence.len) {
+                if (module_simple_presence[@intCast(node_module)]) |*built| {
+                    if (modulePresenceKnowsSimpleTarget(built, target)) |known| {
+                        return known;
+                    }
+                    if (!modulePresenceMayContainTarget(built, target)) {
+                        return false;
+                    }
+                }
             }
             const selector_id = self_ir.extra.items[node.payload];
             const selector_intern: InternId = @enumFromInt(selector_id);

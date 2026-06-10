@@ -2,6 +2,7 @@
 const std = @import("std");
 const shared = @import("shared.zig");
 const value_mod = @import("../runtime/value.zig");
+const intern_pool_mod = @import("../runtime/intern_pool.zig");
 
 const Value = shared.Value;
 const BuiltinContext = shared.BuiltinContext;
@@ -17,20 +18,17 @@ const bindNamedOrPositionalArgsStrict = shared.bindNamedOrPositionalArgsStrict;
 const reportArgumentTypeMismatch = shared.reportArgumentTypeMismatch;
 const argNameMatches = shared.argNameMatches;
 
-const calc_arg_marker = "\x01zsass-calc-arg:";
-const calc_interp_marker = "\x01zsass-calc-interp:";
-
 /// "Naive string key" (no calc-arg marker / no named-color-literal bit / no quoted+escape)
 /// Returns the raw key bytes if . Two keys that satisfy this are bytes equivalent  <=>  `valueEql` equivalent.
 /// otherwise key (non-string, with marker, named-color literal, quoted with escape) is
 /// Return null and do not put it in hash index, process it with linear scan bucket for special key.
-fn plainStringKeyBytes(pool: *const InternPool, v: Value) ?[]const u8 {
+fn plainStringKeyBytes(pool: *InternPool, v: Value) ?[]const u8 {
     if (v.kind() != .string) return null;
     if (v.stringNamedColorLiteral(value_mod.empty_string_flags_pool)) return null;
-    const raw = pool.get(v.stringIntern());
-    if (std.mem.startsWith(u8, raw, calc_arg_marker) or std.mem.startsWith(u8, raw, calc_interp_marker)) return null;
-    if (v.stringQuoted(value_mod.empty_string_flags_pool) and pool.hasBackslash(v.stringIntern())) return null;
-    return raw;
+    const id = v.stringIntern();
+    if (pool.hasCalcMarkerPrefix(id)) return null;
+    if (v.stringQuoted(value_mod.empty_string_flags_pool) and pool.hasBackslash(id)) return null;
+    return pool.get(id);
 }
 
 const pushListWithMeta = shared.pushListWithMeta;
@@ -40,7 +38,21 @@ fn pushMapPairs(ctx: *BuiltinContext, pairs: []const Value) BuiltinError!Value {
     return pushListWithMeta(ctx, pairs, separator, false, true);
 }
 
-const pushCommaList = shared.pushCommaList;
+/// Push an exactly-sized owned pair buffer without re-duplicating it.
+fn pushMapPairsOwned(ctx: *BuiltinContext, owned: []Value) BuiltinError!Value {
+    const separator: ListSeparator = if (owned.len == 0) .undecided else .comma;
+    return shared.pushListOwnedWithMeta(ctx, owned, separator, false, true);
+}
+
+/// Shrink an owned result buffer to its used length before handing it to the
+/// pool, so a later `allocator.free(row)` sees the exact allocation.
+fn shrinkOwned(ctx: *BuiltinContext, buf: []Value, used: usize) BuiltinError![]Value {
+    if (used == buf.len) return buf;
+    return ctx.allocator.realloc(buf, used) catch |err| {
+        ctx.allocator.free(buf);
+        return err;
+    };
+}
 
 fn mapPairsStrict(ctx: *BuiltinContext, v: Value) BuiltinError![]const Value {
     if (v.kind() != .list) return error.BuiltinType;
@@ -58,12 +70,65 @@ fn mapKeyEq(ctx: *BuiltinContext, a: Value, b: Value) bool {
     return valueEql(ctx, a, b);
 }
 
-fn lookupValue(ctx: *BuiltinContext, pairs: []const Value, key: Value) ?Value {
+const calc_meta_mask: u8 = intern_pool_mod.meta_has_calc_paren | intern_pool_mod.meta_has_calc_marker;
+
+/// Needle analysis hoisted out of map key scans. A "plain" needle is a
+/// non-named-color string without calc marker/`calc(` text and without
+/// quoted backslash escapes; for two such strings `valueEql` reduces to a
+/// byte comparison, so the per-key compare can skip the generic equality
+/// machinery. Everything else scans with `valueEql` unchanged.
+const ScanNeedle = struct {
+    plain: bool,
+    id: InternId = .none,
+    bytes: []const u8 = &.{},
+
+    fn from(ctx: *BuiltinContext, key: Value) ScanNeedle {
+        if (key.kind() != .string) return .{ .plain = false };
+        if (key.stringNamedColorLiteral(value_mod.empty_string_flags_pool)) return .{ .plain = false };
+        const id = key.stringIntern();
+        if ((ctx.intern_pool.calcMetaByte(id) & calc_meta_mask) != 0) return .{ .plain = false };
+        if (key.stringQuoted(value_mod.empty_string_flags_pool) and ctx.intern_pool.hasBackslash(id)) return .{ .plain = false };
+        return .{ .plain = true, .id = id, .bytes = ctx.intern_pool.get(id) };
+    }
+};
+
+/// First matching key's pair index in `pairs[0..len]`, or null.
+/// Mirrors a `valueEql` linear scan exactly; the plain-needle branch only
+/// short-circuits cases proven equivalent to a byte comparison.
+fn scanPairsForKey(ctx: *BuiltinContext, pairs: []const Value, len: usize, key: Value, needle: ScanNeedle) ?usize {
     var i: usize = 0;
-    while (i + 1 < pairs.len) : (i += 2) {
-        if (mapKeyEq(ctx, pairs[i], key)) return pairs[i + 1];
+    if (needle.plain) {
+        while (i + 1 < len) : (i += 2) {
+            const cand = pairs[i];
+            if (cand.kind() != .string) continue;
+            // Same named-color-literal flag ordering as valueEqInner: flag
+            // mismatch is unequal even for an identical intern id.
+            if (cand.stringNamedColorLiteral(value_mod.empty_string_flags_pool)) continue;
+            const cid = cand.stringIntern();
+            if (cid == needle.id) return i;
+            if ((ctx.intern_pool.calcMetaByte(cid) & calc_meta_mask) != 0 or
+                (cand.stringQuoted(value_mod.empty_string_flags_pool) and ctx.intern_pool.hasBackslash(cid)))
+            {
+                // Non-plain candidate (calc text/marker or quoted escapes)
+                // can still equal the needle after normalization.
+                if (mapKeyEq(ctx, cand, key)) return i;
+                continue;
+            }
+            const cb = ctx.intern_pool.get(cid);
+            if (cb.len == needle.bytes.len and std.mem.eql(u8, cb, needle.bytes)) return i;
+        }
+        return null;
+    }
+    while (i + 1 < len) : (i += 2) {
+        if (mapKeyEq(ctx, pairs[i], key)) return i;
     }
     return null;
+}
+
+fn lookupValue(ctx: *BuiltinContext, pairs: []const Value, key: Value) ?Value {
+    const needle = ScanNeedle.from(ctx, key);
+    const idx = scanPairsForKey(ctx, pairs, pairs.len, key, needle) orelse return null;
+    return pairs[idx + 1];
 }
 
 /// O(1) lookup using hash index associated with list_handle (fallback is linear).
@@ -157,30 +222,24 @@ fn mergeTwoMapsShallowPairs(ctx: *BuiltinContext, base: []const Value, overlay: 
         return mergeTwoMapsShallowPairsHashed(ctx, base, overlay);
     }
 
-    var out: std.ArrayListUnmanaged(Value) = .empty;
-    defer out.deinit(ctx.allocator);
-    try out.ensureTotalCapacity(ctx.allocator, base.len + overlay.len);
-    try out.appendSlice(ctx.allocator, base);
+    const out_buf = try ctx.allocator.alloc(Value, base.len + overlay.len);
+    @memcpy(out_buf[0..base.len], base);
+    var len: usize = base.len;
 
     var i: usize = 0;
     while (i + 1 < overlay.len) : (i += 2) {
         const key = overlay[i];
         const val = overlay[i + 1];
-        var replaced = false;
-        var oi: usize = 0;
-        while (oi + 1 < out.items.len) : (oi += 2) {
-            if (mapKeyEq(ctx, out.items[oi], key)) {
-                out.items[oi + 1] = try cloneValueDeep(ctx, val);
-                replaced = true;
-                break;
-            }
-        }
-        if (!replaced) {
-            try out.append(ctx.allocator, key);
-            try out.append(ctx.allocator, try cloneValueDeep(ctx, val));
+        const needle = ScanNeedle.from(ctx, key);
+        if (scanPairsForKey(ctx, out_buf, len, key, needle)) |oi| {
+            out_buf[oi + 1] = val;
+        } else {
+            out_buf[len] = key;
+            out_buf[len + 1] = val;
+            len += 2;
         }
     }
-    return pushMapPairs(ctx, out.items);
+    return pushMapPairsOwned(ctx, try shrinkOwned(ctx, out_buf, len));
 }
 
 fn mergeTwoMapsShallowPairsHashed(ctx: *BuiltinContext, base: []const Value, overlay: []const Value) BuiltinError!Value {
@@ -351,25 +410,19 @@ fn nestedMapMerge(ctx: *BuiltinContext, base: Value, keys: []const Value, overla
 }
 
 fn replaceOrInsertKey(ctx: *BuiltinContext, pairs: []const Value, key: Value, new_val: Value) BuiltinError!Value {
-    var out: std.ArrayListUnmanaged(Value) = .empty;
-    defer out.deinit(ctx.allocator);
-    var replaced = false;
-    var i: usize = 0;
-    while (i + 1 < pairs.len) : (i += 2) {
-        if (!replaced and mapKeyEq(ctx, pairs[i], key)) {
-            try out.append(ctx.allocator, pairs[i]);
-            try out.append(ctx.allocator, try cloneValueDeep(ctx, new_val));
-            replaced = true;
-        } else {
-            try out.append(ctx.allocator, pairs[i]);
-            try out.append(ctx.allocator, try cloneValueDeep(ctx, pairs[i + 1]));
-        }
+    const pair_region = pairs.len - (pairs.len % 2);
+    const out_buf = try ctx.allocator.alloc(Value, pair_region + 2);
+    @memcpy(out_buf[0..pair_region], pairs[0..pair_region]);
+    var len: usize = pair_region;
+    const needle = ScanNeedle.from(ctx, key);
+    if (scanPairsForKey(ctx, out_buf, len, key, needle)) |i| {
+        out_buf[i + 1] = new_val;
+    } else {
+        out_buf[len] = key;
+        out_buf[len + 1] = new_val;
+        len += 2;
     }
-    if (!replaced) {
-        try out.append(ctx.allocator, key);
-        try out.append(ctx.allocator, try cloneValueDeep(ctx, new_val));
-    }
-    return pushMapPairs(ctx, out.items);
+    return pushMapPairsOwned(ctx, try shrinkOwned(ctx, out_buf, len));
 }
 
 fn mapSetPathImmutable(
@@ -424,14 +477,7 @@ fn mapSetPathImmutable(
 }
 
 fn clonePairsContent(ctx: *BuiltinContext, pairs: []const Value) BuiltinError!Value {
-    var out: std.ArrayListUnmanaged(Value) = .empty;
-    defer out.deinit(ctx.allocator);
-    var i: usize = 0;
-    while (i + 1 < pairs.len) : (i += 2) {
-        try out.append(ctx.allocator, pairs[i]);
-        try out.append(ctx.allocator, try cloneValueDeep(ctx, pairs[i + 1]));
-    }
-    return pushMapPairs(ctx, out.items);
+    return pushMapPairs(ctx, pairs[0 .. pairs.len - (pairs.len % 2)]);
 }
 
 fn mapDeepRemovePathImmutable(ctx: *BuiltinContext, base_pairs: []const Value, keys: []const Value) BuiltinError!Value {
@@ -553,42 +599,44 @@ pub fn map_remove(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
         }
     }
 
-    var tmp: std.ArrayListUnmanaged(Value) = .empty;
-    defer tmp.deinit(ctx.allocator);
-
+    const out_buf = try ctx.allocator.alloc(Value, map_pairs.len - (map_pairs.len % 2));
+    var len: usize = 0;
     var i: usize = 0;
     outer: while (i + 1 < map_pairs.len) : (i += 2) {
         for (keys_to_remove.items) |rk| {
             if (mapKeyEq(ctx, map_pairs[i], rk)) continue :outer;
         }
-        try tmp.append(ctx.allocator, map_pairs[i]);
-        try tmp.append(ctx.allocator, map_pairs[i + 1]);
+        out_buf[len] = map_pairs[i];
+        out_buf[len + 1] = map_pairs[i + 1];
+        len += 2;
     }
-    return pushMapPairs(ctx, tmp.items);
+    return pushMapPairsOwned(ctx, try shrinkOwned(ctx, out_buf, len));
 }
 
 pub fn map_keys(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 1);
     const pairs = try expectMapArg(ctx, "map", args[0]);
-    var keys_out: std.ArrayListUnmanaged(Value) = .empty;
-    defer keys_out.deinit(ctx.allocator);
+    const out_buf = try ctx.allocator.alloc(Value, pairs.len / 2);
     var i: usize = 0;
+    var j: usize = 0;
     while (i + 1 < pairs.len) : (i += 2) {
-        try keys_out.append(ctx.allocator, pairs[i]);
+        out_buf[j] = pairs[i];
+        j += 1;
     }
-    return pushCommaList(ctx, keys_out.items);
+    return shared.pushListOwnedWithMeta(ctx, out_buf, .comma, false, false);
 }
 
 pub fn map_values(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 1);
     const pairs = try expectMapArg(ctx, "map", args[0]);
-    var vals: std.ArrayListUnmanaged(Value) = .empty;
-    defer vals.deinit(ctx.allocator);
+    const out_buf = try ctx.allocator.alloc(Value, pairs.len / 2);
     var i: usize = 0;
+    var j: usize = 0;
     while (i + 1 < pairs.len) : (i += 2) {
-        try vals.append(ctx.allocator, pairs[i + 1]);
+        out_buf[j] = pairs[i + 1];
+        j += 1;
     }
-    return pushCommaList(ctx, vals.items);
+    return shared.pushListOwnedWithMeta(ctx, out_buf, .comma, false, false);
 }
 
 pub fn map_deep_merge(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {

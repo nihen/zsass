@@ -36,6 +36,7 @@ const resolver_eval_test_env_mod = @import("resolver_eval_test_env.zig");
 const vm_selector_resolve = @import("vm_selector_resolve.zig");
 const vm_emit = @import("vm_emit.zig");
 const vm_cross_module = @import("vm_cross_module.zig");
+const cross_entry_state_mod = @import("cross_entry_state.zig");
 const vm_dispatch = @import("vm_dispatch.zig");
 const origin_mod = @import("origin.zig");
 const InternPool = intern_pool_mod.InternPool;
@@ -144,6 +145,114 @@ fn fuzzyNumberOrder(a: f64, b: f64) std.math.Order {
     return std.math.order(a, b);
 }
 
+/// Chunked LIFO allocator for call-frame slot storage (locals / declared /
+/// global_writeback). Call frames strictly nest, so a frame's slot memory is
+/// reclaimed by rolling back to the marker captured at frame push. Blocks are
+/// pointer-stable: existing blocks are never reallocated, only new blocks are
+/// appended, so live `[]Value` slices stay valid while their frame is alive.
+/// Reusing the same blocks across calls keeps the working set small (the old
+/// program-arena strategy grew by full-module slot space on every call).
+pub const FrameSlotPool = struct {
+    const value_block_len: usize = 16 * 1024;
+    const bool_block_len: usize = 16 * 1024;
+
+    value_blocks: std.ArrayListUnmanaged([]Value) = .empty,
+    bool_blocks: std.ArrayListUnmanaged([]bool) = .empty,
+    value_cur: usize = 0,
+    value_used: usize = 0,
+    bool_cur: usize = 0,
+    bool_used: usize = 0,
+
+    pub const empty: FrameSlotPool = .{};
+
+    pub const Marker = struct {
+        value_cur: usize = 0,
+        value_used: usize = 0,
+        bool_cur: usize = 0,
+        bool_used: usize = 0,
+    };
+
+    pub fn deinit(self: *FrameSlotPool, allocator: std.mem.Allocator) void {
+        for (self.value_blocks.items) |block| allocator.free(block);
+        self.value_blocks.deinit(allocator);
+        for (self.bool_blocks.items) |block| allocator.free(block);
+        self.bool_blocks.deinit(allocator);
+        self.* = .empty;
+    }
+
+    pub fn mark(self: *const FrameSlotPool) Marker {
+        return .{
+            .value_cur = self.value_cur,
+            .value_used = self.value_used,
+            .bool_cur = self.bool_cur,
+            .bool_used = self.bool_used,
+        };
+    }
+
+    pub fn release(self: *FrameSlotPool, m: Marker) void {
+        self.value_cur = m.value_cur;
+        self.value_used = m.value_used;
+        self.bool_cur = m.bool_cur;
+        self.bool_used = m.bool_used;
+    }
+
+    pub fn allocValues(self: *FrameSlotPool, allocator: std.mem.Allocator, n: usize) std.mem.Allocator.Error![]Value {
+        if (n == 0) return &.{};
+        if (self.value_blocks.items.len == 0) {
+            const block = try allocator.alloc(Value, @max(n, value_block_len));
+            try self.value_blocks.append(allocator, block);
+            self.value_cur = 0;
+            self.value_used = 0;
+        }
+        var block = self.value_blocks.items[self.value_cur];
+        if (block.len - self.value_used < n) {
+            // Advance to the next block (allocating one if needed). The tail
+            // of the current block is skipped; release() reclaims it.
+            if (self.value_cur + 1 < self.value_blocks.items.len and
+                self.value_blocks.items[self.value_cur + 1].len >= n)
+            {
+                self.value_cur += 1;
+            } else {
+                const new_block = try allocator.alloc(Value, @max(n, value_block_len));
+                try self.value_blocks.insert(allocator, self.value_cur + 1, new_block);
+                self.value_cur += 1;
+            }
+            self.value_used = 0;
+            block = self.value_blocks.items[self.value_cur];
+        }
+        const out = block[self.value_used .. self.value_used + n];
+        self.value_used += n;
+        return out;
+    }
+
+    pub fn allocBools(self: *FrameSlotPool, allocator: std.mem.Allocator, n: usize) std.mem.Allocator.Error![]bool {
+        if (n == 0) return &.{};
+        if (self.bool_blocks.items.len == 0) {
+            const block = try allocator.alloc(bool, @max(n, bool_block_len));
+            try self.bool_blocks.append(allocator, block);
+            self.bool_cur = 0;
+            self.bool_used = 0;
+        }
+        var block = self.bool_blocks.items[self.bool_cur];
+        if (block.len - self.bool_used < n) {
+            if (self.bool_cur + 1 < self.bool_blocks.items.len and
+                self.bool_blocks.items[self.bool_cur + 1].len >= n)
+            {
+                self.bool_cur += 1;
+            } else {
+                const new_block = try allocator.alloc(bool, @max(n, bool_block_len));
+                try self.bool_blocks.insert(allocator, self.bool_cur + 1, new_block);
+                self.bool_cur += 1;
+            }
+            self.bool_used = 0;
+            block = self.bool_blocks.items[self.bool_cur];
+        }
+        const out = block[self.bool_used .. self.bool_used + n];
+        self.bool_used += n;
+        return out;
+    }
+};
+
 pub const Frame = struct {
     locals: []Value,
     declared: []bool = &.{},
@@ -173,6 +282,15 @@ pub const Frame = struct {
     /// `call_content` automatically opens maybe-current rule for hidden selector context
     /// Close on content frame return.
     auto_close_current_rule_on_return: bool = false,
+    /// FrameSlotPool position captured before this frame's slot storage was
+    /// allocated; rolling back to it on return reclaims locals/declared/
+    /// global_writeback in LIFO order.
+    slot_pool_marker: FrameSlotPool.Marker = .{},
+    /// True when the callee chunk's `uses_global_band` analysis proved the
+    /// global band of `locals` is never observed, so the band was left
+    /// uninitialized (declared[band] is still false) and global write-back
+    /// on return must be skipped.
+    global_band_skipped: bool = false,
 };
 
 const ContentBinding = struct {
@@ -310,6 +428,17 @@ pub const VM = struct {
     stack_source_spans: std.ArrayListUnmanaged(Span) = .empty,
     track_stack_source_spans: bool = false,
     frame_stack: std.ArrayListUnmanaged(Frame) = .empty,
+    frame_slot_pool: FrameSlotPool = .empty,
+    /// Optional per-worker cross-entry module global-state cache. When set
+    /// (multi-entry batch with persistent resolve/compile reuse), pure-top
+    /// dependency modules are seeded from snapshots and skipped instead of
+    /// re-executed on later entries.
+    cross_entry_states: ?*cross_entry_state_mod.CrossEntryModuleStates = null,
+    /// Per-run config-taint closure: tainted[mid] is true when module mid is
+    /// statically configured (@use/@forward ... with) or (transitively)
+    /// observes a configured module, making its global end-state
+    /// entry-specific and thus excluded from cross-entry replay.
+    cross_entry_tainted: []bool = &.{},
     flow_scope_stack: std.ArrayListUnmanaged(FlowScope) = .empty,
     flow_saved_slots: std.ArrayListUnmanaged(FlowSavedSlot) = .empty,
     list_pool: std.ArrayListUnmanaged([]Value) = .empty,
@@ -558,6 +687,7 @@ pub const VM = struct {
             stack: std.ArrayListUnmanaged(Value),
             stack_source_spans: std.ArrayListUnmanaged(Span),
             frame_stack: std.ArrayListUnmanaged(Frame),
+            frame_slot_pool: FrameSlotPool,
             flow_scope_stack: std.ArrayListUnmanaged(FlowScope),
             flow_saved_slots: std.ArrayListUnmanaged(FlowSavedSlot),
             selector_stack: std.ArrayListUnmanaged(InternId),
@@ -628,6 +758,8 @@ pub const VM = struct {
         self.stack.deinit(self.allocator);
         self.stack_source_spans.deinit(self.allocator);
         self.frame_stack.deinit(self.allocator);
+        self.frame_slot_pool.deinit(self.allocator);
+        if (self.cross_entry_tainted.len != 0) self.allocator.free(self.cross_entry_tainted);
         self.flow_scope_stack.deinit(self.allocator);
         self.flow_saved_slots.deinit(self.allocator);
         self.list_pool.deinit(self.allocator);
@@ -1170,7 +1302,17 @@ pub const VM = struct {
         }
         const dist = self.moduleStableDistance(source_module, canonical_target_module) orelse return null;
         const dist_capped: u32 = if (dist > 0xFFFF) 0xFFFF else dist;
-        const source_capped: u32 = if (source_module > 0xFFFF) 0xFFFF else source_module;
+        // Low 16 bits order modules by per-entry load order. Raw module ids
+        // match that order only for a fresh single-entry resolve; with
+        // cross-entry persistent records the ids are global, so use the
+        // per-entry dependency post-order ordinal instead.
+        const group_order = self.program.module_extend_group_order;
+        const source_ordinal: u32 = if (source_module < group_order.len and
+            group_order[source_module] != std.math.maxInt(u32))
+            group_order[source_module]
+        else
+            source_module;
+        const source_capped: u32 = if (source_ordinal > 0xFFFF) 0xFFFF else source_ordinal;
         return ((0xFFFF - dist_capped) << 16) | source_capped;
     }
 
@@ -1526,6 +1668,318 @@ pub const VM = struct {
         return false;
     }
 
+    /// Whether `value` (recursively) can be moved across entries: only value
+    /// kinds we can re-materialize by value, with no sidecar state keyed by
+    /// this VM's list handles (slash-preserve, arglist keywords, source
+    /// shapes). A false here disqualifies the whole module snapshot.
+    fn crossEntryValueMovable(self: *const VM, value: Value) bool {
+        switch (value.kind()) {
+            .nil, .boolean, .string, .number, .color => return true,
+            .list => {
+                const handle: u32 = value.listHandle();
+                const hidx: usize = @intCast(handle);
+                if (hidx >= self.list_pool.items.len) return false;
+                if (self.slash_list_preserve.contains(handle)) return false;
+                if (self.arglist_keyword_lists.contains(handle)) return false;
+                if (self.list_source_shapes.contains(handle)) return false;
+                for (self.list_pool.items[hidx]) |item| {
+                    if (!self.crossEntryValueMovable(item)) return false;
+                }
+                return true;
+            },
+            else => return false, // callable / calc_fragment / interp_fragment
+        }
+    }
+
+    fn cloneValueIntoCrossEntryCache(
+        self: *const VM,
+        cache: *cross_entry_state_mod.CrossEntryModuleStates,
+        value: Value,
+    ) std.mem.Allocator.Error!Value {
+        switch (value.kind()) {
+            .number => {
+                const unit = value.unitId(&self.number_pool);
+                if (unit == .none) return value;
+                return try Value.number(value.asF64(&self.number_pool), unit, &cache.number_pool, cache.allocator);
+            },
+            .color => {
+                const entry = value.colorEntry(self.color_pool).*;
+                const handle = try value_mod.pushColorEntry(&cache.color_pool, cache.allocator, entry);
+                return Value.colorWithHandle(handle);
+            },
+            .list => {
+                const src_items = self.list_pool.items[@intCast(value.listHandle())];
+                const dst_items = try cache.allocator.alloc(Value, src_items.len);
+                errdefer cache.allocator.free(dst_items);
+                for (src_items, 0..) |item, i| {
+                    dst_items[i] = try self.cloneValueIntoCrossEntryCache(cache, item);
+                }
+                const dst_handle: u32 = std.math.cast(u32, cache.list_pool.items.len) orelse return error.OutOfMemory;
+                try cache.list_pool.append(cache.allocator, dst_items);
+                return Value.listWithMetaEx(
+                    dst_handle,
+                    value.listSeparator(self.list_meta_pool.items),
+                    value.listBracketed(self.list_meta_pool.items),
+                    value.listIsMap(self.list_meta_pool.items),
+                    value.listCoerceSlash(self.list_meta_pool.items),
+                );
+            },
+            else => return value,
+        }
+    }
+
+    fn materializeValueFromCrossEntryCache(
+        self: *VM,
+        cache: *const cross_entry_state_mod.CrossEntryModuleStates,
+        value: Value,
+    ) std.mem.Allocator.Error!Value {
+        switch (value.kind()) {
+            .number => {
+                const unit = value.unitId(&cache.number_pool);
+                if (unit == .none) return value;
+                return try Value.number(value.asF64(&cache.number_pool), unit, &self.number_pool, self.allocator);
+            },
+            .color => {
+                const entry = value.colorEntry(&cache.color_pool).*;
+                const handle = try value_mod.pushColorEntry(self.color_pool, self.allocator, entry);
+                return Value.colorWithHandle(handle);
+            },
+            .list => {
+                const src_items = cache.list_pool.items[@intCast(value.listHandle())];
+                const dst_items = try self.allocator.alloc(Value, src_items.len);
+                errdefer self.allocator.free(dst_items);
+                for (src_items, 0..) |item, i| {
+                    dst_items[i] = try self.materializeValueFromCrossEntryCache(cache, item);
+                }
+                const dst_handle: u32 = std.math.cast(u32, self.list_pool.items.len) orelse return error.OutOfMemory;
+                try self.list_pool.append(self.allocator, dst_items);
+                return Value.listWithMetaEx(
+                    dst_handle,
+                    value.listSeparator(value_mod.empty_list_meta_pool),
+                    value.listBracketed(value_mod.empty_list_meta_pool),
+                    value.listIsMap(value_mod.empty_list_meta_pool),
+                    value.listCoerceSlash(value_mod.empty_list_meta_pool),
+                );
+            },
+            else => return value,
+        }
+    }
+
+    fn moduleEligibleForCrossEntryStates(self: *const VM, module_id: usize) bool {
+        if (module_id == self.program.root_index) return false;
+        if (module_id >= self.program.modules.len) return false;
+        if (self.program.reachable_mask) |mask| {
+            if (module_id >= mask.len or !mask[module_id]) return false;
+        }
+        if (module_id >= self.mod_globals_bufs.len or module_id >= self.mod_global_declared_bufs.len) return false;
+        if (module_id >= self.executed_modules.len) return false;
+        if (module_id >= self.cross_entry_tainted.len or self.cross_entry_tainted[module_id]) return false;
+        const mod = &self.program.modules[module_id];
+        if (!mod.cross_entry_pure_top) return false;
+        if (mod.module_path.len == 0) return false;
+        return true;
+    }
+
+    /// One pass over a chunk collecting cross-module observation edges into
+    /// `deps` (any opcode carrying a target module id, plus cross-assign
+    /// encoded slots).
+    fn noteChunkCrossModuleDeps(chunk: *const Chunk, deps: *std.DynamicBitSetUnmanaged) void {
+        for (chunk.code) |inst| {
+            switch (inst.opcode()) {
+                .run_dependency, .call_mixin, .call_function => {
+                    const dep: usize = @intCast(inst.arg_a);
+                    if (dep < deps.bit_length) deps.set(dep);
+                },
+                .load_mod_global, .load_mod_global_strict => {
+                    const dep: usize = @intCast(inst.arg_a);
+                    if (dep < deps.bit_length) deps.set(dep);
+                },
+                .load_local, .load_local_strict, .store_local, .store_local_writeback, .clear_local => {
+                    if (resolver_mod.decodeCrossAssignSlot(inst.arg_b)) |target| {
+                        const dep: usize = @intCast(target.module_id);
+                        if (dep < deps.bit_length) deps.set(dep);
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+
+    /// Compute the per-run config-taint closure: start from statically
+    /// configured modules and propagate backwards along "module A observes
+    /// module B" edges collected from every chunk of A (top, mixins,
+    /// functions, content, placeholders). Over-tainting is safe; it only
+    /// reduces cache coverage.
+    fn computeCrossEntryTaint(self: *VM) VMError!void {
+        const n = self.program.modules.len;
+        if (self.cross_entry_tainted.len != 0) {
+            self.allocator.free(self.cross_entry_tainted);
+            self.cross_entry_tainted = &.{};
+        }
+        const tainted = try self.allocator.alloc(bool, n);
+        @memset(tainted, false);
+        for (self.program.module_config_seeds) |seed| {
+            if (seed.module_id < n) tainted[seed.module_id] = true;
+        }
+
+        // Collect each module's observed-module set once.
+        var deps_storage = try self.allocator.alloc(std.DynamicBitSetUnmanaged, n);
+        var inited: usize = 0;
+        defer {
+            for (deps_storage[0..inited]) |*bits| bits.deinit(self.allocator);
+            self.allocator.free(deps_storage);
+        }
+        for (deps_storage) |*bits| {
+            bits.* = try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, n);
+            inited += 1;
+        }
+        for (self.program.modules, 0..) |*mod, mid| {
+            const deps = &deps_storage[mid];
+            noteChunkCrossModuleDeps(&mod.top, deps);
+            for (mod.mixins) |*c| noteChunkCrossModuleDeps(c, deps);
+            for (mod.functions) |*c| noteChunkCrossModuleDeps(c, deps);
+            for (mod.content_blocks) |*c| noteChunkCrossModuleDeps(c, deps);
+            for (mod.placeholder_blocks) |*c| noteChunkCrossModuleDeps(c, deps);
+        }
+
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (0..n) |mid| {
+                if (tainted[mid]) continue;
+                var it = deps_storage[mid].iterator(.{});
+                while (it.next()) |dep| {
+                    if (tainted[dep]) {
+                        tainted[mid] = true;
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        self.cross_entry_tainted = tainted;
+    }
+
+    /// Restore snapshotted global end-states for pure-top dependency modules
+    /// and mark them executed, so run_dependency skips their top chunks.
+    ///
+    /// A module may only be skipped when its whole dependency closure is
+    /// skipped too: marking a module executed suppresses its top, including
+    /// the run_dependency instructions that would have started its children.
+    /// A child that cannot be replayed (impure, uncached) therefore
+    /// disqualifies every ancestor, which then re-runs normally and starts
+    /// that child itself.
+    fn seedModulesFromCrossEntryStates(self: *VM) VMError!void {
+        const cache = self.cross_entry_states orelse return;
+        // meta.load-css shadow runs have their own state seeding/rerun
+        // semantics; never interfere with them.
+        if (self.load_css_module_tag_override != null) return;
+        try self.computeCrossEntryTaint();
+
+        const n = self.program.modules.len;
+        const seedable = try self.allocator.alloc(bool, n);
+        defer self.allocator.free(seedable);
+        for (self.program.modules, 0..) |*mod, mid| {
+            seedable[mid] = blk: {
+                if (!self.moduleEligibleForCrossEntryStates(mid)) break :blk false;
+                // A load-css snapshot for this path carries configured state
+                // and must win over the unconfigured cross-entry snapshot.
+                if (self.load_css_state_ptr) |m| {
+                    if (m.contains(mod.module_path)) break :blk false;
+                }
+                const saved = cache.map.get(mod.module_path) orelse break :blk false;
+                if (saved.values.len != self.mod_globals_bufs[mid].len) break :blk false;
+                if (saved.declared.len != self.mod_global_declared_bufs[mid].len) break :blk false;
+                break :blk true;
+            };
+        }
+
+        // Fixpoint: a module stays seedable only if every module its top
+        // starts (run_dependency) is seedable as well.
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (self.program.modules, 0..) |*mod, mid| {
+                if (!seedable[mid]) continue;
+                for (mod.top.code) |inst| {
+                    if (inst.opcode() != .run_dependency) continue;
+                    const dep: usize = @intCast(inst.arg_a);
+                    if (dep >= n or !seedable[dep]) {
+                        seedable[mid] = false;
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        for (self.program.modules, 0..) |*mod, mid| {
+            if (!seedable[mid]) continue;
+            const saved = cache.map.get(mod.module_path) orelse continue;
+            const dst_values = self.mod_globals_bufs[mid];
+            const dst_declared = self.mod_global_declared_bufs[mid];
+            for (saved.values, 0..) |sv, i| {
+                dst_values[i] = try self.materializeValueFromCrossEntryCache(cache, sv);
+            }
+            @memcpy(dst_declared, saved.declared);
+            self.executed_modules[mid] = true;
+            try self.markLoadCssModulePathLoaded(mod.module_path);
+            perf.note(.cross_entry_seed);
+        }
+    }
+
+    /// Snapshot a pure-top dependency module's global end-state right after
+    /// its top chunk ran (before the entry root can mutate it), first writer
+    /// wins. Best-effort: allocation failure just skips caching.
+    pub fn saveModuleToCrossEntryStates(self: *const VM, module_id: u32) void {
+        const cache = self.cross_entry_states orelse return;
+        const mid: usize = @intCast(module_id);
+        if (mid < self.program.modules.len and !self.program.modules[mid].cross_entry_pure_top) {
+            perf.note(.cross_entry_impure_top);
+            if (std.c.getenv("ZSASS_XDEBUG") != null) {
+                vmStderrPrint("XIMPURE {s}\n", .{self.program.modules[mid].module_path});
+            }
+        }
+        if (!self.moduleEligibleForCrossEntryStates(mid)) return;
+        const mod = &self.program.modules[mid];
+        if (cache.map.contains(mod.module_path)) return;
+
+        const src_values = self.mod_globals_bufs[mid];
+        const src_declared = self.mod_global_declared_bufs[mid];
+        for (src_values) |v| {
+            if (!self.crossEntryValueMovable(v)) {
+                perf.note(.cross_entry_save_rejected);
+                return;
+            }
+        }
+        perf.note(.cross_entry_save);
+
+        const values = cache.allocator.alloc(Value, src_values.len) catch return;
+        var cloned: usize = 0;
+        for (src_values, 0..) |v, i| {
+            values[i] = self.cloneValueIntoCrossEntryCache(cache, v) catch {
+                cache.allocator.free(values);
+                return;
+            };
+            cloned += 1;
+        }
+        const declared = cache.allocator.dupe(bool, src_declared) catch {
+            cache.allocator.free(values);
+            return;
+        };
+        const key = cache.allocator.dupe(u8, mod.module_path) catch {
+            cache.allocator.free(values);
+            cache.allocator.free(declared);
+            return;
+        };
+        cache.map.put(cache.allocator, key, .{ .values = values, .declared = declared }) catch {
+            cache.allocator.free(values);
+            cache.allocator.free(declared);
+            cache.allocator.free(key);
+            return;
+        };
+    }
+
     pub fn moduleTopEmitsCss(self: *const VM, module_id: u32) bool {
         if (module_id >= self.program.modules.len) return false;
         const top = &self.program.modules[module_id].top;
@@ -1690,7 +2144,8 @@ pub const VM = struct {
         const global_count: usize = @intCast(self.program.modules[module_id].global_slot_count);
         const n = @min(global_count, local_count);
         if (n == 0) return &.{};
-        const slots = try self.arena().alloc(bool, n);
+        perf.bump(.arena_writeback_bytes, n);
+        const slots = try self.frame_slot_pool.allocBools(self.allocator, n);
         @memset(slots, false);
         return slots;
     }
@@ -1880,6 +2335,7 @@ pub const VM = struct {
         try self.initModGlobals();
         try self.seedModulesFromLoadCssState();
         try self.initExecutedModules();
+        try self.seedModulesFromCrossEntryStates();
         try self.buildModuleVisibilityMatrix();
         defer {
             self.freeExecutedModulesIfAny();
@@ -1952,14 +2408,251 @@ pub const VM = struct {
     };
 
     pub fn runLoopTop(self: *VM) VMError!void {
+        // Hot interpreter loop. `runThreaded` executes instructions of a
+        // single (module, chunk) pair and returns when the pair changes
+        // (calls, returns, dependency runs), so the cached chunk pointer only
+        // needs refreshing here. Chunk storage is arena-allocated at compile
+        // time and never moves during a run, so a pointer for a fixed pair
+        // stays valid. `step()` stays as the single-instruction entry point
+        // for external drivers.
+        var cached_module: u32 = self.current_module;
+        var cached_ref: ChunkRef = self.current_chunk;
+        var chunk: *const Chunk = self.getChunk(cached_module, cached_ref);
         while (true) {
-            const r = try self.step();
-            switch (r) {
+            if (self.current_module != cached_module or !std.meta.eql(self.current_chunk, cached_ref)) {
+                cached_module = self.current_module;
+                cached_ref = self.current_chunk;
+                chunk = self.getChunk(cached_module, cached_ref);
+            }
+            switch (try self.runThreaded(chunk)) {
                 .continue_exec => {},
                 .halt_top => return,
                 .exit_run_chunk => return error.InternalError,
             }
         }
+    }
+
+    inline fn fetchNextInst(self: *VM, chunk: *const Chunk) VMError!Instruction {
+        const code = chunk.code;
+        if (self.pc >= code.len) return error.BadJump;
+        if (chunk.code_origin.len == code.len) {
+            self.current_origin = chunk.code_origin[self.pc];
+        }
+        const inst = code[self.pc];
+        self.pc += 1;
+        if (chunk.source_locs.len == code.len) {
+            const loc = chunk.source_locs[self.pc - 1];
+            self.current_source_span = .{
+                .start = loc.start,
+                .end = loc.end,
+                .file_id = self.load_css_module_tag_override orelse loc.module_id,
+            };
+        } else {
+            self.current_source_span = .{
+                .start = 0,
+                .end = 0,
+                .file_id = self.load_css_module_tag_override orelse self.current_module,
+            };
+        }
+        if (self.histogram) |h| h.tick(inst.opcode());
+        perf.note(.vm_step);
+        return inst;
+    }
+
+    fn runThreaded(self: *VM, chunk: *const Chunk) VMError!StepResult {
+        // Direct-threaded dispatch (labeled switch + `continue`) over the hot
+        // opcode subset: each hot arm executes, fetches the next instruction,
+        // and re-dispatches from its own jump site. Hot opcodes never change
+        // (current_module, current_chunk), so `chunk` stays valid for them.
+        // Cold opcodes fall back to `stepInner` (the single source of truth)
+        // and stay in the loop while the pair is unchanged; otherwise control
+        // returns to `runLoopTop`, which refreshes its cached pointer.
+        // Hot arms clear `just_pushed_selector_scope` before the handler:
+        // no hot handler reads the flag (only the emit path does), so this
+        // matches the post-step `defer` ordering of `step()`.
+        const entry_module = self.current_module;
+        const entry_ref = self.current_chunk;
+        var inst = try self.fetchNextInst(chunk);
+        dispatch: switch (inst.opcode()) {
+            .halt => {
+                self.just_pushed_selector_scope = false;
+                return .halt_top;
+            },
+            .load_const => {
+                self.just_pushed_selector_scope = false;
+                self.opLoadConst(inst, chunk) catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .load_local => {
+                self.just_pushed_selector_scope = false;
+                self.opLoadLocal(inst) catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .store_local, .store_local_writeback => {
+                self.just_pushed_selector_scope = false;
+                self.opStoreLocal(inst) catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .store_const_local => {
+                self.just_pushed_selector_scope = false;
+                self.opStoreConstLocal(inst, chunk) catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .clear_local => {
+                self.just_pushed_selector_scope = false;
+                self.opClearLocal(inst) catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .dup => {
+                self.just_pushed_selector_scope = false;
+                self.opDup() catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .coerce_slash_free => {
+                self.just_pushed_selector_scope = false;
+                @call(.never_inline, opCoerceSlashFree, .{self}) catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .jmp => {
+                self.just_pushed_selector_scope = false;
+                self.opJmp(inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .jmp_if_false => {
+                self.just_pushed_selector_scope = false;
+                self.opJmpIfFalse(inst) catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .branch_if_false_local => {
+                self.just_pushed_selector_scope = false;
+                self.opBranchIfFalseLocal(inst) catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .push_flow_scope => {
+                self.just_pushed_selector_scope = false;
+                self.pushFlowScope() catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .pop_flow_scope => {
+                self.just_pushed_selector_scope = false;
+                self.popFlowScope();
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .for_test => {
+                self.just_pushed_selector_scope = false;
+                @call(.never_inline, opForTest, .{ self, inst, chunk }) catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .for_step => {
+                self.just_pushed_selector_scope = false;
+                @call(.never_inline, opForStep, .{ self, inst, chunk }) catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .each_test => {
+                self.just_pushed_selector_scope = false;
+                @call(.never_inline, opEachTest, .{ self, inst, chunk }) catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .each_bind => {
+                self.just_pushed_selector_scope = false;
+                @call(.never_inline, opEachBind, .{ self, inst, chunk }) catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .each_step => {
+                self.just_pushed_selector_scope = false;
+                @call(.never_inline, opEachStep, .{ self, inst, chunk }) catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .branch_local_cmp_local_false => {
+                self.just_pushed_selector_scope = false;
+                @call(.never_inline, opBranchLocalCmpLocalFalse, .{ self, inst, chunk }) catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .local_binop_local_store => {
+                self.just_pushed_selector_scope = false;
+                @call(.never_inline, opLocalBinopLocalStore, .{ self, inst, chunk }) catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .local_inc_const => {
+                self.just_pushed_selector_scope = false;
+                @call(.never_inline, opLocalIncConst, .{ self, inst, chunk }) catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            .load_local_mul_const => {
+                self.just_pushed_selector_scope = false;
+                @call(.never_inline, opLoadLocalMulConst, .{ self, inst, chunk }) catch |err| return self.recordStepFailure(err, chunk, inst);
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+            else => {
+                // See Z10-SAMESEL note in `step()`.
+                const now_op = inst.opcode();
+                const now_is_push = (now_op == .push_selector_scope or
+                    now_op == .push_selector_scope_dynamic or
+                    (now_op == .record_extend and self.just_pushed_selector_scope));
+                const r = stepInner(self, inst, chunk) catch |err| {
+                    const failure = self.recordStepFailure(err, chunk, inst);
+                    self.just_pushed_selector_scope = now_is_push;
+                    return failure;
+                };
+                self.just_pushed_selector_scope = now_is_push;
+                switch (r) {
+                    .continue_exec => {},
+                    .halt_top, .exit_run_chunk => return r,
+                }
+                if (self.current_module != entry_module or !std.meta.eql(self.current_chunk, entry_ref)) {
+                    return .continue_exec;
+                }
+                inst = try self.fetchNextInst(chunk);
+                continue :dispatch inst.opcode();
+            },
+        }
+    }
+
+    fn recordStepFailure(self: *VM, err: VMError, chunk: *const Chunk, inst: Instruction) VMError {
+        // CLI-FIX-E Step 2: To build source frame in driver's catch path,
+        // Record the span where the most recent error occurred in the thread-local context.
+        error_format.recordErrorSpan(
+            self.current_source_span.start,
+            self.current_source_span.end,
+            self.current_source_span.file_id,
+        );
+        error_format.recordErrorTag(err);
+        if (error_format.verboseErrorsEnabled()) {
+            if (err == error.SassError) {
+                self.printCurrentVmErrorSource();
+            }
+            if (!self.suppress_diagnostics) {
+                vmStderrPrint("zsass err module={d} chunk={s} pc={d} op={s} {}\n", .{
+                    self.current_module,
+                    chunk.name,
+                    self.pc - 1,
+                    @tagName(inst.opcode()),
+                    err,
+                });
+            }
+        }
+        return err;
     }
 
     pub fn step(self: *VM) VMError!StepResult {
@@ -2002,34 +2695,14 @@ pub const VM = struct {
         defer self.just_pushed_selector_scope = now_is_push;
 
         return stepInner(self, inst, chunk) catch |err| {
-            // CLI-FIX-E Step 2: To build source frame in driver's catch path,
-            // Record the span where the most recent error occurred in the thread-local context.
-            error_format.recordErrorSpan(
-                self.current_source_span.start,
-                self.current_source_span.end,
-                self.current_source_span.file_id,
-            );
-            error_format.recordErrorTag(err);
-            if (error_format.verboseErrorsEnabled()) {
-                if (err == error.SassError) {
-                    self.printCurrentVmErrorSource();
-                }
-                if (!self.suppress_diagnostics) {
-                    vmStderrPrint("zsass err module={d} chunk={s} pc={d} op={s} {}\n", .{
-                        self.current_module,
-                        chunk.name,
-                        self.pc - 1,
-                        @tagName(inst.opcode()),
-                        err,
-                    });
-                }
-            }
-            return err;
+            return self.recordStepFailure(err, chunk, inst);
         };
     }
 
-    fn pendingCssMathCallPreserveContext(self: *VM) bool {
-        const chunk = self.getChunk(self.current_module, self.current_chunk);
+    /// `chunk` must be the currently executing chunk (the one `self.pc`
+    /// indexes); stepInner handlers pass their cached pointer to avoid a
+    /// per-arithmetic-op getChunk lookup.
+    fn pendingCssMathCallPreserveContext(self: *VM, chunk: *const Chunk) bool {
         if (self.pc >= chunk.code.len) return self.stackContainsCssMathCallable();
 
         const next = chunk.code[self.pc];
@@ -2177,88 +2850,16 @@ pub const VM = struct {
             .nop => return .continue_exec,
             .halt => return .halt_top,
 
-            .load_const => {
-                const idx: usize = @intCast(inst.arg_b);
-                if (idx >= chunk.const_pool.len) return error.BadJump;
-                try self.push(chunk.const_pool[idx]);
-            },
-            .load_local => {
-                const slot_raw: u32 = inst.arg_b;
-                if (resolver_mod.decodeCrossAssignSlot(slot_raw)) |target| {
-                    if (target.module_id >= self.mod_globals_bufs.len) return error.BadJump;
-                    const row = self.mod_globals_bufs[target.module_id];
-                    const target_slot: usize = @intCast(target.slot);
-                    if (target_slot >= row.len) return error.BadJump;
-                    try self.push(row[target_slot]);
-                    return .continue_exec;
-                }
-                const slot: usize = @intCast(slot_raw);
-                const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
-                try self.push(try self.readFrameLocalWithFallback(&fr, slot));
-            },
-            .load_local_strict => {
-                const slot: usize = @intCast(inst.arg_b);
-                const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
-                try self.push(try self.requireDeclaredFrameSlot(&fr, slot));
-            },
-            .store_local, .store_local_writeback => {
-                const writeback = inst.opcode() == .store_local_writeback;
-                const slot_raw: u32 = inst.arg_b;
-                if (resolver_mod.decodeCrossAssignSlot(slot_raw)) |target| {
-                    if (target.module_id >= self.mod_globals_bufs.len) return error.BadJump;
-                    const row = self.mod_globals_bufs[target.module_id];
-                    const target_slot: usize = @intCast(target.slot);
-                    if (target_slot >= row.len) return error.BadJump;
-                    row[target_slot] = try self.pop();
-                    self.markGlobalDeclared(target.module_id, target.slot);
-                    if (self.trace_slot == target.slot and self.trace_slot != std.math.maxInt(u32)) {
-                        vmStderrPrint(
-                            "zsass-slot-trace STORE_CROSS slot={d} mod={d} pc={d} kind={s}\n",
-                            .{ target.slot, target.module_id, self.pc - 1, @tagName(row[target_slot].kind()) },
-                        );
-                    }
-                    return .continue_exec;
-                }
-                const slot: usize = @intCast(slot_raw);
-                const fr = &self.frame_stack.items[self.frame_stack.items.len - 1];
-                if (slot >= fr.locals.len) return error.BadJump;
-                if (slot >= fr.declared.len) return error.BadJump;
-                if (!writeback) try self.snapshotFlowScopeSlot(slot, fr);
-                const stored_value = try self.pop();
-                fr.locals[slot] = stored_value;
-                fr.declared[slot] = true;
-                if (writeback) {
-                    self.markCurrentFrameGlobalWriteback(slot_raw);
-                    self.writeGlobalSlotImmediate(self.current_module, slot_raw, stored_value);
-                }
-                self.markGlobalDeclared(self.current_module, slot_raw);
-                if (self.trace_slot == slot_raw) {
-                    vmStderrPrint(
-                        "zsass-slot-trace STORE slot={d} mod={d} pc={d} kind={s}\n",
-                        .{ slot_raw, self.current_module, self.pc - 1, @tagName(fr.locals[slot].kind()) },
-                    );
-                }
-            },
-            .clear_local => {
-                const slot: usize = @intCast(inst.arg_b);
-                const fr = &self.frame_stack.items[self.frame_stack.items.len - 1];
-                if (slot >= fr.locals.len or slot >= fr.declared.len) return error.BadJump;
-                fr.locals[slot] = Value.nil_v;
-                fr.declared[slot] = false;
-                if (self.trace_slot == @as(u32, @intCast(slot))) {
-                    vmStderrPrint(
-                        "zsass-slot-trace CLEAR slot={d} mod={d} pc={d}\n",
-                        .{ slot, self.current_module, self.pc - 1 },
-                    );
-                }
-            },
+            .load_const => try self.opLoadConst(inst, chunk),
+            .load_local => try self.opLoadLocal(inst),
+            .load_local_strict => try self.opLoadLocalStrict(inst),
+            .store_local, .store_local_writeback => try self.opStoreLocal(inst),
+            .store_const_local => try self.opStoreConstLocal(inst, chunk),
+            .clear_local => try self.opClearLocal(inst),
             .pop => {
                 _ = try self.pop();
             },
-            .dup => {
-                const v = self.stack.items[self.stack.items.len - 1];
-                try self.push(v);
-            },
+            .dup => try self.opDup(),
             .unpack => {
                 try self.stepUnpack(inst.arg_a);
             },
@@ -2275,56 +2876,11 @@ pub const VM = struct {
             .list_item => {
                 try self.stepListItem();
             },
-            .coerce_slash_free => {
-                const value = try self.maybeResolveParentSelectorValue(try self.pop());
-                try self.push(try self.coerceInterpolatedSlashListValue(value));
-            },
+            .coerce_slash_free => try self.opCoerceSlashFree(),
 
-            .add => {
-                const b = try self.maybeResolveParentSelectorValue(try self.pop());
-                const a = try self.maybeResolveParentSelectorValue(try self.pop());
-                try self.push(try addValues(
-                    self.intern_pool,
-                    &self.number_pool,
-                    self.allocator,
-                    &self.list_pool,
-                    self.color_pool,
-                    &self.callable_payload_pool,
-                    a,
-                    b,
-                    self.pendingCssMathCallPreserveContext(),
-                ));
-            },
-            .sub => {
-                const b = try self.maybeResolveParentSelectorValue(try self.pop());
-                const a = try self.maybeResolveParentSelectorValue(try self.pop());
-                try self.push(try subValues(
-                    self.intern_pool,
-                    &self.number_pool,
-                    self.allocator,
-                    &self.list_pool,
-                    self.color_pool,
-                    &self.slash_list_preserve,
-                    a,
-                    b,
-                    self.pendingCssMathCallPreserveContext(),
-                ));
-            },
-            .mul => {
-                const b = try self.maybeResolveParentSelectorValue(try self.pop());
-                const a = try self.maybeResolveParentSelectorValue(try self.pop());
-                try self.push(try mulValues(
-                    self.intern_pool,
-                    &self.number_pool,
-                    self.allocator,
-                    &self.list_pool,
-                    self.color_pool,
-                    &self.slash_list_preserve,
-                    a,
-                    b,
-                    self.pendingCssMathCallPreserveContext(),
-                ));
-            },
+            .add => try self.opAdd(chunk),
+            .sub => try self.opSub(chunk),
+            .mul => try self.opMul(chunk),
             .div => {
                 const b = try self.maybeResolveParentSelectorValue(try self.pop());
                 const a = try self.maybeResolveParentSelectorValue(try self.pop());
@@ -2350,7 +2906,7 @@ pub const VM = struct {
                     &self.slash_list_preserve,
                     a,
                     b,
-                    self.pendingCssMathCallPreserveContext(),
+                    self.pendingCssMathCallPreserveContext(chunk),
                     slash_dep,
                 ));
             },
@@ -2379,10 +2935,7 @@ pub const VM = struct {
                 const a = try self.maybeResolveParentSelectorValue(try self.pop());
                 try self.push(try unaryPrefixValue(self, "/", a, .allow_calc));
             },
-            .not_op => {
-                const a = try self.maybeResolveParentSelectorValue(try self.pop());
-                try self.push(if (a.isTruthy()) Value.false_v else Value.true_v);
-            },
+            .not_op => try self.opNotOp(),
 
             .eq => try self.cmpOp(.eq),
             .neq => try self.cmpOp(.neq),
@@ -2391,44 +2944,21 @@ pub const VM = struct {
             .le => try self.cmpOp(.le),
             .ge => try self.cmpOp(.ge),
 
-            .and_op => {
-                const b = try self.maybeResolveParentSelectorValue(try self.pop());
-                const a = try self.maybeResolveParentSelectorValue(try self.pop());
-                try self.push(if (a.isTruthy() and b.isTruthy()) Value.true_v else Value.false_v);
-            },
-            .or_op => {
-                const b = try self.maybeResolveParentSelectorValue(try self.pop());
-                const a = try self.maybeResolveParentSelectorValue(try self.pop());
-                try self.push(if (a.isTruthy() or b.isTruthy()) Value.true_v else Value.false_v);
-            },
+            .and_op => try self.opAndOp(),
+            .or_op => try self.opOrOp(),
 
-            .jmp => {
-                const off: i32 = @bitCast(inst.arg_b);
-                self.pc = @intCast(@as(i64, @intCast(self.pc)) + @as(i64, off));
-            },
-            .jmp_if_false => {
-                const v = try self.maybeResolveParentSelectorValue(try self.pop());
-                if (!v.isTruthy()) {
-                    const off: i32 = @bitCast(inst.arg_b);
-                    self.pc = @intCast(@as(i64, @intCast(self.pc)) + @as(i64, off));
-                }
-            },
-            .branch_if_false_local => {
-                const slot: usize = @intCast(inst.arg_a);
-                const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
-                const v = try self.maybeResolveParentSelectorValue(try self.readFrameLocalWithFallback(&fr, slot));
-                if (!v.isTruthy()) {
-                    const off: i32 = @bitCast(inst.arg_b);
-                    self.pc = @intCast(@as(i64, @intCast(self.pc)) + @as(i64, off));
-                }
-            },
-            .jmp_if_true => {
-                const v = try self.maybeResolveParentSelectorValue(try self.pop());
-                if (v.isTruthy()) {
-                    const off: i32 = @bitCast(inst.arg_b);
-                    self.pc = @intCast(@as(i64, @intCast(self.pc)) + @as(i64, off));
-                }
-            },
+            .jmp => self.opJmp(inst),
+            .jmp_if_false => try self.opJmpIfFalse(inst),
+            .branch_if_false_local => try self.opBranchIfFalseLocal(inst),
+            .for_test => try self.opForTest(inst, chunk),
+            .each_test => try self.opEachTest(inst, chunk),
+            .each_bind => try self.opEachBind(inst, chunk),
+            .each_step => try self.opEachStep(inst, chunk),
+            .branch_local_cmp_local_false => try self.opBranchLocalCmpLocalFalse(inst, chunk),
+            .local_binop_local_store => try self.opLocalBinopLocalStore(inst, chunk),
+            .local_inc_const => try self.opLocalIncConst(inst, chunk),
+            .for_step => try self.opForStep(inst, chunk),
+            .jmp_if_true => try self.opJmpIfTrue(inst),
             .push_flow_scope => try self.pushFlowScope(),
             .pop_flow_scope => self.popFlowScope(),
 
@@ -2440,18 +2970,9 @@ pub const VM = struct {
             .call_placeholder,
             => return self.stepInnerCall(inst, chunk),
             .record_extend => return self.stepInnerEmit(inst, chunk),
-            .call_builtin => return self.stepInnerCall(inst, chunk),
-            .load_mod_global => {
-                const mid: u32 = inst.arg_a;
-                const slot: usize = @intCast(inst.arg_b);
-                if (mid >= self.mod_globals_bufs.len) return error.BadJump;
-                const row = self.mod_globals_bufs[mid];
-                if (slot >= row.len) return error.BadJump;
-                try self.push(row[slot]);
-            },
-            .load_mod_global_strict => {
-                try self.push(try self.requireDeclaredModuleSlot(inst.arg_a, inst.arg_b));
-            },
+            .call_builtin => return self.stepCallBuiltin(inst, chunk),
+            .load_mod_global => try self.opLoadModGlobal(inst),
+            .load_mod_global_strict => try self.opLoadModGlobalStrict(inst),
             .run_dependency,
             .call_indirect,
             .ret,
@@ -2469,92 +2990,10 @@ pub const VM = struct {
             .emit_rule_end_pop,
             .pop_rule_scope,
             => return self.stepInnerEmit(inst, chunk),
-            .load_local_add_const => {
-                const slot: usize = @intCast(inst.arg_a);
-                const idx: usize = @intCast(inst.arg_b);
-                if (idx >= chunk.const_pool.len) return error.BadJump;
-                const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
-                const l = try self.maybeResolveParentSelectorValue(try self.readFrameLocalWithFallback(&fr, slot));
-                const c = chunk.const_pool[idx];
-                try self.push(try addValues(
-                    self.intern_pool,
-                    &self.number_pool,
-                    self.allocator,
-                    &self.list_pool,
-                    self.color_pool,
-                    &self.callable_payload_pool,
-                    l,
-                    c,
-                    self.pendingCssMathCallPreserveContext(),
-                ));
-            },
-            .load_local_mul_const => {
-                const slot: usize = @intCast(inst.arg_a);
-                const idx: usize = @intCast(inst.arg_b);
-                if (idx >= chunk.const_pool.len) return error.BadJump;
-                const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
-                if (self.trace_slot == @as(u32, @intCast(slot))) {
-                    const raw = fr.locals[slot];
-                    const declared = if (slot < fr.declared.len) fr.declared[slot] else false;
-                    vmStderrPrint(
-                        "zsass-slot-trace LOAD_MUL slot={d} pc={d} declared={any} raw_kind={s} frames={d}\n",
-                        .{ slot, self.pc - 1, declared, @tagName(raw.kind()), self.frame_stack.items.len },
-                    );
-                }
-                const l = try self.maybeResolveParentSelectorValue(try self.readFrameLocalWithFallback(&fr, slot));
-                const c = chunk.const_pool[idx];
-                const preserve_css_math = self.pendingCssMathCallPreserveContext();
-                const out = mulValues(
-                    self.intern_pool,
-                    &self.number_pool,
-                    self.allocator,
-                    &self.list_pool,
-                    self.color_pool,
-                    &self.slash_list_preserve,
-                    l,
-                    c,
-                    preserve_css_math,
-                ) catch |err| {
-                    if (err == error.SassError) {
-                        self.printLoadLocalMulConstDiagnostic(slot, idx, l, c, preserve_css_math);
-                    }
-                    return err;
-                };
-                try self.push(out);
-            },
-            .load_local_ge_const => {
-                const slot: usize = @intCast(inst.arg_a);
-                const idx: usize = @intCast(inst.arg_b);
-                if (idx >= chunk.const_pool.len) return error.BadJump;
-                const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
-                const raw_local = try self.maybeResolveParentSelectorValue(try self.readFrameLocalWithFallback(&fr, slot));
-                const raw_const = chunk.const_pool[idx];
-                const local_val = try self.coerceSlashFreeValue(raw_local);
-                const const_val = try self.coerceSlashFreeValue(raw_const);
-                if (local_val.kind() != .number or const_val.kind() != .number) return error.SassError;
-                const pair = try comparableNumbers(self.intern_pool, &self.number_pool, self.allocator, local_val, const_val);
-                const ord = fuzzyNumberOrder(pair.a, pair.b);
-                try self.push(if (ord == .gt or ord == .eq) Value.true_v else Value.false_v);
-            },
-            .load_const_add_local => {
-                const slot: usize = @intCast(inst.arg_a);
-                const idx: usize = @intCast(inst.arg_b);
-                if (idx >= chunk.const_pool.len) return error.BadJump;
-                const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
-                const c = chunk.const_pool[idx];
-                const l = try self.maybeResolveParentSelectorValue(try self.readFrameLocalWithFallback(&fr, slot));
-                try self.push(try addValues(
-                    self.intern_pool,
-                    &self.number_pool,
-                    self.allocator,
-                    &self.list_pool,
-                    self.color_pool,
-                    &self.callable_payload_pool,
-                    c,
-                    l,
-                    self.pendingCssMathCallPreserveContext(),
-                ));
-            },
+            .load_local_add_const => try self.opLoadLocalAddConst(inst, chunk),
+            .load_local_mul_const => try self.opLoadLocalMulConst(inst, chunk),
+            .load_local_ge_const => try self.opLoadLocalGeConst(inst, chunk),
+            .load_const_add_local => try self.opLoadConstAddLocal(inst, chunk),
             .load_emit_decl,
             .emit_decl,
             .emit_decl_raw,
@@ -2620,6 +3059,542 @@ pub const VM = struct {
         return .continue_exec;
     }
 
+    inline fn opLoadConst(self: *VM, inst: Instruction, chunk: *const Chunk) VMError!void {
+        const idx: usize = @intCast(inst.arg_b);
+        if (idx >= chunk.const_pool.len) return error.BadJump;
+        try self.push(chunk.const_pool[idx]);
+    }
+
+    inline fn opLoadLocal(self: *VM, inst: Instruction) VMError!void {
+        const slot_raw: u32 = inst.arg_b;
+        if (resolver_mod.decodeCrossAssignSlot(slot_raw)) |target| {
+            if (target.module_id >= self.mod_globals_bufs.len) return error.BadJump;
+            const row = self.mod_globals_bufs[target.module_id];
+            const target_slot: usize = @intCast(target.slot);
+            if (target_slot >= row.len) return error.BadJump;
+            try self.push(row[target_slot]);
+            return;
+        }
+        const slot: usize = @intCast(slot_raw);
+        const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
+        try self.push(try self.readFrameLocalWithFallback(&fr, slot));
+    }
+
+    inline fn opLoadLocalStrict(self: *VM, inst: Instruction) VMError!void {
+        const slot: usize = @intCast(inst.arg_b);
+        const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
+        try self.push(try self.requireDeclaredFrameSlot(&fr, slot));
+    }
+
+    inline fn opStoreLocal(self: *VM, inst: Instruction) VMError!void {
+        const writeback = inst.opcode() == .store_local_writeback;
+        const slot_raw: u32 = inst.arg_b;
+        if (resolver_mod.decodeCrossAssignSlot(slot_raw)) |target| {
+            if (target.module_id >= self.mod_globals_bufs.len) return error.BadJump;
+            const row = self.mod_globals_bufs[target.module_id];
+            const target_slot: usize = @intCast(target.slot);
+            if (target_slot >= row.len) return error.BadJump;
+            row[target_slot] = try self.pop();
+            self.markGlobalDeclared(target.module_id, target.slot);
+            if (self.trace_slot == target.slot and self.trace_slot != std.math.maxInt(u32)) {
+                vmStderrPrint(
+                    "zsass-slot-trace STORE_CROSS slot={d} mod={d} pc={d} kind={s}\n",
+                    .{ target.slot, target.module_id, self.pc - 1, @tagName(row[target_slot].kind()) },
+                );
+            }
+            return;
+        }
+        const slot: usize = @intCast(slot_raw);
+        const fr = &self.frame_stack.items[self.frame_stack.items.len - 1];
+        if (slot >= fr.locals.len) return error.BadJump;
+        if (slot >= fr.declared.len) return error.BadJump;
+        if (!writeback) try self.snapshotFlowScopeSlot(slot, fr);
+        const stored_value = try self.pop();
+        fr.locals[slot] = stored_value;
+        fr.declared[slot] = true;
+        if (writeback) {
+            self.markCurrentFrameGlobalWriteback(slot_raw);
+            self.writeGlobalSlotImmediate(self.current_module, slot_raw, stored_value);
+        }
+        self.markGlobalDeclared(self.current_module, slot_raw);
+        if (self.trace_slot == slot_raw) {
+            vmStderrPrint(
+                "zsass-slot-trace STORE slot={d} mod={d} pc={d} kind={s}\n",
+                .{ slot_raw, self.current_module, self.pc - 1, @tagName(fr.locals[slot].kind()) },
+            );
+        }
+    }
+
+    inline fn opStoreConstLocal(self: *VM, inst: Instruction, chunk: *const Chunk) VMError!void {
+        const idx: usize = @intCast(inst.arg_b);
+        if (idx >= chunk.const_pool.len) return error.BadJump;
+        if (self.frame_stack.items.len == 0) return error.InternalError;
+        const slot: usize = @intCast(inst.arg_a);
+        const fr = &self.frame_stack.items[self.frame_stack.items.len - 1];
+        if (slot >= fr.locals.len or slot >= fr.declared.len) return error.BadJump;
+        try self.snapshotFlowScopeSlot(slot, fr);
+        fr.locals[slot] = chunk.const_pool[idx];
+        fr.declared[slot] = true;
+        self.markGlobalDeclared(self.current_module, inst.arg_a);
+        if (self.trace_slot == @as(u32, inst.arg_a)) {
+            vmStderrPrint(
+                "zsass-slot-trace STORE slot={d} mod={d} pc={d} kind={s}\n",
+                .{ inst.arg_a, self.current_module, self.pc - 1, @tagName(fr.locals[slot].kind()) },
+            );
+        }
+    }
+
+    inline fn opClearLocal(self: *VM, inst: Instruction) VMError!void {
+        const slot: usize = @intCast(inst.arg_b);
+        const fr = &self.frame_stack.items[self.frame_stack.items.len - 1];
+        if (slot >= fr.locals.len or slot >= fr.declared.len) return error.BadJump;
+        fr.locals[slot] = Value.nil_v;
+        fr.declared[slot] = false;
+        if (self.trace_slot == @as(u32, @intCast(slot))) {
+            vmStderrPrint(
+                "zsass-slot-trace CLEAR slot={d} mod={d} pc={d}\n",
+                .{ slot, self.current_module, self.pc - 1 },
+            );
+        }
+    }
+
+    inline fn opDup(self: *VM) VMError!void {
+        const v = self.stack.items[self.stack.items.len - 1];
+        try self.push(v);
+    }
+
+    fn opCoerceSlashFree(self: *VM) VMError!void {
+        const value = try self.maybeResolveParentSelectorValue(try self.pop());
+        try self.push(try self.coerceInterpolatedSlashListValue(value));
+    }
+
+    inline fn opAdd(self: *VM, chunk: *const Chunk) VMError!void {
+        const b = try self.maybeResolveParentSelectorValue(try self.pop());
+        const a = try self.maybeResolveParentSelectorValue(try self.pop());
+        try self.push(try addValues(
+            self.intern_pool,
+            &self.number_pool,
+            self.allocator,
+            &self.list_pool,
+            self.color_pool,
+            &self.callable_payload_pool,
+            a,
+            b,
+            self.pendingCssMathCallPreserveContext(chunk),
+        ));
+    }
+
+    inline fn opSub(self: *VM, chunk: *const Chunk) VMError!void {
+        const b = try self.maybeResolveParentSelectorValue(try self.pop());
+        const a = try self.maybeResolveParentSelectorValue(try self.pop());
+        try self.push(try subValues(
+            self.intern_pool,
+            &self.number_pool,
+            self.allocator,
+            &self.list_pool,
+            self.color_pool,
+            &self.slash_list_preserve,
+            a,
+            b,
+            self.pendingCssMathCallPreserveContext(chunk),
+        ));
+    }
+
+    inline fn opMul(self: *VM, chunk: *const Chunk) VMError!void {
+        const b = try self.maybeResolveParentSelectorValue(try self.pop());
+        const a = try self.maybeResolveParentSelectorValue(try self.pop());
+        try self.push(try mulValues(
+            self.intern_pool,
+            &self.number_pool,
+            self.allocator,
+            &self.list_pool,
+            self.color_pool,
+            &self.slash_list_preserve,
+            a,
+            b,
+            self.pendingCssMathCallPreserveContext(chunk),
+        ));
+    }
+
+    inline fn opNotOp(self: *VM) VMError!void {
+        const a = try self.maybeResolveParentSelectorValue(try self.pop());
+        try self.push(if (a.isTruthy()) Value.false_v else Value.true_v);
+    }
+
+    inline fn opAndOp(self: *VM) VMError!void {
+        const b = try self.maybeResolveParentSelectorValue(try self.pop());
+        const a = try self.maybeResolveParentSelectorValue(try self.pop());
+        try self.push(if (a.isTruthy() and b.isTruthy()) Value.true_v else Value.false_v);
+    }
+
+    inline fn opOrOp(self: *VM) VMError!void {
+        const b = try self.maybeResolveParentSelectorValue(try self.pop());
+        const a = try self.maybeResolveParentSelectorValue(try self.pop());
+        try self.push(if (a.isTruthy() or b.isTruthy()) Value.true_v else Value.false_v);
+    }
+
+    inline fn opJmp(self: *VM, inst: Instruction) void {
+        const off: i32 = @bitCast(inst.arg_b);
+        self.pc = @intCast(@as(i64, @intCast(self.pc)) + @as(i64, off));
+    }
+
+    inline fn opJmpIfFalse(self: *VM, inst: Instruction) VMError!void {
+        const v = try self.maybeResolveParentSelectorValue(try self.pop());
+        if (!v.isTruthy()) {
+            const off: i32 = @bitCast(inst.arg_b);
+            self.pc = @intCast(@as(i64, @intCast(self.pc)) + @as(i64, off));
+        }
+    }
+
+    inline fn opJmpIfTrue(self: *VM, inst: Instruction) VMError!void {
+        const v = try self.maybeResolveParentSelectorValue(try self.pop());
+        if (v.isTruthy()) {
+            const off: i32 = @bitCast(inst.arg_b);
+            self.pc = @intCast(@as(i64, @intCast(self.pc)) + @as(i64, off));
+        }
+    }
+
+    inline fn opBranchIfFalseLocal(self: *VM, inst: Instruction) VMError!void {
+        const slot: usize = @intCast(inst.arg_a);
+        const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
+        const v = try self.maybeResolveParentSelectorValue(try self.readFrameLocalWithFallback(&fr, slot));
+        if (!v.isTruthy()) {
+            const off: i32 = @bitCast(inst.arg_b);
+            self.pc = @intCast(@as(i64, @intCast(self.pc)) + @as(i64, off));
+        }
+    }
+
+    fn opForTest(self: *VM, inst: Instruction, chunk: *const Chunk) VMError!void {
+        const meta_idx: usize = @intCast(inst.arg_a);
+        if (meta_idx >= chunk.for_loop_meta.len) return error.BadJump;
+        const meta = chunk.for_loop_meta[meta_idx];
+        if (self.frame_stack.items.len == 0) return error.InternalError;
+        const fr = &self.frame_stack.items[self.frame_stack.items.len - 1];
+        const max_slot = @max(@max(meta.cursor_slot, meta.to_slot), @max(meta.step_slot, meta.var_slot));
+        if (max_slot >= fr.locals.len or max_slot >= fr.declared.len) return error.BadJump;
+        const cursor = fr.locals[meta.cursor_slot];
+        if (try self.forLoopShouldContinue(fr, meta, cursor)) {
+            try self.snapshotFlowScopeSlot(meta.var_slot, fr);
+            fr.locals[meta.var_slot] = cursor;
+            fr.declared[meta.var_slot] = true;
+            self.markGlobalDeclared(self.current_module, meta.var_slot);
+        } else {
+            const off: i32 = @bitCast(inst.arg_b);
+            self.pc = @intCast(@as(i64, @intCast(self.pc)) + @as(i64, off));
+        }
+    }
+
+    fn opForStep(self: *VM, inst: Instruction, chunk: *const Chunk) VMError!void {
+        const meta_idx: usize = @intCast(inst.arg_a);
+        if (meta_idx >= chunk.for_loop_meta.len) return error.BadJump;
+        const meta = chunk.for_loop_meta[meta_idx];
+        if (self.frame_stack.items.len == 0) return error.InternalError;
+        const fr = &self.frame_stack.items[self.frame_stack.items.len - 1];
+        if (meta.cursor_slot >= fr.locals.len or meta.step_slot >= fr.locals.len) return error.BadJump;
+        const cursor = fr.locals[meta.cursor_slot];
+        const step_v = fr.locals[meta.step_slot];
+        const next: Value = blk: {
+            if (cursor.isNumber() and step_v.isNumber() and
+                cursor.unitId(&self.number_pool) == .none and
+                step_v.unitId(&self.number_pool) == .none)
+            {
+                break :blk Value.numberUnitless(cursor.asF64(&self.number_pool) + step_v.asF64(&self.number_pool));
+            }
+            const b = try self.maybeResolveParentSelectorValue(step_v);
+            const a = try self.maybeResolveParentSelectorValue(cursor);
+            break :blk try addValues(
+                self.intern_pool,
+                &self.number_pool,
+                self.allocator,
+                &self.list_pool,
+                self.color_pool,
+                &self.callable_payload_pool,
+                a,
+                b,
+                false,
+            );
+        };
+        try self.snapshotFlowScopeSlot(meta.cursor_slot, fr);
+        fr.locals[meta.cursor_slot] = next;
+        fr.declared[meta.cursor_slot] = true;
+        self.markGlobalDeclared(self.current_module, meta.cursor_slot);
+        const off: i32 = @bitCast(inst.arg_b);
+        self.pc = @intCast(@as(i64, @intCast(self.pc)) + @as(i64, off));
+    }
+
+    fn opEachTest(self: *VM, inst: Instruction, chunk: *const Chunk) VMError!void {
+        const meta_idx: usize = @intCast(inst.arg_a);
+        if (meta_idx >= chunk.each_loop_meta.len) return error.BadJump;
+        const meta = chunk.each_loop_meta[meta_idx];
+        if (self.frame_stack.items.len == 0) return error.InternalError;
+        const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
+        if (meta.list_slot >= fr.locals.len or meta.index_slot >= fr.locals.len) return error.BadJump;
+        const idx_v = fr.locals[meta.index_slot];
+        const listv = try self.maybeResolveParentSelectorValue(fr.locals[meta.list_slot]);
+        const row_len: usize = blk: {
+            if (listv.kind() != .list) break :blk 1;
+            const view = value_mod.inspectLogicalListView(self.list_pool.items, listv).?;
+            break :blk if (view.is_map) view.items.len / 2 else view.items.len;
+        };
+        // The index slot is a synthetic unitless counter (init + each_step).
+        const idx_f = idx_v.asF64(&self.number_pool);
+        const ord = fuzzyNumberOrder(idx_f, @floatFromInt(row_len));
+        if (ord != .lt) {
+            const off: i32 = @bitCast(inst.arg_b);
+            self.pc = @intCast(@as(i64, @intCast(self.pc)) + @as(i64, off));
+        }
+    }
+
+    fn opEachBind(self: *VM, inst: Instruction, chunk: *const Chunk) VMError!void {
+        const meta_idx: usize = @intCast(inst.arg_a);
+        if (meta_idx >= chunk.each_loop_meta.len) return error.BadJump;
+        const meta = chunk.each_loop_meta[meta_idx];
+        if (self.frame_stack.items.len == 0) return error.InternalError;
+        {
+            const fr = &self.frame_stack.items[self.frame_stack.items.len - 1];
+            if (meta.list_slot >= fr.locals.len or meta.index_slot >= fr.locals.len) return error.BadJump;
+            const slot: usize = @intCast(meta.var_slot);
+            if (slot >= fr.locals.len or slot >= fr.declared.len) return error.BadJump;
+            try self.push(fr.locals[meta.list_slot]);
+            try self.push(fr.locals[meta.index_slot]);
+        }
+        try self.stepListItem();
+        const item = try self.pop();
+        const fr = &self.frame_stack.items[self.frame_stack.items.len - 1];
+        const slot: usize = @intCast(meta.var_slot);
+        try self.snapshotFlowScopeSlot(slot, fr);
+        fr.locals[slot] = item;
+        fr.declared[slot] = true;
+        self.markGlobalDeclared(self.current_module, meta.var_slot);
+    }
+
+    fn opEachStep(self: *VM, inst: Instruction, chunk: *const Chunk) VMError!void {
+        const meta_idx: usize = @intCast(inst.arg_a);
+        if (meta_idx >= chunk.each_loop_meta.len) return error.BadJump;
+        const meta = chunk.each_loop_meta[meta_idx];
+        if (self.frame_stack.items.len == 0) return error.InternalError;
+        const fr = &self.frame_stack.items[self.frame_stack.items.len - 1];
+        const slot: usize = @intCast(meta.index_slot);
+        if (slot >= fr.locals.len or slot >= fr.declared.len) return error.BadJump;
+        const next = Value.numberUnitless(fr.locals[slot].asF64(&self.number_pool) + 1);
+        try self.snapshotFlowScopeSlot(slot, fr);
+        fr.locals[slot] = next;
+        fr.declared[slot] = true;
+        self.markGlobalDeclared(self.current_module, meta.index_slot);
+        const off: i32 = @bitCast(inst.arg_b);
+        self.pc = @intCast(@as(i64, @intCast(self.pc)) + @as(i64, off));
+    }
+
+    fn opBranchLocalCmpLocalFalse(self: *VM, inst: Instruction, chunk: *const Chunk) VMError!void {
+        const meta_idx: usize = @intCast(inst.arg_a);
+        if (meta_idx >= chunk.fused_cmp_meta.len) return error.BadJump;
+        const meta = chunk.fused_cmp_meta[meta_idx];
+        if (self.frame_stack.items.len == 0) return error.InternalError;
+        const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
+        const raw_a = try self.readFrameLocalWithFallback(&fr, @intCast(meta.lhs_slot));
+        const raw_b = try self.readFrameLocalWithFallback(&fr, @intCast(meta.rhs_slot));
+        const ok: bool = blk: {
+            if (raw_a.isNumber() and raw_b.isNumber() and
+                raw_a.unitId(&self.number_pool) == .none and
+                raw_b.unitId(&self.number_pool) == .none)
+            {
+                const ord = fuzzyNumberOrder(raw_a.asF64(&self.number_pool), raw_b.asF64(&self.number_pool));
+                break :blk switch (meta.op) {
+                    .lt => ord == .lt,
+                    .gt => ord == .gt,
+                    .le => ord != .gt,
+                    .ge => ord != .lt,
+                };
+            }
+            const b_res = try self.maybeResolveParentSelectorValue(raw_b);
+            const a_res = try self.maybeResolveParentSelectorValue(raw_a);
+            const b_co = try self.coerceSlashFreeValue(b_res);
+            const a_co = try self.coerceSlashFreeValue(a_res);
+            if (a_co.kind() != .number or b_co.kind() != .number) return error.SassError;
+            const pair = try comparableNumbers(self.intern_pool, &self.number_pool, self.allocator, a_co, b_co);
+            const ord = fuzzyNumberOrder(pair.a, pair.b);
+            break :blk switch (meta.op) {
+                .lt => ord == .lt,
+                .gt => ord == .gt,
+                .le => ord != .gt,
+                .ge => ord != .lt,
+            };
+        };
+        if (!ok) {
+            const off: i32 = @bitCast(inst.arg_b);
+            self.pc = @intCast(@as(i64, @intCast(self.pc)) + @as(i64, off));
+        }
+    }
+
+    fn opLocalBinopLocalStore(self: *VM, inst: Instruction, chunk: *const Chunk) VMError!void {
+        const meta_idx: usize = @intCast(inst.arg_a);
+        if (meta_idx >= chunk.fused_binop_meta.len) return error.BadJump;
+        const meta = chunk.fused_binop_meta[meta_idx];
+        if (self.frame_stack.items.len == 0) return error.InternalError;
+        const fr = &self.frame_stack.items[self.frame_stack.items.len - 1];
+        const raw_a = try self.readFrameLocalWithFallback(fr, @intCast(meta.lhs_slot));
+        const raw_b = try self.readFrameLocalWithFallback(fr, @intCast(meta.rhs_slot));
+        const result: Value = blk: {
+            // Unitless number pairs compute numerically regardless of
+            // css-math preserve context (combineAddUnits succeeds), so
+            // this fast path matches the general path for them.
+            if (raw_a.isNumber() and raw_b.isNumber() and
+                raw_a.unitId(&self.number_pool) == .none and
+                raw_b.unitId(&self.number_pool) == .none)
+            {
+                const x = raw_a.asF64(&self.number_pool);
+                const y = raw_b.asF64(&self.number_pool);
+                break :blk Value.numberUnitless(switch (meta.op) {
+                    .add => x + y,
+                    .sub => x - y,
+                    .mul => x * y,
+                });
+            }
+            const b_res = try self.maybeResolveParentSelectorValue(raw_b);
+            const a_res = try self.maybeResolveParentSelectorValue(raw_a);
+            const preserve = self.pendingCssMathCallPreserveContext(chunk);
+            break :blk switch (meta.op) {
+                .add => try addValues(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.callable_payload_pool, a_res, b_res, preserve),
+                .sub => try subValues(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, a_res, b_res, preserve),
+                .mul => try mulValues(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, a_res, b_res, preserve),
+            };
+        };
+        const slot: usize = @intCast(meta.dst_slot);
+        if (slot >= fr.locals.len or slot >= fr.declared.len) return error.BadJump;
+        try self.snapshotFlowScopeSlot(slot, fr);
+        fr.locals[slot] = result;
+        fr.declared[slot] = true;
+        self.markGlobalDeclared(self.current_module, meta.dst_slot);
+    }
+
+    fn opLocalIncConst(self: *VM, inst: Instruction, chunk: *const Chunk) VMError!void {
+        const slot: usize = @intCast(inst.arg_a);
+        const idx: usize = @intCast(inst.arg_b);
+        if (idx >= chunk.const_pool.len) return error.BadJump;
+        if (self.frame_stack.items.len == 0) return error.InternalError;
+        const fr = &self.frame_stack.items[self.frame_stack.items.len - 1];
+        if (slot >= fr.locals.len or slot >= fr.declared.len) return error.BadJump;
+        const raw_a = try self.readFrameLocalWithFallback(fr, slot);
+        const c = chunk.const_pool[idx];
+        const result: Value = blk: {
+            if (raw_a.isNumber() and c.isNumber() and
+                raw_a.unitId(&self.number_pool) == .none and
+                c.unitId(&self.number_pool) == .none)
+            {
+                break :blk Value.numberUnitless(raw_a.asF64(&self.number_pool) + c.asF64(&self.number_pool));
+            }
+            const a_res = try self.maybeResolveParentSelectorValue(raw_a);
+            break :blk try addValues(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.callable_payload_pool, a_res, c, self.pendingCssMathCallPreserveContext(chunk));
+        };
+        try self.snapshotFlowScopeSlot(slot, fr);
+        fr.locals[slot] = result;
+        fr.declared[slot] = true;
+        self.markGlobalDeclared(self.current_module, inst.arg_a);
+    }
+
+    inline fn opLoadLocalAddConst(self: *VM, inst: Instruction, chunk: *const Chunk) VMError!void {
+        const slot: usize = @intCast(inst.arg_a);
+        const idx: usize = @intCast(inst.arg_b);
+        if (idx >= chunk.const_pool.len) return error.BadJump;
+        const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
+        const l = try self.maybeResolveParentSelectorValue(try self.readFrameLocalWithFallback(&fr, slot));
+        const c = chunk.const_pool[idx];
+        try self.push(try addValues(
+            self.intern_pool,
+            &self.number_pool,
+            self.allocator,
+            &self.list_pool,
+            self.color_pool,
+            &self.callable_payload_pool,
+            l,
+            c,
+            self.pendingCssMathCallPreserveContext(chunk),
+        ));
+    }
+
+    fn opLoadLocalMulConst(self: *VM, inst: Instruction, chunk: *const Chunk) VMError!void {
+        const slot: usize = @intCast(inst.arg_a);
+        const idx: usize = @intCast(inst.arg_b);
+        if (idx >= chunk.const_pool.len) return error.BadJump;
+        const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
+        if (self.trace_slot == @as(u32, @intCast(slot))) {
+            const raw = fr.locals[slot];
+            const declared = if (slot < fr.declared.len) fr.declared[slot] else false;
+            vmStderrPrint(
+                "zsass-slot-trace LOAD_MUL slot={d} pc={d} declared={any} raw_kind={s} frames={d}\n",
+                .{ slot, self.pc - 1, declared, @tagName(raw.kind()), self.frame_stack.items.len },
+            );
+        }
+        const l = try self.maybeResolveParentSelectorValue(try self.readFrameLocalWithFallback(&fr, slot));
+        const c = chunk.const_pool[idx];
+        const preserve_css_math = self.pendingCssMathCallPreserveContext(chunk);
+        const out = mulValues(
+            self.intern_pool,
+            &self.number_pool,
+            self.allocator,
+            &self.list_pool,
+            self.color_pool,
+            &self.slash_list_preserve,
+            l,
+            c,
+            preserve_css_math,
+        ) catch |err| {
+            if (err == error.SassError) {
+                self.printLoadLocalMulConstDiagnostic(slot, idx, l, c, preserve_css_math);
+            }
+            return err;
+        };
+        try self.push(out);
+    }
+
+    inline fn opLoadLocalGeConst(self: *VM, inst: Instruction, chunk: *const Chunk) VMError!void {
+        const slot: usize = @intCast(inst.arg_a);
+        const idx: usize = @intCast(inst.arg_b);
+        if (idx >= chunk.const_pool.len) return error.BadJump;
+        const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
+        const raw_local = try self.maybeResolveParentSelectorValue(try self.readFrameLocalWithFallback(&fr, slot));
+        const raw_const = chunk.const_pool[idx];
+        const local_val = try self.coerceSlashFreeValue(raw_local);
+        const const_val = try self.coerceSlashFreeValue(raw_const);
+        if (local_val.kind() != .number or const_val.kind() != .number) return error.SassError;
+        const pair = try comparableNumbers(self.intern_pool, &self.number_pool, self.allocator, local_val, const_val);
+        const ord = fuzzyNumberOrder(pair.a, pair.b);
+        try self.push(if (ord == .gt or ord == .eq) Value.true_v else Value.false_v);
+    }
+
+    inline fn opLoadConstAddLocal(self: *VM, inst: Instruction, chunk: *const Chunk) VMError!void {
+        const slot: usize = @intCast(inst.arg_a);
+        const idx: usize = @intCast(inst.arg_b);
+        if (idx >= chunk.const_pool.len) return error.BadJump;
+        const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
+        const c = chunk.const_pool[idx];
+        const l = try self.maybeResolveParentSelectorValue(try self.readFrameLocalWithFallback(&fr, slot));
+        try self.push(try addValues(
+            self.intern_pool,
+            &self.number_pool,
+            self.allocator,
+            &self.list_pool,
+            self.color_pool,
+            &self.callable_payload_pool,
+            c,
+            l,
+            self.pendingCssMathCallPreserveContext(chunk),
+        ));
+    }
+
+    inline fn opLoadModGlobal(self: *VM, inst: Instruction) VMError!void {
+        const mid: u32 = inst.arg_a;
+        const slot: usize = @intCast(inst.arg_b);
+        if (mid >= self.mod_globals_bufs.len) return error.BadJump;
+        const row = self.mod_globals_bufs[mid];
+        if (slot >= row.len) return error.BadJump;
+        try self.push(row[slot]);
+    }
+
+    inline fn opLoadModGlobalStrict(self: *VM, inst: Instruction) VMError!void {
+        try self.push(try self.requireDeclaredModuleSlot(inst.arg_a, inst.arg_b));
+    }
+
     fn stepInnerMake(self: *VM, inst: Instruction) VMError!StepResult {
         switch (inst.opcode()) {
             .make_number_unit => {
@@ -2636,12 +3611,14 @@ pub const VM = struct {
             .make_list => {
                 const len: usize = inst.arg_a;
                 const flags = inst.arg_b;
+                perf.bump(.arena_list_bytes, len * 8);
                 const items = try self.arena().alloc(Value, len);
                 // SAFETY: If `track_stack_source_spans`, `item_spans` is assigned before any read; otherwise it is never read.
                 var item_spans: []Span = undefined;
                 var i: usize = 0;
                 var list_parent_selector_none = true;
                 if (self.track_stack_source_spans) {
+                    perf.bump(.arena_list_bytes, len * 16);
                     item_spans = try self.arena().alloc(Span, len);
                     while (i < len) : (i += 1) {
                         const popped = try self.popWithSpan();
@@ -2882,14 +3859,16 @@ pub const VM = struct {
                             .content_chunk_id = content_none_sentinel,
                             .content_capture_locals = &.{},
                             .content_capture_declared = &.{},
+                            .slot_pool_marker = self.frame_slot_pool.mark(),
                         });
                         self.prebound_top_locals = null;
                         self.prebound_top_declared = null;
                         return .continue_exec;
                     }
-                    const locals = try self.arena().alloc(Value, lc);
+                    const marker = self.frame_slot_pool.mark();
+                    const locals = try self.frame_slot_pool.allocValues(self.allocator, lc);
                     @memset(locals, Value.nil_v);
-                    const declared = try self.arena().alloc(bool, lc);
+                    const declared = try self.frame_slot_pool.allocBools(self.allocator, lc);
                     @memset(declared, false);
                     try self.frame_stack.append(self.allocator, .{
                         .locals = locals,
@@ -2903,14 +3882,15 @@ pub const VM = struct {
                         .content_chunk_id = content_none_sentinel,
                         .content_capture_locals = &.{},
                         .content_capture_declared = &.{},
+                        .slot_pool_marker = marker,
                     });
                     return .continue_exec;
                 }
                 const fr = &self.frame_stack.items[self.frame_stack.items.len - 1];
                 if (fr.locals.len == 0) {
-                    fr.locals = try self.arena().alloc(Value, lc);
+                    fr.locals = try self.frame_slot_pool.allocValues(self.allocator, lc);
                     @memset(fr.locals, Value.nil_v);
-                    fr.declared = try self.arena().alloc(bool, lc);
+                    fr.declared = try self.frame_slot_pool.allocBools(self.allocator, lc);
                     @memset(fr.declared, false);
                 } else {
                     if (fr.locals.len != lc) return error.InternalError;
@@ -2939,7 +3919,8 @@ pub const VM = struct {
                 const names_end: usize = names_start + argc;
                 if (names_end > chunk.builtin_call_arg_names.len) return error.BadJump;
                 const arg_names = chunk.builtin_call_arg_names[names_start..names_end];
-                try self.validateCallArgOrdering(arg_names);
+                const names_seen = scanCallArgNames(arg_names);
+                if (names_seen.named) try self.validateCallArgOrdering(arg_names);
 
                 var args_buf: [64]Value = undefined;
                 const args = if (argc <= args_buf.len)
@@ -2947,13 +3928,19 @@ pub const VM = struct {
                 else
                     try self.allocator.alloc(Value, argc);
                 defer if (argc > args_buf.len) self.allocator.free(args);
+                try self.popValuesInto(args);
                 var i: usize = argc;
                 while (i > 0) {
                     i -= 1;
-                    const raw = try self.pop();
+                    const raw = args[i];
+                    const k = raw.kind();
+                    if (k != .list and k != .string) continue;
                     args[i] = try self.coerceSlashFreeValueForUserCallArg(raw);
                 }
-                const expanded = try self.expandCallArgsWithSplat(args, arg_names);
+                const expanded = if (names_seen.splat)
+                    try self.expandCallArgsWithSplat(args, arg_names)
+                else
+                    ExpandedCallArgs{ .args = args, .arg_names = @constCast(arg_names), .owned = false };
                 defer self.freeExpandedCallArgs(expanded);
 
                 const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
@@ -2994,46 +3981,6 @@ pub const VM = struct {
                 try self.doCall(target_mod, .{ .placeholder = pid }, 0);
                 return .continue_exec;
             },
-            .call_builtin => {
-                const builtin_id: u32 = inst.arg_a;
-                const meta_idx: usize = @intCast(inst.arg_b);
-                if (meta_idx >= chunk.builtin_call_meta.len) return error.BadJump;
-                const meta = chunk.builtin_call_meta[meta_idx];
-                const argc: u32 = meta.argc;
-                const names_start: usize = @intCast(meta.arg_names_start);
-                const names_end: usize = names_start + argc;
-                if (names_end > chunk.builtin_call_arg_names.len) return error.BadJump;
-                const arg_names = chunk.builtin_call_arg_names[names_start..names_end];
-                if (builtinRejectsTopLevelRest(builtin_id) and callArgNamesContainSplat(arg_names)) {
-                    return error.SassError;
-                }
-                try self.validateCallArgOrdering(arg_names);
-                const had_splat = callArgNamesContainSplat(arg_names);
-                const argc_usize: usize = @intCast(argc);
-                var args_buf: [64]Value = undefined;
-                const args = if (argc_usize <= args_buf.len)
-                    args_buf[0..argc_usize]
-                else
-                    try self.allocator.alloc(Value, argc_usize);
-                defer if (argc_usize > args_buf.len) self.allocator.free(args);
-                var i: u32 = argc;
-                while (i > 0) {
-                    i -= 1;
-                    const resolved = try self.maybeResolveParentSelectorValue(try self.pop());
-                    args[@intCast(i)] = if (builtinSkipsSlashFreeCoercion(builtin_id))
-                        resolved
-                    else
-                        try self.coerceSlashFreeValue(resolved);
-                }
-                const expanded = try self.expandCallArgsWithSplat(args, arg_names);
-                defer self.freeExpandedCallArgs(expanded);
-                const prev_slot_hint = self.current_builtin_local_slot_hint;
-                self.current_builtin_local_slot_hint = meta.local_slot_hint;
-                defer self.current_builtin_local_slot_hint = prev_slot_hint;
-                const raw_out = try self.dispatchBuiltinArgs(builtin_id, expanded.args, expanded.arg_names);
-                const out = try self.maybeSerializeDirectBuiltinColorWithSplat(builtin_id, had_splat, raw_out);
-                try self.push(out);
-            },
             .run_dependency => {
                 const rerun_each_call = (inst.arg_b & 0b1) != 0;
                 const is_forward = (inst.arg_b & 0b10) != 0;
@@ -3065,18 +4012,22 @@ pub const VM = struct {
                 const names_end: usize = names_start + argc;
                 if (names_end > chunk.builtin_call_arg_names.len) return error.BadJump;
                 const arg_names = chunk.builtin_call_arg_names[names_start..names_end];
-                try self.validateCallArgOrdering(arg_names);
-                var raw_args_buf: [64]Value = undefined;
-                const raw_args = if (argc <= raw_args_buf.len)
-                    raw_args_buf[0..argc]
+                const names_seen = scanCallArgNames(arg_names);
+                if (names_seen.named) try self.validateCallArgOrdering(arg_names);
+                var args_buf: [64]Value = undefined;
+                const args = if (argc <= args_buf.len)
+                    args_buf[0..argc]
                 else
                     try self.allocator.alloc(Value, argc);
-                defer if (argc > raw_args_buf.len) self.allocator.free(raw_args);
+                defer if (argc > args_buf.len) self.allocator.free(args);
+                try self.popValuesInto(args);
                 var i: usize = argc;
                 while (i > 0) {
                     i -= 1;
-                    const resolved = try self.maybeResolveParentSelectorValue(try self.pop());
-                    raw_args[i] = resolved;
+                    const raw = args[i];
+                    const k = raw.kind();
+                    if (k != .list and k != .string) continue;
+                    args[i] = try self.maybeResolveParentSelectorValue(raw);
                 }
                 const raw_target = try self.pop();
                 const target_v = if (raw_target.kind() == .nil)
@@ -3084,19 +4035,23 @@ pub const VM = struct {
                 else
                     raw_target;
                 const preserve_slash_free = target_v.kind() == .callable and target_v.callableIsCss(&self.callable_payload_pool);
-                var args_buf: [64]Value = undefined;
-                const args = if (argc <= args_buf.len)
-                    args_buf[0..argc]
-                else
-                    try self.allocator.alloc(Value, argc);
-                defer if (argc > args_buf.len) self.allocator.free(args);
-                for (raw_args, 0..) |arg, idx| {
-                    args[idx] = if (preserve_slash_free) arg else try self.coerceSlashFreeValueForUserCallArg(arg);
+                if (!preserve_slash_free) {
+                    for (args) |*slot| {
+                        const k = slot.*.kind();
+                        if (k != .list and k != .string) continue;
+                        slot.* = try self.coerceSlashFreeValueForUserCallArg(slot.*);
+                    }
                 }
-                const expanded = try self.expandCallArgsWithSplat(args, arg_names);
-                defer self.freeExpandedCallArgs(expanded);
-                if (try self.invokeCallable(inst.arg_a != 0, target_v, expanded.args, expanded.arg_names, expanded.last_spread_separator)) |out| {
-                    if (inst.arg_a == 0) try self.push(out);
+                if (!names_seen.splat) {
+                    if (try self.invokeCallable(inst.arg_a != 0, target_v, args, arg_names, null)) |out| {
+                        if (inst.arg_a == 0) try self.push(out);
+                    }
+                } else {
+                    const expanded = try self.expandCallArgsWithSplat(args, arg_names);
+                    defer self.freeExpandedCallArgs(expanded);
+                    if (try self.invokeCallable(inst.arg_a != 0, target_v, expanded.args, expanded.arg_names, expanded.last_spread_separator)) |out| {
+                        if (inst.arg_a == 0) try self.push(out);
+                    }
                 }
             },
             .ret, .ret_value => {
@@ -3121,6 +4076,57 @@ pub const VM = struct {
                 }
             },
             else => unreachable,
+        }
+        return .continue_exec;
+    }
+
+    fn stepCallBuiltin(self: *VM, inst: Instruction, chunk: *const Chunk) VMError!StepResult {
+        const builtin_id: u32 = inst.arg_a;
+        const meta_idx: usize = @intCast(inst.arg_b);
+        if (meta_idx >= chunk.builtin_call_meta.len) return error.BadJump;
+        const meta = chunk.builtin_call_meta[meta_idx];
+        const argc: usize = @intCast(meta.argc);
+        const names_start: usize = @intCast(meta.arg_names_start);
+        const names_end: usize = names_start + argc;
+        if (names_end > chunk.builtin_call_arg_names.len) return error.BadJump;
+        const arg_names = chunk.builtin_call_arg_names[names_start..names_end];
+        const names_seen = scanCallArgNames(arg_names);
+        if (names_seen.splat and builtinRejectsTopLevelRest(builtin_id)) {
+            return error.SassError;
+        }
+        if (names_seen.named) try self.validateCallArgOrdering(arg_names);
+        var args_buf: [64]Value = undefined;
+        const args = if (argc <= args_buf.len)
+            args_buf[0..argc]
+        else
+            try self.allocator.alloc(Value, argc);
+        defer if (argc > args_buf.len) self.allocator.free(args);
+        try self.popValuesInto(args);
+        const skip_coerce = builtinSkipsSlashFreeCoercion(builtin_id);
+        var i: usize = argc;
+        while (i > 0) {
+            i -= 1;
+            const raw = args[i];
+            const k = raw.kind();
+            if (k != .list and k != .string) continue;
+            const resolved = try self.maybeResolveParentSelectorValue(raw);
+            args[i] = if (skip_coerce)
+                resolved
+            else
+                try self.coerceSlashFreeValue(resolved);
+        }
+        const prev_slot_hint = self.current_builtin_local_slot_hint;
+        self.current_builtin_local_slot_hint = meta.local_slot_hint;
+        defer self.current_builtin_local_slot_hint = prev_slot_hint;
+        if (!names_seen.splat) {
+            const out = try self.dispatchBuiltinArgs(builtin_id, args, arg_names);
+            try self.push(out);
+        } else {
+            const expanded = try self.expandCallArgsWithSplat(args, arg_names);
+            defer self.freeExpandedCallArgs(expanded);
+            const raw_out = try self.dispatchBuiltinArgs(builtin_id, expanded.args, expanded.arg_names);
+            const out = try self.maybeSerializeDirectBuiltinColorWithSplat(builtin_id, true, raw_out);
+            try self.push(out);
         }
         return .continue_exec;
     }
@@ -5079,6 +6085,7 @@ pub const VM = struct {
             }
 
             const handle: u32 = @intCast(self.list_pool.items.len);
+            perf.bump(.arena_list_bytes, resolved_items.items.len * 8);
             const owned = try self.arena().alloc(Value, resolved_items.items.len);
             @memcpy(owned, resolved_items.items);
             try self.list_pool.append(self.allocator, owned);
@@ -5155,6 +6162,7 @@ pub const VM = struct {
         is_bracketed: bool,
     ) VMError!Value {
         const handle: u32 = @intCast(self.list_pool.items.len);
+        perf.bump(.arena_list_bytes, items.len * 8);
         const owned = try self.arena().alloc(Value, items.len);
         @memcpy(owned, items);
         try self.list_pool.append(self.allocator, owned);
@@ -5251,6 +6259,7 @@ pub const VM = struct {
         }
         self.writeBackFrameGlobals(callee_module_id, fr);
         self.writeBackCapturedLocals(fr);
+        self.frame_slot_pool.release(fr.slot_pool_marker);
         self.stack.shrinkRetainingCapacity(fr.save_sp);
         if (self.track_stack_source_spans) self.stack_source_spans.shrinkRetainingCapacity(fr.save_sp);
         if (fr.return_chunk == chunk_run_sentinel) {
@@ -5272,6 +6281,7 @@ pub const VM = struct {
         }
         self.writeBackFrameGlobals(callee_module_id, fr);
         self.writeBackCapturedLocals(fr);
+        self.frame_slot_pool.release(fr.slot_pool_marker);
         self.stack.shrinkRetainingCapacity(fr.save_sp);
         if (self.track_stack_source_spans) self.stack_source_spans.shrinkRetainingCapacity(fr.save_sp);
         if (fr.return_chunk == chunk_run_sentinel) {
@@ -5284,6 +6294,7 @@ pub const VM = struct {
     }
 
     fn writeBackFrameGlobals(self: *VM, module_id: u32, fr: Frame) void {
+        if (fr.global_band_skipped) return;
         if (module_id >= self.program.modules.len) return;
         if (module_id >= self.mod_globals_bufs.len or module_id >= self.mod_global_declared_bufs.len) return;
 
@@ -5383,6 +6394,10 @@ pub const VM = struct {
     }
 
     fn coerceSlashFreeValue(self: *VM, value: Value) VMError!Value {
+        // Only unquoted strings and slash lists can be coerced; every other
+        // kind passes through both checks below unchanged.
+        const k = value.kind();
+        if (k != .string and k != .list) return value;
         if (self.isSlashListPreserved(value)) return value;
         return coerceCalcStringToNumberish(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, value);
     }
@@ -5396,6 +6411,8 @@ pub const VM = struct {
     }
 
     fn coerceInterpolatedSlashListValue(self: *VM, value: Value) VMError!Value {
+        // Both checks below only act on slash lists.
+        if (value.kind() != .list) return value;
         if (self.isSlashListPreserved(value)) return value;
         if (try coerceSlashListToNumberish(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, value)) |parsed| {
             return parsed;
@@ -5610,6 +6627,7 @@ pub const VM = struct {
     }
 
     fn buildRestListValue(self: *VM, rest_items: []const Value, separator: ?ListSeparator) VMError!Value {
+        perf.bump(.arena_list_bytes, rest_items.len * 8);
         const owned = try self.arena().alloc(Value, rest_items.len);
         if (rest_items.len > 0) @memcpy(owned, rest_items);
         const h: u32 = @intCast(self.list_pool.items.len);
@@ -5622,6 +6640,7 @@ pub const VM = struct {
 
     fn buildKeywordMapListValue(self: *VM, key_values: []const Value) VMError!Value {
         if (key_values.len % 2 != 0) return error.InternalError;
+        perf.bump(.arena_list_bytes, key_values.len * 8);
         const owned = try self.arena().alloc(Value, key_values.len);
         if (key_values.len > 0) @memcpy(owned, key_values);
         const h: u32 = @intCast(self.list_pool.items.len);
@@ -5632,6 +6651,8 @@ pub const VM = struct {
     const CallLocals = struct {
         values: []Value,
         declared: []bool,
+        slot_pool_marker: FrameSlotPool.Marker,
+        global_band_skipped: bool = false,
     };
 
     fn allocateCallLocals(
@@ -5642,11 +6663,38 @@ pub const VM = struct {
         capture_callers_locals: bool,
     ) VMError!CallLocals {
         const callee = self.getChunk(target_module, target);
-        const locals = try self.arena().alloc(Value, callee.local_count);
-        const declared = try self.arena().alloc(bool, callee.local_count);
+        perf.bump(.arena_frame_bytes, callee.local_count * 9);
+        const marker = self.frame_slot_pool.mark();
+        const locals = try self.frame_slot_pool.allocValues(self.allocator, callee.local_count);
+        const declared = try self.frame_slot_pool.allocBools(self.allocator, callee.local_count);
 
         const mod = self.program.modules[target_module];
-        if (caller_mod == target_module and self.frame_stack.items.len > 0) {
+
+        // Fast path: compile-time analysis proved the callee never observes
+        // any module-global slot through its frame, so skip the global copy
+        // entirely. All slots start nil/undeclared; an analysis gap degrades
+        // to "undeclared variable" instead of reading a stale value.
+        if (!capture_callers_locals and !callee.uses_global_band) {
+            perf.bump(.frame_band_skipped, @min(@as(usize, @intCast(mod.global_slot_count)), locals.len) * 9);
+            @memset(locals, Value.nil_v);
+            @memset(declared, false);
+            return .{
+                .values = locals,
+                .declared = declared,
+                .slot_pool_marker = marker,
+                .global_band_skipped = mod.global_slot_count > 0,
+            };
+        }
+
+        // A caller frame whose own global band was skipped holds stale band
+        // bytes, so it cannot serve as the band copy source; fall through to
+        // the module-global row instead (writeGlobalSlotImmediate keeps that
+        // row current, so it is equivalent for a band the caller never wrote).
+        const caller_band_usable = caller_mod == target_module and
+            self.frame_stack.items.len > 0 and
+            !self.frame_stack.items[self.frame_stack.items.len - 1].global_band_skipped;
+        perf.bump(.frame_band_copied, @min(@as(usize, @intCast(mod.global_slot_count)), callee.local_count) * 9);
+        if (caller_band_usable) {
             const caller_fr = &self.frame_stack.items[self.frame_stack.items.len - 1];
             if (capture_callers_locals) {
                 const copy_n: usize = @min(callee.local_count, caller_fr.locals.len);
@@ -5666,6 +6714,28 @@ pub const VM = struct {
                 if (declared_n > 0) @memcpy(declared[0..declared_n], caller_fr.declared[0..declared_n]);
                 if (declared_n < declared.len) @memset(declared[declared_n..], false);
             }
+        } else if (capture_callers_locals and caller_mod == target_module and self.frame_stack.items.len > 0) {
+            // Capturing call from a band-skipped caller: take the caller's
+            // own locals verbatim, then refresh the global band from the
+            // module-global row.
+            const caller_fr = &self.frame_stack.items[self.frame_stack.items.len - 1];
+            const copy_n: usize = @min(callee.local_count, caller_fr.locals.len);
+            if (copy_n > 0) @memcpy(locals[0..copy_n], caller_fr.locals[0..copy_n]);
+            if (copy_n < locals.len) @memset(locals[copy_n..], Value.nil_v);
+
+            const declared_n: usize = @min(callee.local_count, caller_fr.declared.len);
+            if (declared_n > 0) @memcpy(declared[0..declared_n], caller_fr.declared[0..declared_n]);
+            if (declared_n < declared.len) @memset(declared[declared_n..], false);
+
+            if (self.mod_globals_bufs.len > target_module and self.mod_global_declared_bufs.len > target_module) {
+                const mg = self.mod_globals_bufs[target_module];
+                const md = self.mod_global_declared_bufs[target_module];
+                const band: usize = @min(@as(usize, @intCast(mod.global_slot_count)), locals.len);
+                const band_v: usize = @min(band, mg.len);
+                if (band_v > 0) @memcpy(locals[0..band_v], mg[0..band_v]);
+                const band_d: usize = @min(@min(band, md.len), declared.len);
+                if (band_d > 0) @memcpy(declared[0..band_d], md[0..band_d]);
+            }
         } else if (self.mod_globals_bufs.len > target_module and self.mod_global_declared_bufs.len > target_module) {
             const mg = self.mod_globals_bufs[target_module];
             const md = self.mod_global_declared_bufs[target_module];
@@ -5684,6 +6754,7 @@ pub const VM = struct {
         return .{
             .values = locals,
             .declared = declared,
+            .slot_pool_marker = marker,
         };
     }
 
@@ -5908,6 +6979,7 @@ pub const VM = struct {
                     };
                 }
                 const handle: u32 = @intCast(self.list_pool.items.len);
+                perf.bump(.arena_list_bytes, l.elem_count * 8);
                 const owned = try self.arena().alloc(Value, l.elem_count);
                 if (l.elem_count > 0) @memcpy(owned, items_buf[0..l.elem_count]);
                 try self.list_pool.append(self.allocator, owned);
@@ -6117,7 +7189,10 @@ pub const VM = struct {
         const local_frame = try self.allocateCallLocals(target_module, target, caller_mod, capture_callers_locals);
         const locals = local_frame.values;
         const declared = local_frame.declared;
-        const global_writeback = try self.allocateGlobalWriteback(target_module, callee.local_count);
+        const global_writeback: []bool = if (local_frame.global_band_skipped)
+            &.{}
+        else
+            try self.allocateGlobalWriteback(target_module, callee.local_count);
         try self.bindCallableArgs(callee, locals, declared, args, arg_names, rest_separator_override);
         const has_pending_content = self.pending_content_chunk != content_none_sentinel;
         if (has_pending_content and switch (target) {
@@ -6148,6 +7223,8 @@ pub const VM = struct {
             .content_parent_chunk_id = if (attach_content) if (parent_content) |fr| fr.content_chunk_id else content_none_sentinel else content_none_sentinel,
             .content_parent_capture_locals = if (attach_content) if (parent_content) |fr| fr.content_capture_locals else &.{} else &.{},
             .content_parent_capture_declared = if (attach_content) if (parent_content) |fr| fr.content_capture_declared else &.{} else &.{},
+            .slot_pool_marker = local_frame.slot_pool_marker,
+            .global_band_skipped = local_frame.global_band_skipped,
         });
         if (attach_content) {
             self.pending_content_module = content_none_sentinel;
@@ -6169,11 +7246,15 @@ pub const VM = struct {
         else
             try self.allocator.alloc(Value, argc_usize);
         defer if (argc_usize > args_buf.len) self.allocator.free(args);
-        var i: u32 = argc;
+        try self.popValuesInto(args);
+        var i: usize = argc_usize;
         while (i > 0) {
             i -= 1;
-            const resolved = try self.maybeResolveParentSelectorValue(try self.pop());
-            args[@intCast(i)] = try self.coerceSlashFreeValueForUserCallArg(resolved);
+            const raw = args[i];
+            const k = raw.kind();
+            if (k != .list and k != .string) continue;
+            const resolved = try self.maybeResolveParentSelectorValue(raw);
+            args[i] = try self.coerceSlashFreeValueForUserCallArg(resolved);
         }
         return self.doCallPrepared(target_module, target, args, &.{}, null, false);
     }
@@ -6430,9 +7511,11 @@ pub const VM = struct {
         const ret_pc = self.pc;
         const ret_enc = encodeChunkRef(self.current_chunk);
 
-        const locals = try self.arena().alloc(Value, callee.local_count);
+        perf.bump(.arena_frame_bytes, callee.local_count * 9);
+        const marker = self.frame_slot_pool.mark();
+        const locals = try self.frame_slot_pool.allocValues(self.allocator, callee.local_count);
         @memset(locals, Value.nil_v);
-        const declared = try self.arena().alloc(bool, callee.local_count);
+        const declared = try self.frame_slot_pool.allocBools(self.allocator, callee.local_count);
         @memset(declared, false);
         const global_writeback = try self.allocateGlobalWriteback(target_module, callee.local_count);
 
@@ -6482,6 +7565,7 @@ pub const VM = struct {
             .content_parent_capture_declared = next_parent_binding.capture_declared,
             .content_writeback_locals = @constCast(capture_locals),
             .content_writeback_declared = @constCast(capture_declared),
+            .slot_pool_marker = marker,
         });
 
         self.current_module = target_module;
@@ -7245,6 +8329,39 @@ pub const VM = struct {
         return self.current_chunk;
     }
 
+    /// Continuation test for a fused `@for` loop (for_test). Mirrors the
+    /// legacy opcode sequence: direction from the step's sign, inclusivity
+    /// from `meta.through`, comparison through the same coerce +
+    /// comparableNumbers path as cmpOp.
+    fn forLoopShouldContinue(self: *VM, fr: *const Frame, meta: Chunk.ForLoopMeta, cursor_raw: Value) VMError!bool {
+        const to_raw = fr.locals[meta.to_slot];
+        const step_raw = fr.locals[meta.step_slot];
+        if (cursor_raw.isNumber() and to_raw.isNumber() and step_raw.isNumber() and
+            cursor_raw.unitId(&self.number_pool) == .none and
+            to_raw.unitId(&self.number_pool) == .none)
+        {
+            const ord = fuzzyNumberOrder(cursor_raw.asF64(&self.number_pool), to_raw.asF64(&self.number_pool));
+            if (step_raw.asF64(&self.number_pool) > 0) {
+                return if (meta.through) ord != .gt else ord == .lt;
+            }
+            return if (meta.through) ord != .lt else ord == .gt;
+        }
+
+        const b0 = try self.maybeResolveParentSelectorValue(to_raw);
+        const a0 = try self.maybeResolveParentSelectorValue(cursor_raw);
+        const b = try self.coerceSlashFreeValue(b0);
+        const a = try self.coerceSlashFreeValue(a0);
+        const s0 = try self.maybeResolveParentSelectorValue(step_raw);
+        const s = try self.coerceSlashFreeValue(s0);
+        if (a.kind() != .number or b.kind() != .number or s.kind() != .number) return error.SassError;
+        const pair = try comparableNumbers(self.intern_pool, &self.number_pool, self.allocator, a, b);
+        const ord = fuzzyNumberOrder(pair.a, pair.b);
+        if (s.asF64(&self.number_pool) > 0) {
+            return if (meta.through) ord != .gt else ord == .lt;
+        }
+        return if (meta.through) ord != .lt else ord == .gt;
+    }
+
     fn cmpOp(self: *VM, op: enum { eq, neq, lt, gt, le, ge }) VMError!void {
         const raw_b = try self.maybeResolveParentSelectorValue(try self.pop());
         const raw_a = try self.maybeResolveParentSelectorValue(try self.pop());
@@ -7378,6 +8495,19 @@ pub const VM = struct {
 
     pub fn pop(self: *VM) VMError!Value {
         return (try self.popWithSpan()).value;
+    }
+
+    /// Bulk equivalent of calling `pop()` once per slot: `out[len-1]` gets the
+    /// top of the stack. Spans are discarded exactly as `pop()` discards them.
+    inline fn popValuesInto(self: *VM, out: []Value) VMError!void {
+        if (self.stack.items.len < out.len) return error.StackUnderflow;
+        const base = self.stack.items.len - out.len;
+        for (out, self.stack.items[base..][0..out.len]) |*dst, src| dst.* = src;
+        self.stack.items.len = base;
+        if (self.track_stack_source_spans) {
+            if (self.stack_source_spans.items.len < out.len) return error.InternalError;
+            self.stack_source_spans.items.len -= out.len;
+        }
     }
 };
 
@@ -7535,6 +8665,17 @@ fn callArgNamesContainSplat(arg_names: []const InternId) bool {
     return false;
 }
 
+const CallArgNamesSeen = struct { named: bool, splat: bool };
+
+inline fn scanCallArgNames(arg_names: []const InternId) CallArgNamesSeen {
+    var seen: CallArgNamesSeen = .{ .named = false, .splat = false };
+    for (arg_names) |name_id| {
+        if (name_id == .none) continue;
+        if (name_id == call_arg_splat_sentinel) seen.splat = true else seen.named = true;
+    }
+    return seen;
+}
+
 fn builtinRejectsTopLevelRest(builtin_id: u32) bool {
     return switch (builtin_id) {
         // CSS-only calculation functions reject top-level rest args.
@@ -7560,7 +8701,7 @@ fn builtinRejectsTopLevelRest(builtin_id: u32) bool {
     };
 }
 
-fn builtinSkipsSlashFreeCoercion(builtin_id: u32) bool {
+inline fn builtinSkipsSlashFreeCoercion(builtin_id: u32) bool {
     return switch (builtin_id) {
         // Color constructors need the raw `calc(...)` / slash-list surface form.
         // Eager calc-string coercion turns CSS fallback inputs into plain numbers
@@ -8205,6 +9346,9 @@ fn coerceCalcStringToNumberish(
     list_pool: *const std.ArrayListUnmanaged([]Value),
     v: Value,
 ) VMError!Value {
+    // Only unquoted strings and slash lists are ever rewritten here.
+    const k = v.kind();
+    if (k != .string and k != .list) return v;
     if (v.kind() == .string and !v.stringQuoted(value_mod.empty_string_flags_pool)) {
         const raw = calc_utils.stripCalcArgMarker(pool.get(v.stringIntern()));
         if (std.mem.indexOf(u8, raw, calc_interp_preserve_start) != null) return v;
@@ -16044,6 +17188,7 @@ fn compileWithAstCacheToCss(
         &ast_cache,
         null,
         null,
+        null,
     );
     defer if (!r.borrowed_color_pool) r.color_pool.deinit(allocator);
     defer r.resolved.deinit();
@@ -16064,6 +17209,180 @@ fn compileWithAstCacheToCss(
         css = w.toArrayList();
     }
     return try css.toOwnedSlice(allocator);
+}
+
+fn compileWithSharedPoolCrossEntryToCss(
+    allocator: std.mem.Allocator,
+    pool: *InternPool,
+    cross_entry_states: *cross_entry_state_mod.CrossEntryModuleStates,
+    source: []const u8,
+    entry_path: []const u8,
+    load_paths: []const []const u8,
+) ![]u8 {
+    var r = try compiler_mod.parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
+        allocator,
+        source,
+        entry_path,
+        load_paths,
+        null,
+        pool,
+        null,
+        null,
+        null,
+        null,
+        null,
+    );
+    defer if (!r.borrowed_color_pool) r.color_pool.deinit(allocator);
+    defer r.resolved.deinit();
+    defer r.program.deinit();
+
+    var rule_ir = RuleIR.init();
+    defer rule_ir.deinit(allocator);
+
+    var vm = try VM.init(allocator, pool, &r.color_pool, &rule_ir, &r.program);
+    vm.cross_entry_states = cross_entry_states;
+    defer vm.deinit();
+    try vm.runTop();
+
+    var css: std.ArrayList(u8) = .empty;
+    errdefer css.deinit(allocator);
+    {
+        var w = std.Io.Writer.Allocating.fromArrayList(allocator, &css);
+        try rule_ir.writeTo(&w.writer, pool);
+        css = w.toArrayList();
+    }
+    return try css.toOwnedSlice(allocator);
+}
+
+fn cssDeclValue(css: []const u8, prop: []const u8) ![]const u8 {
+    const key = try std.fmt.allocPrint(std.testing.allocator, "  {s}: ", .{prop});
+    defer std.testing.allocator.free(key);
+    const pos = std.mem.indexOf(u8, css, key) orelse return error.TestExpectedEqual;
+    const start = pos + key.len;
+    const end = std.mem.indexOfScalarPos(u8, css, start, ';') orelse return error.TestExpectedEqual;
+    return std.mem.trim(u8, css[start..end], " \t\r\n");
+}
+
+test "vm: cross-entry seed preserves load-css configured-load guard" {
+    const allocator = std.testing.allocator;
+    var td = std.testing.tmpDir(.{});
+    defer td.cleanup();
+
+    const tmp_sub = td.sub_path[0..];
+    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    defer allocator.free(root);
+    const dep_path = try std.fmt.allocPrint(allocator, "{s}/_dep.scss", .{root});
+    defer allocator.free(dep_path);
+    const entry1_path = try std.fmt.allocPrint(allocator, "{s}/entry1.scss", .{root});
+    defer allocator.free(entry1_path);
+    const entry2_path = try std.fmt.allocPrint(allocator, "{s}/entry2.scss", .{root});
+    defer allocator.free(entry2_path);
+
+    try writeFileAll(dep_path,
+        \\$a: original !default;
+        \\
+    );
+
+    var pool = try InternPool.init(allocator);
+    defer pool.deinit(allocator);
+    var cross_entry_states = cross_entry_state_mod.CrossEntryModuleStates.init(allocator);
+    defer cross_entry_states.deinit();
+
+    const first_css = try compileWithSharedPoolCrossEntryToCss(
+        allocator,
+        &pool,
+        &cross_entry_states,
+        \\@use "dep";
+        \\.a { x: dep.$a; }
+        \\
+    ,
+        entry1_path,
+        &.{root},
+    );
+    defer allocator.free(first_css);
+
+    var r = try compiler_mod.parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
+        allocator,
+        \\@use "dep";
+        \\@use "sass:meta";
+        \\@include meta.load-css("dep", $with: (a: configured));
+        \\
+    ,
+        entry2_path,
+        &.{root},
+        null,
+        &pool,
+        null,
+        null,
+        null,
+        null,
+        null,
+    );
+    defer if (!r.borrowed_color_pool) r.color_pool.deinit(allocator);
+    defer r.resolved.deinit();
+    defer r.program.deinit();
+
+    var rule_ir = RuleIR.init();
+    defer rule_ir.deinit(allocator);
+    var vm = try VM.init(allocator, &pool, &r.color_pool, &rule_ir, &r.program);
+    vm.cross_entry_states = &cross_entry_states;
+    defer vm.deinit();
+    try std.testing.expectError(error.SassError, vm.runTop());
+}
+
+test "vm: cross-entry does not replay stateful builtin globals" {
+    const allocator = std.testing.allocator;
+    var td = std.testing.tmpDir(.{});
+    defer td.cleanup();
+
+    const tmp_sub = td.sub_path[0..];
+    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    defer allocator.free(root);
+    const dep_path = try std.fmt.allocPrint(allocator, "{s}/_dep.scss", .{root});
+    defer allocator.free(dep_path);
+    const entry1_path = try std.fmt.allocPrint(allocator, "{s}/entry1.scss", .{root});
+    defer allocator.free(entry1_path);
+    const entry2_path = try std.fmt.allocPrint(allocator, "{s}/entry2.scss", .{root});
+    defer allocator.free(entry2_path);
+
+    try writeFileAll(dep_path,
+        \\@use "sass:string";
+        \\$id: string.unique-id();
+        \\
+    );
+
+    var pool = try InternPool.init(allocator);
+    defer pool.deinit(allocator);
+    var cross_entry_states = cross_entry_state_mod.CrossEntryModuleStates.init(allocator);
+    defer cross_entry_states.deinit();
+
+    const first_css = try compileWithSharedPoolCrossEntryToCss(
+        allocator,
+        &pool,
+        &cross_entry_states,
+        \\@use "dep";
+        \\.a { id: dep.$id; }
+        \\
+    ,
+        entry1_path,
+        &.{root},
+    );
+    defer allocator.free(first_css);
+
+    const second_css = try compileWithSharedPoolCrossEntryToCss(
+        allocator,
+        &pool,
+        &cross_entry_states,
+        \\@use "dep";
+        \\.a { id: dep.$id; }
+        \\
+    ,
+        entry2_path,
+        &.{root},
+    );
+    defer allocator.free(second_css);
+
+    try std.testing.expect(!std.mem.eql(u8, try cssDeclValue(first_css, "id"), try cssDeclValue(second_css, "id")));
 }
 
 test "vm: ast cache converts imported indented syntax before parsing" {

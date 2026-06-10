@@ -1216,6 +1216,8 @@ fn isCssCalculationFunctionName(name: []const u8) bool {
 /// Check if a value string contains CSS calculation functions (calc, min, max, clamp)
 /// that should not be evaluated as Sass expressions.
 pub fn containsCalcFunction(text: []const u8) bool {
+    // A calculation function requires `name(`; no parenthesis, no match.
+    if (std.mem.findScalar(u8, text, '(') == null) return false;
     var i: usize = 0;
     while (i < text.len) {
         // Skip strings

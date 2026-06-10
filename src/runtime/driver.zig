@@ -18,6 +18,7 @@ const intern_pool_mod = @import("../runtime/intern_pool.zig");
 const source_cache_mod = @import("../resolve/source_cache.zig");
 const ast_cache_mod = @import("../resolve/ast_cache.zig");
 const persistent_resolver_mod = @import("../resolve/persistent_resolver.zig");
+const cross_entry_state_mod = @import("cross_entry_state.zig");
 const source_map_mod = @import("../ir/source_map.zig");
 const syntax_override_mod = @import("syntax_override.zig");
 
@@ -1715,31 +1716,19 @@ fn compileFiles(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
     var phase_agg: PhaseAggregator = .{};
     const phase_agg_ptr: ?*PhaseAggregator = if (jobs.len > 0 and jobs[0].opts.phase_timer) &phase_agg else null;
 
-    var disable_persistent = false;
-    if (jobs.len > 1) {
-        for (jobs) |job| {
-            if (job.opts.stdin_source) |stdin_source| {
-                if (sourceMayConfigureModule(stdin_source)) {
-                    disable_persistent = true;
-                    break;
-                }
-            } else {
-                const src = readFileToStringAlloc(allocator, job.input_path) catch continue;
-                defer allocator.free(src);
-                if (sourceMayConfigureModule(src)) {
-                    disable_persistent = true;
-                    break;
-                }
-            }
-        }
-    }
-
+    // Persistent record sharing validity is enforced per entry inside
+    // runEnd2EndWithPool: an entry whose own source may configure modules
+    // (@use/@forward ... with, textual @import) gets a null persistent
+    // compile context and neither reads nor writes shared records, while
+    // clean entries in the same batch keep full reuse. Extend selector
+    // grouping is record-reuse-stable since module groups are ordered by
+    // the per-entry dependency post-order ordinal, not raw module ids.
     var shared: Shared = .{
         .jobs = jobs,
         .order = order,
         .source_cache = &source_cache,
         .phase_aggregator = phase_agg_ptr,
-        .disable_persistent = disable_persistent,
+        .disable_persistent = false,
     };
 
     var started: usize = 0;
@@ -1791,6 +1780,13 @@ fn compileFiles(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
                 );
                 defer persistent_state.deinit();
 
+                // Cross-entry module global-state snapshots (pure-top
+                // dependency replay). Shares lifetime and enable conditions
+                // with the persistent resolver: stable module structure
+                // across entries is what makes the snapshots valid.
+                var cross_entry_states = cross_entry_state_mod.CrossEntryModuleStates.init(std.heap.c_allocator);
+                defer cross_entry_states.deinit();
+
                 while (true) {
                     const maybe_job: ?FileJob = blk: {
                         state.mutex.lockUncancelable(zsass_io_mod.io);
@@ -1806,7 +1802,11 @@ fn compileFiles(allocator: std.mem.Allocator, jobs: []const FileJob) !void {
                     const job = maybe_job orelse return;
                     const arena_alloc = arena.allocator();
                     const persistent_ptr = if (state.disable_persistent) null else &persistent_state;
-                    runEnd2EndWithPool(arena_alloc, job.input_path, job.output_path, job.opts, &shared_pool, state.source_cache, &local_ast_cache, state.phase_aggregator, persistent_ptr) catch |err| {
+                    // Cross-entry replay validity is fully per-entry (taint
+                    // closure + path + slot-layout checks in the VM), so it
+                    // stays on even when batch-level record reuse is off.
+                    const cross_entry_ptr = &cross_entry_states;
+                    runEnd2EndWithPool(arena_alloc, job.input_path, job.output_path, job.opts, &shared_pool, state.source_cache, &local_ast_cache, state.phase_aggregator, persistent_ptr, cross_entry_ptr) catch |err| {
                         if (job.opts.diagnostics_enabled) {
                             // Print this job's user-facing error in the worker
                             // thread (the diagnostic context lives in
@@ -2415,7 +2415,15 @@ fn runEnd2End(
     output_path: []const u8,
     opts: RunOpts,
 ) !void {
-    return runEnd2EndWithPool(allocator, input_path, output_path, opts, null, null, null, null, null);
+    return runEnd2EndWithPool(allocator, input_path, output_path, opts, null, null, null, null, null, null);
+}
+
+/// True when the named environment variable is set to "0" (explicit opt-out
+/// switch for diagnosing optimization layers).
+fn envFlagDisabled(name: [:0]const u8) bool {
+    const v = std.c.getenv(name.ptr) orelse return false;
+    const s = std.mem.sliceTo(v, 0);
+    return std.mem.eql(u8, s, "0");
 }
 
 fn sourceMayConfigureModule(source: []const u8) bool {
@@ -2425,8 +2433,61 @@ fn sourceMayConfigureModule(source: []const u8) bool {
 }
 
 fn sourceMayReachUnknownConfiguration(source: []const u8) bool {
-    return sourceMayConfigureModule(source) or
-        std.mem.indexOf(u8, source, "@import") != null;
+    if (sourceMayConfigureModule(source)) return true;
+    if (std.mem.indexOf(u8, source, "@import") == null) return false;
+    return !sourceImportsArePlainCssOnly(source);
+}
+
+fn importTailHasOnlyWhitespaceBeforeSemicolon(source: []const u8, start: usize) bool {
+    var k = start;
+    while (k < source.len) : (k += 1) {
+        if (source[k] == ';') return true;
+        if (!std.ascii.isWhitespace(source[k])) return false;
+    }
+    return true;
+}
+
+/// True when every `@import` occurrence in `source` is a plain-CSS import
+/// (url(...), an http(s)/protocol-relative URL, or a quoted path ending in
+/// .css). Plain-CSS imports pass through to the output without loading a
+/// Sass module, so they cannot inject configuration into module resolution.
+/// Anything ambiguous (quoted Sass partials, media-suffixed quoted imports,
+/// "@import" text inside strings or comments) answers false, keeping the
+/// caller on the conservative path.
+fn sourceImportsArePlainCssOnly(source: []const u8) bool {
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, source, i, "@import")) |pos| {
+        i = pos + "@import".len;
+        var j = i;
+        while (j < source.len and std.ascii.isWhitespace(source[j])) j += 1;
+        if (j >= source.len) return false;
+        if (std.mem.startsWith(u8, source[j..], "url(")) continue;
+        if (source[j] == '"' or source[j] == '\'') {
+            const quote = source[j];
+            const rest = source[j + 1 ..];
+            const end = std.mem.indexOfScalar(u8, rest, quote) orelse return false;
+            const path = rest[0..end];
+            const after_quote = j + 1 + end + 1;
+            if (!importTailHasOnlyWhitespaceBeforeSemicolon(source, after_quote)) return false;
+            if (std.mem.startsWith(u8, path, "http://") or
+                std.mem.startsWith(u8, path, "https://") or
+                std.mem.startsWith(u8, path, "//"))
+            {
+                continue;
+            }
+            if (std.mem.endsWith(u8, path, ".css")) continue;
+            return false;
+        }
+        return false;
+    }
+    return true;
+}
+
+test "driver: plain-css import probe rejects quoted media suffixes" {
+    try std.testing.expect(sourceImportsArePlainCssOnly("@import \"theme.css\";"));
+    try std.testing.expect(sourceImportsArePlainCssOnly("@import \"https://example.com/theme.css\";"));
+    try std.testing.expect(!sourceImportsArePlainCssOnly("@import \"theme.css\" screen;"));
+    try std.testing.expect(!sourceImportsArePlainCssOnly("@import \"theme\";"));
 }
 
 fn runEnd2EndWithPool(
@@ -2439,6 +2500,7 @@ fn runEnd2EndWithPool(
     ast_cache: ?*ast_cache_mod.ParsedAstCache,
     phase_aggregator: ?*PhaseAggregator,
     persistent_state: ?*persistent_resolver_mod.PersistentResolverState,
+    cross_entry_states: ?*cross_entry_state_mod.CrossEntryModuleStates,
 ) !void {
     if (opts.update_mode) {
         if (opts.stdin_source == null and
@@ -2502,7 +2564,13 @@ fn runEnd2EndWithPool(
             if (sourceMayReachUnknownConfiguration(source)) null else ps.compileContext()
         else
             null;
-        borrowed_result = try compiler_mod.parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(allocator, source, module_path, opts.load_paths, phase_timer_ptr, pool, source_cache, ast_cache, persistent_ctx, &deprecation_opts);
+        // Import-preamble checkpoints serve exactly the entries the persistent
+        // opt-out leaves cold (kill switch: ZSASS_PREAMBLE_CHECKPOINT=0).
+        const preamble_store: ?*persistent_resolver_mod.PersistentResolverState.PreambleStore = if (persistent_state) |ps|
+            if (persistent_ctx == null and !envFlagDisabled("ZSASS_PREAMBLE_CHECKPOINT")) &ps.preamble_checkpoints else null
+        else
+            null;
+        borrowed_result = try compiler_mod.parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(allocator, source, module_path, opts.load_paths, phase_timer_ptr, pool, source_cache, ast_cache, persistent_ctx, &deprecation_opts, preamble_store);
         pool_ptr = pool;
         color_pool_ptr = &borrowed_result.?.color_pool;
         program_ptr = &borrowed_result.?.program;
@@ -2602,6 +2670,20 @@ fn runEnd2EndWithPool(
     }
     const output_to_stdout = std.mem.eql(u8, output_path, "-");
     const resolved_sm_mode = resolveSourceMapMode(opts.source_map_mode, output_to_stdout);
+    // Cross-entry pure-top replay. Entries whose own source may inject
+    // configuration in ways the static config seeds cannot represent
+    // (@use/@forward ... with, or textual @import config snapshots) opt out
+    // entirely; the VM's taint closure handles configuration that IS
+    // represented as seeds. Off with source maps so per-module origin
+    // bookkeeping stays exactly as a fresh run would have it.
+    if (cross_entry_states != null and
+        resolved_sm_mode == .off and
+        opts.stdin_source == null and
+        !sourceMayReachUnknownConfiguration(source) and
+        !envFlagDisabled("ZSASS_CROSS_ENTRY"))
+    {
+        vm.cross_entry_states = cross_entry_states;
+    }
     vm.configureStreamChunkFlush(
         resolved_sm_mode == .off and opts.trace_diff == null,
         1024,
@@ -2616,6 +2698,23 @@ fn runEnd2EndWithPool(
 
     const exec_start: i128 = if (opts.phase_timer) observe_mod.PhaseTimer.begin() else 0;
     const perf_exec_start = perf.timeBegin();
+    defer if (std.c.getenv("ZSASS_DUMP_POOLS") != null) {
+        var list_bytes: usize = 0;
+        for (vm.list_pool.items) |row| list_bytes += row.len * @sizeOf(value_mod.Value);
+        cliErrPrint("arena_capacity={d}\n", .{program_ptr.arena.queryCapacity()});
+        cliErrPrint("pools: number={d} list_rows={d} list_bytes={d} callable={d} string_flags={d} list_meta={d} color={d} stack_cap={d} intern_bytes={d} rule_ir_nodes={d}\n", .{
+            vm.number_pool.items.len,
+            vm.list_pool.items.len,
+            list_bytes,
+            vm.callable_payload_pool.items.len,
+            vm.string_flags_pool.items.len,
+            vm.list_meta_pool.items.len,
+            color_pool_ptr.items.len,
+            vm.stack.capacity,
+            pool_ptr.strings.items.len,
+            rule_ir.nodes.items.len,
+        });
+    };
     vm_mod.VM.runTop(&vm) catch |err| {
         if (error_format.verboseErrorsEnabled()) {
             cliErrPrint("zsass: VM error: {}\n", .{err});

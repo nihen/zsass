@@ -166,6 +166,12 @@ pub fn runTopModuleWithSelectorPrefix(self: anytype, module_id: u32, selector_pr
     self.current_module = module_id;
     self.current_chunk = .top;
     self.stack.clearRetainingCapacity();
+    if (self.frame_stack.items.len > 0) {
+        // Reclaim slot storage of any frames left behind by a previous top
+        // run (top frames are not popped on halt). frame_stack[0] is the
+        // oldest frame, so its marker is the lowest pool position.
+        self.frame_slot_pool.release(self.frame_stack.items[0].slot_pool_marker);
+    }
     self.frame_stack.clearRetainingCapacity();
     self.flow_scope_stack.clearRetainingCapacity();
     self.flow_saved_slots.clearRetainingCapacity();
@@ -207,6 +213,12 @@ pub fn runTopModuleWithSelectorPrefix(self: anytype, module_id: u32, selector_pr
     try self.runLoopTop();
     if (!rerun_each_call and module_id < self.executed_modules.len) {
         self.executed_modules[module_id] = true;
+        // Snapshot pure-top dependency state right after its top ran, before
+        // the entry root can mutate it (cross-assign / !global writes stay
+        // per-entry, exactly as they would by re-running the top).
+        if (selector_prefix.len == 0 and self.load_css_module_tag_override == null) {
+            self.saveModuleToCrossEntryStates(module_id);
+        }
     }
     if (self.open_rule_depth > 0) {
         var leak = self.open_rule_depth;

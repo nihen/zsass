@@ -148,6 +148,41 @@ pub const Opcode = enum(u8) {
     branch_if_false_local,
     /// emit_rule_end + pop_rule_scope
     emit_rule_end_pop,
+    /// Fused `@for` loop-head test -- argA: Chunk.for_loop_meta index,
+    /// argB: relative jump offset to loop exit (i32 bitcast). Compares the
+    /// cursor slot against the to slot (direction from the step slot's sign,
+    /// inclusivity from meta.through); on continue binds the loop variable
+    /// slot from the cursor and falls through, otherwise jumps to exit.
+    for_test,
+    /// Fused `@for` loop-tail step -- argA: Chunk.for_loop_meta index,
+    /// argB: relative jump offset back to the matching for_test (i32
+    /// bitcast). Adds the step slot into the cursor slot, then jumps back.
+    for_step,
+    /// load_local a + load_local b + cmp + jmp_if_false -- argA:
+    /// Chunk.fused_cmp_meta index, argB: relative jump offset (i32 bitcast).
+    branch_local_cmp_local_false,
+    /// load_local a + load_local b + add/sub/mul + store_local c -- argA:
+    /// Chunk.fused_binop_meta index.
+    local_binop_local_store,
+    /// load_local s + load_const + add + store_local s (same slot) -- argA:
+    /// slot, argB: const_pool index.
+    local_inc_const,
+    /// Fused `@each` loop-head test -- argA: Chunk.each_loop_meta index,
+    /// argB: relative jump offset to loop exit (i32 bitcast). Compares the
+    /// index slot against the logical length of the list slot; jumps to exit
+    /// when exhausted.
+    each_test,
+    /// Fused `@each` single-variable bind -- argA: Chunk.each_loop_meta
+    /// index. Stores list[index] into the loop variable slot.
+    each_bind,
+    /// Fused `@each` loop-tail step -- argA: Chunk.each_loop_meta index,
+    /// argB: relative jump offset back to the matching each_test (i32
+    /// bitcast). Increments the index slot, then jumps back.
+    each_step,
+    /// load_const + store_local -- argA: slot, argB: const_pool index.
+    /// Keeps full store_local semantics (flow-scope snapshot, declared
+    /// marking, global-declared marking).
+    store_const_local,
 
     //-- selector / prop name interpolation (Stage 1b-A1) -
     /// argA: parts_count -- pop N values from stack (bottom..top order), stringify + concat, push one string

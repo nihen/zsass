@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const perf = @import("../runtime/perf.zig");
 const lexer_mod = @import("../frontend/lexer.zig");
 const parser_mod = @import("../frontend/parser.zig");
 const ast_flat = @import("../frontend/ast_flat.zig");
@@ -41,6 +42,7 @@ pub fn resolveEntryAst(self: *ModuleResolver, ast: *const ast_flat.Ast, entry_pa
 
 pub fn resolveUserModule(self: *ModuleResolver, from_path: []const u8, url: []const u8, resolve_parsed: ResolveParsedModuleFn) ResolveError!u32 {
     if (url.len == 0) return error.UsermodulePathEmpty;
+    const t_path = perf.timeBegin();
     const resolved_raw = resolveUserModulePath(self.alloc, from_path, url, self.load_paths, .{ .pkg_importer_enabled = self.pkg_importer_enabled }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
     } orelse return error.UsermoduleNotFound;
@@ -49,7 +51,12 @@ pub fn resolveUserModule(self: *ModuleResolver, from_path: []const u8, url: []co
         error.OutOfMemory => return error.OutOfMemory,
     };
     defer self.alloc.free(resolved);
-    if (self.id_by_path_ptr.get(resolved)) |id| return id;
+    perf.timeEnd(.resolve_path_lookup_ns, t_path);
+    if (self.id_by_path_ptr.get(resolved)) |id| {
+        perf.note(.resolve_record_hit);
+        return id;
+    }
+    perf.note(.resolve_record_miss);
     if (isVisiting(self, resolved)) return error.UsermoduleCircular;
 
     // When ast_cache hit: borrow parsed AST and go straight to resolve (lex/parse skip).
