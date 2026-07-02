@@ -8672,8 +8672,8 @@ const resolveImportModulePathWithPolicy = path_resolution.resolveImportModulePat
 const test_only_path_resolver = path_resolution.test_only_path_resolver;
 const isPlainCssStylesheetPath = path_resolution.isPlainCssStylesheetPath;
 
-fn resolveImportedFile(ctx: *Ctx, url: []const u8, span: Span) ResolveError!StmtIndex {
-    return module_import_inline.resolveImportedFile(ctx, url, span, ModuleStmtDeps);
+fn resolveImportedFile(ctx: *Ctx, url: []const u8, span: Span, url_span: Span) ResolveError!StmtIndex {
+    return module_import_inline.resolveImportedFile(ctx, url, span, url_span, ModuleStmtDeps);
 }
 
 fn resolveAtRuleStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {

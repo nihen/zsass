@@ -26,6 +26,7 @@ const persistent_resolver_mod = @import("../resolve/persistent_resolver.zig");
 const perf = @import("perf.zig");
 const syntax_override_mod = @import("syntax_override.zig");
 const zsass_io = @import("io.zig");
+const error_format = @import("error_format.zig");
 
 /// Spin-lock-guarded wrapper around an arbitrary `std.mem.Allocator`. Used so
 /// the caller's allocator is safe to share across worker threads even when its
@@ -98,12 +99,19 @@ pub const CompileFileResult = struct {
     css: ?[]u8 = null,
     source_map_json: ?[]u8 = null,
     err: ?anyerror = null,
+    /// Dart-style rendered diagnostic for `err` (message, inner-most source
+    /// frame, and the `@import`/`@use` chain), multi-line, `alloc`-owned.
+    /// Null when the entry succeeded, when no diagnostic was captured, or
+    /// when allocating the rendered text failed (`err` is still set then).
+    err_rendered: ?[]u8 = null,
 
     pub fn deinit(self: *CompileFileResult, allocator: std.mem.Allocator) void {
         if (self.css) |b| allocator.free(b);
         if (self.source_map_json) |b| allocator.free(b);
+        if (self.err_rendered) |b| allocator.free(b);
         self.css = null;
         self.source_map_json = null;
+        self.err_rendered = null;
     }
 };
 
@@ -309,6 +317,9 @@ fn compileOnePath(
     out: *CompileFileResult,
 ) void {
     out.* = .{};
+    // Diagnostic state is threadlocal; reset so a previous entry compiled on
+    // this worker thread cannot leak its span/stack into this entry's report.
+    error_format.clearErrorContext();
     compileOnePathFallible(out_alloc, work_alloc, input_path, opts, shared_pool, source_cache, ast_cache, persistent_state, out) catch |err| {
         if (out.css) |b| {
             out_alloc.free(b);
@@ -319,6 +330,7 @@ fn compileOnePath(
             out.source_map_json = null;
         }
         out.err = err;
+        out.err_rendered = error_format.formatDiagnosticAlloc(out_alloc, err);
     };
 }
 
