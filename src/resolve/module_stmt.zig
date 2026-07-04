@@ -271,7 +271,12 @@ pub fn resolveImportStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: an
     const css_only = in_plain_css_module or has_conds or url_has_dynamic or isPlainCssImport(url_raw, url_inner);
     if (!css_only) {
         if (ctx.flow_control_depth > 0 or ctx.in_callable) return error.SassError;
-        return try deps.resolveImportedFile(ctx, url_inner, span);
+        // dart's stack trace points the parent frame at the import URL
+        // (`{parent} l:c root stylesheet` with c = quote start), not the
+        // statement head. Pass the url node span alongside the stmt span.
+        const url_ast = ctx.ast.getNode(url_node);
+        const url_span = Span{ .start = url_ast.span_start, .end = url_ast.span_end };
+        return try deps.resolveImportedFile(ctx, url_inner, span, url_span);
     }
 
     return emitImportAtRuleCssOnly(ctx, span, url_node, cond_node, deps);

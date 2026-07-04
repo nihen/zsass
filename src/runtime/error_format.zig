@@ -230,6 +230,7 @@ pub fn recordErrorSpanIfUnset(start: u32, end: u32, file_id: u32) void {
 pub fn clearErrorContext() void {
     error_state.last_error_ctx = .{};
     error_state.error_stack_len = 0;
+    error_state.error_stack_overflow = 0;
     error_state.error_stack_snapshot_len = 0;
     error_state.context_message_len = 0;
 }
@@ -288,6 +289,10 @@ pub const ErrorState = struct {
     last_error_ctx: ErrorContext = .{},
     error_stack: [max_error_stack]ErrorStackFrame = [_]ErrorStackFrame{.{ .path = "", .source = "", .label = "" }} ** max_error_stack,
     error_stack_len: usize = 0,
+    /// Frames dropped by `pushFrame` because the stack was full. `popFrame`
+    /// consumes this before touching `error_stack_len` so callers'
+    /// unconditional `defer popFrame()` stays balanced past max depth.
+    error_stack_overflow: usize = 0,
     error_stack_snapshot: [max_error_stack]ErrorTraceFrame = [_]ErrorTraceFrame{.{}} ** max_error_stack,
     error_stack_snapshot_len: usize = 0,
 };
@@ -295,13 +300,36 @@ pub const ErrorState = struct {
 pub threadlocal var error_state: ErrorState = std.mem.zeroes(ErrorState);
 
 pub fn pushFrame(path: []const u8, source: []const u8, label: []const u8) void {
-    if (error_state.error_stack_len >= max_error_stack) return;
+    if (error_state.error_stack_len >= max_error_stack) {
+        // Keep push/pop balanced for callers' `defer popFrame()`: count the
+        // dropped frame so the matching pop doesn't remove an unrelated one.
+        error_state.error_stack_overflow += 1;
+        return;
+    }
     error_state.error_stack[error_state.error_stack_len] = .{ .path = path, .source = source, .label = label };
     error_state.error_stack_len += 1;
 }
 
 pub fn popFrame() void {
+    if (error_state.error_stack_overflow > 0) {
+        error_state.error_stack_overflow -= 1;
+        return;
+    }
     if (error_state.error_stack_len > 0) error_state.error_stack_len -= 1;
+}
+
+/// Record the caller-side span that triggered a child load on the current
+/// top frame before pushing the child frame. Pass the span dart-sass points
+/// its parent trace line at -- for `@import` that is the URL token span
+/// (quote start), not the statement head. The trace line for the parent then
+/// reads `{parent} {l}:{c} {label}` instead of the 1:1 fallback. No-op when
+/// the stack is empty.
+pub fn setTopFrameSpan(start: u32, end: u32) void {
+    if (error_state.error_stack_len == 0) return;
+    var f = &error_state.error_stack[error_state.error_stack_len - 1];
+    f.span_start = start;
+    f.span_end = end;
+    f.has_span = true;
 }
 
 /// Copy the current error_stack to snapshot. Automatically called with recordErrorSpan. caller is
@@ -554,6 +582,79 @@ fn writeSourceFrameAsciiOnlyFromSnapshot(
         eprint("  \u{2575}\n", .{});
     } else {
         eprint("  <\n", .{});
+    }
+}
+
+/// Render the current diagnostic (message + inner-most source frame + stack
+/// trace from `error_stack_snapshot`) into an `allocator`-owned string.
+/// Embedding-API counterpart of the stderr renderers above (writeSourceFrame /
+/// writeStackTrace): batch compiles (`embed_batch.zig`) attach this to the
+/// per-file result so watchers can show dart-style diagnostics instead of a
+/// bare error tag. Returns null when allocation fails.
+pub fn formatDiagnosticAlloc(allocator: std.mem.Allocator, err: anyerror) ?[]u8 {
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    formatDiagnosticToWriter(&aw.writer, err) catch return null;
+    return aw.toOwnedSlice() catch null;
+}
+
+fn writeSpaces(w: *std.Io.Writer, n: usize) !void {
+    var i: usize = 0;
+    while (i < n) : (i += 1) try w.writeAll(" ");
+}
+
+fn formatDiagnosticToWriter(w: *std.Io.Writer, err: anyerror) !void {
+    try w.print("Error: {s}\n", .{errorToUserMessageWithContext(err)});
+    const slen = error_state.error_stack_snapshot_len;
+    if (slen == 0) return;
+
+    // Inner-most source frame (same layout as writeSourceFrameAsciiOnlyFromSnapshot,
+    // honoring the unicode/ASCII diagnostics toggle).
+    const unicode = unicodeDiagnosticsEnabled();
+    const bar_top: []const u8 = if (unicode) "  \u{2577}\n" else "  >\n";
+    const bar_mid: []const u8 = if (unicode) " \u{2502} " else " | ";
+    const bar_bottom: []const u8 = if (unicode) "  \u{2575}\n" else "  <\n";
+    const inner = &error_state.error_stack_snapshot[slen - 1];
+    if (inner.has_span and inner.line_text_len > 0) {
+        const line_text = inner.line_text_buf[0..inner.line_text_len];
+        var lineno_text_buf: [12]u8 = undefined;
+        const lineno_text = std.fmt.bufPrint(&lineno_text_buf, "{d}", .{inner.line_no}) catch "?";
+        try w.writeAll(bar_top);
+        try w.print("{s}{s}{s}\n", .{ lineno_text, bar_mid, line_text });
+        try writeSpaces(w, lineno_text.len);
+        try w.writeAll(bar_mid);
+        try writeSpaces(w, inner.col_no -| 1);
+        const caret_len: u32 = if (inner.line_no == inner.end_line_no)
+            @max(inner.end_col_no -| inner.col_no, 1)
+        else
+            @max(@as(u32, @intCast(line_text.len)) -| (inner.col_no - 1), 1);
+        var ci: u32 = 0;
+        while (ci < caret_len) : (ci += 1) try w.writeAll("^");
+        try w.writeAll("\n");
+        try w.writeAll(bar_bottom);
+    }
+
+    // Trace lines, inner -> outer, with the label column aligned (dart compatible).
+    var piece_bufs: [max_error_stack][300]u8 = undefined;
+    var pieces: [max_error_stack][]const u8 = undefined;
+    var max_width: usize = 0;
+    var i: usize = 0;
+    while (i < slen) : (i += 1) {
+        const f = &error_state.error_stack_snapshot[i];
+        pieces[i] = std.fmt.bufPrint(&piece_bufs[i], "{s} {d}:{d}", .{
+            f.path_buf[0..f.path_len],
+            f.line_no,
+            f.col_no,
+        }) catch "?";
+        if (pieces[i].len > max_width) max_width = pieces[i].len;
+    }
+    var j: usize = 0;
+    while (j < slen) : (j += 1) {
+        const idx = slen - 1 - j;
+        const f = &error_state.error_stack_snapshot[idx];
+        try w.print("  {s}", .{pieces[idx]});
+        try writeSpaces(w, max_width - pieces[idx].len + 2);
+        try w.print("{s}\n", .{f.label_buf[0..f.label_len]});
     }
 }
 

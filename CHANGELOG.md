@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+- Report errors inside `@import`-inlined files at their actual file and
+  position with a dart-sass compatible stack trace (`{inner} l:c @import` /
+  `{parent} l:c root stylesheet`). Previously the inner file's span was
+  projected onto the parent source, producing a bogus location in the
+  importing file.
+
+### Added
+- `CompileFileResult.err_rendered` in the batch embedding API
+  (`compileFiles`): a dart-style rendered diagnostic (message, inner-most
+  source frame, and the `@import`/`@use` chain) for failed entries, so
+  embedders such as build watchers can show the full error instead of a
+  bare error tag.
+
 ## 0.3.3 (2026-06-10)
 
 ### Changed

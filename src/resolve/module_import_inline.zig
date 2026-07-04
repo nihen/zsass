@@ -30,7 +30,9 @@ const resolveImportModulePathWithPolicy = path_resolution.resolveImportModulePat
 const spanStartLineColOneBased = data.spanStartLineColOneBased;
 
 /// Inline expansion of Sass file `@import` to parent ctx.
-pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, comptime deps: anytype) ResolveError!StmtIndex {
+/// `url_span` is the span of the URL token within the parent source (used
+/// for the parent line of dart-style error stack traces).
+pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: Span, comptime deps: anytype) ResolveError!StmtIndex {
     const entering_import_context = ctx.visiting_imports.items.len == 0;
     const saved_static_config_len = ctx.static_config_vars.items.len;
     var captured_import_config = false;
@@ -135,6 +137,15 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, comptime d
     ctx.ast = child_ast_ptr;
     ctx.module_path = resolved_path;
     ctx.module_directive_locked = false;
+    // Error-trace frame for the inlined file: without this, spans recorded
+    // while resolving the child would be projected onto the parent frame's
+    // source (bogus location in the root file). Mirror the @use route
+    // (resolveParsedModule) with label="@import", and pin the parent frame
+    // to the import URL token span (dart points the parent trace line at
+    // the quote start, not the statement head).
+    error_format.setTopFrameSpan(url_span.start, url_span.end);
+    error_format.pushFrame(resolved_path, child_ast_ptr.source, "@import");
+    defer error_format.popFrame();
     defer {
         ctx.ast = saved_ast;
         ctx.module_path = saved_path;

@@ -44,6 +44,9 @@ pub fn main(init: std.process.Init) !void {
     for (paths, results) |path, result| {
         if (result.err) |err| {
             try printLine("FAIL  {s}: {}\n", .{ path, err });
+            if (result.err_rendered) |rendered| {
+                try printLine("{s}", .{rendered});
+            }
             continue;
         }
         const css = result.css orelse continue;
