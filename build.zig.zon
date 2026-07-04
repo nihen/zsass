@@ -1,6 +1,6 @@
 .{
     .name = .zsass,
-    .version = "0.3.3",
+    .version = "0.3.4",
     .fingerprint = 0x88c1aba572d9a0b5,
     .minimum_zig_version = "0.16.0",
     .paths = .{
