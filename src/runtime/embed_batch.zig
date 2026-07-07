@@ -104,14 +104,22 @@ pub const CompileFileResult = struct {
     /// Null when the entry succeeded, when no diagnostic was captured, or
     /// when allocating the rendered text failed (`err` is still set then).
     err_rendered: ?[]u8 = null,
+    /// Error CSS payload for `err` (the rendered diagnostic as a CSS comment
+    /// plus a `body::before` rule that displays it on the page), `alloc`-owned.
+    /// Callers that write compile output to disk can write this to the
+    /// destination on failure to mirror the CLI's `--error-css` behavior.
+    /// Null when the entry succeeded or when `err_rendered` is null.
+    err_css: ?[]u8 = null,
 
     pub fn deinit(self: *CompileFileResult, allocator: std.mem.Allocator) void {
         if (self.css) |b| allocator.free(b);
         if (self.source_map_json) |b| allocator.free(b);
         if (self.err_rendered) |b| allocator.free(b);
+        if (self.err_css) |b| allocator.free(b);
         self.css = null;
         self.source_map_json = null;
         self.err_rendered = null;
+        self.err_css = null;
     }
 };
 
@@ -331,7 +339,54 @@ fn compileOnePath(
         }
         out.err = err;
         out.err_rendered = error_format.formatDiagnosticAlloc(out_alloc, err);
+        out.err_css = formatErrorCssAlloc(out_alloc, err, input_path, out.err_rendered);
     };
+}
+
+/// Error CSS for a failed entry, mirroring the CLI's `--error-css` output.
+/// When the resolver captured a stack snapshot the rendered diagnostic
+/// already carries the source frame and trace, so wrap that. Otherwise
+/// (e.g. a parse error in the entry itself) rebuild the inner-most frame
+/// from the recorded span the way the CLI driver does: re-read the entry
+/// and feed `writeErrorCssTemplate`. `file_id == 0` means the recorded span
+/// belongs to the entry; spans in other modules cannot be resolved to a
+/// source here, so those fall back to message + path.
+fn formatErrorCssAlloc(
+    alloc: std.mem.Allocator,
+    err: anyerror,
+    input_path: []const u8,
+    rendered: ?[]const u8,
+) ?[]u8 {
+    if (error_format.error_state.error_stack_snapshot_len > 0) {
+        if (rendered) |r| return error_format.formatErrorCssFromDiagnosticAlloc(alloc, r);
+    }
+
+    const ctx = error_format.error_state.last_error_ctx;
+    var source: ?[]u8 = null;
+    defer if (source) |s| alloc.free(s);
+    var line_starts: ?[]u32 = null;
+    defer if (line_starts) |ls| alloc.free(ls);
+    if (ctx.has_value and ctx.file_id == 0) {
+        source = readFileAlloc(alloc, input_path) catch null;
+        if (source) |s| {
+            line_starts = error_format.computeLineStarts(alloc, s) catch null;
+        }
+    }
+    const has_frame = line_starts != null;
+
+    var aw = std.Io.Writer.Allocating.init(alloc);
+    defer aw.deinit();
+    error_format.writeErrorCssTemplate(
+        &aw.writer,
+        err,
+        input_path,
+        if (has_frame) source else null,
+        line_starts,
+        ctx.span_start,
+        ctx.span_end,
+        has_frame,
+    ) catch return null;
+    return aw.toOwnedSlice() catch null;
 }
 
 fn compileOnePathFallible(

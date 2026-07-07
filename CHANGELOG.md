@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+- `CompileFileResult.err_css` in the batch embedding API (`compileFiles`):
+  a CSS payload for failed entries that renders the diagnostic as a comment
+  plus a `body::before` rule, so embedders that write compile output to disk
+  can mirror the CLI's `--error-css` behavior and surface the error on the
+  page instead of silently serving stale CSS. Parse errors in the entry file
+  reconstruct the inner-most source frame (file, line, caret) the same way
+  the CLI does; resolver/VM errors reuse the rendered diagnostic including
+  the `@use`/`@import` trace.
+
 ## 0.3.4 (2026-07-04)
 
 ### Fixed

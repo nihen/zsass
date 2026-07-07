@@ -446,22 +446,7 @@ fn formatInnerLabel(ref: vm_mod.ChunkRef, name: []const u8, buf: []u8) []const u
     return written;
 }
 
-fn computeLineStarts(allocator: std.mem.Allocator, source: []const u8) ![]u32 {
-    var nl_count: usize = 1;
-    for (source) |c| {
-        if (c == '\n') nl_count += 1;
-    }
-    var list: std.ArrayListUnmanaged(u32) = .empty;
-    defer list.deinit(allocator);
-    try list.ensureTotalCapacity(allocator, nl_count);
-    list.appendAssumeCapacity(0);
-    for (source, 0..) |c, i| {
-        if (c == '\n') {
-            list.appendAssumeCapacity(@intCast(i + 1));
-        }
-    }
-    return try list.toOwnedSlice(allocator);
-}
+const computeLineStarts = error_format.computeLineStarts;
 
 /// CLI-FIX-E Step 3 (C-6): Write error CSS template when error occurs in file output mode.
 /// Existing output file (if partially written) is overwritten. If stdout (-), do nothing.
