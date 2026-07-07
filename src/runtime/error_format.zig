@@ -823,6 +823,93 @@ fn writeCssEscapedString(writer: *std.Io.Writer, text: []const u8) !void {
     }
 }
 
+/// Embedding-API counterpart of `writeErrorCssTemplate`: wraps an already
+/// rendered diagnostic (see `formatDiagnosticAlloc`) into the same error CSS
+/// shape (diagnostic as a CSS comment plus a `body::before` rule that
+/// displays it on the page). Only needs the rendered text, so it stays valid
+/// after the per-entry compile arenas are torn down. Returns null when
+/// allocation fails.
+pub fn formatErrorCssFromDiagnosticAlloc(allocator: std.mem.Allocator, diagnostic: []const u8) ?[]u8 {
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    writeErrorCssFromDiagnostic(&aw.writer, diagnostic) catch return null;
+    return aw.toOwnedSlice() catch null;
+}
+
+fn writeErrorCssFromDiagnostic(writer: *std.Io.Writer, diagnostic: []const u8) !void {
+    const text = std.mem.trimEnd(u8, diagnostic, "\n");
+
+    try writer.writeAll("/* ");
+    var comment_lines = std.mem.splitScalar(u8, text, '\n');
+    var first = true;
+    while (comment_lines.next()) |line| {
+        if (!first) try writer.writeAll("\n * ");
+        first = false;
+        try writeCommentSafe(writer, line);
+    }
+    try writer.writeAll(" */\n\n");
+
+    try writer.writeAll(
+        \\body::before {
+        \\  font-family: "Source Code Pro", "SF Mono", Monaco, Inconsolata, "Fira Mono",
+        \\      "Droid Sans Mono", monospace, monospace;
+        \\  white-space: pre;
+        \\  display: block;
+        \\  padding: 1em;
+        \\  margin-bottom: 1em;
+        \\  border-bottom: 2px solid black;
+        \\  content: "
+    );
+    var content_lines = std.mem.splitScalar(u8, text, '\n');
+    first = true;
+    while (content_lines.next()) |line| {
+        if (!first) try writer.writeAll("\\a ");
+        first = false;
+        try writeCssEscapedString(writer, line);
+    }
+    try writer.writeAll("\";\n}\n");
+}
+
+pub fn computeLineStarts(allocator: std.mem.Allocator, source: []const u8) ![]u32 {
+    var nl_count: usize = 1;
+    for (source) |c| {
+        if (c == '\n') nl_count += 1;
+    }
+    var list: std.ArrayListUnmanaged(u32) = .empty;
+    defer list.deinit(allocator);
+    try list.ensureTotalCapacity(allocator, nl_count);
+    list.appendAssumeCapacity(0);
+    for (source, 0..) |c, i| {
+        if (c == '\n') {
+            list.appendAssumeCapacity(@intCast(i + 1));
+        }
+    }
+    return try list.toOwnedSlice(allocator);
+}
+
+/// `*/` inside a diagnostic line (e.g. quoted source text) would terminate
+/// the wrapping comment early; break the pair with a space.
+fn writeCommentSafe(writer: *std.Io.Writer, line: []const u8) !void {
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        if (line[i] == '*' and i + 1 < line.len and line[i + 1] == '/') {
+            try writer.writeAll("* /");
+            i += 1;
+        } else {
+            try writer.writeByte(line[i]);
+        }
+    }
+}
+
+test "formatErrorCssFromDiagnosticAlloc wraps diagnostic as comment and body::before" {
+    const alloc = std.testing.allocator;
+    const css = formatErrorCssFromDiagnosticAlloc(alloc, "Error: \"boom\" */\n  a.scss 1:1  root stylesheet\n").?;
+    defer alloc.free(css);
+    try std.testing.expect(std.mem.indexOf(u8, css, "/* Error: \"boom\" * /\n *   a.scss 1:1  root stylesheet */\n\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, css, "body::before {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, css, "content: \"Error: \\\"boom\\\" */\\a   a.scss 1:1  root stylesheet\";\n}\n") != null);
+}
+
 test "errorToUserMessage covers main resolver errors" {
     try std.testing.expectEqualStrings("Undefined variable.", errorToUserMessage(error.UnknownVar));
     try std.testing.expectEqualStrings("Undefined mixin.", errorToUserMessage(error.UnknownMixin));
