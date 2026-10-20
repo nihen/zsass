@@ -7,6 +7,9 @@ const math = std.math;
 // See the color audit ledger ("Route `powRational()` through
 // libc `pow()` ...").
 extern fn pow(f64, f64) f64;
+// libm `atan2` for the same reason: `std.math.atan2` differs from it by 1 ULP
+// on some inputs, and the official CLI hue matches libm.
+extern fn atan2(f64, f64) f64;
 
 // ============================================================================
 // Types
@@ -418,6 +421,14 @@ const oklab_to_lms_cbrt: Matrix3 = .{
     .{ 1.00000000000000020, 0.39633777737617490, 0.21580375730991360 },
     .{ 0.99999999999999980, -0.10556134581565854, -0.06385417282581334 },
     .{ 0.99999999999999990, -0.08948417752981180, -1.29148554801940940 },
+};
+
+// Linear rec2020 -> LMS in one step; fitted bit for bit against the official
+// Sass CLI with power-of-two probe inputs (it does not round through XYZ-D65).
+const rec2020_to_lms: Matrix3 = .{
+    .{ 0.6167557848654444, 0.36019840122646335, 0.02304581390809228 },
+    .{ 0.2651330593926367, 0.6358393720678491, 0.09902756853951408 },
+    .{ 0.10010262952034828, 0.20390652261661452, 0.6959908478630372 },
 };
 
 const lms_to_display_p3_linear: Matrix3 = .{
@@ -902,6 +913,20 @@ fn labToLchOffset(comptime deg: comptime_int, comptime hue: comptime_int, lab_va
     return .{ l, c, h };
 }
 
+/// Hue in degrees from Cartesian channels computed as
+/// `atan2(b, a) * 180 / pi` in binary64, evaluated left to right. This
+/// matches the official Sass CLI bit for bit when the Cartesian input does.
+fn hueDegreesBinary64(a: f64, b: f64) f64 {
+    const h = atan2(b, a) * 180.0 / math.pi;
+    return if (h < 0.0) h + 360.0 else h;
+}
+
+fn labToLchBinary64(lab_val: [3]f64) [3]f64 {
+    const a = lab_val[1];
+    const b = lab_val[2];
+    return .{ lab_val[0], @sqrt(a * a + b * b), hueDegreesBinary64(a, b) };
+}
+
 // --- OKLab <-> XYZ-D65 ---
 
 fn oklabToXyzD65(oklab_val: [3]f64) [3]f64 {
@@ -977,6 +1002,16 @@ fn xyzD65ToOklab(xyz: [3]f64) [3]f64 {
         signedPowCbrt(lms[2]),
     };
     // LMS^(1/3) -> OKLab
+    return mulMV64(lms_cbrt_to_oklab, lms_cbrt);
+}
+
+fn linearRec2020ToOklab(linear: [3]f64) [3]f64 {
+    const lms = mulMV64(rec2020_to_lms, linear);
+    const lms_cbrt: [3]f64 = .{
+        signedPowCbrt(lms[0]),
+        signedPowCbrt(lms[1]),
+        signedPowCbrt(lms[2]),
+    };
     return mulMV64(lms_cbrt_to_oklab, lms_cbrt);
 }
 
@@ -1594,8 +1629,16 @@ pub fn convert(color: Color, target: ColorSpace) Color {
                 return Color.init(a98[0], a98[1], a98[2], color.channels[3], .a98_rgb);
             },
             .lch => {
-                const lch = labToLchOffset(2, 4, xyzD50ToLab(linearRec2020ToXyzD50(rec2020ToLinear(channels))));
+                const lch = labToLchBinary64(xyzD50ToLab(linearRec2020ToXyzD50(rec2020ToLinear(channels))));
                 return Color.init(lch[0], lch[1], lch[2], color.channels[3], .lch);
+            },
+            .oklab => {
+                const oklab = linearRec2020ToOklab(rec2020ToLinear(channels));
+                return Color.init(oklab[0], oklab[1], oklab[2], color.channels[3], .oklab);
+            },
+            .oklch => {
+                const oklch = labToLchBinary64(linearRec2020ToOklab(rec2020ToLinear(channels)));
+                return Color.init(oklch[0], oklch[1], oklch[2], color.channels[3], .oklch);
             },
             else => {},
         },

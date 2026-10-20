@@ -3115,12 +3115,18 @@ fn colorValueFromDeclaredColor(
     return colorValueFromPrimitive(ctx, normalized, declared_space, missing, legacy);
 }
 
+/// Hue normalization as observed with the official Sass CLI: the result is
+/// `((hue % 360) + 360) % 360`, so in-range hues still round through `+ 360`.
+fn normalizeHueChannel(hue: f64) f64 {
+    return @mod(@mod(hue, 360.0) + 360.0, 360.0);
+}
+
 fn normalizeChannelColor(color: color_mod.Color) color_mod.Color {
     var normalized = color;
     switch (normalized.space) {
-        .hsl => normalized.channels[0] = @mod(normalized.channels[0], 360.0),
+        .hsl => normalized.channels[0] = normalizeHueChannel(normalized.channels[0]),
         .hwb => {
-            normalized.channels[0] = @mod(normalized.channels[0], 360.0);
+            normalized.channels[0] = normalizeHueChannel(normalized.channels[0]);
             const total = normalized.channels[1] + normalized.channels[2];
             if (total > 100.0) {
                 const scale = 100.0 / total;
@@ -3128,7 +3134,7 @@ fn normalizeChannelColor(color: color_mod.Color) color_mod.Color {
                 normalized.channels[2] *= scale;
             }
         },
-        .lch, .oklch => normalized.channels[2] = @mod(normalized.channels[2], 360.0),
+        .lch, .oklch => normalized.channels[2] = normalizeHueChannel(normalized.channels[2]),
         else => {},
     }
     return normalized;
@@ -4666,7 +4672,7 @@ pub fn color_to_space(ctx: *BuiltinContext, args: []const Value, arg_names: []co
                 (target_space == .oklab and (converted.channels[0] < -lab_tol or converted.channels[0] > 1.0 + lab_tol)) or
                 (target_space == .oklch and (converted.channels[0] < -lab_tol or converted.channels[0] > 1.0 + lab_tol))))
         {
-            return serializeToSpaceLabLikeOutOfRange(ctx, converted, target_space, source_declared_space);
+            return serializeToSpaceLabLikeOutOfRange(ctx, normalizeChannelColor(converted), target_space, source_declared_space);
         }
 
         if (target_space == .srgb and target_spec.legacy_rgb_alias) {
