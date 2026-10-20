@@ -1197,8 +1197,7 @@ fn parseHwbChannelOrMissing(ctx: *BuiltinContext, arg: Value) ?ParsedColorCompon
         return .{ .value = raw, .missing = false };
     }
     if (parseCalcSpecialNumber(ctx, arg)) |raw| {
-        const clamped = if (std.math.isNan(raw)) 0.0 else std.math.clamp(raw, 0.0, 100.0);
-        return .{ .value = clamped, .missing = false };
+        return .{ .value = raw, .missing = false };
     }
     return null;
 }
@@ -1240,58 +1239,6 @@ fn parseRgbAlphaOrMissing(ctx: *BuiltinContext, arg: Value) ?ParsedColorComponen
     } else parseCalcSpecialNumber(ctx, arg) orelse return null;
     const clamped = if (std.math.isNan(raw)) 0.0 else std.math.clamp(raw, 0.0, 1.0);
     return .{ .value = clamped, .missing = false };
-}
-
-fn parseHwbRawChannelForLegacyDegenerate(ctx: *BuiltinContext, arg: Value) ?f64 {
-    if (isNoneColorToken(ctx, arg)) return null;
-    if (arg.kind() == .number) {
-        const unit = if (arg.unitId(ctx.number_pool) == .none) null else ctx.intern_pool.get(arg.unitId(ctx.number_pool));
-        const raw = if (unit) |u| blk: {
-            if (!std.ascii.eqlIgnoreCase(u, "%")) return null;
-            break :blk arg.asF64(ctx.number_pool);
-        } else return null;
-        return raw;
-    }
-    return parseCalcSpecialNumber(ctx, arg);
-}
-
-fn parseHwbAlphaForLegacyDegenerate(ctx: *BuiltinContext, arg: Value) ?f64 {
-    if (isNoneColorToken(ctx, arg)) return 0.0;
-    const raw = if (arg.kind() == .number) blk: {
-        const unit = if (arg.unitId(ctx.number_pool) == .none) null else ctx.intern_pool.get(arg.unitId(ctx.number_pool));
-        break :blk if (unit) |u| blk2: {
-            if (!std.ascii.eqlIgnoreCase(u, "%")) return null;
-            break :blk2 arg.asF64(ctx.number_pool) / 100.0;
-        } else arg.asF64(ctx.number_pool);
-    } else parseCalcSpecialNumber(ctx, arg) orelse return null;
-    if (std.math.isNan(raw)) return 0.0;
-    if (std.math.isInf(raw)) return if (raw < 0.0) 0.0 else 1.0;
-    return std.math.clamp(raw, 0.0, 1.0);
-}
-
-fn constructorArgsIncludeAlphaForHwb(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) bool {
-    for (arg_names) |name_id| {
-        if (name_id != .none and argNameMatches(ctx, name_id, "alpha")) return true;
-    }
-    if (args.len >= 4) return true;
-    if (args.len == 1 and args[0].kind() == .list and args[0].listSlash(ctx.list_meta_pool.items) and !args[0].listBracketed(ctx.list_meta_pool.items)) return true;
-    return false;
-}
-
-fn hwbLegacyDegeneratePassthrough(ctx: *BuiltinContext, alpha: f64, has_alpha: bool) BuiltinError!Value {
-    const alpha_css = if (has_alpha) blk: {
-        const css = try valueToCssString(ctx, Value.numberUnitless(std.math.clamp(alpha, 0.0, 1.0)));
-        break :blk css;
-    } else "";
-    defer if (has_alpha) ctx.allocator.free(alpha_css);
-
-    const text = if (has_alpha)
-        try std.fmt.allocPrint(ctx.allocator, "hsla(calc(NaN), calc(NaN * 1%), calc(NaN * 1%), {s})", .{alpha_css})
-    else
-        try ctx.allocator.dupe(u8, "hsl(calc(NaN), calc(NaN * 1%), calc(NaN * 1%))");
-    defer ctx.allocator.free(text);
-    const id = try internString(ctx, text);
-    return Value.string(id, false);
 }
 
 fn color_hwbImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
@@ -1342,15 +1289,6 @@ fn color_hwbImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
         if (shouldSerializeConstructorFallback(ctx, args)) return serializeConstructorListFallback(ctx, "hwb", args, false);
         return error.BuiltinType;
     };
-
-    if (!w.missing and !b.missing) {
-        const w_raw = parseHwbRawChannelForLegacyDegenerate(ctx, bound.values[1].?);
-        const b_raw = parseHwbRawChannelForLegacyDegenerate(ctx, bound.values[2].?);
-        if ((w_raw != null and !std.math.isFinite(w_raw.?)) or (b_raw != null and !std.math.isFinite(b_raw.?))) {
-            const alpha_raw = parseHwbAlphaForLegacyDegenerate(ctx, bound.values[3].?) orelse alpha.value;
-            return hwbLegacyDegeneratePassthrough(ctx, alpha_raw, constructorArgsIncludeAlphaForHwb(ctx, args, arg_names));
-        }
-    }
 
     var missing: ColorMissingMask = 0;
     if (h.missing) missing |= 0x1;

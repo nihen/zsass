@@ -522,7 +522,16 @@ pub fn clampByte(v: f64) u8 {
 }
 
 /// Converts sRGB channels on a 0-255 scale to HSL (hue degrees, S/L as percentages).
+/// Unlike @min/@max, the reference conversions propagate NaN, so a NaN RGB
+/// channel yields NaN for every cylindrical channel.
+fn anyNan3(v: [3]f64) bool {
+    return math.isNan(v[0]) or math.isNan(v[1]) or math.isNan(v[2]);
+}
+
+const nan3: [3]f64 = .{ math.nan(f64), math.nan(f64), math.nan(f64) };
+
 pub fn rgb255ToHsl(r_in: f64, g_in: f64, b_in: f64) [3]f64 {
+    if (anyNan3(.{ r_in, g_in, b_in })) return nan3;
     const rf = r_in / 255.0;
     const gf = g_in / 255.0;
     const bf = b_in / 255.0;
@@ -665,6 +674,7 @@ fn hueFromRgb(r: f64, g: f64, b: f64, max_val: f64, delta: f64) f64 {
 }
 
 fn srgbToHslWithChromaEpsilon(rgb: [3]f64, chroma_threshold: f64) [3]f64 {
+    if (anyNan3(rgb)) return nan3;
     const r = rgb[0];
     const g = rgb[1];
     const b = rgb[2];
@@ -738,6 +748,7 @@ fn hwbToSrgb(hwb_val: [3]f64) [3]f64 {
 }
 
 fn srgbToHwb(rgb: [3]f64) [3]f64 {
+    if (anyNan3(rgb)) return nan3;
     const r = rgb[0];
     const g = rgb[1];
     const blue = rgb[2];

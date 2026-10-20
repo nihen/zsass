@@ -62,14 +62,22 @@ fn allocPreferredNamedOrHex(alloc: std.mem.Allocator, r: u8, g: u8, b: u8) std.m
     return allocHexColor(alloc, r, g, b, true);
 }
 
+fn zeroIfNan(v: f64) f64 {
+    return if (std.math.isNan(v)) 0.0 else v;
+}
+
 fn formatLegacyHslCss(
     alloc: std.mem.Allocator,
-    h: f64,
-    s: f64,
-    l: f64,
+    h_raw: f64,
+    s_raw: f64,
+    l_raw: f64,
     alpha_raw: f64,
     force_alpha: bool,
 ) std.mem.Allocator.Error![]u8 {
+    // Converted channels that come out as NaN behave as zero.
+    const h = if (std.math.isFinite(h_raw)) h_raw else 0.0;
+    const s = zeroIfNan(s_raw);
+    const l = zeroIfNan(l_raw);
     const alpha = clampLegacyAlpha(alpha_raw);
     const hh = try value_format.formatNumberCore(alloc, normalizeHueDeg(h));
     defer alloc.free(hh);
