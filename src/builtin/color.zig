@@ -4720,7 +4720,7 @@ pub fn color_to_space(ctx: *BuiltinContext, args: []const Value, arg_names: []co
             const rgb = color_mod.Color.init(r255 / 255.0, g255 / 255.0, b255 / 255.0, alpha, .srgb);
             const out = try colorValueFromDeclaredColor(ctx, rgb, .srgb, output_missing, true);
             preserveLegacyRgbTargetSourceRepr(ctx, out, &source_entry, source_legacy);
-            if (out.kind() == .color and source_missing != 0 and source_declared_space == .srgb) {
+            if (out.kind() == .color and source_legacy and source_missing != 0 and source_declared_space == .srgb) {
                 out.colorEntryMut(ctx.color_pool).inspect_repr = .legacy_rgb_function;
             }
             maybePreferLongHexResult(ctx, out, shouldPreferLongHexForToSpaceLegacyRgbTarget(&source_entry, source_declared_space));
