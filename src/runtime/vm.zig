@@ -19244,11 +19244,11 @@ test "vm: nested import function captures import-scope variables" {
 
     try std.testing.expectEqualStrings(
         \\.dark a {
-        \\  color: rgb(127.5, 0, 0);
+        \\  color: rgb(50%, 0%, 0%);
         \\}
         \\
         \\.light a {
-        \\  color: rgb(255, 127.5, 127.5);
+        \\  color: rgb(100%, 50%, 50%);
         \\}
         \\
     , css);
@@ -19725,8 +19725,8 @@ test "vm: dynamic custom property preserves source colon spacing" {
         \\
     ,
         \\:root {
-        \\  --blue-50:rgb(243.9, 249.75, 254.4);
-        \\  --blue-50-s: rgb(243.9, 249.75, 254.4);
+        \\  --blue-50:rgb(95.6470588235%, 97.9411764706%, 99.7647058824%);
+        \\  --blue-50-s: rgb(95.6470588235%, 97.9411764706%, 99.7647058824%);
         \\  --blue-50-plain:$value;
         \\  --blue-50-plain-s: $value;
         \\}

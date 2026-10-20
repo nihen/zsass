@@ -5352,7 +5352,7 @@ test "color.to-space rgb alias zero-fills modern srgb missing channels even when
     const out = try color_to_space(&ctx, args[0..], &.{ .none, .none });
     const css = try valueToCssString(&ctx, out);
     defer ctx.allocator.free(css);
-    try std.testing.expectEqualStrings("rgb(0, 20, 30)", css);
+    try std.testing.expectEqualStrings("#00141e", css);
 }
 
 test "color.to-space rgb alias zero-fills non-byte-like modern missing channels" {
@@ -6167,7 +6167,7 @@ test "color.rgb clamps non-finite calc channels" {
     try std.testing.expectEqualStrings("rgba(255, 0, 0, 0.5)", css);
 }
 
-test "color.hwb uses legacy degenerate passthrough for non-finite whiteness" {
+test "color.hwb normalizes non-finite whiteness" {
     var h = try ColorOpTestHarness.init(std.testing.allocator);
     defer h.deinit();
     var ctx = h.context();
@@ -6180,8 +6180,9 @@ test "color.hwb uses legacy degenerate passthrough for non-finite whiteness" {
         Value.numberUnitless(0.5),
     };
     const out = try color_hwb(&ctx, args[0..], &.{ .none, .none, .none, .none });
-    try std.testing.expectEqual(.string, out.kind());
-    try std.testing.expectEqualStrings("hsla(calc(NaN), calc(NaN * 1%), calc(NaN * 1%), 0.5)", h.intern_pool.get(out.stringIntern()));
+    const css = try valueToCssString(&ctx, out);
+    defer ctx.allocator.free(css);
+    try std.testing.expectEqualStrings("hsla(0, 100%, 50%, 0.5)", css);
 }
 
 test "color.color splits inline slash text for explicit alpha" {
@@ -6204,7 +6205,7 @@ test "color.color splits inline slash text for explicit alpha" {
     try std.testing.expectEqualStrings("color(srgb 0 0 calc(-infinity) / 0.5)", css);
 }
 
-test "color.hsl keeps NaN lightness as calc percent" {
+test "color.hsl treats NaN lightness as zero" {
     var h = try ColorOpTestHarness.init(std.testing.allocator);
     defer h.deinit();
     var ctx = h.context();
@@ -6217,7 +6218,7 @@ test "color.hsl keeps NaN lightness as calc percent" {
     }, &.{ .none, .none, .none });
     const css = try valueToCssString(&ctx, out);
     defer ctx.allocator.free(css);
-    try std.testing.expectEqualStrings("hsl(0, 100%, calc(NaN * 1%))", css);
+    try std.testing.expectEqualStrings("hsl(0, 100%, 0%)", css);
 }
 
 test "color.hsl keeps infinite saturation as calc percent" {
@@ -6285,7 +6286,7 @@ test "color.adjust-hue converts angle units to degrees" {
     const out = try color_adjust_hue(&ctx, args[0..]);
     const css = try valueToCssString(&ctx, out);
     defer ctx.allocator.free(css);
-    try std.testing.expectEqualStrings("rgb(0, 179.576224164, 255)", css);
+    try std.testing.expectEqualStrings("rgb(0%, 70.4220486918%, 100%)", css);
 }
 
 test "color.alpha named-argument filter fallback emits alpha() text" {
