@@ -153,6 +153,40 @@ fn appendAlphaTail(
     try appendFormattedNumber(alloc, out, alpha);
 }
 
+/// Serializes in-gamut legacy rgb()/rgba() channels (0-255). Legacy colors
+/// with any non-integer channel serialize every channel as a percentage, so
+/// that rgb() never carries non-percent decimal channels.
+/// A color written as an rgb() call keeps its channels unless they are exact
+/// integers; computed colors use the legacy integer tolerance.
+fn formatLegacyRgbFunction(
+    alloc: std.mem.Allocator,
+    channels: [3]f64,
+    alpha: f64,
+    literal: bool,
+    is_integer_byte: bool,
+) std.mem.Allocator.Error![]u8 {
+    const integers = if (literal)
+        channels[0] == @round(channels[0]) and channels[1] == @round(channels[1]) and channels[2] == @round(channels[2])
+    else
+        is_integer_byte;
+    var parts: [3][]u8 = undefined;
+    var filled: usize = 0;
+    defer for (parts[0..filled]) |part| alloc.free(part);
+    for (channels) |channel| {
+        parts[filled] = if (integers)
+            try value_format.formatNumberCore(alloc, if (literal) channel else @round(channel))
+        else
+            try value_format.formatNumberWithUnit(alloc, channel / 255.0 * 100.0, "%");
+        filled += 1;
+    }
+    if (@abs(alpha - 1.0) < 5e-6) {
+        return std.fmt.allocPrint(alloc, "rgb({s}, {s}, {s})", .{ parts[0], parts[1], parts[2] });
+    }
+    const a = try value_format.formatNumberCore(alloc, alpha);
+    defer alloc.free(a);
+    return std.fmt.allocPrint(alloc, "rgba({s}, {s}, {s}, {s})", .{ parts[0], parts[1], parts[2], a });
+}
+
 fn formatLegacySrgb(alloc: std.mem.Allocator, entry: ColorEntry) std.mem.Allocator.Error![]u8 {
     const primitive = color_mod.Color.init(
         entry.channels[0],
@@ -227,26 +261,18 @@ fn formatLegacySrgb(alloc: std.mem.Allocator, entry: ColorEntry) std.mem.Allocat
     }
 
     if (!missing_r and !missing_g and !missing_b and !missing_a) {
-        const r = try value_format.formatNumberCore(alloc, r_clamped);
-        defer alloc.free(r);
-        const g = try value_format.formatNumberCore(alloc, g_clamped);
-        defer alloc.free(g);
-        const b = try value_format.formatNumberCore(alloc, b_clamped);
-        defer alloc.free(b);
-        if (@abs(alpha - 1.0) < channel_tol) {
-            if (entry.legacy and is_integer_byte and entry.inspect_repr != .legacy_rgb_function) {
-                return allocPreferredNamedOrHex(
-                    alloc,
-                    color_mod.clampByte(r_clamped),
-                    color_mod.clampByte(g_clamped),
-                    color_mod.clampByte(b_clamped),
-                );
-            }
-            return std.fmt.allocPrint(alloc, "rgb({s}, {s}, {s})", .{ r, g, b });
+        if (@abs(alpha - 1.0) < channel_tol and entry.legacy and is_integer_byte and
+            entry.inspect_repr != .legacy_rgb_function)
+        {
+            return allocPreferredNamedOrHex(
+                alloc,
+                color_mod.clampByte(r_clamped),
+                color_mod.clampByte(g_clamped),
+                color_mod.clampByte(b_clamped),
+            );
         }
-        const a = try value_format.formatNumberCore(alloc, alpha);
-        defer alloc.free(a);
-        return std.fmt.allocPrint(alloc, "rgba({s}, {s}, {s}, {s})", .{ r, g, b, a });
+        const literal = entry.inspect_repr == .legacy_rgb_function;
+        return formatLegacyRgbFunction(alloc, .{ r_clamped, g_clamped, b_clamped }, alpha, literal, is_integer_byte);
     }
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -471,12 +497,11 @@ pub fn formatColorCssRaw(alloc: std.mem.Allocator, entry: ColorEntry) std.mem.Al
         const r = color_mod.clampByte(clampLegacyByte(r_raw));
         const g = color_mod.clampByte(clampLegacyByte(g_raw));
         const b = color_mod.clampByte(clampLegacyByte(b_raw));
-        const rs = try value_format.formatNumberCore(alloc, clampLegacyByte(r_raw));
-        defer alloc.free(rs);
-        const gs = try value_format.formatNumberCore(alloc, clampLegacyByte(g_raw));
-        defer alloc.free(gs);
-        const bs = try value_format.formatNumberCore(alloc, clampLegacyByte(b_raw));
-        defer alloc.free(bs);
+        const raw_channels = [3]f64{ clampLegacyByte(r_raw), clampLegacyByte(g_raw), clampLegacyByte(b_raw) };
+        const raw_is_integer_byte = @abs(raw_channels[0] - @round(raw_channels[0])) <= 5e-6 and
+            @abs(raw_channels[1] - @round(raw_channels[1])) <= 5e-6 and
+            @abs(raw_channels[2] - @round(raw_channels[2])) <= 5e-6;
+        const raw_literal = entry.inspect_repr == .legacy_rgb_function;
         if (@abs(alpha - 1.0) < 5e-6) {
             if (entry.inspect_repr == .literal_long_hex or entry.inspect_repr == .literal_short_hex) {
                 const short = entry.inspect_repr == .literal_short_hex;
@@ -496,11 +521,8 @@ pub fn formatColorCssRaw(alloc: std.mem.Allocator, entry: ColorEntry) std.mem.Al
                 if (namedColorForRgb(r, g, b)) |name| return alloc.dupe(u8, name);
                 return allocHexColor(alloc, r, g, b, false);
             }
-            return std.fmt.allocPrint(alloc, "rgb({s}, {s}, {s})", .{ rs, gs, bs });
         }
-        const as = try value_format.formatNumberCore(alloc, alpha);
-        defer alloc.free(as);
-        return std.fmt.allocPrint(alloc, "rgba({s}, {s}, {s}, {s})", .{ rs, gs, bs, as });
+        return formatLegacyRgbFunction(alloc, raw_channels, alpha, raw_literal, raw_is_integer_byte);
     }
     return formatColorCss(alloc, entry);
 }
