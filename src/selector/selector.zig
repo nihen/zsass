@@ -428,9 +428,12 @@ fn parseComplexSelector(allocator: std.mem.Allocator, input: []const u8) ParseEr
             // Check for consecutive combinators (e.g., "> >")
             continue;
         } else if (complex.components.items.len > 0) {
-            // Implicit descendant combinator between compounds
+            // Implicit descendant combinator between compounds. Adjacent
+            // compounds without whitespace (deprecated `[a]b`) also mean
+            // descendant.
             const had_whitespace = pos > ws_start;
-            if (had_whitespace) {
+            const after_compound = complex.components.items[complex.components.items.len - 1] == .compound;
+            if (had_whitespace or after_compound) {
                 complex.components.append(allocator, .{ .combinator = .descendant }) catch return ParseError.OutOfMemory;
             }
         }
@@ -459,6 +462,13 @@ fn parseCompoundSelector(allocator: std.mem.Allocator, input: []const u8, pos: *
 
         // || combinator
         if (ch == '|' and pos.* + 1 < input.len and input[pos.* + 1] == '|') break;
+
+        // A type selector can only start a compound; one written after other
+        // simple selectors begins an adjacent compound.
+        // `&-suffix` stays a single compound.
+        if (compound.simple_selectors.items.len > 0 and
+            compound.simple_selectors.items[compound.simple_selectors.items.len - 1] != .parent and
+            (ch == '|' or isIdentChar(ch) or ch == '-' or ch == '\\')) break;
 
         // Empty namespace prefix: |type or |*
         if (ch == '|' and pos.* + 1 < input.len and input[pos.* + 1] != '|') {
