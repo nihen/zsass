@@ -18,7 +18,66 @@ const perf = @import("../runtime/perf.zig");
 const source_map_mod = @import("source_map.zig");
 const zsass_io = @import("../runtime/io.zig");
 const opcode_mod = @import("opcode.zig");
+const error_format = @import("../runtime/error_format.zig");
 const media_prelude_preserve_case_marker = "\x01zsass-media-preserve:";
+
+/// Media context of a style rule or `@extend`: the interned merged media
+/// query list, or one of these sentinels.
+pub const media_context_none: u32 = std.math.maxInt(u32);
+/// Media context whose queries cannot be merged into a single list.
+pub const media_context_unknown: u32 = std.math.maxInt(u32) - 1;
+
+const MediaContextText = union(enum) {
+    none,
+    unknown,
+    text: []const u8,
+};
+
+/// Folds a nested `@media` prelude into its enclosing media context the same
+/// way nested media queries are merged for output. A returned text is either
+/// `prelude` itself or owned by `allocator`.
+fn foldMediaContextText(
+    allocator: std.mem.Allocator,
+    parent: MediaContextText,
+    prelude: []const u8,
+) error{OutOfMemory}!MediaContextText {
+    const child = stripMediaPreludePreserveCaseMarker(prelude);
+    switch (parent) {
+        .unknown => return .unknown,
+        .none => return .{ .text = child },
+        .text => |parent_text| {
+            const merged = (media_prelude.mergeMediaQueryLists(allocator, parent_text, child) catch
+                return error.OutOfMemory) orelse return .unknown;
+            if (merged.ptr == media_prelude.MEDIA_MERGE_UNRESOLVABLE.ptr) return .unknown;
+            return .{ .text = merged };
+        },
+    }
+}
+
+/// Interning variant of `foldMediaContextText` for contexts tracked by id.
+pub fn foldMediaContext(
+    allocator: std.mem.Allocator,
+    pool: *InternPool,
+    parent: u32,
+    prelude_id: u32,
+) error{OutOfMemory}!u32 {
+    if (prelude_id == std.math.maxInt(u32)) return media_context_unknown;
+    const parent_text: MediaContextText = switch (parent) {
+        media_context_none => .none,
+        media_context_unknown => .unknown,
+        else => .{ .text = pool.get(@enumFromInt(parent)) },
+    };
+    const folded = try foldMediaContextText(allocator, parent_text, pool.get(@enumFromInt(prelude_id)));
+    return switch (folded) {
+        .none => media_context_none,
+        .unknown => media_context_unknown,
+        .text => |text| blk: {
+            const owned = parent_text == .text;
+            defer if (owned) allocator.free(text);
+            break :blk @intFromEnum(try pool.intern(text));
+        },
+    };
+}
 const calc_arg_marker = calc_utils.calc_arg_marker;
 const calc_interp_marker = calc_utils.calc_interp_marker;
 const literal_decl_marker = "\x01zsass-literal-decl:";
@@ -873,7 +932,7 @@ pub const RuleIR = struct {
     extra: std.ArrayListUnmanaged(u32) = .empty,
     strings: std.ArrayListUnmanaged([]const u8) = .empty,
     extend_edges: std.ArrayListUnmanaged(ExtendEdge) = .empty,
-    extend_relation_media: std.AutoHashMapUnmanaged(u64, bool) = .empty,
+    extend_relation_media: std.AutoHashMapUnmanaged(u64, u32) = .empty,
     /// Borrowed from VM during `runTop()` for cross-module @extend scope checks.
     module_visibility_matrix: []const bool = &.{},
     module_visibility_n: u32 = 0,
@@ -1513,25 +1572,47 @@ pub const RuleIR = struct {
         allocator: std.mem.Allocator,
         source_module: u32,
         relation_id: u32,
-        media_context_active: bool,
+        media_context: u32,
     ) !void {
         if (relation_id == std.math.maxInt(u32)) return;
         const key = extendRelationMediaKey(source_module, relation_id);
         const gop = try self.extend_relation_media.getOrPut(allocator, key);
-        if (!gop.found_existing) {
-            gop.value_ptr.* = media_context_active;
+        if (!gop.found_existing or gop.value_ptr.* == media_context_none) {
+            gop.value_ptr.* = media_context;
             return;
         }
-        gop.value_ptr.* = gop.value_ptr.* or media_context_active;
+        if (media_context != media_context_none and media_context != gop.value_ptr.*) {
+            gop.value_ptr.* = media_context_unknown;
+        }
     }
 
     fn extendRelationMediaKey(source_module: u32, relation_id: u32) u64 {
         return (@as(u64, source_module) << 32) | relation_id;
     }
 
-    fn extendRelationInMedia(self: *const RuleIR, source_module: u32, relation_id: u32) bool {
-        if (relation_id == std.math.maxInt(u32)) return false;
-        return self.extend_relation_media.get(extendRelationMediaKey(source_module, relation_id)) orelse false;
+    fn extendRelationMediaContext(self: *const RuleIR, source_module: u32, relation_id: u32) u32 {
+        if (relation_id == std.math.maxInt(u32)) return media_context_none;
+        return self.extend_relation_media.get(extendRelationMediaKey(source_module, relation_id)) orelse media_context_none;
+    }
+
+    /// Rejects one extender extending the same target from different media
+    /// queries, which Sass reports even when every such `@extend` is optional.
+    fn checkExtendSameSelectorMediaContexts(self: *const RuleIR, temp: std.mem.Allocator) error{ OutOfMemory, SassError }!void {
+        if (self.extend_relation_media.count() == 0) return;
+        var seen: std.AutoHashMapUnmanaged(u64, u32) = .empty;
+        defer seen.deinit(temp);
+        for (self.extend_edges.items) |edge| {
+            const ctx = self.extendRelationMediaContext(edge.source_module, edge.relation_id);
+            if (ctx == media_context_none or ctx == media_context_unknown) continue;
+            const key = (@as(u64, @intFromEnum(edge.extending_selector)) << 32) | @intFromEnum(edge.target_selector);
+            const gop = try seen.getOrPut(temp, key);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = ctx;
+            } else if (gop.value_ptr.* != ctx) {
+                error_format.setContextMessage("You may not @extend the same selector from within different media queries.");
+                return error.SassError;
+            }
+        }
     }
 
     /// Runtime-recorded extend relation.
@@ -8905,6 +8986,7 @@ pub const RuleIR = struct {
         const edge_duplicate_satisfied = try temp.alloc(bool, self.extend_edges.items.len);
         @memset(edge_duplicate_satisfied, false);
 
+        try self.checkExtendSameSelectorMediaContexts(temp);
         try self.populateExtendStateFromEdges(
             intern_pool,
             temp,
@@ -8920,7 +9002,11 @@ pub const RuleIR = struct {
         const selector_visible = try temp.alloc(bool, n);
         for (selector_override) |*p| p.* = null;
         const rule_in_media = try temp.alloc(bool, n);
+        const rule_media_context = try temp.alloc(MediaContextText, n);
         const rule_in_keyframes = try temp.alloc(bool, n);
+        var media_context_stack: std.ArrayListUnmanaged(MediaContextText) = .empty;
+        defer media_context_stack.deinit(temp);
+        try media_context_stack.ensureTotalCapacity(temp, self.nodes.items.len);
         var at_rule_media_stack: std.ArrayListUnmanaged(bool) = .empty;
         defer at_rule_media_stack.deinit(temp);
         var at_rule_keyframes_stack: std.ArrayListUnmanaged(bool) = .empty;
@@ -8941,8 +9027,20 @@ pub const RuleIR = struct {
                     at_rule_keyframes_stack.appendAssumeCapacity(is_keyframes);
                     if (is_media) media_depth += 1;
                     if (is_keyframes) keyframes_depth += 1;
+                    const outer_context = if (media_context_stack.items.len != 0)
+                        media_context_stack.items[media_context_stack.items.len - 1]
+                    else
+                        MediaContextText.none;
+                    const prelude_id = self.extra.items[node.payload + 1];
+                    media_context_stack.appendAssumeCapacity(if (!is_media)
+                        outer_context
+                    else if (prelude_id == std.math.maxInt(u32))
+                        MediaContextText.unknown
+                    else
+                        try foldMediaContextText(temp, outer_context, intern_pool.get(@enumFromInt(prelude_id))));
                 },
                 .at_rule_end => {
+                    if (media_context_stack.items.len != 0) _ = media_context_stack.pop();
                     if (at_rule_media_stack.items.len != 0) {
                         const was_media = at_rule_media_stack.pop().?;
                         if (was_media and media_depth > 0) media_depth -= 1;
@@ -8954,6 +9052,10 @@ pub const RuleIR = struct {
                 },
                 .rule_begin => {
                     rule_in_media[node_idx] = media_depth != 0;
+                    rule_media_context[node_idx] = if (media_context_stack.items.len != 0)
+                        media_context_stack.items[media_context_stack.items.len - 1]
+                    else
+                        MediaContextText.none;
                     rule_in_keyframes[node_idx] = keyframes_depth != 0;
                 },
                 else => {},
@@ -9107,9 +9209,9 @@ pub const RuleIR = struct {
                 try extend_state.markModuleMatchesNonPropagated(rule_module_idx, &selector_list, local_matches);
                 local_matches_opt = local_matches;
 
-                // @extend declared inside @media is
-                // Cannot be applied to root style rule.
-                if (!rule_in_media[i]) {
+                // An @extend declared inside @media only applies to rules in
+                // the same media context.
+                if (rule_media_context[i] != .unknown) {
                     const edge_indices = extend_state.moduleEdgeIndices(rule_module_idx);
                     const check_len = @min(local_matches.len, edge_indices.len);
                     var local_idx: usize = 0;
@@ -9118,7 +9220,16 @@ pub const RuleIR = struct {
                         const edge_idx: usize = @intCast(edge_indices[local_idx]);
                         if (edge_idx >= self.extend_edges.items.len) continue;
                         const edge = self.extend_edges.items[edge_idx];
-                        if (self.extendRelationInMedia(edge.source_module, edge.relation_id)) return error.SassError;
+                        const extend_context = self.extendRelationMediaContext(edge.source_module, edge.relation_id);
+                        if (extend_context == media_context_none or extend_context == media_context_unknown) continue;
+                        const same_context = switch (rule_media_context[i]) {
+                            .text => |text| std.mem.eql(u8, text, intern_pool.get(@enumFromInt(extend_context))),
+                            else => false,
+                        };
+                        if (!same_context) {
+                            error_format.setContextMessage("You may not @extend selectors across media queries.");
+                            return error.SassError;
+                        }
                     }
                 }
                 for (local_matches, 0..) |is_match, match_idx| {

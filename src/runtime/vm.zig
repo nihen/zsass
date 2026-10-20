@@ -4153,12 +4153,11 @@ pub const VM = struct {
                 if (self.next_extend_relation_id != std.math.maxInt(u32)) {
                     self.next_extend_relation_id += 1;
                 }
-                const in_media = self.mediaQueryActive();
                 try self.rule_ir.noteExtendRelationMediaContext(
                     self.allocator,
                     source_module,
                     relation_id,
-                    in_media,
+                    try self.currentMediaContext(),
                 );
                 if (self.load_css_module_tag_override) |_| {
                     const group_start = self.extendModuleGroupStartOrder(source_module, self.current_module);
@@ -5496,6 +5495,27 @@ pub const VM = struct {
 
     fn mediaQueryActive(self: *const VM) bool {
         return self.media_query_depth != 0;
+    }
+
+    /// Merged media query list of the open `@media` rules, as a
+    /// `rule_ir_mod.foldMediaContext` id.
+    fn currentMediaContext(self: *VM) VMError!u32 {
+        var context = rule_ir_mod.media_context_none;
+        if (!self.mediaQueryActive()) return context;
+        for (self.open_at_rule_bubble_stack.items) |frame| {
+            if (frame.node_idx >= self.rule_ir.nodes.items.len) return rule_ir_mod.media_context_unknown;
+            const node = self.rule_ir.nodes.items[frame.node_idx];
+            if (node.kind != .at_rule_begin) return rule_ir_mod.media_context_unknown;
+            const name = self.intern_pool.get(@enumFromInt(self.rule_ir.extra.items[node.payload]));
+            if (!std.mem.eql(u8, name, "media")) continue;
+            context = try rule_ir_mod.foldMediaContext(
+                self.allocator,
+                self.intern_pool,
+                context,
+                self.rule_ir.extra.items[node.payload + 1],
+            );
+        }
+        return context;
     }
 
     fn declarationAtRuleActive(self: *const VM) bool {
