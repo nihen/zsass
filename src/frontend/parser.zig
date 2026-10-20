@@ -5024,6 +5024,37 @@ pub const Parser = struct {
     /// Emits `stmt_variable_decl` with extra layout
     /// `[name_id, value_node, flags_u32]` where
     /// `flags_u32` bit 0 = `!default`, bit 1 = `!global`.
+    fn isAtKeywordTag(tag: Token.Tag) bool {
+        return switch (tag) {
+            .at_keyword,
+            .at_use,
+            .at_forward,
+            .at_import,
+            .at_mixin,
+            .at_include,
+            .at_function,
+            .at_return,
+            .at_extend,
+            .at_if,
+            .at_else,
+            .at_each,
+            .at_for,
+            .at_while,
+            .at_debug,
+            .at_warn,
+            .at_error,
+            .at_at_root,
+            .at_media,
+            .at_supports,
+            .at_charset,
+            .at_keyframes,
+            .at_font_face,
+            .at_content,
+            => true,
+            else => false,
+        };
+    }
+
     fn parseVariableDeclStmt(self: *Parser, ast: *Ast) ParseError!NodeIndex {
         const name_tok = self.current();
         std.debug.assert(name_tok.tag == .dollar_ident);
@@ -5054,6 +5085,11 @@ pub const Parser = struct {
             }
         } else {
             self.skipWhitespaceAndComments();
+        }
+        // An at-rule keyword cannot start an expression (`$x: @include y;`).
+        if (!self.isAtEnd() and isAtKeywordTag(self.current().tag)) {
+            error_format.setContextMessage("Expected expression.");
+            return error.HardSyntaxError;
         }
 
         const value_node = if (self.is_indented_syntax)
@@ -6194,8 +6230,9 @@ pub const Parser = struct {
     /// True when a leading `/` should parse as unary `slash_prefix` (not as
     /// the start of an infix slash expression).  Restricted to the same
     /// unary-operator contexts as `+`/`-`, but only when the previous
-    /// non-trivia token is `(`, `,`, or another `/` produced by an
-    /// enclosing slash expression.
+    /// non-trivia token is `(`, `,`, `:` (start of a variable, keyword
+    /// argument, or map value), or another `/` produced by an enclosing
+    /// slash expression.
     fn isSlashUnaryPrefixContext(self: *const Parser) bool {
         if (!self.isUnaryContext()) return false;
         if (self.pos == 0) return false;
@@ -6205,7 +6242,7 @@ pub const Parser = struct {
             if (t != .whitespace and t != .newline and t != .comment) break;
         }
         return switch (self.tokens[prev].tag) {
-            .lparen, .comma, .slash => true,
+            .lparen, .comma, .slash, .colon => true,
             else => false,
         };
     }
@@ -12347,6 +12384,37 @@ test "parse: incomplete binary operator in declaration is syntax error (no raw f
     const msg = error_format.currentContextMessage() orelse "";
     try std.testing.expect(std.mem.indexOf(u8, msg, "Expected expression") != null);
     error_format.clearContextMessage();
+}
+
+test "parse: at-rule keyword cannot start a variable value" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var pool = try InternPool.init(alloc);
+    defer pool.deinit(alloc);
+
+    if (parseFullSourceWithSyntax(alloc, &pool, "$x: @include y;", false)) |_| {
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    const msg = error_format.currentContextMessage() orelse "";
+    try std.testing.expect(std.mem.indexOf(u8, msg, "Expected expression") != null);
+    error_format.clearContextMessage();
+}
+
+test "parse: leading slash after a colon is unary" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var pool = try InternPool.init(alloc);
+    defer pool.deinit(alloc);
+
+    var result = try parseFullSourceWithSyntax(alloc, &pool, "$x: /$y;", false);
+    defer result.ast.deinit();
+    const decl = result.ast.getNode(rootChild(&result.ast, 0));
+    const value_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(decl.payload + 1));
+    try std.testing.expectEqual(AstTag.expr_unary_op, result.ast.getNode(value_node).tag);
 }
 
 test "parse: trailing percent in declaration keeps raw fallback" {

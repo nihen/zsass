@@ -284,6 +284,12 @@ fn buildReachableMaskFromResolved(
                 try stack.append(allocator, c.module_id);
             }
         }
+        for (m.meta_load_deps.items) |mid| {
+            if (mid < n and !mask[mid]) {
+                mask[mid] = true;
+                try stack.append(allocator, mid);
+            }
+        }
     }
     return mask;
 }

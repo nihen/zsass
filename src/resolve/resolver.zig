@@ -148,6 +148,7 @@ pub const UseBinding = data_mod.UseBinding;
 pub const local_module_id_sentinel = data_mod.local_module_id_sentinel;
 pub const apply_mixin_sentinel = data_mod.apply_mixin_sentinel;
 pub const load_css_mixin_sentinel = data_mod.load_css_mixin_sentinel;
+pub const css_mixin_sentinel = data_mod.css_mixin_sentinel;
 pub const ConfigSeed = data_mod.ConfigSeed;
 pub const SharedValuePoolStorage = data_mod.SharedValuePoolStorage;
 pub const ResolvedBundle = data_mod.ResolvedBundle;
@@ -156,6 +157,7 @@ const ModuleResolver = data_mod.ModuleResolver;
 fn builtinMixinIdToSentinel(bid: builtin_mod.Id) ?MixinId {
     if (bid == builtin_mod.meta_apply_mixin_id) return apply_mixin_sentinel;
     if (bid == builtin_mod.meta_load_css_mixin_id) return load_css_mixin_sentinel;
+    if (bid == builtin_mod.meta_css_mixin_id) return css_mixin_sentinel;
     return null;
 }
 
@@ -2807,6 +2809,49 @@ fn ensureMetaModuleLoadedForIntrospection(
     return error.Unsupported;
 }
 
+/// Pull the module named by a literal `meta.load()` URL into the bundle so
+/// the runtime can execute it in place. Targets that cannot be resolved
+/// here (missing files, modules still being loaded) are left to the runtime,
+/// which reports them only if the call actually runs.
+fn noteMetaLoadTarget(
+    ctx: *Ctx,
+    builtin_id: u32,
+    arg_exprs: []const ExprIndex,
+    arg_names: []const InternId,
+) ResolveError!void {
+    if (builtin_id != builtin_mod.meta_load_id) return;
+    var url_expr: ?ExprIndex = null;
+    for (arg_exprs, 0..) |arg_expr, i| {
+        const name_id = if (i < arg_names.len) arg_names[i] else .none;
+        if (name_id == .none) {
+            if (url_expr == null) url_expr = arg_expr;
+            continue;
+        }
+        var raw = ctx.pool.get(name_id);
+        if (raw.len > 0 and raw[0] == '$') raw = raw[1..];
+        if (identifierEq(raw, "url")) url_expr = arg_expr;
+    }
+    const url = exprLiteralStringText(ctx, url_expr orelse return) orelse return;
+    if (url.len == 0 or std.mem.startsWith(u8, url, "sass:")) return;
+    const loader = ctx.loader orelse return;
+    if (ctx.module_path.len == 0) return;
+
+    const resolved_raw = (try resolveUserModulePath(ctx.a, ctx.module_path, url, loader.load_paths, .{ .pkg_importer_enabled = loader.pkg_importer_enabled })) orelse return;
+    defer ctx.a.free(resolved_raw);
+    const canonical = try std.fs.path.resolve(ctx.a, &.{resolved_raw});
+    defer ctx.a.free(canonical);
+    if (isVisiting(loader, canonical)) return;
+
+    const saved_pending_config = loader.pending_next_config_entries;
+    loader.pending_next_config_entries = &.{};
+    defer loader.pending_next_config_entries = saved_pending_config;
+    const mid = try resolveUserModule(loader, ctx.module_path, url);
+    for (ctx.prog.meta_load_deps.items) |existing| {
+        if (existing == mid) return;
+    }
+    try ctx.prog.meta_load_deps.append(ctx.a, mid);
+}
+
 fn appendBoolLiteralExpr(ctx: *Ctx, value: bool, span: Span) ResolveError!ExprIndex {
     return appendExpr(ctx.prog, ctx.a, .{
         .kind = .literal_bool,
@@ -3565,6 +3610,7 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
                     return error.UnknownFunctionInBuiltinNs;
                 };
                 try ensureMetaModuleLoadedForIntrospection(ctx, bid, arg_buf.items, arg_name_buf.items);
+                try noteMetaLoadTarget(ctx, bid, arg_buf.items, arg_name_buf.items);
                 if (try tryFoldMetaBuiltinExists(ctx, bid, arg_buf.items, arg_name_buf.items, span)) |folded| {
                     return folded;
                 }
@@ -3603,6 +3649,7 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
                 if (lookupVoidFlagInsensitive(&ex.ambiguous_functions, name_slice)) return error.SassError;
                 if (lookupIdentifierIdInsensitive(&ex.builtin_functions, name_slice)) |bid| {
                     try ensureMetaModuleLoadedForIntrospection(ctx, bid, arg_buf.items, arg_name_buf.items);
+                    try noteMetaLoadTarget(ctx, bid, arg_buf.items, arg_name_buf.items);
                     if (try tryFoldMetaBuiltinExists(ctx, bid, arg_buf.items, arg_name_buf.items, span)) |folded| {
                         return folded;
                     }
@@ -3692,6 +3739,7 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
             if (try tryFoldMetaBuiltinExists(ctx, bid, arg_buf.items, arg_name_buf.items, span)) |folded| {
                 return folded;
             }
+            try noteMetaLoadTarget(ctx, bid, arg_buf.items, arg_name_buf.items);
             const bidx: u32 = @intCast(ctx.prog.builtin_calls.items.len);
             const prebound = tryResolvePreboundMetaCallable(ctx, bid, astart, @intCast(arg_buf.items.len));
             try ctx.prog.builtin_calls.append(ctx.a, .{
@@ -9817,6 +9865,7 @@ const preamble_prog_pod_lists = [_][]const u8{
     "decl_stmts",
     "comment_stmts",
     "module_dep_stmts",
+    "meta_load_deps",
     "decl_prop_part_exprs",
     "if_stmts",
     "if_branches",

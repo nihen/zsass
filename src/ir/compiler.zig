@@ -309,6 +309,9 @@ pub const ModuleChunks = struct {
     /// re-running the chunk. Computed in compileOneModule.
     cross_entry_pure_top: bool = false,
 
+    /// Modules named by a literal `meta.load()` URL (see ResolvedProgram.meta_load_deps).
+    meta_load_deps: []const u32 = &.{},
+
     /// introspection metadata: name -> slot
     global_slots: std.StringHashMapUnmanaged(u32) = .empty,
     /// introspection metadata: name -> mixin index
@@ -3800,9 +3803,9 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                     const meta_idx = try addBuiltinCallMetaFromIndices(ctx, forwarded.items, std.math.maxInt(u32));
                     try ctx.cb.emit(.call_indirect, 1, meta_idx);
                 }
-            } else if (inc.mixin_id == resolver.load_css_mixin_sentinel) {
+            } else if (inc.mixin_id == resolver.load_css_mixin_sentinel or inc.mixin_id == resolver.css_mixin_sentinel) {
                 const target = try Value.callableMake(
-                    builtin_mod.meta_load_css_mixin_id,
+                    if (inc.mixin_id == resolver.css_mixin_sentinel) builtin_mod.meta_css_mixin_id else builtin_mod.meta_load_css_mixin_id,
                     value_mod.callable_flag_is_mixin | value_mod.callable_flag_is_builtin,
                     0,
                     .none,
@@ -4564,7 +4567,7 @@ fn analyzeIncludeCall(
         no_content_analysis
     else
         analyzeContentBlock(modules, pool, resolved, current_module, content_block, content_analysis, depth + 1);
-    if (mixin_id == resolver.load_css_mixin_sentinel) {
+    if (mixin_id == resolver.load_css_mixin_sentinel or mixin_id == resolver.css_mixin_sentinel) {
         return .{
             .may_emit_decl = false,
             .needs_mid_close = true,
@@ -5516,6 +5519,7 @@ fn compileOneModule(
         .source_len = resolved.source_len,
         .local_fallback_slots = local_fallback_slots,
         .cross_entry_pure_top = topChunkIsCrossEntryPure(&top),
+        .meta_load_deps = try arena.dupe(u32, resolved.meta_load_deps.items),
     };
 
     // Copy metadata maps
@@ -5813,6 +5817,11 @@ fn buildReachableMask(arena: std.mem.Allocator, modules: []const ModuleChunks, r
     mask[root_index] = true;
 
     while (stack.pop()) |cur| {
+        for (modules[cur].meta_load_deps) |dep_id| {
+            if (dep_id >= n or mask[dep_id]) continue;
+            mask[dep_id] = true;
+            try stack.append(arena, dep_id);
+        }
         const chunk = &modules[cur].top;
         for (chunk.code) |inst| {
             const dep_id: u32 = switch (inst.opcode()) {
