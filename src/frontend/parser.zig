@@ -6194,8 +6194,9 @@ pub const Parser = struct {
     /// True when a leading `/` should parse as unary `slash_prefix` (not as
     /// the start of an infix slash expression).  Restricted to the same
     /// unary-operator contexts as `+`/`-`, but only when the previous
-    /// non-trivia token is `(`, `,`, or another `/` produced by an
-    /// enclosing slash expression.
+    /// non-trivia token is `(`, `,`, `:` (start of a variable, keyword
+    /// argument, or map value), or another `/` produced by an enclosing
+    /// slash expression.
     fn isSlashUnaryPrefixContext(self: *const Parser) bool {
         if (!self.isUnaryContext()) return false;
         if (self.pos == 0) return false;
@@ -6205,7 +6206,7 @@ pub const Parser = struct {
             if (t != .whitespace and t != .newline and t != .comment) break;
         }
         return switch (self.tokens[prev].tag) {
-            .lparen, .comma, .slash => true,
+            .lparen, .comma, .slash, .colon => true,
             else => false,
         };
     }
