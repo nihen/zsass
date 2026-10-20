@@ -498,28 +498,17 @@ fn prophotLinearize(val: f64) f64 {
     return sign * powRational(abs_val, 9, 5);
 }
 
-/// Rec2020 transfer function constants
-const rec2020_alpha: f64 = 1.09929682680944;
-const rec2020_beta: f64 = 0.018053968510807;
-
-/// Rec2020 transfer function: linear -> gamma
+/// Rec2020 transfer function: linear -> gamma. CSS Color 4 specifies a pure
+/// 2.4 gamma (sign-preserving) rather than the piecewise BT.2020 curve.
 fn rec2020Gamma(linear: f64) f64 {
-    const abs_val = @abs(linear);
     const sign: f64 = if (linear < 0) -1.0 else 1.0;
-    if (abs_val < rec2020_beta) {
-        return sign * 4.5 * abs_val;
-    }
-    return sign * (rec2020_alpha * powRational(abs_val, 9, 20) - (rec2020_alpha - 1.0));
+    return sign * pow(@abs(linear), 1.0 / 2.4);
 }
 
 /// Rec2020 inverse: gamma -> linear
 fn rec2020Linearize(val: f64) f64 {
-    const abs_val = @abs(val);
     const sign: f64 = if (val < 0) -1.0 else 1.0;
-    if (abs_val < rec2020_beta * 4.5) {
-        return sign * abs_val / 4.5;
-    }
-    return sign * powRational((abs_val + (rec2020_alpha - 1.0)) / rec2020_alpha, 20, 9);
+    return sign * pow(@abs(val), 2.4);
 }
 
 // ============================================================================
