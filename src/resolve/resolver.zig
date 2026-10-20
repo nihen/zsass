@@ -6951,7 +6951,14 @@ fn appendCssIfRenderedExpr(
         try parts.append(ctx.a, else_expr);
     }
     try appendLiteralExprPart(ctx, &parts, ")", span);
-    return finishConcatExprParts(ctx, parts.items, span);
+    const interp = try appendInterpExprResolved(ctx, parts.items, span, false);
+    // Branch values use their CSS serialization (quoted strings keep their
+    // quotes), which is what interpolated calls with an interpolated name and
+    // literal arguments already do.
+    const flags = &ctx.prog.interp_exprs.items[ctx.prog.exprs.items[interp].payload];
+    flags.source_name_has_interp = true;
+    flags.source_args_have_interp = false;
+    return interp;
 }
 
 const ResolvedCssIfClause = struct {
