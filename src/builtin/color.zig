@@ -1197,8 +1197,7 @@ fn parseHwbChannelOrMissing(ctx: *BuiltinContext, arg: Value) ?ParsedColorCompon
         return .{ .value = raw, .missing = false };
     }
     if (parseCalcSpecialNumber(ctx, arg)) |raw| {
-        const clamped = if (std.math.isNan(raw)) 0.0 else std.math.clamp(raw, 0.0, 100.0);
-        return .{ .value = clamped, .missing = false };
+        return .{ .value = raw, .missing = false };
     }
     return null;
 }
@@ -1240,58 +1239,6 @@ fn parseRgbAlphaOrMissing(ctx: *BuiltinContext, arg: Value) ?ParsedColorComponen
     } else parseCalcSpecialNumber(ctx, arg) orelse return null;
     const clamped = if (std.math.isNan(raw)) 0.0 else std.math.clamp(raw, 0.0, 1.0);
     return .{ .value = clamped, .missing = false };
-}
-
-fn parseHwbRawChannelForLegacyDegenerate(ctx: *BuiltinContext, arg: Value) ?f64 {
-    if (isNoneColorToken(ctx, arg)) return null;
-    if (arg.kind() == .number) {
-        const unit = if (arg.unitId(ctx.number_pool) == .none) null else ctx.intern_pool.get(arg.unitId(ctx.number_pool));
-        const raw = if (unit) |u| blk: {
-            if (!std.ascii.eqlIgnoreCase(u, "%")) return null;
-            break :blk arg.asF64(ctx.number_pool);
-        } else return null;
-        return raw;
-    }
-    return parseCalcSpecialNumber(ctx, arg);
-}
-
-fn parseHwbAlphaForLegacyDegenerate(ctx: *BuiltinContext, arg: Value) ?f64 {
-    if (isNoneColorToken(ctx, arg)) return 0.0;
-    const raw = if (arg.kind() == .number) blk: {
-        const unit = if (arg.unitId(ctx.number_pool) == .none) null else ctx.intern_pool.get(arg.unitId(ctx.number_pool));
-        break :blk if (unit) |u| blk2: {
-            if (!std.ascii.eqlIgnoreCase(u, "%")) return null;
-            break :blk2 arg.asF64(ctx.number_pool) / 100.0;
-        } else arg.asF64(ctx.number_pool);
-    } else parseCalcSpecialNumber(ctx, arg) orelse return null;
-    if (std.math.isNan(raw)) return 0.0;
-    if (std.math.isInf(raw)) return if (raw < 0.0) 0.0 else 1.0;
-    return std.math.clamp(raw, 0.0, 1.0);
-}
-
-fn constructorArgsIncludeAlphaForHwb(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) bool {
-    for (arg_names) |name_id| {
-        if (name_id != .none and argNameMatches(ctx, name_id, "alpha")) return true;
-    }
-    if (args.len >= 4) return true;
-    if (args.len == 1 and args[0].kind() == .list and args[0].listSlash(ctx.list_meta_pool.items) and !args[0].listBracketed(ctx.list_meta_pool.items)) return true;
-    return false;
-}
-
-fn hwbLegacyDegeneratePassthrough(ctx: *BuiltinContext, alpha: f64, has_alpha: bool) BuiltinError!Value {
-    const alpha_css = if (has_alpha) blk: {
-        const css = try valueToCssString(ctx, Value.numberUnitless(std.math.clamp(alpha, 0.0, 1.0)));
-        break :blk css;
-    } else "";
-    defer if (has_alpha) ctx.allocator.free(alpha_css);
-
-    const text = if (has_alpha)
-        try std.fmt.allocPrint(ctx.allocator, "hsla(calc(NaN), calc(NaN * 1%), calc(NaN * 1%), {s})", .{alpha_css})
-    else
-        try ctx.allocator.dupe(u8, "hsl(calc(NaN), calc(NaN * 1%), calc(NaN * 1%))");
-    defer ctx.allocator.free(text);
-    const id = try internString(ctx, text);
-    return Value.string(id, false);
 }
 
 fn color_hwbImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
@@ -1342,15 +1289,6 @@ fn color_hwbImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
         if (shouldSerializeConstructorFallback(ctx, args)) return serializeConstructorListFallback(ctx, "hwb", args, false);
         return error.BuiltinType;
     };
-
-    if (!w.missing and !b.missing) {
-        const w_raw = parseHwbRawChannelForLegacyDegenerate(ctx, bound.values[1].?);
-        const b_raw = parseHwbRawChannelForLegacyDegenerate(ctx, bound.values[2].?);
-        if ((w_raw != null and !std.math.isFinite(w_raw.?)) or (b_raw != null and !std.math.isFinite(b_raw.?))) {
-            const alpha_raw = parseHwbAlphaForLegacyDegenerate(ctx, bound.values[3].?) orelse alpha.value;
-            return hwbLegacyDegeneratePassthrough(ctx, alpha_raw, constructorArgsIncludeAlphaForHwb(ctx, args, arg_names));
-        }
-    }
 
     var missing: ColorMissingMask = 0;
     if (h.missing) missing |= 0x1;
@@ -1597,15 +1535,14 @@ fn mixModernColors(ctx: *BuiltinContext, c1: Value, c2: Value, weight_percent: f
     var mixed_output = if (method.space == output_space) mixed_in_method else color_mod.convert(mixed_in_method, output_space);
     var output_missing = mapMissingChannels(result_missing, method.space, output_space);
 
-    if (method.space != output_space and output_missing != 0 and colorLegacyFlagFromValue(ctx, c1) and isLegacyColorSpace(output_space)) {
-        for (0..4) |i| {
-            const bit: ColorMissingMask = @as(ColorMissingMask, 1) << @intCast(i);
-            if ((output_missing & bit) != 0) mixed_output.channels[i] = 0.0;
-        }
+    const legacy_input = colorLegacyCompatFlagFromValue(ctx, c1);
+    if (method.space != output_space and output_missing != 0 and legacy_input and isLegacyColorSpace(output_space)) {
+        zeroMissingChannels(&mixed_output, output_missing);
         output_missing = 0;
     }
 
-    const output_legacy = colorLegacyFlagFromValue(ctx, c1) and isLegacyColorSpace(output_space);
+    const output_legacy = isLegacyColorSpace(output_space) and
+        (colorLegacyFlagFromValue(ctx, c1) or (legacy_input and output_missing == 0));
     return colorValueFromDeclaredColor(ctx, mixed_output, output_space, output_missing, output_legacy);
 }
 
@@ -2900,6 +2837,26 @@ fn colorLegacyCompatFlagFromValue(ctx: *BuiltinContext, c: Value) bool {
     return entry.missing != 0 and (entry.space == .hsl or entry.space == .hwb);
 }
 
+/// CSS Color 4 analogous component categories, used to carry missing
+/// components forward across color space conversions.
+const AnalogousCategory = enum { none, reds, greens, blues, lightness, colorfulness, hue, opponent_a, opponent_b };
+
+fn analogousCategories(space: color_mod.ColorSpace) [3]AnalogousCategory {
+    return switch (space) {
+        .srgb, .srgb_linear, .display_p3, .display_p3_linear, .a98_rgb, .prophoto_rgb, .rec2020, .xyz_d50, .xyz_d65 => .{ .reds, .greens, .blues },
+        .hsl => .{ .hue, .colorfulness, .lightness },
+        .hwb => .{ .hue, .none, .none },
+        .lab, .oklab => .{ .lightness, .opponent_a, .opponent_b },
+        .lch, .oklch => .{ .lightness, .colorfulness, .hue },
+    };
+}
+
+/// Maps the missing-channel mask of a color in `src_space` onto the channels
+/// of `target_space`. Missing analogous components are carried forward
+/// individually. The components left over on each side form an analogous
+/// set; when every leftover source component is missing, every leftover
+/// target component becomes missing too (CSS Color 4, "Interpolating with
+/// Missing Components").
 fn mapMissingChannels(
     missing: ColorMissingMask,
     src_space: color_mod.ColorSpace,
@@ -2907,78 +2864,69 @@ fn mapMissingChannels(
 ) ColorMissingMask {
     if (src_space == target_space) return missing;
 
-    var result: ColorMissingMask = 0;
-    if ((missing & 0x8) != 0) result |= 0x8;
+    var result: ColorMissingMask = missing & 0x8;
+    const src_cats = analogousCategories(src_space);
+    const target_cats = analogousCategories(target_space);
 
-    const ChannelKind = enum { rgb, hsl, hwb, lab, lch, xyz };
-    const src_kind: ChannelKind = switch (src_space) {
-        .srgb, .srgb_linear, .display_p3, .display_p3_linear, .a98_rgb, .prophoto_rgb, .rec2020 => .rgb,
-        .hsl => .hsl,
-        .hwb => .hwb,
-        .lab, .oklab => .lab,
-        .lch, .oklch => .lch,
-        .xyz_d50, .xyz_d65 => .xyz,
-    };
-    const target_kind: ChannelKind = switch (target_space) {
-        .srgb, .srgb_linear, .display_p3, .display_p3_linear, .a98_rgb, .prophoto_rgb, .rec2020 => .rgb,
-        .hsl => .hsl,
-        .hwb => .hwb,
-        .lab, .oklab => .lab,
-        .lch, .oklch => .lch,
-        .xyz_d50, .xyz_d65 => .xyz,
-    };
-
-    if (src_kind == target_kind or
-        (src_kind == .rgb and target_kind == .xyz) or
-        (src_kind == .xyz and target_kind == .rgb))
-    {
-        result |= (missing & 0x7);
-        return result;
+    var src_paired: [3]bool = .{ false, false, false };
+    var target_paired: [3]bool = .{ false, false, false };
+    for (src_cats, 0..) |src_cat, i| {
+        if (src_cat == .none) continue;
+        for (target_cats, 0..) |target_cat, j| {
+            if (target_cat != src_cat) continue;
+            src_paired[i] = true;
+            target_paired[j] = true;
+            if ((missing & (@as(ColorMissingMask, 1) << @intCast(i))) != 0) {
+                result |= @as(ColorMissingMask, 1) << @intCast(j);
+            }
+        }
     }
 
-    const src_l_bit: ?ColorMissingMask = switch (src_kind) {
-        .hsl => 0x4,
-        .lab, .lch => 0x1,
-        else => null,
-    };
-    const target_l_bit: ?ColorMissingMask = switch (target_kind) {
-        .hsl => 0x4,
-        .lab, .lch => 0x1,
-        else => null,
-    };
-    if (src_l_bit != null and target_l_bit != null and (missing & src_l_bit.?) != 0) {
-        result |= target_l_bit.?;
+    var src_leftover: usize = 0;
+    var src_leftover_missing = true;
+    for (0..3) |i| {
+        if (src_paired[i]) continue;
+        src_leftover += 1;
+        if ((missing & (@as(ColorMissingMask, 1) << @intCast(i))) == 0) src_leftover_missing = false;
     }
-
-    const src_h_bit: ?ColorMissingMask = switch (src_kind) {
-        .hsl, .hwb => 0x1,
-        .lch => 0x4,
-        else => null,
-    };
-    const target_h_bit: ?ColorMissingMask = switch (target_kind) {
-        .hsl, .hwb => 0x1,
-        .lch => 0x4,
-        else => null,
-    };
-    if (src_h_bit != null and target_h_bit != null and (missing & src_h_bit.?) != 0) {
-        result |= target_h_bit.?;
-    }
-
-    const src_c_bit: ?ColorMissingMask = switch (src_kind) {
-        .hsl => 0x2,
-        .lch => 0x2,
-        else => null,
-    };
-    const target_c_bit: ?ColorMissingMask = switch (target_kind) {
-        .hsl => 0x2,
-        .lch => 0x2,
-        else => null,
-    };
-    if (src_c_bit != null and target_c_bit != null and (missing & src_c_bit.?) != 0) {
-        result |= target_c_bit.?;
+    if (src_leftover > 0 and src_leftover_missing) {
+        for (0..3) |j| {
+            if (!target_paired[j]) result |= @as(ColorMissingMask, 1) << @intCast(j);
+        }
     }
 
     return result;
+}
+
+/// Missing mask of `converted`, the result of converting `source` (declared
+/// in `src_space`) to `target_space`.
+fn toSpaceMissingMask(
+    source_missing: ColorMissingMask,
+    source: color_mod.Color,
+    src_space: color_mod.ColorSpace,
+    target_space: color_mod.ColorSpace,
+    converted: color_mod.Color,
+) ColorMissingMask {
+    if (src_space == target_space) return source_missing;
+    var mapped_missing = mapMissingChannels(source_missing, src_space, target_space);
+    if (target_space == .lab and src_space == .lch) {
+        if ((source_missing & 0x1) != 0) {
+            mapped_missing |= 0x7;
+        } else if ((source_missing & 0x2) == 0 and @abs(source.channels[0]) <= 1e-10 and @abs(source.channels[1]) <= 1e-10) {
+            mapped_missing |= 0x6;
+        }
+    }
+    // A hue made powerless by the conversion becomes missing.
+    if ((target_space == .lch or target_space == .oklch) and @abs(converted.channels[1]) <= 1e-10) {
+        mapped_missing |= 0x4;
+    }
+    return mapped_missing;
+}
+
+fn zeroMissingChannels(color: *color_mod.Color, missing: ColorMissingMask) void {
+    for (0..4) |i| {
+        if ((missing & (@as(ColorMissingMask, 1) << @intCast(i))) != 0) color.channels[i] = 0.0;
+    }
 }
 
 fn isTargetLabLikeLightnessMissing(target_space: color_mod.ColorSpace, missing: ColorMissingMask) bool {
@@ -3020,50 +2968,10 @@ fn projectChannelReadForSpace(
 ) ProjectedChannelRead {
     var converted = normalizeChannelColor(color_mod.convert(source, target_space));
     const source_declared_space = source_entry.space;
-    const source_missing = source_entry.missing;
-
-    var mapped_missing = mapMissingChannels(source_missing, source_declared_space, target_space);
-    if (target_space == .lab and source_declared_space == .lch) {
-        if ((source_missing & 0x1) != 0) {
-            mapped_missing |= 0x7;
-        } else if ((source_missing & 0x2) == 0 and
-            @abs(source.channels[0]) <= 1e-10 and
-            @abs(source.channels[1]) <= 1e-10)
-        {
-            mapped_missing |= 0x6;
-        }
-    }
-    if ((target_space == .lch or target_space == .oklch) and source_declared_space != target_space and
-        (source_declared_space == .hsl or source_declared_space == .lch or source_declared_space == .oklch) and
-        (source_missing & 0x2) != 0)
-    {
-        mapped_missing |= 0x4;
-    }
-    if (((target_space == .hsl and source_declared_space != .hsl) or target_space == .hwb) and
-        (mapped_missing & 0x1) != 0)
-    {
-        mapped_missing &= ~@as(ColorMissingMask, 0x1);
-    }
-    if (target_space == .hsl and source_declared_space != .hsl) {
+    var mapped_missing = toSpaceMissingMask(source_entry.missing, source, source_declared_space, target_space, converted);
+    if (source_declared_space != target_space and (target_space == .hsl or target_space == .hwb)) {
+        zeroMissingChannels(&converted, mapped_missing);
         mapped_missing = 0;
-    }
-    if (target_space == .hsl and source_declared_space == .hwb) mapped_missing &= 0x8;
-    if (target_space == .hwb and source_declared_space == .hsl) mapped_missing &= 0x8;
-    if ((target_space == .lch or target_space == .oklch) and
-        (mapped_missing & 0x2) == 0 and
-        @abs(converted.channels[1]) <= 1e-10)
-    {
-        mapped_missing |= 0x4;
-    }
-
-    if (((target_space == .hsl and !isSemanticHslSourceEntry(source_entry)) or target_space == .hwb) and
-        hasMissingPolarHueEntry(source_entry))
-    {
-        converted.channels[0] = 0.0;
-        mapped_missing &= ~@as(ColorMissingMask, 0x1);
-    }
-    if (target_space == .hsl and hasMissingLightnessEntry(source_entry)) {
-        converted.channels[2] = 0.0;
     }
 
     return .{
@@ -4742,31 +4650,13 @@ pub fn color_to_space(ctx: *BuiltinContext, args: []const Value, arg_names: []co
         const source_declared_space = declaredColorSpaceFromValue(ctx, c);
         const source_missing = colorMissingMaskFromValue(ctx, c);
         const source_legacy = colorLegacyFlagFromValue(ctx, c);
-        const converted = color_mod.convert(source, target_space);
-        var mapped_missing = mapMissingChannels(source_missing, source_declared_space, target_space);
-        if (target_space == .lab and source_declared_space == .lch) {
-            if ((source_missing & 0x1) != 0) {
-                mapped_missing |= 0x7;
-            } else if ((source_missing & 0x2) == 0 and @abs(source.channels[0]) <= 1e-10 and @abs(source.channels[1]) <= 1e-10) {
-                mapped_missing |= 0x6;
-            }
-        }
-        if ((target_space == .lch or target_space == .oklch) and source_declared_space != target_space and
-            (source_declared_space == .hsl or source_declared_space == .lch or source_declared_space == .oklch) and
-            (source_missing & 0x2) != 0)
-        {
-            mapped_missing |= 0x4;
-        }
-        if (((target_space == .hsl and source_declared_space != .hsl) or target_space == .hwb) and (mapped_missing & 0x1) != 0) {
-            mapped_missing &= ~@as(ColorMissingMask, 0x1);
-        }
-        if (target_space == .hsl and source_declared_space != .hsl) {
+        var converted = color_mod.convert(source, target_space);
+        var mapped_missing = toSpaceMissingMask(source_missing, source, source_declared_space, target_space, converted);
+        if (source_declared_space != target_space and (target_space == .hsl or target_space == .hwb)) {
+            // Legacy targets cannot represent missing channels produced by a
+            // conversion, so they behave as zero.
+            zeroMissingChannels(&converted, mapped_missing);
             mapped_missing = 0;
-        }
-        if (target_space == .hsl and source_declared_space == .hwb) mapped_missing &= 0x8;
-        if (target_space == .hwb and source_declared_space == .hsl) mapped_missing &= 0x8;
-        if ((target_space == .lch or target_space == .oklch) and (mapped_missing & 0x2) == 0 and @abs(converted.channels[1]) <= 1e-10) {
-            mapped_missing |= 0x4;
         }
 
         const lab_tol = 1e-10;
@@ -4797,6 +4687,13 @@ pub fn color_to_space(ctx: *BuiltinContext, args: []const Value, arg_names: []co
                 if ((output_missing & 0x4) != 0) b255 = 0.0;
                 output_missing &= ~@as(ColorMissingMask, 0x7);
             }
+            var alpha = converted.channels[3];
+            if (!(source_legacy and source_declared_space == .srgb) and (output_missing & 0x8) != 0) {
+                // A legacy rgb result converted from another space cannot
+                // carry a missing alpha; it behaves as zero.
+                alpha = 0.0;
+                output_missing &= ~@as(ColorMissingMask, 0x8);
+            }
 
             const out_of_gamut = !std.math.isFinite(r255) or !std.math.isFinite(g255) or !std.math.isFinite(b255) or
                 r255 < -1e-10 or r255 > 255.0 + 1e-10 or
@@ -4813,17 +4710,17 @@ pub fn color_to_space(ctx: *BuiltinContext, args: []const Value, arg_names: []co
 
                 return colorValueFromDeclaredColor(
                     ctx,
-                    color_mod.Color.init(hsl[0], hsl[1], hsl[2], converted.channels[3], .hsl),
+                    color_mod.Color.init(hsl[0], hsl[1], hsl[2], alpha, .hsl),
                     .hsl,
                     output_missing & 0x8,
                     true,
                 );
             }
 
-            const rgb = color_mod.Color.init(r255 / 255.0, g255 / 255.0, b255 / 255.0, converted.channels[3], .srgb);
+            const rgb = color_mod.Color.init(r255 / 255.0, g255 / 255.0, b255 / 255.0, alpha, .srgb);
             const out = try colorValueFromDeclaredColor(ctx, rgb, .srgb, output_missing, true);
             preserveLegacyRgbTargetSourceRepr(ctx, out, &source_entry, source_legacy);
-            if (out.kind() == .color and source_missing != 0 and source_declared_space == .srgb) {
+            if (out.kind() == .color and source_legacy and source_missing != 0 and source_declared_space == .srgb) {
                 out.colorEntryMut(ctx.color_pool).inspect_repr = .legacy_rgb_function;
             }
             maybePreferLongHexResult(ctx, out, shouldPreferLongHexForToSpaceLegacyRgbTarget(&source_entry, source_declared_space));
@@ -4832,25 +4729,15 @@ pub fn color_to_space(ctx: *BuiltinContext, args: []const Value, arg_names: []co
 
         const target_legacy = switch (target_space) {
             // Legacy aliases keep legacy serialization only for the matching
-            // target route: rgb aliases, hsl without missing channels, and hwb.
+            // target route: rgb aliases, and hsl/hwb without missing channels.
             // srgb itself remains modern syntax even for legacy-source colors.
             .srgb => target_spec.legacy_rgb_alias,
-            .hsl => mapped_missing == 0,
-            .hwb => true,
+            .hsl, .hwb => mapped_missing == 0,
             else => false,
         };
         const out = try colorValueFromDeclaredColor(ctx, converted, target_space, mapped_missing, target_legacy);
         if (out.kind() == .color) {
             const entry = out.colorEntryMut(ctx.color_pool);
-            if (((target_space == .hsl and !isSemanticHslSourceEntry(&source_entry)) or target_space == .hwb) and
-                hasMissingPolarHueEntry(&source_entry))
-            {
-                entry.channels[0] = 0.0;
-                entry.missing &= ~@as(ColorMissingMask, 0x1);
-            }
-            if (target_space == .hsl and hasMissingLightnessEntry(&source_entry)) {
-                entry.channels[2] = 0.0;
-            }
             if (target_space == .hwb and source_legacy and source_declared_space == .srgb and entry.channels[1] < 0.0) {
                 entry.channels[1] = std.math.nextAfter(f64, entry.channels[1], -std.math.inf(f64));
             }
@@ -5465,7 +5352,7 @@ test "color.to-space rgb alias zero-fills modern srgb missing channels even when
     const out = try color_to_space(&ctx, args[0..], &.{ .none, .none });
     const css = try valueToCssString(&ctx, out);
     defer ctx.allocator.free(css);
-    try std.testing.expectEqualStrings("rgb(0, 20, 30)", css);
+    try std.testing.expectEqualStrings("#00141e", css);
 }
 
 test "color.to-space rgb alias zero-fills non-byte-like modern missing channels" {
@@ -6280,7 +6167,7 @@ test "color.rgb clamps non-finite calc channels" {
     try std.testing.expectEqualStrings("rgba(255, 0, 0, 0.5)", css);
 }
 
-test "color.hwb uses legacy degenerate passthrough for non-finite whiteness" {
+test "color.hwb normalizes non-finite whiteness" {
     var h = try ColorOpTestHarness.init(std.testing.allocator);
     defer h.deinit();
     var ctx = h.context();
@@ -6293,8 +6180,9 @@ test "color.hwb uses legacy degenerate passthrough for non-finite whiteness" {
         Value.numberUnitless(0.5),
     };
     const out = try color_hwb(&ctx, args[0..], &.{ .none, .none, .none, .none });
-    try std.testing.expectEqual(.string, out.kind());
-    try std.testing.expectEqualStrings("hsla(calc(NaN), calc(NaN * 1%), calc(NaN * 1%), 0.5)", h.intern_pool.get(out.stringIntern()));
+    const css = try valueToCssString(&ctx, out);
+    defer ctx.allocator.free(css);
+    try std.testing.expectEqualStrings("hsla(0, 100%, 50%, 0.5)", css);
 }
 
 test "color.color splits inline slash text for explicit alpha" {
@@ -6317,7 +6205,7 @@ test "color.color splits inline slash text for explicit alpha" {
     try std.testing.expectEqualStrings("color(srgb 0 0 calc(-infinity) / 0.5)", css);
 }
 
-test "color.hsl keeps NaN lightness as calc percent" {
+test "color.hsl treats NaN lightness as zero" {
     var h = try ColorOpTestHarness.init(std.testing.allocator);
     defer h.deinit();
     var ctx = h.context();
@@ -6330,7 +6218,7 @@ test "color.hsl keeps NaN lightness as calc percent" {
     }, &.{ .none, .none, .none });
     const css = try valueToCssString(&ctx, out);
     defer ctx.allocator.free(css);
-    try std.testing.expectEqualStrings("hsl(0, 100%, calc(NaN * 1%))", css);
+    try std.testing.expectEqualStrings("hsl(0, 100%, 0%)", css);
 }
 
 test "color.hsl keeps infinite saturation as calc percent" {
@@ -6398,7 +6286,7 @@ test "color.adjust-hue converts angle units to degrees" {
     const out = try color_adjust_hue(&ctx, args[0..]);
     const css = try valueToCssString(&ctx, out);
     defer ctx.allocator.free(css);
-    try std.testing.expectEqualStrings("rgb(0, 179.576224164, 255)", css);
+    try std.testing.expectEqualStrings("rgb(0%, 70.4220486918%, 100%)", css);
 }
 
 test "color.alpha named-argument filter fallback emits alpha() text" {

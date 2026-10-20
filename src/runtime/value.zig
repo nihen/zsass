@@ -190,6 +190,23 @@ pub inline fn isLegacyColorSpace(space: color_mod.ColorSpace) bool {
     return space == .srgb or space == .hsl or space == .hwb;
 }
 
+/// CSS Color 4 treats NaN channels, negative zero, and infinite polar hues
+/// as zero, so colors never store them.
+pub fn normalizeColorEntryChannels(entry: *ColorEntry) void {
+    const hue_idx: ?usize = switch (entry.space) {
+        .hsl, .hwb => 0,
+        .lch, .oklch => 2,
+        else => null,
+    };
+    for (&entry.channels, 0..) |*channel, i| {
+        if (std.math.isNan(channel.*) or channel.* == 0.0) {
+            channel.* = 0.0;
+        } else if (hue_idx != null and hue_idx.? == i and std.math.isInf(channel.*)) {
+            channel.* = 0.0;
+        }
+    }
+}
+
 pub fn pushColorEntry(
     pool: *ColorPool,
     allocator: std.mem.Allocator,
@@ -197,7 +214,9 @@ pub fn pushColorEntry(
 ) std.mem.Allocator.Error!u32 {
     const handle: u32 = std.math.cast(u32, pool.items.len) orelse
         std.debug.panic("ColorPool index overflow (exceeds u32)", .{});
-    try pool.append(allocator, entry);
+    var normalized = entry;
+    normalizeColorEntryChannels(&normalized);
+    try pool.append(allocator, normalized);
     return handle;
 }
 

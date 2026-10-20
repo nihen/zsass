@@ -498,28 +498,17 @@ fn prophotLinearize(val: f64) f64 {
     return sign * powRational(abs_val, 9, 5);
 }
 
-/// Rec2020 transfer function constants
-const rec2020_alpha: f64 = 1.09929682680944;
-const rec2020_beta: f64 = 0.018053968510807;
-
-/// Rec2020 transfer function: linear -> gamma
+/// Rec2020 transfer function: linear -> gamma. CSS Color 4 specifies a pure
+/// 2.4 gamma (sign-preserving) rather than the piecewise BT.2020 curve.
 fn rec2020Gamma(linear: f64) f64 {
-    const abs_val = @abs(linear);
     const sign: f64 = if (linear < 0) -1.0 else 1.0;
-    if (abs_val < rec2020_beta) {
-        return sign * 4.5 * abs_val;
-    }
-    return sign * (rec2020_alpha * powRational(abs_val, 9, 20) - (rec2020_alpha - 1.0));
+    return sign * pow(@abs(linear), 1.0 / 2.4);
 }
 
 /// Rec2020 inverse: gamma -> linear
 fn rec2020Linearize(val: f64) f64 {
-    const abs_val = @abs(val);
     const sign: f64 = if (val < 0) -1.0 else 1.0;
-    if (abs_val < rec2020_beta * 4.5) {
-        return sign * abs_val / 4.5;
-    }
-    return sign * powRational((abs_val + (rec2020_alpha - 1.0)) / rec2020_alpha, 20, 9);
+    return sign * pow(@abs(val), 2.4);
 }
 
 // ============================================================================
@@ -533,7 +522,16 @@ pub fn clampByte(v: f64) u8 {
 }
 
 /// Converts sRGB channels on a 0-255 scale to HSL (hue degrees, S/L as percentages).
+/// Unlike @min/@max, the reference conversions propagate NaN, so a NaN RGB
+/// channel yields NaN for every cylindrical channel.
+fn anyNan3(v: [3]f64) bool {
+    return math.isNan(v[0]) or math.isNan(v[1]) or math.isNan(v[2]);
+}
+
+const nan3: [3]f64 = .{ math.nan(f64), math.nan(f64), math.nan(f64) };
+
 pub fn rgb255ToHsl(r_in: f64, g_in: f64, b_in: f64) [3]f64 {
+    if (anyNan3(.{ r_in, g_in, b_in })) return nan3;
     const rf = r_in / 255.0;
     const gf = g_in / 255.0;
     const bf = b_in / 255.0;
@@ -676,6 +674,7 @@ fn hueFromRgb(r: f64, g: f64, b: f64, max_val: f64, delta: f64) f64 {
 }
 
 fn srgbToHslWithChromaEpsilon(rgb: [3]f64, chroma_threshold: f64) [3]f64 {
+    if (anyNan3(rgb)) return nan3;
     const r = rgb[0];
     const g = rgb[1];
     const b = rgb[2];
@@ -749,6 +748,7 @@ fn hwbToSrgb(hwb_val: [3]f64) [3]f64 {
 }
 
 fn srgbToHwb(rgb: [3]f64) [3]f64 {
+    if (anyNan3(rgb)) return nan3;
     const r = rgb[0];
     const g = rgb[1];
     const blue = rgb[2];
