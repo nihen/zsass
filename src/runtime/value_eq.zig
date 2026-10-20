@@ -297,6 +297,7 @@ fn valueEqInner(env: anytype, a: Value, b: Value) bool {
     }
 
     if (a.kind() == .calc_fragment or a.kind() == .interp_fragment) return a.p64Of() == b.p64Of();
+    if (a.kind() == .module) return a.moduleRefKey() == b.moduleRefKey();
 
     if (a.kind() == .callable) {
         if (a.callableIsMixin(env.callablePayloadPool()) != b.callableIsMixin(env.callablePayloadPool())) return false;

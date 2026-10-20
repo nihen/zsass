@@ -140,6 +140,17 @@ pub fn reportArgumentTypeMismatch(ctx: *BuiltinContext, param_name: []const u8, 
     return error.BuiltinType;
 }
 
+/// Like `reportArgumentTypeMismatch`, but with a free-form expectation phrase
+/// (`$name: <value> is <phrase>.`).
+pub fn reportArgumentMismatchPhrase(ctx: *BuiltinContext, param_name: []const u8, value: Value, phrase: []const u8) BuiltinError {
+    const val_str = valueToInspectionString(ctx, value) catch return error.BuiltinType;
+    defer ctx.allocator.free(val_str);
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "${s}: {s} is {s}.", .{ param_name, val_str, phrase }) catch return error.BuiltinType;
+    error_format.setContextMessage(msg);
+    return error.BuiltinType;
+}
+
 fn valueToInspectionString(ctx: *BuiltinContext, v: Value) BuiltinError![]const u8 {
     var inspect_ctx: value_inspect.Context = .{
         .allocator = ctx.allocator,

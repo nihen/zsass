@@ -4,6 +4,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+Tracks Dart Sass 1.105.2. The vendored `sass-spec` pin moves to
+`530e761ec`.
+
+### Added
+- First-class modules (Dart Sass 1.105.0): `meta.load()` and
+  `meta.get-module()` return module values, which `meta.css()` and the
+  `$module` argument of `sass:meta` functions such as
+  `meta.module-variables()` and `meta.function-exists()` accept.
+
+### Changed
+- Exact negative zero is serialized as `-0` (Dart Sass 1.104.0).
+  `math.sqrt()`, `math.pow()`, `math.log()`, and the trigonometric functions
+  keep the sign of a zero result. Zero `%`/`mod()` results are positive, and
+  zero `rem()` results are negative when the operand signs differ.
+- Legacy `rgb()`/`rgba()` colors with a non-integer channel are serialized
+  with percentage channels (Dart Sass 1.101.4).
+- rec2020 uses the 2.4 gamma transfer function (Dart Sass 1.102.0).
+- Color space conversions preserve analogous sets of missing channels, and
+  NaN, negative zero, and infinite polar hues become 0 (Dart Sass 1.103.0,
+  1.104.0).
+- A type selector written directly after another compound (`[a]b`) starts a
+  new compound joined by a descendant combinator (Dart Sass 1.100.0). The
+  `adjacent-compounds` deprecation warning is not emitted yet.
+- Color conversion matrices and hue normalization match Dart Sass to the
+  last bit for far out-of-range channels, and rec2020 converts to OKLab
+  directly through LMS.
+- Plain-CSS `if()` branch values use their CSS serialization, so quoted
+  strings keep their quotes (Dart Sass 1.101.4).
+
+### Fixed
+- `@extend` inside `@media` no longer applies to rules in a different media
+  query; it fails with "You may not @extend selectors across media
+  queries.", and extending the same selector from different media queries
+  fails as in Dart Sass 1.105.1.
+- A `/` right after a `:` in a variable value parses as a unary slash.
+- A variable value starting with an at-rule keyword is rejected.
+
 ## 0.3.5 (2026-07-07)
 
 ### Added

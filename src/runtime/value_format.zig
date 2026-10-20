@@ -85,7 +85,7 @@ pub fn formatNumberCore(alloc: std.mem.Allocator, v: f64) std.mem.Allocator.Erro
     perf.note(.format_number);
     if (std.math.isNan(v)) return alloc.dupe(u8, "calc(NaN)");
     if (std.math.isInf(v)) return alloc.dupe(u8, if (v < 0) "calc(-infinity)" else "calc(infinity)");
-    if (v == 0) return alloc.dupe(u8, "0");
+    if (v == 0) return alloc.dupe(u8, if (std.math.signbit(v)) "-0" else "0");
 
     if (try formatNormalizedLargeInteger(alloc, v)) |normalized| return normalized;
 
@@ -618,11 +618,14 @@ test "formatNumberCore: fractions trim and zero-pad" {
     try std.testing.expectEqualStrings("1.25", s4);
 }
 
-test "formatNumberCore: negative zero normalizes" {
+test "formatNumberCore: negative zero keeps its sign" {
     const alloc = std.testing.allocator;
     const s = try formatNumberCore(alloc, -0.0);
     defer alloc.free(s);
-    try std.testing.expectEqualStrings("0", s);
+    try std.testing.expectEqualStrings("-0", s);
+    const fuzzy = try formatNumberCore(alloc, -0.00000000001);
+    defer alloc.free(fuzzy);
+    try std.testing.expectEqualStrings("0", fuzzy);
 }
 
 test "formatNumberWithUnit: degenerate values" {

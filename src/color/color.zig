@@ -7,6 +7,9 @@ const math = std.math;
 // See the color audit ledger ("Route `powRational()` through
 // libc `pow()` ...").
 extern fn pow(f64, f64) f64;
+// libm `atan2` for the same reason: `std.math.atan2` differs from it by 1 ULP
+// on some inputs, and the official CLI hue matches libm.
+extern fn atan2(f64, f64) f64;
 
 // ============================================================================
 // Types
@@ -322,17 +325,19 @@ const display_p3_to_prophoto_linear: Matrix3 = .{
 };
 
 const display_p3_to_rec2020_linear: Matrix3 = .{
-    .{ 0.7538330343617219, 0.19859736905261627, 0.047569596585661844 },
-    .{ 0.045743848965358325, 0.94177721981169338, 0.012478931222948103 },
-    .{ -0.0012103403545183200, 0.017601717301089892, 0.98360862305342833 },
+    .{ 0.7538330343617218, 0.1985973690526163, 0.04756959658566188 },
+    .{ 0.04574384896535833, 0.9417772198116936, 0.012478931222948122 },
+    .{ -0.0012103403545183202, 0.017601717301089892, 0.9836086230534284 },
 };
 
 // --- Rec2020 Linear <-> XYZ-D65 ---
+// The rec2020 matrices below match the official Sass CLI to the last bit for
+// far out-of-range channels, as observed with power-of-two probe inputs.
 
 const rec2020_to_xyz_d65: Matrix3 = .{
-    .{ 63426534.0 / 99577255.0, 20160776.0 / 139408157.0, 47086771.0 / 278816314.0 },
-    .{ 26158966.0 / 99577255.0, 472592308.0 / 697040785.0, 8267143.0 / 139408157.0 },
-    .{ 0.0, 19567812.0 / 697040785.0, 295819943.0 / 278816314.0 },
+    .{ 0.6369580483012913, 0.14461690358620838, 0.16888097516417205 },
+    .{ 0.26270021201126703, 0.677998071518871, 0.05930171646986194 },
+    .{ 0.0, 0.0280726930490875, 1.0609850577107909 },
 };
 
 const xyz_d65_to_rec2020: Matrix3 = .{
@@ -343,8 +348,8 @@ const xyz_d65_to_rec2020: Matrix3 = .{
 
 const rec2020_to_xyz_d50: Matrix3 = .{
     .{ 0.673515463188276, 0.16569726370390453, 0.12508294953738705 },
-    .{ 0.27905900514112056, 0.6753180057491098, 0.045622989109769625 },
-    .{ -0.0019324271340043801, 0.02997782679282923, 0.7970592028516354 },
+    .{ 0.2790590051411206, 0.6753180057491098, 0.04562298910976962 },
+    .{ -0.00193242713400438, 0.02997782679282923, 0.7970592028516355 },
 };
 
 const rec2020_to_srgb_linear: Matrix3 = .{
@@ -360,9 +365,21 @@ const rec2020_to_display_p3_linear: Matrix3 = .{
 };
 
 const rec2020_to_prophoto_linear: Matrix3 = .{
-    .{ 0.8351873331297234, 0.048868848586056945, 0.11594381828421949 },
-    .{ 0.05403324519953362, 0.92891840856920449, 0.017048346231262002 },
-    .{ -0.0023420389707253901, 0.03633215316169465, 0.96600988580903069 },
+    .{ 0.8351873331297235, 0.04886884858605698, 0.11594381828421951 },
+    .{ 0.05403324519953363, 0.9289184085692045, 0.01704834623126199 },
+    .{ -0.00234203897072539, 0.03633215316169465, 0.9660098858090307 },
+};
+
+const a98_rgb_to_rec2020_linear: Matrix3 = .{
+    .{ 0.8773338416636568, 0.07749370651571999, 0.04517245182062317 },
+    .{ 0.09662259146620378, 0.8915273202441805, 0.01185008828961569 },
+    .{ 0.02292106270284839, 0.043036685010679324, 0.9340422522864723 },
+};
+
+const rec2020_to_a98_rgb_linear: Matrix3 = .{
+    .{ 1.1519783947159163, -0.0975030553024086, -0.05447533941350767 },
+    .{ -0.12455047452159074, 1.1328998971259603, -0.008349422604369472 },
+    .{ -0.0225303827810559, -0.04980650742838876, 1.0723368902094446 },
 };
 
 // --- Bradford chromatic adaptation D50 <-> D65 ---
@@ -404,6 +421,14 @@ const oklab_to_lms_cbrt: Matrix3 = .{
     .{ 1.00000000000000020, 0.39633777737617490, 0.21580375730991360 },
     .{ 0.99999999999999980, -0.10556134581565854, -0.06385417282581334 },
     .{ 0.99999999999999990, -0.08948417752981180, -1.29148554801940940 },
+};
+
+// Linear rec2020 -> LMS in one step; fitted bit for bit against the official
+// Sass CLI with power-of-two probe inputs (it does not round through XYZ-D65).
+const rec2020_to_lms: Matrix3 = .{
+    .{ 0.6167557848654444, 0.36019840122646335, 0.02304581390809228 },
+    .{ 0.2651330593926367, 0.6358393720678491, 0.09902756853951408 },
+    .{ 0.10010262952034828, 0.20390652261661452, 0.6959908478630372 },
 };
 
 const lms_to_display_p3_linear: Matrix3 = .{
@@ -498,28 +523,17 @@ fn prophotLinearize(val: f64) f64 {
     return sign * powRational(abs_val, 9, 5);
 }
 
-/// Rec2020 transfer function constants
-const rec2020_alpha: f64 = 1.09929682680944;
-const rec2020_beta: f64 = 0.018053968510807;
-
-/// Rec2020 transfer function: linear -> gamma
+/// Rec2020 transfer function: linear -> gamma. CSS Color 4 specifies a pure
+/// 2.4 gamma (sign-preserving) rather than the piecewise BT.2020 curve.
 fn rec2020Gamma(linear: f64) f64 {
-    const abs_val = @abs(linear);
     const sign: f64 = if (linear < 0) -1.0 else 1.0;
-    if (abs_val < rec2020_beta) {
-        return sign * 4.5 * abs_val;
-    }
-    return sign * (rec2020_alpha * powRational(abs_val, 9, 20) - (rec2020_alpha - 1.0));
+    return sign * pow(@abs(linear), 1.0 / 2.4);
 }
 
 /// Rec2020 inverse: gamma -> linear
 fn rec2020Linearize(val: f64) f64 {
-    const abs_val = @abs(val);
     const sign: f64 = if (val < 0) -1.0 else 1.0;
-    if (abs_val < rec2020_beta * 4.5) {
-        return sign * abs_val / 4.5;
-    }
-    return sign * powRational((abs_val + (rec2020_alpha - 1.0)) / rec2020_alpha, 20, 9);
+    return sign * pow(@abs(val), 2.4);
 }
 
 // ============================================================================
@@ -533,7 +547,16 @@ pub fn clampByte(v: f64) u8 {
 }
 
 /// Converts sRGB channels on a 0-255 scale to HSL (hue degrees, S/L as percentages).
+/// Unlike @min/@max, the reference conversions propagate NaN, so a NaN RGB
+/// channel yields NaN for every cylindrical channel.
+fn anyNan3(v: [3]f64) bool {
+    return math.isNan(v[0]) or math.isNan(v[1]) or math.isNan(v[2]);
+}
+
+const nan3: [3]f64 = .{ math.nan(f64), math.nan(f64), math.nan(f64) };
+
 pub fn rgb255ToHsl(r_in: f64, g_in: f64, b_in: f64) [3]f64 {
+    if (anyNan3(.{ r_in, g_in, b_in })) return nan3;
     const rf = r_in / 255.0;
     const gf = g_in / 255.0;
     const bf = b_in / 255.0;
@@ -676,6 +699,7 @@ fn hueFromRgb(r: f64, g: f64, b: f64, max_val: f64, delta: f64) f64 {
 }
 
 fn srgbToHslWithChromaEpsilon(rgb: [3]f64, chroma_threshold: f64) [3]f64 {
+    if (anyNan3(rgb)) return nan3;
     const r = rgb[0];
     const g = rgb[1];
     const b = rgb[2];
@@ -749,6 +773,7 @@ fn hwbToSrgb(hwb_val: [3]f64) [3]f64 {
 }
 
 fn srgbToHwb(rgb: [3]f64) [3]f64 {
+    if (anyNan3(rgb)) return nan3;
     const r = rgb[0];
     const g = rgb[1];
     const blue = rgb[2];
@@ -888,6 +913,20 @@ fn labToLchOffset(comptime deg: comptime_int, comptime hue: comptime_int, lab_va
     return .{ l, c, h };
 }
 
+/// Hue in degrees from Cartesian channels computed as
+/// `atan2(b, a) * 180 / pi` in binary64, evaluated left to right. This
+/// matches the official Sass CLI bit for bit when the Cartesian input does.
+fn hueDegreesBinary64(a: f64, b: f64) f64 {
+    const h = atan2(b, a) * 180.0 / math.pi;
+    return if (h < 0.0) h + 360.0 else h;
+}
+
+fn labToLchBinary64(lab_val: [3]f64) [3]f64 {
+    const a = lab_val[1];
+    const b = lab_val[2];
+    return .{ lab_val[0], @sqrt(a * a + b * b), hueDegreesBinary64(a, b) };
+}
+
 // --- OKLab <-> XYZ-D65 ---
 
 fn oklabToXyzD65(oklab_val: [3]f64) [3]f64 {
@@ -963,6 +1002,16 @@ fn xyzD65ToOklab(xyz: [3]f64) [3]f64 {
         signedPowCbrt(lms[2]),
     };
     // LMS^(1/3) -> OKLab
+    return mulMV64(lms_cbrt_to_oklab, lms_cbrt);
+}
+
+fn linearRec2020ToOklab(linear: [3]f64) [3]f64 {
+    const lms = mulMV64(rec2020_to_lms, linear);
+    const lms_cbrt: [3]f64 = .{
+        signedPowCbrt(lms[0]),
+        signedPowCbrt(lms[1]),
+        signedPowCbrt(lms[2]),
+    };
     return mulMV64(lms_cbrt_to_oklab, lms_cbrt);
 }
 
@@ -1201,6 +1250,14 @@ fn linearRec2020ToLinearDisplayP3(linear: [3]f64) [3]f64 {
 
 fn linearRec2020ToLinearProphoto(linear: [3]f64) [3]f64 {
     return mulMV64(rec2020_to_prophoto_linear, linear);
+}
+
+fn linearRec2020ToLinearA98(linear: [3]f64) [3]f64 {
+    return mulMV64(rec2020_to_a98_rgb_linear, linear);
+}
+
+fn linearA98ToLinearRec2020(linear: [3]f64) [3]f64 {
+    return mulMV64(a98_rgb_to_rec2020_linear, linear);
 }
 
 // ============================================================================
@@ -1474,6 +1531,10 @@ pub fn convert(color: Color, target: ColorSpace) Color {
                 const prophoto = linearToProphoto(linearA98ToLinearProphoto(a98ToLinear(channels)));
                 return Color.init(prophoto[0], prophoto[1], prophoto[2], color.channels[3], .prophoto_rgb);
             },
+            .rec2020 => {
+                const rec2020 = linearToRec2020(linearA98ToLinearRec2020(a98ToLinear(channels)));
+                return Color.init(rec2020[0], rec2020[1], rec2020[2], color.channels[3], .rec2020);
+            },
             else => {},
         },
         .display_p3 => switch (target) {
@@ -1563,9 +1624,21 @@ pub fn convert(color: Color, target: ColorSpace) Color {
                 const prophoto = linearToProphoto(linearRec2020ToLinearProphoto(rec2020ToLinear(channels)));
                 return Color.init(prophoto[0], prophoto[1], prophoto[2], color.channels[3], .prophoto_rgb);
             },
+            .a98_rgb => {
+                const a98 = linearToA98(linearRec2020ToLinearA98(rec2020ToLinear(channels)));
+                return Color.init(a98[0], a98[1], a98[2], color.channels[3], .a98_rgb);
+            },
             .lch => {
-                const lch = labToLchOffset(2, 4, xyzD50ToLab(linearRec2020ToXyzD50(rec2020ToLinear(channels))));
+                const lch = labToLchBinary64(xyzD50ToLab(linearRec2020ToXyzD50(rec2020ToLinear(channels))));
                 return Color.init(lch[0], lch[1], lch[2], color.channels[3], .lch);
+            },
+            .oklab => {
+                const oklab = linearRec2020ToOklab(rec2020ToLinear(channels));
+                return Color.init(oklab[0], oklab[1], oklab[2], color.channels[3], .oklab);
+            },
+            .oklch => {
+                const oklch = labToLchBinary64(linearRec2020ToOklab(rec2020ToLinear(channels)));
+                return Color.init(oklch[0], oklch[1], oklch[2], color.channels[3], .oklch);
             },
             else => {},
         },

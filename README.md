@@ -4,7 +4,7 @@
 [![Latest release](https://img.shields.io/github/v/release/nihen/zsass?display_name=tag&sort=semver)](https://github.com/nihen/zsass/releases/latest)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Zig 0.16+](https://img.shields.io/badge/zig-0.16%2B-orange.svg)](https://ziglang.org/)
-[![sass-spec](https://img.shields.io/badge/sass--spec-13885%2F13885-brightgreen.svg)](https://github.com/sass/sass-spec)
+[![sass-spec](https://img.shields.io/badge/sass--spec-14339%2F14339-brightgreen.svg)](https://github.com/sass/sass-spec)
 
 A clean-room Sass compiler written in Zig for native and Zig
 build-tooling workflows. zsass provides a standalone CLI and an
@@ -234,7 +234,7 @@ See [docs/api.md](docs/api.md) for the full embedding surface and
 ## sass-spec compatibility
 
 This release passes the upstream `sass-spec` suite vendored at the
-submodule pin in `tests/sass-spec`: **13,885 / 13,885 cases pass, 6
+submodule pin in `tests/sass-spec`: **14,339 / 14,339 cases pass, 5
 skipped** (see `tests/sass-spec/.gitmodules` for the exact commit and
 `tests/spec_runner.zig` for the runner). This validates behavior
 against the cases the suite covers; outside that, real-world

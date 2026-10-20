@@ -11,3 +11,6 @@ pub const meta_apply_mixin_id = meta_dispatch_abi.meta_apply_mixin_id;
 pub const meta_load_css_mixin_id = meta_dispatch_abi.meta_load_css_mixin_id;
 pub const meta_get_function_id = meta_dispatch_abi.meta_get_function_id;
 pub const meta_get_mixin_id = meta_dispatch_abi.meta_get_mixin_id;
+pub const meta_load_id = meta_dispatch_abi.meta_load_id;
+pub const meta_get_module_id = meta_dispatch_abi.meta_get_module_id;
+pub const meta_css_mixin_id = meta_dispatch_abi.meta_css_mixin_id;

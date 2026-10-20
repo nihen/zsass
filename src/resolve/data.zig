@@ -329,6 +329,9 @@ pub const ResolvedProgram = struct {
         prebound_name: InternId = .none,
     }) = .empty,
     cross_var_refs: std.ArrayListUnmanaged(struct { module_id: u32, slot: SlotId }) = .empty,
+    /// Modules named by a literal `meta.load()` URL in this module. They are
+    /// part of the bundle but only run when `meta.load()` executes.
+    meta_load_deps: std.ArrayListUnmanaged(u32) = .empty,
     list_exprs: std.ArrayListUnmanaged(struct {
         elem_start: u32,
         elem_count: u32,
@@ -548,6 +551,7 @@ pub const ResolvedProgram = struct {
         self.at_rule_stmts.deinit(alloc);
         self.comment_stmts.deinit(alloc);
         self.module_dep_stmts.deinit(alloc);
+        self.meta_load_deps.deinit(alloc);
         self.decl_prop_part_exprs.deinit(alloc);
         self.if_stmts.deinit(alloc);
         self.if_branches.deinit(alloc);
@@ -600,6 +604,7 @@ pub const UseBinding = union(enum) {
 pub const local_module_id_sentinel: u32 = std.math.maxInt(u32);
 pub const apply_mixin_sentinel: u32 = std.math.maxInt(u32) - 1;
 pub const load_css_mixin_sentinel: u32 = std.math.maxInt(u32) - 2;
+pub const css_mixin_sentinel: u32 = std.math.maxInt(u32) - 3;
 
 pub const ConfigSeed = struct {
     module_id: u32,

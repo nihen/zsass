@@ -39,6 +39,7 @@ pub fn formatValueForArgMismatch(ctx: *const Context, value: Value) std.mem.Allo
         .list => formatListValue(ctx, value),
         .color => color_format.formatColorCss(ctx.allocator, value.colorEntry(ctx.color_pool).*) catch error.OutOfMemory,
         .callable => formatCallableValue(ctx, value),
+        .module => ctx.allocator.dupe(u8, value_mod.moduleRefDisplay(ctx.intern_pool.get(value.moduleRefKey()))),
         else => ctx.allocator.dupe(u8, "()"),
     };
 }

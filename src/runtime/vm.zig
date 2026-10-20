@@ -36,6 +36,7 @@ const resolver_eval_test_env_mod = @import("resolver_eval_test_env.zig");
 const vm_selector_resolve = @import("vm_selector_resolve.zig");
 const vm_emit = @import("vm_emit.zig");
 const vm_cross_module = @import("vm_cross_module.zig");
+const vm_module_load = @import("vm_module_load.zig");
 const cross_entry_state_mod = @import("cross_entry_state.zig");
 const vm_dispatch = @import("vm_dispatch.zig");
 const origin_mod = @import("origin.zig");
@@ -593,6 +594,11 @@ pub const VM = struct {
     /// re-emit pattern: If L has no visible output (only var def, etc.), FL preamble re-emit is not necessary.
     /// Avoid false re-emit in declaration-only module `_variables.scss` (var def only).
     module_emitted_visible: []bool = &.{},
+    /// Modules first executed by `meta.load()`, whose CSS was not emitted. A
+    /// later `@use`/`@forward` of such a module emits its CSS in place.
+    module_css_deferred: []bool = &.{},
+    /// True while `meta.load()` runs a module into a discarded RuleIR.
+    css_output_deferred: bool = false,
     /// `runTop` The first `enter_frame` uses `mod_globals_bufs[root]` as is.
     prebound_top_locals: ?[]Value = null,
     prebound_top_declared: ?[]bool = null,
@@ -1011,6 +1017,10 @@ pub const VM = struct {
             self.allocator.free(self.module_emitted_visible);
         }
         self.module_emitted_visible = &.{};
+        if (self.module_css_deferred.len != 0) {
+            self.allocator.free(self.module_css_deferred);
+        }
+        self.module_css_deferred = &.{};
     }
 
     fn initExecutedModules(self: *VM) VMError!void {
@@ -1025,6 +1035,8 @@ pub const VM = struct {
         @memset(self.module_currently_running, false);
         self.module_emitted_visible = try self.allocator.alloc(bool, self.program.modules.len);
         @memset(self.module_emitted_visible, false);
+        self.module_css_deferred = try self.allocator.alloc(bool, self.program.modules.len);
+        @memset(self.module_css_deferred, false);
     }
 
     /// Used in official Sass CLI's re-emit pattern. From the beginning of the top chunk of module M
@@ -4153,12 +4165,11 @@ pub const VM = struct {
                 if (self.next_extend_relation_id != std.math.maxInt(u32)) {
                     self.next_extend_relation_id += 1;
                 }
-                const in_media = self.mediaQueryActive();
                 try self.rule_ir.noteExtendRelationMediaContext(
                     self.allocator,
                     source_module,
                     relation_id,
-                    in_media,
+                    try self.currentMediaContext(),
                 );
                 if (self.load_css_module_tag_override) |_| {
                     const group_start = self.extendModuleGroupStartOrder(source_module, self.current_module);
@@ -4285,7 +4296,7 @@ pub const VM = struct {
                 const prop_name = self.intern_pool.get(prop_id);
                 const is_custom_property = std.mem.startsWith(u8, prop_name, "--");
                 if (try self.declarationValueNeedsIndentedCommaSyntaxError(val, 0)) return error.SassError;
-                try ensureDeclarationValueIsCssValue(&self.list_pool, val, is_custom_property);
+                if (try self.skipInvalidDeferredDeclValue(val, is_custom_property)) return .continue_exec;
                 var vid = try valueToInternIdDecl(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, val, is_custom_property);
                 const val_calc_interp_marked = shouldMarkCalcInterpString(self.intern_pool, val);
                 if (!is_custom_property and val_calc_interp_marked) {
@@ -4326,7 +4337,7 @@ pub const VM = struct {
                 const prop_name = self.intern_pool.get(prop_id);
                 const is_custom_property = std.mem.startsWith(u8, prop_name, "--");
                 if (try self.declarationValueNeedsIndentedCommaSyntaxError(val, emit_decl_flags)) return error.SassError;
-                try ensureDeclarationValueIsCssValue(&self.list_pool, val, is_custom_property);
+                if (try self.skipInvalidDeferredDeclValue(val, is_custom_property)) return .continue_exec;
                 if (is_custom_property and
                     (emit_decl_flags & opcode_mod.emit_decl_flag_value_source_multiline) != 0 and
                     val.kind() == .string and !val.stringQuoted(self.string_flags_pool.items))
@@ -5010,7 +5021,7 @@ pub const VM = struct {
                 const is_custom_property = std.mem.startsWith(u8, prop_name, "--");
                 if (self.open_block_depth == 0) return error.SassError;
                 if (try self.declarationValueNeedsIndentedCommaSyntaxError(val, inst.arg_a)) return error.SassError;
-                try ensureDeclarationValueIsCssValue(&self.list_pool, val, is_custom_property);
+                if (try self.skipInvalidDeferredDeclValue(val, is_custom_property)) return .continue_exec;
                 var dynamic_custom_raw_value_id: ?InternId = null;
                 if (is_custom_property) {
                     const raw_vid = if (val.kind() == .string and !val.stringQuoted(self.string_flags_pool.items))
@@ -5496,6 +5507,27 @@ pub const VM = struct {
 
     fn mediaQueryActive(self: *const VM) bool {
         return self.media_query_depth != 0;
+    }
+
+    /// Merged media query list of the open `@media` rules, as a
+    /// `rule_ir_mod.foldMediaContext` id.
+    fn currentMediaContext(self: *VM) VMError!u32 {
+        var context = rule_ir_mod.media_context_none;
+        if (!self.mediaQueryActive()) return context;
+        for (self.open_at_rule_bubble_stack.items) |frame| {
+            if (frame.node_idx >= self.rule_ir.nodes.items.len) return rule_ir_mod.media_context_unknown;
+            const node = self.rule_ir.nodes.items[frame.node_idx];
+            if (node.kind != .at_rule_begin) return rule_ir_mod.media_context_unknown;
+            const name = self.intern_pool.get(@enumFromInt(self.rule_ir.extra.items[node.payload]));
+            if (!std.mem.eql(u8, name, "media")) continue;
+            context = try rule_ir_mod.foldMediaContext(
+                self.allocator,
+                self.intern_pool,
+                context,
+                self.rule_ir.extra.items[node.payload + 1],
+            );
+        }
+        return context;
     }
 
     fn declarationAtRuleActive(self: *const VM) bool {
@@ -6209,6 +6241,54 @@ pub const VM = struct {
         return self.makeListValue(outer_items.items, .comma, false);
     }
 
+    fn diagnosticTextWithModules(self: *VM, v: Value) VMError![]const u8 {
+        if (v.kind() == .module) {
+            return try self.allocator.dupe(u8, value_mod.moduleRefDisplay(self.intern_pool.get(v.moduleRefKey())));
+        }
+        if (v.kind() != .list or v.listHandle() >= self.list_pool.items.len) {
+            const id = valueToInternIdRaw(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, v) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return formatInspectionValueForArgMessage(self, v),
+            };
+            return try self.allocator.dupe(u8, self.intern_pool.get(id));
+        }
+        const items = self.list_pool.items[v.listHandle()];
+        const meta = self.list_meta_pool.items;
+        var acc: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer acc.deinit(self.allocator);
+        const bracketed = v.listBracketed(meta);
+        if (bracketed) try acc.append(self.allocator, '[');
+        if (v.listIsMap(meta) and items.len % 2 == 0) {
+            try acc.append(self.allocator, '(');
+            var i: usize = 0;
+            while (i + 1 < items.len) : (i += 2) {
+                if (i != 0) try acc.appendSlice(self.allocator, ", ");
+                const key = try self.diagnosticTextWithModules(items[i]);
+                defer self.allocator.free(key);
+                const val = try self.diagnosticTextWithModules(items[i + 1]);
+                defer self.allocator.free(val);
+                try acc.appendSlice(self.allocator, key);
+                try acc.appendSlice(self.allocator, ": ");
+                try acc.appendSlice(self.allocator, val);
+            }
+            try acc.append(self.allocator, ')');
+        } else {
+            const sep = switch (v.listSeparator(meta)) {
+                .comma => ", ",
+                .slash => " / ",
+                .space, .undecided => " ",
+            };
+            for (items, 0..) |item, i| {
+                if (i != 0) try acc.appendSlice(self.allocator, sep);
+                const part = try self.diagnosticTextWithModules(item);
+                defer self.allocator.free(part);
+                try acc.appendSlice(self.allocator, part);
+            }
+        }
+        if (bracketed) try acc.append(self.allocator, ']');
+        return try acc.toOwnedSlice(self.allocator);
+    }
+
     fn valueToDiagnosticMessage(self: *VM, v: Value, comptime prefer_css_decl_render: bool) VMError![]const u8 {
         const msg_id_res = if (prefer_css_decl_render)
             valueToInternIdDecl(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, v, false)
@@ -6218,7 +6298,11 @@ pub const VM = struct {
         const msg_id = msg_id_res catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => blk: {
-                const fallback = try valueToOpString(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.callable_payload_pool, v);
+                const fallback = valueToOpString(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.callable_payload_pool, v) catch |op_err| switch (op_err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    // Module references have no CSS form; diagnostics show their inspect form.
+                    else => try self.diagnosticTextWithModules(v),
+                };
                 defer self.allocator.free(fallback);
                 break :blk self.intern_pool.intern(fallback) catch return error.OutOfMemory;
             },
@@ -8228,6 +8312,34 @@ pub const VM = struct {
         return serializeUnquotedDeclString(self.allocator, raw);
     }
 
+    pub fn invokeMetaLoad(self: *VM, ctx: anytype, args: []const Value, arg_names: []const InternId) builtin_shared.BuiltinError!Value {
+        return vm_module_load.invokeMetaLoad(self, ctx, args, arg_names);
+    }
+
+    /// Declarations whose value has no CSS form are errors, except while
+    /// `meta.load()` runs a module with its CSS deferred: serialization errors
+    /// surface only once the CSS is emitted.
+    fn skipInvalidDeferredDeclValue(self: *VM, val: Value, is_custom_property: bool) VMError!bool {
+        if (!self.css_output_deferred) {
+            try ensureDeclarationValueIsCssValue(&self.list_pool, val, is_custom_property);
+            return false;
+        }
+        if (is_custom_property) return false;
+        return declarationValueNeedsCssError(&self.list_pool, val);
+    }
+
+    pub fn invokeMetaCss(self: *VM, args: []const Value, arg_names: []const InternId) VMError!void {
+        return vm_module_load.invokeMetaCss(self, args, arg_names);
+    }
+
+    pub fn recordModuleArgumentMismatchMessage(self: *VM, value: Value) void {
+        const rendered = formatInspectionValueForArgMessage(self, value) catch return;
+        defer self.allocator.free(rendered);
+        const msg = std.fmt.allocPrint(self.allocator, "$module: {s} is neither a string nor a module reference.", .{rendered}) catch return;
+        defer self.allocator.free(msg);
+        error_format.setContextMessage(msg);
+    }
+
     pub fn invokeMetaLoadCss(self: *VM, args: []const Value, arg_names: []const InternId) VMError!void {
         return vm_cross_module.invokeMetaLoadCss(self, args, arg_names);
     }
@@ -8237,7 +8349,7 @@ pub const VM = struct {
     }
 
     fn runLoadCssModule(self: *VM, resolved_path: []const u8, config: LoadCssConfig) VMError!void {
-        return vm_cross_module.runLoadCssModule(self, resolved_path, config);
+        return vm_cross_module.runLoadCssModule(self, resolved_path, config, .{});
     }
 
     pub fn initLoadCssChildVM(self: *VM, child_program: *Program, is_plain_css_source: bool, has_parent_selector: bool) std.mem.Allocator.Error!VM {
@@ -9959,7 +10071,8 @@ fn modValues(
                 if (std.math.signbit(av) == std.math.signbit(bv)) return try Value.number(av, unit, number_pool, alloc);
                 return try Value.number(std.math.nan(f64), unit, number_pool, alloc);
             }
-            return try Value.number(@mod(av, bv), unit, number_pool, alloc);
+            const result = @mod(av, bv);
+            return try Value.number(if (result == 0) 0 else result, unit, number_pool, alloc);
         }
     }
     return error.SassError;
@@ -10019,6 +10132,7 @@ fn valueToOpString(
         }
         return error.SassError;
     }
+    if (v.kind() == .module) return error.SassError;
 
     return try alloc.dupe(u8, "()");
 }
@@ -11075,6 +11189,7 @@ fn listValueContainsQuotedStringRecursive(list_pool: *const std.ArrayListUnmanag
 }
 
 fn declarationValueNeedsCssError(list_pool: *const std.ArrayListUnmanaged([]Value), value: Value) bool {
+    if (value.kind() == .module) return true;
     if (listValueContainsMapRecursive(list_pool, value)) return true;
     if (value.kind() != .list) return false;
     if (value.listBracketed(value_mod.empty_list_meta_pool)) return false;
@@ -19244,11 +19359,11 @@ test "vm: nested import function captures import-scope variables" {
 
     try std.testing.expectEqualStrings(
         \\.dark a {
-        \\  color: rgb(127.5, 0, 0);
+        \\  color: rgb(50%, 0%, 0%);
         \\}
         \\
         \\.light a {
-        \\  color: rgb(255, 127.5, 127.5);
+        \\  color: rgb(100%, 50%, 50%);
         \\}
         \\
     , css);
@@ -19725,8 +19840,8 @@ test "vm: dynamic custom property preserves source colon spacing" {
         \\
     ,
         \\:root {
-        \\  --blue-50:rgb(243.9, 249.75, 254.4);
-        \\  --blue-50-s: rgb(243.9, 249.75, 254.4);
+        \\  --blue-50:rgb(95.6470588235%, 97.9411764706%, 99.7647058824%);
+        \\  --blue-50-s: rgb(95.6470588235%, 97.9411764706%, 99.7647058824%);
         \\  --blue-50-plain:$value;
         \\  --blue-50-plain-s: $value;
         \\}
