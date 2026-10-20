@@ -329,6 +329,9 @@ pub const ResolvedProgram = struct {
         prebound_name: InternId = .none,
     }) = .empty,
     cross_var_refs: std.ArrayListUnmanaged(struct { module_id: u32, slot: SlotId }) = .empty,
+    /// Modules named by a literal `meta.load()` URL in this module. They are
+    /// part of the bundle but only run when `meta.load()` executes.
+    meta_load_deps: std.ArrayListUnmanaged(u32) = .empty,
     list_exprs: std.ArrayListUnmanaged(struct {
         elem_start: u32,
         elem_count: u32,
@@ -548,6 +551,7 @@ pub const ResolvedProgram = struct {
         self.at_rule_stmts.deinit(alloc);
         self.comment_stmts.deinit(alloc);
         self.module_dep_stmts.deinit(alloc);
+        self.meta_load_deps.deinit(alloc);
         self.decl_prop_part_exprs.deinit(alloc);
         self.if_stmts.deinit(alloc);
         self.if_branches.deinit(alloc);

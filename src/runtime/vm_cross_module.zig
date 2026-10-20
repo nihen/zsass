@@ -9,6 +9,7 @@ const zsass_io = @import("io.zig");
 const value_mod = @import("value.zig");
 const intern_pool_mod = @import("intern_pool.zig");
 const builtin_shared = @import("../builtin/shared.zig");
+const vm_module_load = @import("vm_module_load.zig");
 
 const Value = value_mod.Value;
 const InternId = intern_pool_mod.InternId;
@@ -139,6 +140,11 @@ pub fn runTopDependencyAtCurrentPosition(self: anytype, module_id: u32, rerun_ea
     const effect = self.classifyDependencyRun(module_id, rerun_each_call);
     switch (effect) {
         .skip_body => {
+            if (module_id < self.module_css_deferred.len and self.module_css_deferred[module_id]) {
+                self.module_css_deferred[module_id] = false;
+                try vm_module_load.emitModuleCss(self, module_id);
+                return;
+            }
             try self.replayDependencySkipPreamble(module_id);
             return;
         },
