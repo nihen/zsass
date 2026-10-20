@@ -4687,6 +4687,13 @@ pub fn color_to_space(ctx: *BuiltinContext, args: []const Value, arg_names: []co
                 if ((output_missing & 0x4) != 0) b255 = 0.0;
                 output_missing &= ~@as(ColorMissingMask, 0x7);
             }
+            var alpha = converted.channels[3];
+            if (!(source_legacy and source_declared_space == .srgb) and (output_missing & 0x8) != 0) {
+                // A legacy rgb result converted from another space cannot
+                // carry a missing alpha; it behaves as zero.
+                alpha = 0.0;
+                output_missing &= ~@as(ColorMissingMask, 0x8);
+            }
 
             const out_of_gamut = !std.math.isFinite(r255) or !std.math.isFinite(g255) or !std.math.isFinite(b255) or
                 r255 < -1e-10 or r255 > 255.0 + 1e-10 or
@@ -4703,14 +4710,14 @@ pub fn color_to_space(ctx: *BuiltinContext, args: []const Value, arg_names: []co
 
                 return colorValueFromDeclaredColor(
                     ctx,
-                    color_mod.Color.init(hsl[0], hsl[1], hsl[2], converted.channels[3], .hsl),
+                    color_mod.Color.init(hsl[0], hsl[1], hsl[2], alpha, .hsl),
                     .hsl,
                     output_missing & 0x8,
                     true,
                 );
             }
 
-            const rgb = color_mod.Color.init(r255 / 255.0, g255 / 255.0, b255 / 255.0, converted.channels[3], .srgb);
+            const rgb = color_mod.Color.init(r255 / 255.0, g255 / 255.0, b255 / 255.0, alpha, .srgb);
             const out = try colorValueFromDeclaredColor(ctx, rgb, .srgb, output_missing, true);
             preserveLegacyRgbTargetSourceRepr(ctx, out, &source_entry, source_legacy);
             if (out.kind() == .color and source_missing != 0 and source_declared_space == .srgb) {
