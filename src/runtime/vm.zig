@@ -9959,7 +9959,8 @@ fn modValues(
                 if (std.math.signbit(av) == std.math.signbit(bv)) return try Value.number(av, unit, number_pool, alloc);
                 return try Value.number(std.math.nan(f64), unit, number_pool, alloc);
             }
-            return try Value.number(@mod(av, bv), unit, number_pool, alloc);
+            const result = @mod(av, bv);
+            return try Value.number(if (result == 0) 0 else result, unit, number_pool, alloc);
         }
     }
     return error.SassError;

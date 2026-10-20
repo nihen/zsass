@@ -638,7 +638,8 @@ fn modValues(env: anytype, a: Value, b: Value) Error!Value {
                 if (std.math.signbit(av) == std.math.signbit(bv)) return try Value.number(av, unit, env.numberPool(), env.poolAlloc());
                 return try Value.number(std.math.nan(f64), unit, env.numberPool(), env.poolAlloc());
             }
-            return try Value.number(@mod(av, bv), unit, env.numberPool(), env.poolAlloc());
+            const result = @mod(av, bv);
+            return try Value.number(if (result == 0) 0 else result, unit, env.numberPool(), env.poolAlloc());
         }
     }
     return error.SassError;

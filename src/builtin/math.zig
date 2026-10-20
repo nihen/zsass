@@ -404,9 +404,8 @@ fn sassModulo(a: f64, b: f64) f64 {
     }
 
     const result = a - b * @floor(a / b);
-    if (result == 0) {
-        return if (std.math.signbit(b)) -@as(f64, 0) else @as(f64, 0);
-    }
+    // A zero modulo is always positive zero, whatever the operand signs.
+    if (result == 0) return 0;
     return result;
 }
 
@@ -2213,13 +2212,7 @@ pub fn math_mod(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
         return numberLike(ctx, y_value, y.unitId(ctx.number_pool));
     }
 
-    const raw = if (y_value == 0 and std.math.signbit(y_value))
-        -@as(f64, 0)
-    else
-        sassModulo(y_value, x_value);
-
-    const result = if (raw == 0 and !(y_value == 0 and std.math.signbit(y_value))) @as(f64, 0) else raw;
-    return numberLike(ctx, result, y.unitId(ctx.number_pool));
+    return numberLike(ctx, sassModulo(y_value, x_value), y.unitId(ctx.number_pool));
 }
 
 pub fn math_rem(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
@@ -2290,7 +2283,11 @@ pub fn math_rem(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     }
 
     const raw = y_value - @trunc(y_value / x_value) * x_value;
-    const result = if (raw == 0 and std.math.signbit(y_value)) -@as(f64, 0) else raw;
+    // A zero remainder is negative exactly when the operand signs differ.
+    const result = if (raw == 0)
+        (if (std.math.signbit(y_value) != std.math.signbit(x_value)) -@as(f64, 0) else @as(f64, 0))
+    else
+        raw;
     return numberLike(ctx, result, y.unitId(ctx.number_pool));
 }
 
@@ -2487,7 +2484,7 @@ pub fn math_sqrt(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     };
 
     if (number.unitId(ctx.number_pool) != .none) return error.SassError;
-    return Value.numberUnitless(canonicalizeSignedZero(@sqrt(number.asF64(ctx.number_pool))));
+    return Value.numberUnitless(@sqrt(number.asF64(ctx.number_pool)));
 }
 
 pub fn math_pow(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
@@ -2525,8 +2522,8 @@ pub fn math_pow(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     if (@abs(base_v) <= 1e-9 or base_v == 0 or std.math.isInf(base_v)) {
         result = roundPowResult(result);
     }
-    if (@abs(result) < 1e-12) result = 0;
-    return Value.numberUnitless(canonicalizeSignedZero(result));
+    if (result != 0 and @abs(result) < 1e-12) result = 0;
+    return Value.numberUnitless(result);
 }
 
 pub fn math_log(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
@@ -2552,7 +2549,7 @@ pub fn math_log(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     const number = number_value.asF64(ctx.number_pool);
 
     if (base_arg) |base| {
-        if (base.kind() == .nil) return Value.numberUnitless(canonicalizeSignedZero(@log(number)));
+        if (base.kind() == .nil) return Value.numberUnitless(@log(number));
 
         const base_value = coerceMathNumberValue(ctx, base) catch |err| switch (err) {
             error.BuiltinType => {
@@ -2564,10 +2561,10 @@ pub fn math_log(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
             else => return err,
         };
         if (base_value.unitId(ctx.number_pool) != .none) return error.SassError;
-        return Value.numberUnitless(canonicalizeSignedZero(@log(number) / @log(base_value.asF64(ctx.number_pool))));
+        return Value.numberUnitless(@log(number) / @log(base_value.asF64(ctx.number_pool)));
     }
 
-    return Value.numberUnitless(canonicalizeSignedZero(@log(number)));
+    return Value.numberUnitless(@log(number));
 }
 
 fn forwardTrig(
@@ -2595,8 +2592,8 @@ fn forwardTrig(
     }
     const radians = convertAngleToRadians(number.asF64(ctx.number_pool), unitSlice(ctx, number.unitId(ctx.number_pool)));
     var result = op(radians);
-    if (@abs(result) < 1e-10) result = 0;
-    return Value.numberUnitless(canonicalizeSignedZero(result));
+    if (result != 0 and @abs(result) < 1e-10) result = 0;
+    return Value.numberUnitless(result);
 }
 
 fn inverseTrig(
@@ -2619,7 +2616,7 @@ fn inverseTrig(
         else => return err,
     };
     if (number.unitId(ctx.number_pool) != .none) return error.SassError;
-    const value = canonicalizeSignedZero(op(number.asF64(ctx.number_pool)) * 180.0 / std.math.pi);
+    const value = op(number.asF64(ctx.number_pool)) * 180.0 / std.math.pi;
     return numberToDeg(ctx, value);
 }
 
@@ -2726,7 +2723,7 @@ pub fn math_atan2(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
         };
     }
 
-    const value = canonicalizeSignedZero(std.math.atan2(y.asF64(ctx.number_pool), x_value) * 180.0 / std.math.pi);
+    const value = std.math.atan2(y.asF64(ctx.number_pool), x_value) * 180.0 / std.math.pi;
     return numberToDeg(ctx, value);
 }
 
