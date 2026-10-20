@@ -322,17 +322,19 @@ const display_p3_to_prophoto_linear: Matrix3 = .{
 };
 
 const display_p3_to_rec2020_linear: Matrix3 = .{
-    .{ 0.7538330343617219, 0.19859736905261627, 0.047569596585661844 },
-    .{ 0.045743848965358325, 0.94177721981169338, 0.012478931222948103 },
-    .{ -0.0012103403545183200, 0.017601717301089892, 0.98360862305342833 },
+    .{ 0.7538330343617218, 0.1985973690526163, 0.04756959658566188 },
+    .{ 0.04574384896535833, 0.9417772198116936, 0.012478931222948122 },
+    .{ -0.0012103403545183202, 0.017601717301089892, 0.9836086230534284 },
 };
 
 // --- Rec2020 Linear <-> XYZ-D65 ---
+// The rec2020 matrices below match the official Sass CLI to the last bit for
+// far out-of-range channels, as observed with power-of-two probe inputs.
 
 const rec2020_to_xyz_d65: Matrix3 = .{
-    .{ 63426534.0 / 99577255.0, 20160776.0 / 139408157.0, 47086771.0 / 278816314.0 },
-    .{ 26158966.0 / 99577255.0, 472592308.0 / 697040785.0, 8267143.0 / 139408157.0 },
-    .{ 0.0, 19567812.0 / 697040785.0, 295819943.0 / 278816314.0 },
+    .{ 0.6369580483012913, 0.14461690358620838, 0.16888097516417205 },
+    .{ 0.26270021201126703, 0.677998071518871, 0.05930171646986194 },
+    .{ 0.0, 0.0280726930490875, 1.0609850577107909 },
 };
 
 const xyz_d65_to_rec2020: Matrix3 = .{
@@ -343,8 +345,8 @@ const xyz_d65_to_rec2020: Matrix3 = .{
 
 const rec2020_to_xyz_d50: Matrix3 = .{
     .{ 0.673515463188276, 0.16569726370390453, 0.12508294953738705 },
-    .{ 0.27905900514112056, 0.6753180057491098, 0.045622989109769625 },
-    .{ -0.0019324271340043801, 0.02997782679282923, 0.7970592028516354 },
+    .{ 0.2790590051411206, 0.6753180057491098, 0.04562298910976962 },
+    .{ -0.00193242713400438, 0.02997782679282923, 0.7970592028516355 },
 };
 
 const rec2020_to_srgb_linear: Matrix3 = .{
@@ -360,9 +362,21 @@ const rec2020_to_display_p3_linear: Matrix3 = .{
 };
 
 const rec2020_to_prophoto_linear: Matrix3 = .{
-    .{ 0.8351873331297234, 0.048868848586056945, 0.11594381828421949 },
-    .{ 0.05403324519953362, 0.92891840856920449, 0.017048346231262002 },
-    .{ -0.0023420389707253901, 0.03633215316169465, 0.96600988580903069 },
+    .{ 0.8351873331297235, 0.04886884858605698, 0.11594381828421951 },
+    .{ 0.05403324519953363, 0.9289184085692045, 0.01704834623126199 },
+    .{ -0.00234203897072539, 0.03633215316169465, 0.9660098858090307 },
+};
+
+const a98_rgb_to_rec2020_linear: Matrix3 = .{
+    .{ 0.8773338416636568, 0.07749370651571999, 0.04517245182062317 },
+    .{ 0.09662259146620378, 0.8915273202441805, 0.01185008828961569 },
+    .{ 0.02292106270284839, 0.043036685010679324, 0.9340422522864723 },
+};
+
+const rec2020_to_a98_rgb_linear: Matrix3 = .{
+    .{ 1.1519783947159163, -0.0975030553024086, -0.05447533941350767 },
+    .{ -0.12455047452159074, 1.1328998971259603, -0.008349422604369472 },
+    .{ -0.0225303827810559, -0.04980650742838876, 1.0723368902094446 },
 };
 
 // --- Bradford chromatic adaptation D50 <-> D65 ---
@@ -1203,6 +1217,14 @@ fn linearRec2020ToLinearProphoto(linear: [3]f64) [3]f64 {
     return mulMV64(rec2020_to_prophoto_linear, linear);
 }
 
+fn linearRec2020ToLinearA98(linear: [3]f64) [3]f64 {
+    return mulMV64(rec2020_to_a98_rgb_linear, linear);
+}
+
+fn linearA98ToLinearRec2020(linear: [3]f64) [3]f64 {
+    return mulMV64(a98_rgb_to_rec2020_linear, linear);
+}
+
 // ============================================================================
 // To / From XYZ-D65 Hub
 // ============================================================================
@@ -1474,6 +1496,10 @@ pub fn convert(color: Color, target: ColorSpace) Color {
                 const prophoto = linearToProphoto(linearA98ToLinearProphoto(a98ToLinear(channels)));
                 return Color.init(prophoto[0], prophoto[1], prophoto[2], color.channels[3], .prophoto_rgb);
             },
+            .rec2020 => {
+                const rec2020 = linearToRec2020(linearA98ToLinearRec2020(a98ToLinear(channels)));
+                return Color.init(rec2020[0], rec2020[1], rec2020[2], color.channels[3], .rec2020);
+            },
             else => {},
         },
         .display_p3 => switch (target) {
@@ -1562,6 +1588,10 @@ pub fn convert(color: Color, target: ColorSpace) Color {
             .prophoto_rgb => {
                 const prophoto = linearToProphoto(linearRec2020ToLinearProphoto(rec2020ToLinear(channels)));
                 return Color.init(prophoto[0], prophoto[1], prophoto[2], color.channels[3], .prophoto_rgb);
+            },
+            .a98_rgb => {
+                const a98 = linearToA98(linearRec2020ToLinearA98(rec2020ToLinear(channels)));
+                return Color.init(a98[0], a98[1], a98[2], color.channels[3], .a98_rgb);
             },
             .lch => {
                 const lch = labToLchOffset(2, 4, xyzD50ToLab(linearRec2020ToXyzD50(rec2020ToLinear(channels))));
