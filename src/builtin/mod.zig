@@ -28,11 +28,20 @@ pub const meta_load_css_mixin_id: Id = meta_dispatch_abi.meta_load_css_mixin_id;
 pub const meta_get_function_id: Id = meta_dispatch_abi.meta_get_function_id;
 /// Dispatch id for `meta.get-mixin` (function).
 pub const meta_get_mixin_id: Id = meta_dispatch_abi.meta_get_mixin_id;
+/// Dispatch id for `meta.load` (function).
+pub const meta_load_id: Id = meta_dispatch_abi.meta_load_id;
+/// Dispatch id for `meta.get-module` (function).
+pub const meta_get_module_id: Id = meta_dispatch_abi.meta_get_module_id;
+/// Dispatch id for `meta.css` (mixin).
+pub const meta_css_mixin_id: Id = meta_dispatch_abi.meta_css_mixin_id;
 
 pub fn isCrossEntryStatefulFunction(id: Id) bool {
     return switch (id) {
         31, // string.unique-id
         109, // math.random
+        // meta.load executes another module's top, so replaying the caller's
+        // end-state would skip that module's execution.
+        meta_load_id,
         => true,
         else => false,
     };

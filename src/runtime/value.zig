@@ -26,6 +26,8 @@
 //! calc_fragment: aux=0, handle (existing meaning)
 //! interp_fragment: aux=0, handle (existing meaning)
 //!   callable:          aux=0, handle=index into CallablePayloadPool (sidecar)
+//!   module:            aux=0, handle=InternId of the module reference key
+//!                      (see `moduleRefKey`)
 //!
 //! callable / unit-bearing number is a 32-bit handle and spills to sidecar.
 //! String / list flags are packed directly into aux byte, so sidecar is not necessary.
@@ -120,10 +122,26 @@ pub const ValueKind = enum(u8) {
     calc_fragment = 6,
     interp_fragment = 7,
     callable = 8,
+    /// First-class module reference (`meta.get-module()` / `meta.load()`).
+    module = 9,
     _count,
 };
 
 pub const ListHandle = u32;
+
+pub const module_ref_separator: u8 = 0;
+
+/// Display text (`get-module("name")`) of an interned module reference key.
+pub fn moduleRefDisplay(raw_key: []const u8) []const u8 {
+    const sep = std.mem.indexOfScalar(u8, raw_key, module_ref_separator) orelse return raw_key;
+    return raw_key[0..sep];
+}
+
+/// Identity part (`sass:<name>` or module path) of an interned module reference key.
+pub fn moduleRefIdentity(raw_key: []const u8) []const u8 {
+    const sep = std.mem.indexOfScalar(u8, raw_key, module_ref_separator) orelse return "";
+    return raw_key[sep + 1 ..];
+}
 
 // aux byte bit positions (inline flag pack for string/list).
 const string_quoted_bit: u8 = 1 << 0;
@@ -580,6 +598,18 @@ pub const Value = extern struct {
             .name = name,
         });
         return .{ .bits = packTagged(.callable, 0, pool_handle) };
+    }
+
+    /// A module reference interns `<display>\x00<identity>`: the display text is
+    /// what `meta.inspect()` prints and the identity (`sass:<name>` or the
+    /// canonical module path) makes equal references share one InternId.
+    pub inline fn moduleRef(key: InternId) Value {
+        return .{ .bits = packTagged(.module, 0, @intFromEnum(key)) };
+    }
+
+    pub inline fn moduleRefKey(self: Value) InternId {
+        std.debug.assert(self.kind() == .module);
+        return @enumFromInt(@as(u32, @truncate(self.bits & handle_mask)));
     }
 
     pub inline fn callablePoolHandle(self: Value) u32 {

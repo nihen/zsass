@@ -398,6 +398,10 @@ pub fn invokeCallable(
                 try self.invokeMetaLoadCss(args, arg_names);
                 return null;
             }
+            if (handle == builtin_mod.meta_css_mixin_id) {
+                try self.invokeMetaCss(args, arg_names);
+                return null;
+            }
             return error.BuiltinUnsupported;
         }
         if (handle == meta_call_builtin_id) {

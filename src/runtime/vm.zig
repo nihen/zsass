@@ -36,6 +36,7 @@ const resolver_eval_test_env_mod = @import("resolver_eval_test_env.zig");
 const vm_selector_resolve = @import("vm_selector_resolve.zig");
 const vm_emit = @import("vm_emit.zig");
 const vm_cross_module = @import("vm_cross_module.zig");
+const vm_module_load = @import("vm_module_load.zig");
 const cross_entry_state_mod = @import("cross_entry_state.zig");
 const vm_dispatch = @import("vm_dispatch.zig");
 const origin_mod = @import("origin.zig");
@@ -6218,7 +6219,11 @@ pub const VM = struct {
         const msg_id = msg_id_res catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => blk: {
-                const fallback = try valueToOpString(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.callable_payload_pool, v);
+                const fallback = valueToOpString(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.callable_payload_pool, v) catch |op_err| switch (op_err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    // Module references have no CSS form; diagnostics show their inspect form.
+                    else => try formatInspectionValueForArgMessage(self, v),
+                };
                 defer self.allocator.free(fallback);
                 break :blk self.intern_pool.intern(fallback) catch return error.OutOfMemory;
             },
@@ -8228,6 +8233,22 @@ pub const VM = struct {
         return serializeUnquotedDeclString(self.allocator, raw);
     }
 
+    pub fn invokeMetaLoad(self: *VM, ctx: anytype, args: []const Value, arg_names: []const InternId) builtin_shared.BuiltinError!Value {
+        return vm_module_load.invokeMetaLoad(self, ctx, args, arg_names);
+    }
+
+    pub fn invokeMetaCss(self: *VM, args: []const Value, arg_names: []const InternId) VMError!void {
+        return vm_module_load.invokeMetaCss(self, args, arg_names);
+    }
+
+    pub fn recordModuleArgumentMismatchMessage(self: *VM, value: Value) void {
+        const rendered = formatInspectionValueForArgMessage(self, value) catch return;
+        defer self.allocator.free(rendered);
+        const msg = std.fmt.allocPrint(self.allocator, "$module: {s} is neither a string nor a module reference.", .{rendered}) catch return;
+        defer self.allocator.free(msg);
+        error_format.setContextMessage(msg);
+    }
+
     pub fn invokeMetaLoadCss(self: *VM, args: []const Value, arg_names: []const InternId) VMError!void {
         return vm_cross_module.invokeMetaLoadCss(self, args, arg_names);
     }
@@ -8237,7 +8258,7 @@ pub const VM = struct {
     }
 
     fn runLoadCssModule(self: *VM, resolved_path: []const u8, config: LoadCssConfig) VMError!void {
-        return vm_cross_module.runLoadCssModule(self, resolved_path, config);
+        return vm_cross_module.runLoadCssModule(self, resolved_path, config, .{});
     }
 
     pub fn initLoadCssChildVM(self: *VM, child_program: *Program, is_plain_css_source: bool, has_parent_selector: bool) std.mem.Allocator.Error!VM {
@@ -10019,6 +10040,7 @@ fn valueToOpString(
         }
         return error.SassError;
     }
+    if (v.kind() == .module) return error.SassError;
 
     return try alloc.dupe(u8, "()");
 }

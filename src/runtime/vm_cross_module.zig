@@ -662,7 +662,14 @@ fn readFileToStringAlloc(self: anytype, path: []const u8) ![]const u8 {
     };
 }
 
-pub fn runLoadCssModule(self: anytype, resolved_path: []const u8, config: LoadCssConfig) !void {
+pub const LoadCssRunOptions = struct {
+    /// Copy the child's module globals back into this VM after the run.
+    sync_state: bool = true,
+    /// Silence `@debug` / `@warn` / deprecations in the child run.
+    quiet: bool = false,
+};
+
+pub fn runLoadCssModule(self: anytype, resolved_path: []const u8, config: LoadCssConfig, opts: LoadCssRunOptions) !void {
     perf.note(.vm_module_run);
     const source = try readFileToStringAlloc(self, resolved_path);
     defer self.allocator.free(source);
@@ -717,6 +724,7 @@ pub fn runLoadCssModule(self: anytype, resolved_path: []const u8, config: LoadCs
 
     var child_vm = try self.initLoadCssChildVM(&child_program, is_plain_css_source, parent_selector != null);
     defer child_vm.deinit();
+    if (opts.quiet) child_vm.deprecation_opts.quiet = true;
     try child_vm.ensureStaticEvalListsLoaded();
     const seed_bindings = try buildLoadCssSeedBindings(self, &child_vm, config);
     defer self.allocator.free(seed_bindings);
@@ -737,7 +745,7 @@ pub fn runLoadCssModule(self: anytype, resolved_path: []const u8, config: LoadCs
     } else {
         try child_vm.runTopWithSelectorPrefix(&.{});
     }
-    try self.syncLoadCssChildStates(&child_vm);
+    if (opts.sync_state) try self.syncLoadCssChildStates(&child_vm);
 }
 
 pub fn invokeMetaLoadCss(self: anytype, args: []const Value, arg_names: []const InternId) !void {
@@ -796,6 +804,6 @@ pub fn invokeMetaLoadCss(self: anytype, args: []const Value, arg_names: []const 
     const owner_module = self.effectiveModuleTag();
     const child_tag = self.allocateLoadCssModuleTag();
     try self.registerVisibleLoadCssModule(owner_module, owner_module, std.math.maxInt(u32), child_tag);
-    try runLoadCssModule(self, resolved_path, config);
+    try runLoadCssModule(self, resolved_path, config, .{});
     try self.markLoadCssModulePathLoaded(resolved_path);
 }

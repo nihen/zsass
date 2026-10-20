@@ -20,6 +20,8 @@ const internString = shared.internString;
 const reportArgumentTypeMismatch = shared.reportArgumentTypeMismatch;
 
 const VM = vm_mod.VM;
+const error_format = @import("error_format.zig");
+const vm_module_load = @import("vm_module_load.zig");
 
 fn getVM(ctx: *BuiltinContext) *VM {
     return @ptrCast(@alignCast(ctx.vm));
@@ -262,6 +264,11 @@ fn makeUserFunctionCallableQualified(ctx: *BuiltinContext, module_name: []const 
         ctx.callable_payload_pool,
         ctx.allocator,
     );
+}
+
+fn makeModuleFunctionCallable(ctx: *BuiltinContext, module_name: ?[]const u8, module_id: u32, function_id: u32, display_name: []const u8) BuiltinError!Value {
+    if (module_name) |label| return makeUserFunctionCallableQualified(ctx, label, module_id, function_id, display_name);
+    return makeUserFunctionCallable(ctx, module_id, function_id, display_name);
 }
 
 fn makeBuiltinMixinCallable(ctx: *BuiltinContext, builtin_id: u32, display_name: []const u8, accepts_content: bool) BuiltinError!Value {
@@ -516,9 +523,37 @@ fn builtinFunctionIdCompat(ctx: *BuiltinContext, module_name: []const u8, functi
     return null;
 }
 
+fn reportModuleArgumentMismatch(ctx: *BuiltinContext, value: Value) BuiltinError {
+    return shared.reportArgumentMismatchPhrase(ctx, "module", value, "neither a string nor a module reference");
+}
+
+fn reportMissingNamespace(namespace: []const u8) BuiltinError {
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "There is no module with namespace \"{s}\".", .{namespace}) catch return error.SassError;
+    error_format.setContextMessage(msg);
+    return error.SassError;
+}
+
+pub fn makeBuiltinModuleRef(ctx: *BuiltinContext, name: []const u8) BuiltinError!Value {
+    return vm_module_load.makeBuiltinModuleRef(getVM(ctx), name);
+}
+
+pub fn makeUserModuleRef(ctx: *BuiltinContext, module_id: u32) BuiltinError!Value {
+    return vm_module_load.makeUserModuleRef(getVM(ctx), module_id);
+}
+
+fn moduleRefTarget(ctx: *BuiltinContext, ref: Value) ModuleId {
+    return switch (vm_module_load.resolveModuleRef(getVM(ctx), ref)) {
+        .builtin => |name| .{ .builtin = name },
+        .user => |mid| .{ .user = mid },
+        .not_found => .not_found,
+    };
+}
+
 fn findModule(ctx: *BuiltinContext, module_name_v: ?Value) BuiltinError!ModuleId {
     if (module_name_v == null or module_name_v.?.kind() == .nil) return .current;
-    if (module_name_v.?.kind() != .string) return reportArgumentTypeMismatch(ctx, "module", module_name_v.?, "string");
+    if (module_name_v.?.kind() == .module) return moduleRefTarget(ctx, module_name_v.?);
+    if (module_name_v.?.kind() != .string) return reportModuleArgumentMismatch(ctx, module_name_v.?);
     const name = ctx.intern_pool.get(module_name_v.?.stringIntern());
     const vm = getVM(ctx);
     const mod = &vm.program.modules[vm.current_module];
@@ -635,6 +670,7 @@ fn meta_type_of(ctx: *BuiltinContext, args: []const Value, _: []const InternId) 
         }
         if (value.kind() == .calc_fragment) break :blk "calculation";
         if (value.kind() == .callable) break :blk if (value.callableIsMixin(ctx.callable_payload_pool)) "mixin" else "function";
+        if (value.kind() == .module) break :blk "module";
         break :blk "unknown";
     };
     const id = try internString(ctx, tag);
@@ -803,6 +839,9 @@ fn valueToInspectCssString(ctx: *BuiltinContext, value: Value) BuiltinError![]co
     }
     if (value.kind() == .color) {
         return inspectColorValue(ctx, value);
+    }
+    if (value.kind() == .module) {
+        return ctx.allocator.dupe(u8, value_mod.moduleRefDisplay(ctx.intern_pool.get(value.moduleRefKey()))) catch error.OutOfMemory;
     }
     if (value.kind() == .callable) {
         const name = ctx.intern_pool.get(value.callableNameIntern(ctx.callable_payload_pool));
@@ -1072,8 +1111,7 @@ fn meta_global_variable_exists(ctx: *BuiltinContext, args: []const Value, arg_na
     else
         false;
     if (has_module_arg) {
-        if (b[1] == null or b[1].?.kind() != .string) return error.SassError;
-        const module_info = findModule(ctx, b[1]) catch return error.SassError;
+        const module_info = try findModule(ctx, b[1]);
         switch (module_info) {
             .current => {
                 return if (moduleDeclaredVarExists(vm, vm.current_module, name)) Value.true_v else Value.false_v;
@@ -1196,7 +1234,12 @@ fn resolveSpecificMixinCallable(ctx: *BuiltinContext, module_info: ModuleId, mod
         },
         .builtin => |bname| {
             if (builtin_mod.resolveMixin(bname, name)) |builtin_id| {
-                const display_name = if (builtin_id == builtin_mod.meta_apply_mixin_id) "apply" else "load-css";
+                const display_name = if (builtin_id == builtin_mod.meta_apply_mixin_id)
+                    "apply"
+                else if (builtin_id == builtin_mod.meta_css_mixin_id)
+                    "css"
+                else
+                    "load-css";
                 return try makeBuiltinMixinCallable(ctx, builtin_id, display_name, builtin_id == builtin_mod.meta_apply_mixin_id);
             }
             return null;
@@ -1340,7 +1383,8 @@ fn meta_module_functions(ctx: *BuiltinContext, args: []const Value, arg_names: [
     const params = [_][]const u8{"module"};
     const b = try shared.bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &params, 1);
     const module_info = try findModule(ctx, b[0] orelse return error.BuiltinArity);
-    const module_name = ctx.intern_pool.get((b[0] orelse return error.BuiltinArity).stringIntern());
+    const module_v = b[0] orelse return error.BuiltinArity;
+    const module_name: ?[]const u8 = if (module_v.kind() == .string) ctx.intern_pool.get(module_v.stringIntern()) else null;
     const vm = getVM(ctx);
     const builtin_mod = @import("../builtin/mod.zig");
 
@@ -1357,7 +1401,7 @@ fn meta_module_functions(ctx: *BuiltinContext, args: []const Value, arg_names: [
                 const display_id = try internDisplayIdentifier(ctx, entry.key_ptr.*);
                 try pairs.append(ctx.allocator, .{
                     .key = Value.string(display_id, false),
-                    .value = try makeUserFunctionCallableQualified(ctx, module_name, entry.value_ptr.*.module_id, entry.value_ptr.*.id, entry.key_ptr.*),
+                    .value = try makeModuleFunctionCallable(ctx, module_name, entry.value_ptr.*.module_id, entry.value_ptr.*.id, entry.key_ptr.*),
                 });
             }
             var bit = mod.exported_builtin_fns.iterator();
@@ -1378,7 +1422,7 @@ fn meta_module_functions(ctx: *BuiltinContext, args: []const Value, arg_names: [
                     const display_id = try internDisplayIdentifier(ctx, entry.key_ptr.*);
                     try pairs.append(ctx.allocator, .{
                         .key = Value.string(display_id, false),
-                        .value = try makeUserFunctionCallableQualified(ctx, module_name, entry.value_ptr.*.module_id, entry.value_ptr.*.id, entry.key_ptr.*),
+                        .value = try makeModuleFunctionCallable(ctx, module_name, entry.value_ptr.*.module_id, entry.value_ptr.*.id, entry.key_ptr.*),
                     });
                 }
                 var bit = mod.exported_builtin_fns.iterator();
@@ -1451,6 +1495,11 @@ fn meta_module_mixins(ctx: *BuiltinContext, args: []const Value, arg_names: []co
         },
         .builtin => |bname| {
             if (std.mem.eql(u8, bname, "meta")) {
+                const css_id = try internString(ctx, "css");
+                try pairs.append(ctx.allocator, .{
+                    .key = Value.string(css_id, false),
+                    .value = try makeBuiltinMixinCallable(ctx, builtin_mod.meta_css_mixin_id, "css", false),
+                });
                 const apply_id = try internString(ctx, "apply");
                 try pairs.append(ctx.allocator, .{
                     .key = Value.string(apply_id, false),
@@ -1468,6 +1517,27 @@ fn meta_module_mixins(ctx: *BuiltinContext, args: []const Value, arg_names: []co
 
     sortMapPairs(ctx, pairs.items);
     return pushMapPairs(ctx, pairs.items);
+}
+
+fn meta_get_module(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    const params = [_][]const u8{"module"};
+    const b = try shared.bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &params, 1);
+    const module_v = b[0] orelse return error.BuiltinArity;
+    if (module_v.kind() == .module) return module_v;
+    if (module_v.kind() != .string) return reportModuleArgumentMismatch(ctx, module_v);
+    const namespace = ctx.intern_pool.get(module_v.stringIntern());
+    const vm = getVM(ctx);
+    const mod = &vm.program.modules[vm.current_module];
+    const binding = mod.use_map.get(namespace) orelse return reportMissingNamespace(namespace);
+    return switch (binding) {
+        .builtin_module => |name| makeBuiltinModuleRef(ctx, name),
+        .user_module => |mid| makeUserModuleRef(ctx, mid),
+    };
+}
+
+fn meta_load(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    const vm = getVM(ctx);
+    return vm.invokeMetaLoad(ctx, args, arg_names);
 }
 
 pub export fn zsass_builtin_meta_dispatch(
@@ -1502,6 +1572,8 @@ pub export fn zsass_builtin_meta_dispatch(
         .calc_args => meta_calc_args(ctx, args, arg_names),
         .get_function => meta_get_function(ctx, args, arg_names),
         .get_mixin => meta_get_mixin(ctx, args, arg_names),
+        .load => meta_load(ctx, args, arg_names),
+        .get_module => meta_get_module(ctx, args, arg_names),
     };
     out_value.* = result catch |err| return meta_dispatch_abi.statusFromBuiltinError(err);
     return .ok;

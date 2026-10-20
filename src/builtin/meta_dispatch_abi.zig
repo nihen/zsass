@@ -27,6 +27,8 @@ pub const DispatchKind = enum {
     calc_args,
     get_function,
     get_mixin,
+    load,
+    get_module,
 };
 
 const MetaBuiltinSpec = struct {
@@ -57,6 +59,9 @@ pub const meta_builtin_specs = [_]MetaBuiltinSpec{
     .{ .id = 181, .name = "load-css", .mixin_only = true },
     .{ .id = 182, .name = "get-function", .dispatch_kind = .get_function },
     .{ .id = 183, .name = "get-mixin", .dispatch_kind = .get_mixin },
+    .{ .id = 188, .name = "load", .dispatch_kind = .load },
+    .{ .id = 189, .name = "get-module", .dispatch_kind = .get_module },
+    .{ .id = 190, .name = "css", .mixin_only = true },
 };
 
 fn idByNameComptime(comptime name: []const u8) Id {
@@ -70,6 +75,9 @@ pub const meta_apply_mixin_id: Id = idByNameComptime("apply");
 pub const meta_load_css_mixin_id: Id = idByNameComptime("load-css");
 pub const meta_get_function_id: Id = idByNameComptime("get-function");
 pub const meta_get_mixin_id: Id = idByNameComptime("get-mixin");
+pub const meta_load_id: Id = idByNameComptime("load");
+pub const meta_get_module_id: Id = idByNameComptime("get-module");
+pub const meta_css_mixin_id: Id = idByNameComptime("css");
 
 pub fn isMixinOnlyId(id: Id) bool {
     inline for (meta_builtin_specs) |spec| {

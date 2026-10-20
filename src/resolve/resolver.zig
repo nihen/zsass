@@ -148,6 +148,7 @@ pub const UseBinding = data_mod.UseBinding;
 pub const local_module_id_sentinel = data_mod.local_module_id_sentinel;
 pub const apply_mixin_sentinel = data_mod.apply_mixin_sentinel;
 pub const load_css_mixin_sentinel = data_mod.load_css_mixin_sentinel;
+pub const css_mixin_sentinel = data_mod.css_mixin_sentinel;
 pub const ConfigSeed = data_mod.ConfigSeed;
 pub const SharedValuePoolStorage = data_mod.SharedValuePoolStorage;
 pub const ResolvedBundle = data_mod.ResolvedBundle;
@@ -156,6 +157,7 @@ const ModuleResolver = data_mod.ModuleResolver;
 fn builtinMixinIdToSentinel(bid: builtin_mod.Id) ?MixinId {
     if (bid == builtin_mod.meta_apply_mixin_id) return apply_mixin_sentinel;
     if (bid == builtin_mod.meta_load_css_mixin_id) return load_css_mixin_sentinel;
+    if (bid == builtin_mod.meta_css_mixin_id) return css_mixin_sentinel;
     return null;
 }
 

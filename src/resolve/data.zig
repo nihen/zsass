@@ -600,6 +600,7 @@ pub const UseBinding = union(enum) {
 pub const local_module_id_sentinel: u32 = std.math.maxInt(u32);
 pub const apply_mixin_sentinel: u32 = std.math.maxInt(u32) - 1;
 pub const load_css_mixin_sentinel: u32 = std.math.maxInt(u32) - 2;
+pub const css_mixin_sentinel: u32 = std.math.maxInt(u32) - 3;
 
 pub const ConfigSeed = struct {
     module_id: u32,
