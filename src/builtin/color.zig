@@ -1597,15 +1597,14 @@ fn mixModernColors(ctx: *BuiltinContext, c1: Value, c2: Value, weight_percent: f
     var mixed_output = if (method.space == output_space) mixed_in_method else color_mod.convert(mixed_in_method, output_space);
     var output_missing = mapMissingChannels(result_missing, method.space, output_space);
 
-    if (method.space != output_space and output_missing != 0 and colorLegacyFlagFromValue(ctx, c1) and isLegacyColorSpace(output_space)) {
-        for (0..4) |i| {
-            const bit: ColorMissingMask = @as(ColorMissingMask, 1) << @intCast(i);
-            if ((output_missing & bit) != 0) mixed_output.channels[i] = 0.0;
-        }
+    const legacy_input = colorLegacyCompatFlagFromValue(ctx, c1);
+    if (method.space != output_space and output_missing != 0 and legacy_input and isLegacyColorSpace(output_space)) {
+        zeroMissingChannels(&mixed_output, output_missing);
         output_missing = 0;
     }
 
-    const output_legacy = colorLegacyFlagFromValue(ctx, c1) and isLegacyColorSpace(output_space);
+    const output_legacy = isLegacyColorSpace(output_space) and
+        (colorLegacyFlagFromValue(ctx, c1) or (legacy_input and output_missing == 0));
     return colorValueFromDeclaredColor(ctx, mixed_output, output_space, output_missing, output_legacy);
 }
 
@@ -2979,11 +2978,8 @@ fn toSpaceMissingMask(
             mapped_missing |= 0x6;
         }
     }
-    // A hue made powerless by the conversion becomes missing; a missing
-    // chroma behaves as zero.
-    if ((target_space == .lch or target_space == .oklch) and
-        ((mapped_missing & 0x2) != 0 or @abs(converted.channels[1]) <= 1e-10))
-    {
+    // A hue made powerless by the conversion becomes missing.
+    if ((target_space == .lch or target_space == .oklch) and @abs(converted.channels[1]) <= 1e-10) {
         mapped_missing |= 0x4;
     }
     return mapped_missing;
