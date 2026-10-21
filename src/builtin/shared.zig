@@ -77,6 +77,18 @@ pub const ListIndexCacheKey = struct {
     needle_p64: u64,
 };
 
+/// Sass `%` for finite divisors: the result takes the divisor's sign, and a
+/// zero result is positive. `@mod` assumes a positive divisor, which
+/// ReleaseFast builds rely on, so it is not used here.
+pub fn flooredModulo(a: f64, b: f64) f64 {
+    if (b == 0) return std.math.nan(f64);
+    const magnitude = @rem(@abs(a), @abs(b));
+    if (magnitude == 0) return 0;
+    const result = if (std.math.signbit(a)) -magnitude else magnitude;
+    if (std.math.signbit(result) != std.math.signbit(b)) return result + b;
+    return result;
+}
+
 pub fn listIndexNeedleIsCacheable(v: Value) bool {
     return switch (v.kind()) {
         .nil, .boolean, .number, .string => true,
@@ -545,3 +557,14 @@ const BuiltinValueEqEnv = struct {
         return self.ctx.list_pool.items[idx];
     }
 };
+
+test "flooredModulo takes the divisor's sign" {
+    try std.testing.expectEqual(@as(f64, -3), flooredModulo(1, -4));
+    try std.testing.expectEqual(@as(f64, -2.5), flooredModulo(1.5, -4));
+    try std.testing.expectEqual(@as(f64, 3), flooredModulo(-1, 4));
+    try std.testing.expectEqual(@as(f64, -1), flooredModulo(-1, -4));
+    try std.testing.expectEqual(@as(f64, 1), flooredModulo(5, 4));
+    try std.testing.expect(!std.math.signbit(flooredModulo(-4, 4)));
+    try std.testing.expect(!std.math.signbit(flooredModulo(4, -4)));
+    try std.testing.expect(std.math.isNan(flooredModulo(1, 0)));
+}

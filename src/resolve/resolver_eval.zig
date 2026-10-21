@@ -5,6 +5,7 @@ fn fuzzyNumberOrder(a: f64, b: f64) std.math.Order {
     return std.math.order(a, b);
 }
 const builtin_mod = @import("../builtin/mod.zig");
+const builtin_shared = @import("../builtin/shared.zig");
 const meta_dispatch_abi = @import("../builtin/meta_dispatch_abi.zig");
 const color_mod = @import("../color/color.zig");
 const color_format = @import("../color/color_format.zig");
@@ -638,8 +639,7 @@ fn modValues(env: anytype, a: Value, b: Value) Error!Value {
                 if (std.math.signbit(av) == std.math.signbit(bv)) return try Value.number(av, unit, env.numberPool(), env.poolAlloc());
                 return try Value.number(std.math.nan(f64), unit, env.numberPool(), env.poolAlloc());
             }
-            const result = @mod(av, bv);
-            return try Value.number(if (result == 0) 0 else result, unit, env.numberPool(), env.poolAlloc());
+            return try Value.number(builtin_shared.flooredModulo(av, bv), unit, env.numberPool(), env.poolAlloc());
         }
     }
     return error.SassError;
