@@ -5649,7 +5649,6 @@ fn buildOrigins(arena: std.mem.Allocator, bundle: *const ResolvedBundle) Compile
         .source_path = bundle.modules[bundle.root_index].module_path,
         .module_id = bundle.root_index,
         .parent_import_origin = .invalid,
-        .preamble_comment_ids = &.{},
     };
     for (bundle.modules, 0..) |*rp, mid| {
         origins[mid + 1] = .{
@@ -5657,7 +5656,6 @@ fn buildOrigins(arena: std.mem.Allocator, bundle: *const ResolvedBundle) Compile
             .source_path = rp.module_path,
             .module_id = @intCast(mid),
             .parent_import_origin = .invalid,
-            .preamble_comment_ids = &.{},
         };
     }
     const import_base: u32 = @intCast(bundle.modules.len + 1);
@@ -5671,7 +5669,6 @@ fn buildOrigins(arena: std.mem.Allocator, bundle: *const ResolvedBundle) Compile
             .source_path = origin.source_path,
             .module_id = origin.module_id,
             .parent_import_origin = parent_import_origin,
-            .preamble_comment_ids = origin.preamble_comment_ids,
         };
     }
     return origins;

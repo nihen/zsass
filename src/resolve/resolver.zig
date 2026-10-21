@@ -10494,7 +10494,6 @@ fn capturePreambleCheckpoint(
         const rows = try arena.dupe(origin_mod.CssOrigin, mr.import_origins_ptr.items);
         for (rows) |*row| {
             row.source_path = try arena.dupe(u8, row.source_path);
-            row.preamble_comment_ids = try arena.dupe(u32, row.preamble_comment_ids);
         }
         break :blk rows;
     };

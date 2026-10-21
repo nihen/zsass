@@ -20,5 +20,4 @@ pub const CssOrigin = struct {
     source_path: []const u8,
     module_id: u32,
     parent_import_origin: OriginId = .invalid,
-    preamble_comment_ids: []const u32 = &.{},
 };

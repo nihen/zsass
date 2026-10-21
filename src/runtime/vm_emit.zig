@@ -1,59 +1,13 @@
 const std = @import("std");
 const intern_pool_mod = @import("intern_pool.zig");
-const origin_mod = @import("origin.zig");
 
 const InternId = intern_pool_mod.InternId;
-const OriginId = origin_mod.OriginId;
 
 /// The nest_depth of rule_ir is available in u8, but the usage on the writer side is `nest_depth != 0`
 /// bool test only. When it reaches 256 steps or more, silent wrap becomes 0 and hoisted rule
 /// Perform a saturation cast to avoid fallback blank from firing accidentally.
 inline fn saturateNestDepth(depth: usize) u8 {
     return std.math.cast(u8, depth) orelse std.math.maxInt(u8);
-}
-
-/// Used for the official Sass CLI module re-emit pattern. From the beginning of the top chunk of module M
-/// Append consecutive emit_comments to rule_ir. enter_frame / emit_stmt_gap
-/// / nop is skip. Stops at first non-preamble inst.
-pub fn emitModulePreambleComments(self: anytype, module_id: u32) !void {
-    if (module_id >= self.program.modules.len) return;
-    const chunk = &self.program.modules[module_id].top;
-    for (chunk.code) |inst| {
-        switch (inst.opcode()) {
-            .enter_frame, .emit_stmt_gap, .nop => continue,
-            .emit_comment => {
-                const text_id: InternId = @enumFromInt(inst.arg_b);
-                try self.rule_ir.appendComment(
-                    self.allocator,
-                    text_id,
-                    self.currentSourceSpan(),
-                );
-            },
-            else => return,
-        }
-    }
-}
-
-pub fn emitImportOriginPreamble(self: anytype, origin: origin_mod.CssOrigin) !void {
-    for (origin.preamble_comment_ids) |comment_id| {
-        try self.rule_ir.appendComment(
-            self.allocator,
-            @enumFromInt(comment_id),
-            self.currentSourceSpan(),
-        );
-    }
-}
-
-pub fn emitOriginPreamble(self: anytype, origin_id: OriginId) !void {
-    if (!origin_id.isValid()) return;
-    const origin_idx = @intFromEnum(origin_id);
-    if (origin_idx >= self.program.origins.len) return;
-    const origin = self.program.origins[origin_idx];
-    switch (origin.kind) {
-        .root => {},
-        .module => try emitModulePreambleComments(self, origin.module_id),
-        .import_stylesheet => try emitImportOriginPreamble(self, origin),
-    }
 }
 
 /// If trailing-empty-scope is detected in the previous `emit_stmt_gap` and stmt_gap is suppressed,

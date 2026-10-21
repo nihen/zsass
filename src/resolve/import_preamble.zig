@@ -1,57 +1,10 @@
 const std = @import("std");
 const data_mod = @import("data.zig");
-const origin_mod = @import("../runtime/origin.zig");
 
-const ModuleResolver = data_mod.ModuleResolver;
 const ResolvedProgram = data_mod.ResolvedProgram;
 const StmtIndex = data_mod.StmtIndex;
-const OriginId = origin_mod.OriginId;
 
 const PreambleError = error{ OutOfMemory, InternalError };
-
-fn collectCommentInternIds(
-    prog: *const ResolvedProgram,
-    allocator: std.mem.Allocator,
-    stmts: []const StmtIndex,
-) PreambleError![]const u32 {
-    const out = try allocator.alloc(u32, stmts.len);
-    errdefer allocator.free(out);
-    var i: usize = 0;
-    for (stmts) |si| {
-        const st = prog.stmts.items[si];
-        if (st.kind != .comment) return error.InternalError;
-        out[i] = @intFromEnum(prog.comment_stmts.items[st.payload].text_intern);
-        i += 1;
-    }
-    return out;
-}
-
-pub fn recordImportPreambleComments(
-    prog: *const ResolvedProgram,
-    loader: *ModuleResolver,
-    import_origin_id: OriginId,
-    expanded_top: []const StmtIndex,
-) PreambleError!void {
-    if (expanded_top.len == 0) return;
-    const origin_index = @intFromEnum(import_origin_id);
-    if (origin_index >= loader.import_origins_ptr.items.len) return;
-
-    var preamble_count: usize = 0;
-    while (preamble_count < expanded_top.len) : (preamble_count += 1) {
-        const si = expanded_top[preamble_count];
-        if (prog.stmts.items[si].kind != .comment) break;
-    }
-    if (preamble_count == 0) return;
-
-    const origin = &loader.import_origins_ptr.items[origin_index];
-    // import_origins is retained across entries in cross-entry persistent mode, so
-    // preamble_comment_ids is also allocated with long-lived records_alloc.
-    origin.preamble_comment_ids = try collectCommentInternIds(
-        prog,
-        loader.records_alloc,
-        expanded_top[0..preamble_count],
-    );
-}
 
 pub fn adjustModuleStyleImportPreamble(
     allocator: std.mem.Allocator,

@@ -70,7 +70,6 @@ pub fn appendImportOrigin(self: *ModuleResolver, source_path: []const u8, parent
         .source_path = owned_path,
         .module_id = std.math.maxInt(u32),
         .parent_import_origin = parent_import_origin,
-        .preamble_comment_ids = &.{},
     });
     return @enumFromInt(idx_u32);
 }

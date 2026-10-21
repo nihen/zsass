@@ -67,6 +67,12 @@ jobs:
         if: matrix.run_spec
         run: zig build spec
 
+      # Release archives are built with ReleaseFast, where code that relies
+      # on illegal behavior being checked can compile differently.
+      - name: Spec tests (ReleaseFast)
+        if: matrix.run_spec
+        run: zig build spec -Doptimize=ReleaseFast
+
   shellcheck:
     name: Shellcheck
     runs-on: ubuntu-latest

@@ -100,35 +100,12 @@ pub fn runDependencyBody(self: anytype, module_id: u32, rerun_each_call: bool, i
             }
         }
     }
-    if (module_id < self.module_first_loader_origin.len and
-        self.module_first_loader_origin[module_id] == .invalid)
-    {
-        self.module_first_loader_origin[module_id] = self.current_origin;
-    }
     const track_running = module_id < self.module_currently_running.len;
     if (track_running) self.module_currently_running[module_id] = true;
     defer if (track_running) {
         self.module_currently_running[module_id] = false;
     };
-    const node_count_before = self.rule_ir.nodes.items.len;
     try runTopModuleWithSelectorPrefix(self, module_id, selector_prefix, shadow_copy);
-    if (module_id < self.module_emitted_visible.len) {
-        const nodes = self.rule_ir.nodes.items;
-        var has_visible = false;
-        var i: usize = node_count_before;
-        while (i < nodes.len) : (i += 1) {
-            switch (nodes[i].kind) {
-                .rule_begin, .rule_end, .decl, .decl_raw, .at_rule_simple, .at_rule_begin, .at_rule_end, .comment, .stream_chunk => {
-                    has_visible = true;
-                    break;
-                },
-                .stmt_gap, .group_boundary, .sourcemap_gap => continue,
-            }
-        }
-        if (has_visible) {
-            self.module_emitted_visible[module_id] = true;
-        }
-    }
     if (shadow_copy and saved_state.stacks.selector_stack.items.len > 0) {
         const parent_selector = saved_state.stacks.selector_stack.items[saved_state.stacks.selector_stack.items.len - 1];
         try prefixRuleIrRangeTopLevelRules(self, start_node_idx, parent_selector);
@@ -145,21 +122,9 @@ pub fn runTopDependencyAtCurrentPosition(self: anytype, module_id: u32, rerun_ea
                 try vm_module_load.emitModuleCss(self, module_id);
                 return;
             }
-            try self.replayDependencySkipPreamble(module_id);
             return;
         },
         .run_body => {
-            if (self.current_chunk == .top and
-                self.selector_stack.items.len == 0 and
-                self.open_block_depth == 0)
-            {
-                try self.preEmitFirstLoaderPreambles(module_id);
-            }
-            if (module_id < self.module_first_loader_origin.len and
-                self.module_first_loader_origin[module_id] == .invalid)
-            {
-                self.module_first_loader_origin[module_id] = self.current_origin;
-            }
             try runDependencyBody(self, module_id, rerun_each_call, is_forward);
         },
     }
