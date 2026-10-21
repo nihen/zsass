@@ -577,23 +577,9 @@ pub const VM = struct {
     mod_global_declared_storage: []bool = &.{},
     /// Have you executed top chunk with `@use` / `@forward`?
     executed_modules: []bool = &.{},
-    /// The header loud comment of the preceding `@forward`, and that module of the following module.
-    /// Mapping to play when re-referenced with `@use`.
-    /// Value stores InternId(u32) and maxInt(u32) is unset sentinel.
-    dependency_replay_comments: []u32 = &.{},
-    /// Loader origin when module is loaded for the first time.
-    /// official Sass CLI re-emit pattern: previously-loaded module in subsequent @use chain
-    // Used to re-emit the first-loader preamble when /// is re-visited.
-    /// .invalid not loaded sentinel.
-    module_first_loader_origin: []OriginId = &.{},
-    /// A bool array of currently running modules (on the saved frame chain).
-    /// For FL active determination of re-emit pattern (left  ->  shared, input @use right after left completion
-    /// FL[shared]=left is inactive so it will not be re-emit, spec diamond comment_only).
+    /// Modules whose top chunk is currently running (on the saved frame chain),
+    /// used to detect `meta.load()` module loops.
     module_currently_running: []bool = &.{},
-    /// Did the module issue visible CSS when it was first loaded (runtime judgment: if rule_ir.nodes increased)?
-    /// re-emit pattern: If L has no visible output (only var def, etc.), FL preamble re-emit is not necessary.
-    /// Avoid false re-emit in declaration-only module `_variables.scss` (var def only).
-    module_emitted_visible: []bool = &.{},
     /// Modules first executed by `meta.load()`, whose CSS was not emitted. A
     /// later `@use`/`@forward` of such a module emits its CSS in place.
     module_css_deferred: []bool = &.{},
@@ -1001,22 +987,10 @@ pub const VM = struct {
             self.allocator.free(self.executed_modules);
         }
         self.executed_modules = &.{};
-        if (self.dependency_replay_comments.len != 0) {
-            self.allocator.free(self.dependency_replay_comments);
-        }
-        self.dependency_replay_comments = &.{};
-        if (self.module_first_loader_origin.len != 0) {
-            self.allocator.free(self.module_first_loader_origin);
-        }
-        self.module_first_loader_origin = &.{};
         if (self.module_currently_running.len != 0) {
             self.allocator.free(self.module_currently_running);
         }
         self.module_currently_running = &.{};
-        if (self.module_emitted_visible.len != 0) {
-            self.allocator.free(self.module_emitted_visible);
-        }
-        self.module_emitted_visible = &.{};
         if (self.module_css_deferred.len != 0) {
             self.allocator.free(self.module_css_deferred);
         }
@@ -1027,153 +1001,10 @@ pub const VM = struct {
         self.freeExecutedModulesIfAny();
         self.executed_modules = try self.allocator.alloc(bool, self.program.modules.len);
         @memset(self.executed_modules, false);
-        self.dependency_replay_comments = try self.allocator.alloc(u32, self.program.modules.len);
-        @memset(self.dependency_replay_comments, std.math.maxInt(u32));
-        self.module_first_loader_origin = try self.allocator.alloc(OriginId, self.program.modules.len);
-        @memset(self.module_first_loader_origin, OriginId.invalid);
         self.module_currently_running = try self.allocator.alloc(bool, self.program.modules.len);
         @memset(self.module_currently_running, false);
-        self.module_emitted_visible = try self.allocator.alloc(bool, self.program.modules.len);
-        @memset(self.module_emitted_visible, false);
         self.module_css_deferred = try self.allocator.alloc(bool, self.program.modules.len);
         @memset(self.module_css_deferred, false);
-    }
-
-    /// Used in official Sass CLI's re-emit pattern. From the beginning of the top chunk of module M
-    /// Append consecutive emit_comments to rule_ir. enter_frame / emit_stmt_gap
-    /// / nop is skip. Stops at first non-preamble inst.
-    fn emitModulePreambleComments(self: *VM, module_id: u32) VMError!void {
-        return vm_emit.emitModulePreambleComments(self, module_id);
-    }
-
-    fn emitImportOriginPreamble(self: *VM, origin: origin_mod.CssOrigin) VMError!void {
-        return vm_emit.emitImportOriginPreamble(self, origin);
-    }
-
-    fn emitOriginPreamble(self: *VM, origin_id: OriginId) VMError!void {
-        return vm_emit.emitOriginPreamble(self, origin_id);
-    }
-
-    fn isImportOriginOnActiveStack(self: *VM, target: OriginId) bool {
-        if (!target.isValid()) return false;
-        var cur = self.current_origin;
-        while (cur.isValid()) {
-            if (cur == target) return true;
-            const cur_idx = @intFromEnum(cur);
-            if (cur_idx >= self.program.origins.len) return false;
-            const current = self.program.origins[cur_idx];
-            if (current.kind != .import_stylesheet) return false;
-            cur = current.parent_import_origin;
-        }
-        return false;
-    }
-
-    fn isOriginActive(self: *VM, origin_id: OriginId) bool {
-        if (!origin_id.isValid()) return false;
-        const origin_idx = @intFromEnum(origin_id);
-        if (origin_idx >= self.program.origins.len) return false;
-        const origin = self.program.origins[origin_idx];
-        return switch (origin.kind) {
-            .root => true,
-            .module => if (origin.module_id < self.module_currently_running.len)
-                self.module_currently_running[origin.module_id]
-            else
-                false,
-            .import_stylesheet => self.isImportOriginOnActiveStack(origin_id),
-        };
-    }
-
-    /// For @use/@forward target N of fresh-load, pre-scan direct deps of N,
-    /// Add preamble of first loader FL[L] of already loaded module L immediately before N's CSS
-    /// Emit using the official Sass CLI re-emit pattern for preserved preamble comments.
-    ///
-    /// FL only emit (spec
-    /// in `directives/use/css/order/use_only.hrx::comment_order/diamond`
-    /// If input @use right(@use shared) comes after completing left  ->  shared,
-    /// FL[shared] = left is inactive so it will not be re-emit).
-    fn isAlreadyEmitted(
-        small: []const OriginId,
-        small_len: usize,
-        heap: *const std.ArrayListUnmanaged(OriginId),
-        origin: OriginId,
-    ) bool {
-        for (small[0..small_len]) |emitted_origin| {
-            if (emitted_origin == origin) return true;
-        }
-        for (heap.items) |emitted_origin| {
-            if (emitted_origin == origin) return true;
-        }
-        return false;
-    }
-
-    pub fn preEmitFirstLoaderPreambles(self: *VM, target_module: u32) VMError!void {
-        if (target_module >= self.program.modules.len) return;
-        if (target_module >= self.executed_modules.len) return;
-        if (self.executed_modules[target_module]) return;
-        const target_chunk = &self.program.modules[target_module].top;
-        var emitted_small: [64]OriginId = undefined;
-        var emitted_small_len: usize = 0;
-        var emitted_heap: std.ArrayListUnmanaged(OriginId) = .empty;
-        defer emitted_heap.deinit(self.allocator);
-        if (target_chunk.code.len > emitted_small.len) {
-            try emitted_heap.ensureTotalCapacity(self.allocator, target_chunk.code.len - emitted_small.len);
-        }
-        for (target_chunk.code) |inst| {
-            if (inst.opcode() != .run_dependency) continue;
-            const dep_id = inst.arg_a;
-            const dep_rerun_each_call = (inst.arg_b & 0b1) != 0;
-            if (self.classifyDependencyRun(dep_id, dep_rerun_each_call) == .skip_body) continue;
-            // "loaded" signal uses module_first_loader instead of executed_modules.
-            // executed_modules[N] is not set when rerun_each_call=true (@import-routed)
-            // (for rerun). module_first_loader[N] != maxInt means "loaded at least once"
-            // means.
-            if (dep_id >= self.module_first_loader_origin.len) continue;
-            const fl_origin = self.module_first_loader_origin[dep_id];
-            if (!fl_origin.isValid()) continue;
-            // If L itself does not output visible output (var defs only, etc.), re-emit is not necessary.
-            if (dep_id >= self.module_emitted_visible.len) continue;
-            if (!self.module_emitted_visible[dep_id]) continue;
-            if (!self.isOriginActive(fl_origin)) continue;
-            if (isAlreadyEmitted(&emitted_small, emitted_small_len, &emitted_heap, fl_origin)) continue;
-            if (emitted_small_len < emitted_small.len) {
-                emitted_small[emitted_small_len] = fl_origin;
-                emitted_small_len += 1;
-            } else {
-                try emitted_heap.append(self.allocator, fl_origin);
-            }
-            try self.emitOriginPreamble(fl_origin);
-        }
-    }
-
-    fn replayCommentBeforeRunDependency(self: *const VM, chunk: *const Chunk, run_inst_idx: usize) ?InternId {
-        if (run_inst_idx >= chunk.code.len) return null;
-        var i = run_inst_idx;
-        var allow_charset_const = false;
-        while (i > 0) {
-            i -= 1;
-            const prev = chunk.code[i];
-            switch (prev.opcode()) {
-                .emit_stmt_gap => continue,
-                .load_const => {
-                    if (allow_charset_const) {
-                        allow_charset_const = false;
-                        continue;
-                    }
-                    return null;
-                },
-                .emit_at_rule_simple => {
-                    const at_name = self.intern_pool.get(@enumFromInt(prev.arg_b));
-                    if (std.ascii.eqlIgnoreCase(at_name, "charset")) {
-                        allow_charset_const = true;
-                        continue;
-                    }
-                    return null;
-                },
-                .emit_comment => return @enumFromInt(prev.arg_b),
-                else => return null,
-            }
-        }
-        return null;
     }
 
     fn freeModuleVisibilityIfAny(self: *VM) void {
@@ -2384,21 +2215,6 @@ pub const VM = struct {
             return .skip_body;
         }
         return .run_body;
-    }
-
-    pub fn replayDependencySkipPreamble(self: *VM, module_id: u32) VMError!void {
-        if (self.selector_stack.items.len == 0 and self.open_block_depth == 0 and
-            module_id < self.dependency_replay_comments.len)
-        {
-            const replay_comment = self.dependency_replay_comments[module_id];
-            if (replay_comment != std.math.maxInt(u32)) {
-                try self.rule_ir.appendComment(
-                    self.allocator,
-                    @enumFromInt(replay_comment),
-                    self.currentSourceSpan(),
-                );
-            }
-        }
     }
 
     fn runDependencyBody(self: *VM, module_id: u32, rerun_each_call: bool, is_forward: bool) VMError!void {
@@ -3996,23 +3812,6 @@ pub const VM = struct {
             .run_dependency => {
                 const rerun_each_call = (inst.arg_b & 0b1) != 0;
                 const is_forward = (inst.arg_b & 0b10) != 0;
-                // The preceding loud comment can only be saved via `@forward` dep.
-                // via `@use` dep's preceding comment is in module-local context (sass-spec
-                // diamond `use_only::comment_order`) So when replaying on the second visit
-                // The comment from the left route is leaked to the right route, violating the spec.
-                if (is_forward and
-                    self.current_chunk == .top and
-                    self.selector_stack.items.len == 0 and
-                    self.open_block_depth == 0 and
-                    inst.arg_a < self.dependency_replay_comments.len and
-                    self.moduleTopEmitsCss(inst.arg_a) and
-                    self.dependency_replay_comments[inst.arg_a] == std.math.maxInt(u32))
-                {
-                    const run_inst_idx: usize = self.pc - 1;
-                    if (self.replayCommentBeforeRunDependency(chunk, run_inst_idx)) |comment_id| {
-                        self.dependency_replay_comments[inst.arg_a] = @intFromEnum(comment_id);
-                    }
-                }
                 try self.runTopDependencyAtCurrentPosition(inst.arg_a, rerun_each_call, is_forward);
             },
             .call_indirect => {
@@ -17377,6 +17176,52 @@ fn cssDeclValue(css: []const u8, prop: []const u8) ![]const u8 {
     return std.mem.trim(u8, css[start..end], " \t\r\n");
 }
 
+test "vm: a loud comment before @forward is emitted once when a later module reuses the dependency" {
+    const allocator = std.testing.allocator;
+    var td = std.testing.tmpDir(.{});
+    defer td.cleanup();
+
+    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{td.sub_path[0..]});
+    defer allocator.free(root);
+    const a_path = try std.fmt.allocPrint(allocator, "{s}/_a.scss", .{root});
+    defer allocator.free(a_path);
+    const c_path = try std.fmt.allocPrint(allocator, "{s}/_c.scss", .{root});
+    defer allocator.free(c_path);
+    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    defer allocator.free(entry_path);
+
+    try writeFileAll(a_path, ".a { x: 1; }\n");
+    try writeFileAll(c_path, "@use \"a\";\n.c { x: 2; }\n");
+
+    const forward_css = try compileWithEntryPathToCss(allocator,
+        \\/* H */
+        \\@forward "a";
+        \\@forward "c";
+        \\
+    , entry_path, &.{root});
+    defer allocator.free(forward_css);
+    try std.testing.expectEqualStrings(
+        \\/* H */
+        \\.a {
+        \\  x: 1;
+        \\}
+        \\
+        \\.c {
+        \\  x: 2;
+        \\}
+        \\
+    , forward_css);
+
+    const use_css = try compileWithEntryPathToCss(allocator,
+        \\/* H */
+        \\@use "a";
+        \\@forward "c";
+        \\
+    , entry_path, &.{root});
+    defer allocator.free(use_css);
+    try std.testing.expectEqualStrings(forward_css, use_css);
+}
+
 test "vm: cross-entry seed preserves load-css configured-load guard" {
     const allocator = std.testing.allocator;
     var td = std.testing.tmpDir(.{});
@@ -18805,7 +18650,7 @@ test "vm: interpolation preserves quoted strings while evaluating function args"
     );
 }
 
-test "vm: @forward header loud comment replays only for direct @use of first forwarded module" {
+test "vm: @forward header loud comment is not replayed for a later @use of the forwarded module" {
     const allocator = std.testing.allocator;
     var td = std.testing.tmpDir(.{});
     defer td.cleanup();
@@ -18859,7 +18704,8 @@ test "vm: @forward header loud comment replays only for direct @use of first for
         \\/* Header */
         \\.shared {
         \\  x: y;
-        \\} /* Header */
+        \\}
+        \\
         \\.a {
         \\  x: y;
         \\}

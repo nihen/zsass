@@ -24,71 +24,48 @@ fn copyStaticEvalLists(allocator: std.mem.Allocator, lists: []const []const valu
 }
 
 /// Flat-buffer view of copied import origins. The `origins` slice references
-/// `path_bytes` / `id_bytes`; freeing requires releasing all three slices.
+/// `path_bytes`; freeing requires releasing both slices.
 pub const CopiedOrigins = struct {
     origins: []CssOrigin,
     path_bytes: []u8,
-    id_bytes: []u32,
 };
 
 /// Copy `origins` into bundle-owned storage.
 ///
-/// Source paths and preamble-comment-id arrays are concatenated into single
-/// flat buffers (`path_bytes` / `id_bytes`); each `CssOrigin.source_path` /
-/// `preamble_comment_ids` is then a borrowed slice into that buffer. This
-/// replaces the previous per-element `dupe` with three bulk allocations and
-/// lets `ResolvedBundle.deinit` free everything in three `free` calls.
+/// Source paths are concatenated into a single flat buffer (`path_bytes`);
+/// each `CssOrigin.source_path` is then a borrowed slice into that buffer.
+/// This replaces per-element `dupe` with bulk allocations and lets
+/// `ResolvedBundle.deinit` free everything in two `free` calls.
 fn copyOrigins(allocator: std.mem.Allocator, origins: []const CssOrigin) !CopiedOrigins {
-    if (origins.len == 0) return .{ .origins = &.{}, .path_bytes = &.{}, .id_bytes = &.{} };
+    if (origins.len == 0) return .{ .origins = &.{}, .path_bytes = &.{} };
 
     var path_total: usize = 0;
-    var id_total: usize = 0;
-    for (origins) |o| {
-        path_total += o.source_path.len;
-        id_total += o.preamble_comment_ids.len;
-    }
+    for (origins) |o| path_total += o.source_path.len;
 
     const path_bytes: []u8 = if (path_total == 0)
         &.{}
     else
         try allocator.alloc(u8, path_total);
     errdefer if (path_total != 0) allocator.free(path_bytes);
-    const id_bytes: []u32 = if (id_total == 0)
-        &.{}
-    else
-        try allocator.alloc(u32, id_total);
-    errdefer if (id_total != 0) allocator.free(id_bytes);
 
     const out = try allocator.alloc(CssOrigin, origins.len);
     errdefer allocator.free(out);
 
     var path_cursor: usize = 0;
-    var id_cursor: usize = 0;
     for (origins, 0..) |origin, i| {
         const path_end = path_cursor + origin.source_path.len;
         @memcpy(path_bytes[path_cursor..path_end], origin.source_path);
         const path_slice = path_bytes[path_cursor..path_end];
         path_cursor = path_end;
 
-        const ids_slice: []const u32 = if (origin.preamble_comment_ids.len == 0)
-            &.{}
-        else blk: {
-            const id_end = id_cursor + origin.preamble_comment_ids.len;
-            @memcpy(id_bytes[id_cursor..id_end], origin.preamble_comment_ids);
-            const s = id_bytes[id_cursor..id_end];
-            id_cursor = id_end;
-            break :blk s;
-        };
-
         out[i] = .{
             .kind = origin.kind,
             .source_path = path_slice,
             .module_id = origin.module_id,
             .parent_import_origin = origin.parent_import_origin,
-            .preamble_comment_ids = ids_slice,
         };
     }
-    return .{ .origins = out, .path_bytes = path_bytes, .id_bytes = id_bytes };
+    return .{ .origins = out, .path_bytes = path_bytes };
 }
 
 pub fn buildResolvedBundleFromResolver(
@@ -160,7 +137,6 @@ pub fn buildResolvedBundleFromResolver(
     errdefer {
         if (copied_origins.origins.len != 0) allocator.free(copied_origins.origins);
         if (copied_origins.path_bytes.len != 0) allocator.free(copied_origins.path_bytes);
-        if (copied_origins.id_bytes.len != 0) allocator.free(copied_origins.id_bytes);
     }
 
     return .{
@@ -168,7 +144,6 @@ pub fn buildResolvedBundleFromResolver(
         .root_index = root_id,
         .import_origins = copied_origins.origins,
         .import_origin_path_bytes = copied_origins.path_bytes,
-        .import_origin_id_bytes = copied_origins.id_bytes,
         .config_seeds = config_seeds,
         .static_eval_lists = static_eval_lists,
         .alloc = allocator,

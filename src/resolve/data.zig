@@ -650,9 +650,6 @@ pub const ResolvedBundle = struct {
     /// concatenated back-to-back; each origin holds a borrowed slice into this
     /// buffer. A single `free(import_origin_path_bytes)` releases every path.
     import_origin_path_bytes: []u8 = &.{},
-    /// Backing storage for `import_origins[*].preamble_comment_ids`, sharing
-    /// the same flat-buffer pattern as `import_origin_path_bytes`.
-    import_origin_id_bytes: []u32 = &.{},
     config_seeds: []ConfigSeed = &.{},
     static_eval_lists: []const []const value_mod.Value = &.{},
     alloc: std.mem.Allocator,
@@ -703,14 +700,10 @@ pub const ResolvedBundle = struct {
         if (self.import_origin_path_bytes.len != 0) {
             self.alloc.free(self.import_origin_path_bytes);
         }
-        if (self.import_origin_id_bytes.len != 0) {
-            self.alloc.free(self.import_origin_id_bytes);
-        }
         if (self.config_seeds.len != 0) self.alloc.free(self.config_seeds);
         if (self.static_eval_lists.len != 0) self.alloc.free(self.static_eval_lists);
         self.import_origins = &.{};
         self.import_origin_path_bytes = &.{};
-        self.import_origin_id_bytes = &.{};
         self.config_seeds = &.{};
         self.static_eval_lists = &.{};
         if (self.owns_shared_value_pools) {

@@ -297,11 +297,6 @@ fn runModuleDeferringCss(self: anytype, module_id: u32) !void {
         self.css_output_deferred = true;
         defer self.css_output_deferred = saved_deferred;
 
-        if (module_id < self.module_first_loader_origin.len and
-            self.module_first_loader_origin[module_id] == .invalid)
-        {
-            self.module_first_loader_origin[module_id] = self.current_origin;
-        }
         const track_running = module_id < self.module_currently_running.len;
         if (track_running) self.module_currently_running[module_id] = true;
         defer if (track_running) {

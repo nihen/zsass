@@ -23,7 +23,6 @@ const loadImportChildAst = import_child_ast.loadImportChildAst;
 const importSourceNeedsConfigSnapshot = import_css.importSourceNeedsConfigSnapshot;
 const isBareImportLookupUrl = import_css.isBareImportLookupUrl;
 const hasBareImportedTopLevelDeclaration = import_scan.hasBareImportedTopLevelDeclaration;
-const recordImportPreambleComments = import_preamble.recordImportPreambleComments;
 const adjustModuleStyleImportPreamble = import_preamble.adjustModuleStyleImportPreamble;
 const appendImportOrigin = module_resolver_state.appendImportOrigin;
 const resolveImportModulePathWithPolicy = path_resolution.resolveImportModulePathWithPolicy;
@@ -208,7 +207,6 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: 
         try deps.mergeForwardRuleIntoImportScope(ctx, ctx.forward_rules.items[fi], false);
     }
 
-    try recordImportPreambleComments(ctx.prog, loader, loader_import_origin_idx, expanded_top.items);
     if (child_first_module_directive != null) {
         const loader_records_after: u32 = if (ctx.loader) |ld| @intCast(ld.records_ptr.items.len) else 0;
         try adjustModuleStyleImportPreamble(

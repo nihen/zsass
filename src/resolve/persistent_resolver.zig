@@ -46,7 +46,7 @@ pub const PersistentResolverState = struct {
     /// resolver.zig is private, so here it has ArrayList directly).
     static_eval_lists: std.ArrayListUnmanaged([]const value_mod.Value) = .empty,
     /// import_origins is also shared because it is referenced by OriginId from the byte code of records.
-    /// Source_path / preamble_comment_ids of CssOrigin also alloc in records_arena.
+    /// Source_path of CssOrigin is also allocated in records_arena.
     import_origins: std.ArrayListUnmanaged(origin_mod.CssOrigin) = .empty,
     /// Since the color literal of ResolvedExpr in records holds the pool index, ColorPool is also
     /// If not shared, color index will be invalidated across entries (panic: p32 OOB).
