@@ -391,6 +391,37 @@ fn renderedDeclValueNeedsCharset(text: []const u8, output_style: OutputStyle) bo
     };
 }
 
+/// Charset check for a declaration value. The emitter decodes escapes in
+/// unmarked, non-custom-property values, which can introduce non-ASCII text
+/// (e.g. `\0 x` becomes U+FFFD followed by `x`), so the decoded text decides.
+fn declValueNeedsCharset(
+    temp: std.mem.Allocator,
+    prop: []const u8,
+    full_text: []const u8,
+    output_style: OutputStyle,
+    raw_decl: bool,
+) !bool {
+    if (renderedDeclValueNeedsCharset(full_text, output_style)) return true;
+    if (std.mem.findScalar(u8, full_text, '\\') == null) return false;
+    if (std.mem.startsWith(u8, prop, "--")) return false;
+    // Mirror the emitter: raw declarations only decode values carrying a
+    // `\9` / `\0` hack (or `filter`), and marked values are written as-is.
+    if (raw_decl) {
+        if (containsCalcDeclMarker(full_text) or isMarkedCalcInterpolationDecl(full_text)) return false;
+    }
+    const text = stripInterpDeclMarker(full_text);
+    if (containsLiteralDeclMarker(text) or containsCalcDeclMarker(text) or isMarkedCalcInterpolationDecl(text)) return false;
+    if (raw_decl and !(std.ascii.eqlIgnoreCase(prop, "filter") or
+        std.mem.find(u8, text, "\\9") != null or
+        std.mem.find(u8, text, "\\0") != null)) return false;
+    const normalized = css_utils.normalizeCssValueEscapes(temp, text) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return false,
+    };
+    defer if (normalized.ptr != text.ptr) temp.free(normalized);
+    return renderedDeclValueNeedsCharset(normalized, output_style);
+}
+
 fn escapeExpandedDeclPrivateUseCodePoints(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
     var needs_change = false;
     var scan: usize = 0;
@@ -4775,7 +4806,7 @@ pub const RuleIR = struct {
                             if (renderedNeedsCharset(prop)) saw_charset = true;
                             const value_id = self.extra.items[node.payload + 1];
                             const value = intern_pool.get(@enumFromInt(value_id));
-                            if (renderedDeclValueNeedsCharset(value, output_style)) saw_charset = true;
+                            if (try declValueNeedsCharset(temp, prop, value, output_style, false)) saw_charset = true;
                         },
                         .decl_raw => {
                             const prop_id = self.extra.items[node.payload];
@@ -4783,7 +4814,7 @@ pub const RuleIR = struct {
                             if (renderedNeedsCharset(prop)) saw_charset = true;
                             const raw_idx = self.extra.items[node.payload + 1];
                             const value = self.strings.items[raw_idx];
-                            if (renderedDeclValueNeedsCharset(value, output_style)) saw_charset = true;
+                            if (try declValueNeedsCharset(temp, prop, value, output_style, true)) saw_charset = true;
                         },
                         .comment => {
                             const text_id = self.extra.items[node.payload];

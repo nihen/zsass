@@ -1268,6 +1268,9 @@ const CompileCtx = struct {
     /// declarations keep their normal whitespace collapse.
     in_loud_comment_text_outer: bool = false,
     skip_decimal_normalize: bool = false,
+    /// Set while compiling the prelude of a non-`@media` at-rule: that text is
+    /// emitted as written, so escapes for invalid code points stay untouched.
+    keep_invalid_escapes: bool = false,
     /// True while compiling an `@function` body. Functions can't emit CSS,
     /// so the blank-retention `emit_stmt_gap` markers between sibling
     /// statements are dead weight there (the VM either early-outs on them or
@@ -1421,14 +1424,24 @@ fn normalizeLiteralStringIntern(
     id: InternId,
     quoted: bool,
     apply_decimal_normalize: bool,
+    /// False for raw statement text, which keeps escapes as written.
+    is_value_literal: bool,
 ) CompileError!InternId {
-    const raw = pool.get(id);
-    if (!quoted and !unquotedLiteralLooksLikeIdentifierText(raw)) {
+    const source_raw = pool.get(id);
+    const raw = if (quoted or !is_value_literal)
+        source_raw
+    else
+        css_utils.replaceInvalidEscapeCodePoints(alloc, source_raw) catch return error.OutOfMemory;
+    defer if (raw.ptr != source_raw.ptr) alloc.free(raw);
+    if (!quoted and !unquotedLiteralLooksLikeIdentifierText(source_raw)) {
         // Unquoted strings that are not identifier-like (such as interp CSS value fragments) are
         // escape does not pass normalization, but in decl value context leading-zero like `.5`
         // Fill in the gaps. literal inside quoted-interp (`url("data:...#{x}...")`) is
         // Apply_decimal_normalize=false because SVG's `-.4` etc. should not be touched.
-        if (!apply_decimal_normalize or !literalStringHasLeadingDotDecimal(raw)) return id;
+        if (!apply_decimal_normalize or !literalStringHasLeadingDotDecimal(raw)) {
+            if (raw.ptr == source_raw.ptr) return id;
+            return pool.intern(raw) catch return error.OutOfMemory;
+        }
         const normalized = value_format.normalizeLeadingZeros(alloc, raw) catch return error.OutOfMemory;
         defer alloc.free(normalized);
         return pool.intern(normalized) catch return error.OutOfMemory;
@@ -1859,7 +1872,7 @@ fn compileParamDefaultConstValue(ctx: CompileCtx, ex: ResolvedExpr) CompileError
         .literal_number => try numberExprValue(ctx.resolved, ex.payload, ctx.cb.shared_pool_alloc),
         .literal_string => blk: {
             const s = resolver.unpackLiteralStringPayload(ex.payload);
-            const normalized_id = try normalizeLiteralStringIntern(ctx.pool, ctx.cb.alloc, s.id, s.quoted, true);
+            const normalized_id = try normalizeLiteralStringIntern(ctx.pool, ctx.cb.alloc, s.id, s.quoted, true, true);
             break :blk Value.stringWithFlagsEx(normalized_id, s.quoted, false, s.named_color_literal);
         },
         .literal_color => try literalColorValue(ctx, ex.payload),
@@ -2409,7 +2422,7 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
         },
         .literal_string => {
             const s = resolver.unpackLiteralStringPayload(ex.payload);
-            const normalized_id = try normalizeLiteralStringIntern(ctx.pool, ctx.cb.alloc, s.id, s.quoted, !ctx.skip_decimal_normalize);
+            const normalized_id = try normalizeLiteralStringIntern(ctx.pool, ctx.cb.alloc, s.id, s.quoted, !ctx.skip_decimal_normalize, !s.raw_text and !ctx.keep_invalid_escapes);
             if (!s.quoted and !s.named_color_literal and !s.raw_text) {
                 const raw = ctx.pool.get(normalized_id);
                 if (raw.len == 1 and raw[0] == '&') {
@@ -2645,6 +2658,7 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
                             s.id,
                             s.quoted,
                             false,
+                            !ctx.keep_invalid_escapes,
                         );
                     const val = Value.stringWithFlagsEx(normalized_id, s.quoted, false, s.named_color_literal);
                     const idx = try ctx.cb.addConst(val);
@@ -2782,7 +2796,9 @@ fn compileAtRuleBody(
         const ci = try ctx.cb.addConst(Value.string(override_id, false));
         try ctx.cb.emit(.load_const, 0, ci);
     } else {
-        try compileExprOrNil(ctx, prelude_expr);
+        var prelude_ctx = ctx;
+        prelude_ctx.keep_invalid_escapes = !std.mem.eql(u8, raw_name, "media");
+        try compileExprOrNil(prelude_ctx, prelude_expr);
     }
 
     try ctx.cb.noteIntern(name_intern);

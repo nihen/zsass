@@ -780,13 +780,13 @@ pub fn unescapeSassString(allocator: std.mem.Allocator, text: []const u8) ![]con
                     after_hex += 1;
                 }
                 const hex_str = text[hex_start..hex_end];
-                const raw_code_point = std.fmt.parseInt(u21, hex_str, 16) catch {
+                const raw_code_point = std.fmt.parseInt(u32, hex_str, 16) catch {
                     try buf.append(allocator, text[i]);
                     i += 1;
                     continue;
                 };
-                // U+0000 is replaced with U+FFFD (replacement character) per CSS spec
-                const code_point = if (raw_code_point == 0) @as(u21, 0xFFFD) else raw_code_point;
+                // U+0000, surrogates, and values past U+10FFFF all decode to U+FFFD.
+                const code_point: u21 = if (isInvalidEscapeCodePoint(raw_code_point)) 0xFFFD else @intCast(raw_code_point);
                 if (code_point < 0x80) {
                     try buf.append(allocator, @intCast(code_point));
                 } else {
@@ -953,16 +953,23 @@ pub fn normalizeCssValueEscapes(allocator: std.mem.Allocator, text: []const u8) 
             }
 
             if (hex_end > i + 1) {
-                const code_point = std.fmt.parseInt(u32, text[i + 1 .. hex_end], 16) catch {
+                const raw_code_point = std.fmt.parseInt(u32, text[i + 1 .. hex_end], 16) catch {
                     return EvalError.SassError;
                 };
-                if (code_point > 0x10FFFF) return EvalError.SassError;
                 changed = true;
                 i = hex_end;
                 // Skip optional whitespace separator after hex escape
                 if (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n' or text[i] == '\r' or text[i] == '\x0c')) {
                     i += 1;
                 }
+                // Surrogates and out-of-range values denote U+FFFD. `\0` stays
+                // escaped here: source literals had it rewritten already by
+                // `replaceInvalidEscapeCodePoints`, and text assembled at runtime
+                // keeps its spelling.
+                const code_point: u32 = if (raw_code_point != 0 and isInvalidEscapeCodePoint(raw_code_point))
+                    0xFFFD
+                else
+                    raw_code_point;
                 if (code_point == 0x20) {
                     try buf.appendSlice(allocator, "\\ ");
                     continue;
@@ -1092,8 +1099,85 @@ pub fn normalizeCssValueEscapes(allocator: std.mem.Allocator, text: []const u8) 
 }
 pub fn isPrivateUseCodePoint(code_point: u21) bool {
     return (code_point >= 0xE000 and code_point <= 0xF8FF) or
-        (code_point >= 0xF0000 and code_point <= 0xFFFFD) or
-        (code_point >= 0x100000 and code_point <= 0x10FFFD);
+        (code_point >= 0xF0000 and code_point <= 0x10FFFF);
+}
+
+/// Code points a CSS escape cannot denote: U+0000, surrogates, and values past
+/// U+10FFFF. Sass normalizes escapes for all of them to U+FFFD.
+pub fn isInvalidEscapeCodePoint(code_point: u32) bool {
+    return code_point == 0 or (code_point >= 0xD800 and code_point <= 0xDFFF) or code_point > 0x10FFFF;
+}
+
+/// Rewrite escapes for U+0000, surrogates, and out-of-range values in source
+/// text to U+FFFD. An unquoted identifier that is exactly `\0` keeps its
+/// escaped spelling. Returns `text` itself when nothing changes.
+pub fn replaceInvalidEscapeCodePoints(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    if (std.mem.findScalar(u8, text, '\\') == null) return text;
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var changed = false;
+    var in_string: u8 = 0;
+    // True while the bytes just copied belong to an identifier (so a following
+    // escape continues it rather than starting a new one).
+    var prev_continues = false;
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        if (c != '\\') {
+            if (in_string != 0) {
+                if (c == in_string) in_string = 0;
+            } else if (c == '"' or c == '\'') {
+                in_string = c;
+            }
+            prev_continues = in_string == 0 and isIdentCharByte(c);
+            try buf.append(allocator, c);
+            i += 1;
+            continue;
+        }
+        if (i + 1 >= text.len) {
+            try buf.append(allocator, c);
+            break;
+        }
+        if (!isHexDigit(text[i + 1])) {
+            const seq_len = std.unicode.utf8ByteSequenceLength(text[i + 1]) catch 1;
+            const end = @min(text.len, i + 1 + seq_len);
+            try buf.appendSlice(allocator, text[i..end]);
+            prev_continues = in_string == 0;
+            i = end;
+            continue;
+        }
+        var hex_end = i + 1;
+        var value: u32 = 0;
+        while (hex_end < text.len and hex_end - (i + 1) < 6 and isHexDigit(text[hex_end])) : (hex_end += 1) {
+            value = value * 16 + hexDigitValue(text[hex_end]);
+        }
+        var after = hex_end;
+        if (after < text.len and (text[after] == ' ' or text[after] == '\t' or text[after] == '\n' or text[after] == '\r' or text[after] == '\x0c')) {
+            if (text[after] == '\r' and after + 1 < text.len and text[after + 1] == '\n') after += 1;
+            after += 1;
+        }
+        const replace = blk: {
+            if (!isInvalidEscapeCodePoint(value)) break :blk false;
+            if (value != 0 or in_string != 0) break :blk true;
+            const next_continues = after < text.len and (isIdentCharByte(text[after]) or text[after] == '\\');
+            break :blk prev_continues or next_continues;
+        };
+        if (replace) {
+            try buf.appendSlice(allocator, "\xEF\xBF\xBD");
+            changed = true;
+        } else {
+            try buf.appendSlice(allocator, text[i..after]);
+        }
+        prev_continues = in_string == 0;
+        i = after;
+    }
+
+    if (!changed) {
+        buf.deinit(allocator);
+        return text;
+    }
+    return try buf.toOwnedSlice(allocator);
 }
 
 /// Normalize only `\-` escapes in an interpolated CSS value result.
@@ -1314,4 +1398,26 @@ test "normalizeAttributeSelectors trims whitespace before unquoted values" {
     const normalized = try normalizeAttributeSelectors(std.testing.allocator, "[data-theme= dark] .x");
     defer std.testing.allocator.free(normalized);
     try std.testing.expectEqualStrings("[data-theme=dark] .x", normalized);
+}
+
+test "replaceInvalidEscapeCodePoints rewrites invalid escapes to U+FFFD" {
+    const alloc = std.testing.allocator;
+    const cases = [_][2][]const u8{
+        .{ "\\0 x", "\xEF\xBF\xBDx" },
+        .{ "x\\0", "x\xEF\xBF\xBD" },
+        .{ "\\0\\0", "\xEF\xBF\xBD\xEF\xBF\xBD" },
+        .{ "\\d800", "\xEF\xBF\xBD" },
+        .{ "\\110000 x", "\xEF\xBF\xBDx" },
+        .{ "#f00\\9\\0\\;", "#f00\\9\xEF\xBF\xBD\\;" },
+    };
+    for (cases) |case| {
+        const out = try replaceInvalidEscapeCodePoints(alloc, case[0]);
+        defer if (out.ptr != case[0].ptr) alloc.free(out);
+        try std.testing.expectEqualStrings(case[1], out);
+    }
+    // A lone `\0` identifier and valid escapes keep their spelling.
+    for ([_][]const u8{ "\\0", "\\0 ", "a, \\0", "\\10ffff", "\\9 x" }) |text| {
+        const out = try replaceInvalidEscapeCodePoints(alloc, text);
+        try std.testing.expect(out.ptr == text.ptr);
+    }
 }

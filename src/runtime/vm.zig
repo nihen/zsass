@@ -12693,7 +12693,7 @@ fn appendSerializedDeclStringImpl(
                 if (std.ascii.isHex(next)) {
                     var j: usize = i + 1;
                     var count: u8 = 0;
-                    var parsed: u21 = 0;
+                    var parsed: u32 = 0;
                     while (j < raw.len and count < 6 and std.ascii.isHex(raw[j])) : (j += 1) {
                         parsed = parsed * 16 + cssHexDigitValue(raw[j]);
                         count += 1;
@@ -12715,7 +12715,7 @@ fn appendSerializedDeclStringImpl(
                         if (raw[j] == '\r' and j + 1 < raw.len and raw[j + 1] == '\n') j += 1;
                         j += 1;
                     }
-                    const code_point: u21 = if (parsed > 0x10FFFF) 0xFFFD else parsed;
+                    const code_point: u21 = if (parsed != 0 and css_utils.isInvalidEscapeCodePoint(parsed)) 0xFFFD else @intCast(parsed);
                     if (prev_was_hex_escape and codePointNeedsHexEscapeSeparator(code_point)) {
                         try acc.append(alloc, ' ');
                     }
@@ -12743,7 +12743,7 @@ fn appendSerializedDeclStringImpl(
             if (std.ascii.isHex(next)) {
                 var j: usize = i + 1;
                 var count: u8 = 0;
-                var parsed: u21 = 0;
+                var parsed: u32 = 0;
                 while (j < raw.len and count < 6 and std.ascii.isHex(raw[j])) : (j += 1) {
                     parsed = parsed * 16 + cssHexDigitValue(raw[j]);
                     count += 1;
@@ -12755,7 +12755,7 @@ fn appendSerializedDeclStringImpl(
                     j += 1;
                 }
 
-                const code_point: u21 = if (parsed > 0x10FFFF) 0xFFFD else parsed;
+                const code_point: u21 = if (parsed != 0 and css_utils.isInvalidEscapeCodePoint(parsed)) 0xFFFD else @intCast(parsed);
                 const preserve_tab_escape = quote_char == null and
                     code_point == '\t' and
                     isIdentifierStartContextForEscape(acc.items);

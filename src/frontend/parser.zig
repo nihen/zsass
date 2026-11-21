@@ -7430,10 +7430,6 @@ pub const Parser = struct {
         const text = tok.slice(self.source);
         const ident_pos = self.pos;
 
-        if (self.in_declaration_value_context and identHasTooHighUnicodeEscape(text)) {
-            return error.HardSyntaxError;
-        }
-
         if (std.mem.eql(u8, text, "true")) {
             self.advance();
             return try ast.addNode(.{
@@ -7926,45 +7922,6 @@ pub const Parser = struct {
         if (!isVendorPrefixedCssFunction(name)) return name;
         const dash = std.mem.findScalarPos(u8, name, 1, '-') orelse return name;
         return name[dash + 1 ..];
-    }
-
-    fn identHasTooHighUnicodeEscape(text: []const u8) bool {
-        var i: usize = 0;
-        while (i < text.len) {
-            if (text[i] != '\\') {
-                i += 1;
-                continue;
-            }
-            i += 1;
-            if (i >= text.len) break;
-
-            if (std.ascii.isHex(text[i])) {
-                const start = i;
-                var count: usize = 0;
-                while (i < text.len and count < 6 and std.ascii.isHex(text[i])) : (count += 1) {
-                    i += 1;
-                }
-                const digits = text[start..i];
-                const code_point = std.fmt.parseInt(u32, digits, 16) catch return true;
-                if (code_point > 0x10FFFF) return true;
-                if (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n' or text[i] == '\r' or text[i] == '\x0c')) {
-                    i += 1;
-                }
-                continue;
-            }
-
-            if (text[i] == '\r') {
-                i += 1;
-                if (i < text.len and text[i] == '\n') i += 1;
-                continue;
-            }
-            if (text[i] == '\n' or text[i] == '\x0c') {
-                i += 1;
-                continue;
-            }
-            i += 1;
-        }
-        return false;
     }
 
     /// Parse the argument list of a function call and emit
