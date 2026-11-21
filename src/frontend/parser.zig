@@ -173,6 +173,25 @@ pub const Parser = struct {
 
     /// Consume the token stream and return a fully populated `Ast`.
     ///
+    /// In the indented syntax the first line with content (a statement or a
+    /// comment) must start at column one.
+    fn rejectIndentedFirstStatement(self: *Parser) ParseError!void {
+        var line_start: usize = 0;
+        var i: usize = 0;
+        while (i < self.source.len) : (i += 1) {
+            const c = self.source[i];
+            if (c == '\n' or c == '\r' or c == '\x0c') {
+                line_start = i + 1;
+                continue;
+            }
+            if (c == ' ' or c == '\t') continue;
+            if (i == line_start) return;
+            error_format.setContextMessage("Indenting at the beginning of the document is illegal.");
+            error_format.recordErrorSpanIfUnset(@intCast(line_start), @intCast(i), 0);
+            return error.HardSyntaxError;
+        }
+    }
+
     /// Reserve the `stylesheet_root` slot, walk the top-level statement
     /// stream, and patch the root's payload with the resulting child
     /// list once parsing is done.
@@ -188,6 +207,8 @@ pub const Parser = struct {
         }
 
         const source_end: u32 = @intCast(self.source.len);
+
+        if (self.is_indented_syntax) try self.rejectIndentedFirstStatement();
 
         const root_idx = try ast.addNode(.{
             .tag = .stylesheet_root,
@@ -2519,6 +2540,8 @@ pub const Parser = struct {
         defer names.deinit(self.allocator);
         var defaults: std.ArrayListUnmanaged(u32) = .empty;
         defer defaults.deinit(self.allocator);
+        var name_spans: std.ArrayListUnmanaged(@TypeOf(self.current().span)) = .empty;
+        defer name_spans.deinit(self.allocator);
         var has_splat = false;
 
         while (!self.isAtEnd() and self.current().tag != .rparen) {
@@ -2553,6 +2576,17 @@ pub const Parser = struct {
                 self.skipWhitespaceAndComments();
             }
 
+            // Parameter names are compared like variables: `-` and `_` match.
+            const name_text = self.intern_pool.get(name_id);
+            for (names.items, name_spans.items) |prev_id, prev_span| {
+                if (identifierEqDashInsensitive(self.intern_pool.get(prev_id), name_text)) {
+                    error_format.setContextMessage("Duplicate parameter.");
+                    error_format.recordErrorSpanIfUnset(prev_span.start, prev_span.end, 0);
+                    return error.HardSyntaxError;
+                }
+            }
+
+            try name_spans.append(self.allocator, var_tok.span);
             try names.append(self.allocator, name_id);
             try defaults.append(self.allocator, default_slot);
 
