@@ -1162,6 +1162,10 @@ fn tryAppendStaticValueExpr(ctx: *Ctx, value: value_mod.Value, span: Span) Resol
             const quoted = value.stringQuoted(ctx.prog.value_string_flags_pool.items);
             var id = value.stringIntern();
             const text = ctx.pool.get(id);
+            // An unquoted value with a backslash cannot be written back: the
+            // compiler would canonicalize its escapes again (`\\61` built by
+            // string.unquote() must stay `\\61`, not become `a`).
+            if (!quoted and std.mem.findScalar(u8, text, '\\') != null) return null;
             // The value holds canonical text, and the compiler decodes a
             // quoted literal's escapes again. Write a backslash as `\\\\` so
             // the literal decodes back to this value.

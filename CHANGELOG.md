@@ -26,6 +26,9 @@ Tracks Dart Sass 1.108.2. The vendored `sass-spec` pin moves to
 - A plain CSS function call prints its name with escapes decoded, and an
   escaped spelling of `url`, `!important`, `!default`, or `!global` is
   recognized as the plain one (Dart Sass 1.106.0).
+- Escapes in the arguments of special functions are canonicalized when the
+  value is compiled: `url(\41)` is `url(A)`, and `element(\31)` keeps
+  `\31 ` (Dart Sass 1.106.0).
 - A unit that reads like an exponent is serialized with an escaped `e`, such
   as `1\65 1` for the unit `e1` (Dart Sass 1.106.0).
 - `meta.module-functions()` and `meta.module-mixins()` return maps keyed by
@@ -44,6 +47,11 @@ Tracks Dart Sass 1.108.2. The vendored `sass-spec` pin moves to
   in the file it appears (Dart Sass 1.106.0).
 - A surrogate escape such as `\d800` in a declaration value no longer
   crashes the compiler.
+- A string literal with escapes is no longer compared or concatenated as
+  source text when an expression is folded at compile time, so a top-level
+  `@if \61 == a` is true. A module configured with such a literal
+  (`@use "m" with ($a: "\61")`) receives its decoded value.
+- `-\41` is the identifier `-A` rather than a negated `\41`.
 
 ## 0.4.1 (2026-10-21)
 

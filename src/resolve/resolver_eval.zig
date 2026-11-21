@@ -58,6 +58,36 @@ fn envWantsCanonicalLiterals(env: anytype) bool {
     return @hasField(Env, "canonical_literals") and env.canonical_literals;
 }
 
+/// The value text of a string literal, as the compiler canonicalizes it: a
+/// quoted string decoded, an identifier with canonical escapes, and the text
+/// of a call such as `url(\61)` with its name and arguments canonicalized.
+/// Returns `raw` itself when nothing changes.
+fn canonicalLiteralText(alloc: std.mem.Allocator, raw: []const u8, quoted: bool) Error![]const u8 {
+    if (quoted) return css_utils.unescapeSassString(alloc, raw) catch return error.OutOfMemory;
+    if (css_utils.unquotedLiteralIsIdentifierText(raw)) {
+        return css_utils.canonicalizeIdentifierValueEscapes(alloc, raw) catch return error.OutOfMemory;
+    }
+    if (std.mem.startsWith(u8, raw, calc_arg_marker)) {
+        const arg = raw[calc_arg_marker.len..];
+        if (std.mem.findScalar(u8, arg, '\x01') != null) return error.NonStaticExpr;
+        const arg_normalized = css_utils.canonicalizeCalcArgEscapes(alloc, arg) catch return error.OutOfMemory;
+        if (arg_normalized.ptr == arg.ptr) return raw;
+        defer alloc.free(arg_normalized);
+        return std.mem.concat(alloc, u8, &.{ calc_arg_marker, arg_normalized }) catch return error.OutOfMemory;
+    }
+    // Other marked fragments have no static value here.
+    if (std.mem.findScalar(u8, raw, '\x01') != null) return error.NonStaticExpr;
+    if (css_utils.isNonUrlCallLiteral(raw)) {
+        return css_utils.normalizeCssCallLiteralEscapes(alloc, raw) catch return error.OutOfMemory;
+    }
+    const replaced = css_utils.replaceInvalidEscapeCodePoints(alloc, raw) catch return error.OutOfMemory;
+    defer if (replaced.ptr != raw.ptr) alloc.free(replaced);
+    const normalized = css_utils.normalizeCssCallLiteralEscapes(alloc, replaced) catch return error.OutOfMemory;
+    if (normalized.ptr != replaced.ptr) return normalized;
+    if (replaced.ptr == raw.ptr) return raw;
+    return alloc.dupe(u8, replaced) catch return error.OutOfMemory;
+}
+
 pub fn eval(env: anytype, prog: anytype, expr_idx: anytype) Error!Value {
     const ex = prog.exprs.items[expr_idx];
     return switch (ex.kind) {
@@ -75,19 +105,11 @@ pub fn eval(env: anytype, prog: anytype, expr_idx: anytype) Error!Value {
                 // source text is not its value. Unless this evaluation
                 // produces final values, leave the literal to runtime.
                 if (!envWantsCanonicalLiterals(env)) return error.NonStaticExpr;
-                {
-                    // Text that is not one identifier (call text, marked
-                    // fragments) has no static value here.
-                    if (!lit.quoted and !css_utils.unquotedLiteralIsIdentifierText(raw)) return error.NonStaticExpr;
-                    const alloc = env.allocator();
-                    const text = if (lit.quoted)
-                        css_utils.unescapeSassString(alloc, raw) catch return error.OutOfMemory
-                    else
-                        css_utils.canonicalizeIdentifierValueEscapes(alloc, raw) catch return error.OutOfMemory;
-                    defer if (text.ptr != raw.ptr) alloc.free(text);
-                    const id = env.pool().intern(text) catch return error.OutOfMemory;
-                    break :blk Value.stringWithFlagsEx(id, lit.quoted, false, lit.named_color_literal);
-                }
+                const alloc = env.allocator();
+                const text = try canonicalLiteralText(alloc, raw, lit.quoted);
+                defer if (text.ptr != raw.ptr) alloc.free(text);
+                const id = env.pool().intern(text) catch return error.OutOfMemory;
+                break :blk Value.stringWithFlagsEx(id, lit.quoted, false, lit.named_color_literal);
             }
             break :blk Value.stringWithFlagsEx(lit.id, lit.quoted, false, lit.named_color_literal);
         },

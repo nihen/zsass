@@ -1112,6 +1112,35 @@ pub fn normalizeCssCallLiteralEscapes(allocator: std.mem.Allocator, text: []cons
     return try buf.toOwnedSlice(allocator);
 }
 
+/// Canonicalize the escapes in the text of a calculation argument, whose
+/// identifiers are ordinary values. An argument with an escaped hyphen stays
+/// as written: decoded, the calculation formatter would read the hyphen as a
+/// subtraction. Returns `arg` itself when nothing changes.
+pub fn canonicalizeCalcArgEscapes(allocator: std.mem.Allocator, arg: []const u8) ![]const u8 {
+    if (std.mem.findScalar(u8, arg, '\\') == null or calcArgHasEscapedHyphen(arg)) return arg;
+    return normalizeCssValueEscapes(allocator, arg) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => arg,
+    };
+}
+
+fn calcArgHasEscapedHyphen(arg: []const u8) bool {
+    var i: usize = 0;
+    while (i + 1 < arg.len) : (i += 1) {
+        if (arg[i] != '\\') continue;
+        if (arg[i + 1] == '-') return true;
+        var j = i + 1;
+        var value: u32 = 0;
+        while (j < arg.len and j - (i + 1) < 6 and isHexDigit(arg[j])) : (j += 1) {
+            value = value * 16 + hexDigitValue(arg[j]);
+        }
+        if (j > i + 1 and value == '-') return true;
+        // Skip the escaped character so `\\-` is not taken for `\-`.
+        i += 1;
+    }
+    return false;
+}
+
 pub fn hexDigitValue(c: u8) u21 {
     return switch (c) {
         '0'...'9' => @as(u21, c - '0'),

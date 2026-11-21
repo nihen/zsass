@@ -1401,23 +1401,6 @@ fn literalStringHasLeadingDotDecimal(raw: []const u8) bool {
     return false;
 }
 
-fn calcArgHasEscapedHyphen(arg: []const u8) bool {
-    var i: usize = 0;
-    while (i + 1 < arg.len) : (i += 1) {
-        if (arg[i] != '\\') continue;
-        if (arg[i + 1] == '-') return true;
-        var j = i + 1;
-        var value: u32 = 0;
-        while (j < arg.len and j - (i + 1) < 6 and std.ascii.isHex(arg[j])) : (j += 1) {
-            value = value * 16 + css_utils.hexDigitValue(arg[j]);
-        }
-        if (j > i + 1 and value == '-') return true;
-        // Skip the escaped character so `\\-` is not taken for `\-`.
-        i += 1;
-    }
-    return false;
-}
-
 fn normalizeLiteralStringIntern(
     pool: *InternPool,
     alloc: std.mem.Allocator,
@@ -1439,17 +1422,12 @@ fn normalizeLiteralStringIntern(
         // A calculation argument kept as text: its identifiers are ordinary
         // values, so canonicalize their escapes.
         const arg = raw[calc_utils.calc_arg_marker.len..];
-        // An escaped hyphen stays as written: decoded, the calculation
-        // formatter would read it as a subtraction.
-        if (std.mem.findScalar(u8, arg, '\\') == null or calcArgHasEscapedHyphen(arg)) {
+        const arg_normalized = css_utils.canonicalizeCalcArgEscapes(alloc, arg) catch return error.OutOfMemory;
+        if (arg_normalized.ptr == arg.ptr) {
             if (raw.ptr == source_raw.ptr) return id;
             return pool.intern(raw) catch return error.OutOfMemory;
         }
-        const arg_normalized = css_utils.normalizeCssValueEscapes(alloc, arg) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => arg,
-        };
-        defer if (arg_normalized.ptr != arg.ptr) alloc.free(arg_normalized);
+        defer alloc.free(arg_normalized);
         const marked = std.mem.concat(alloc, u8, &.{ calc_utils.calc_arg_marker, arg_normalized }) catch return error.OutOfMemory;
         defer alloc.free(marked);
         return pool.intern(marked) catch return error.OutOfMemory;
