@@ -222,7 +222,7 @@ pub const Lexer = struct {
                 } else if (self.css_special_paren_depth > 0) {
                     self.css_special_paren_depth += 1;
                 } else {
-                    switch (parenFunctionKindBefore(self.source, self.pos)) {
+                    switch (self.escapedParenFunctionKind() orelse parenFunctionKindBefore(self.source, self.pos)) {
                         .url => self.url_paren_depth = 1,
                         .css_special => self.css_special_paren_depth = 1,
                         .none => {},
@@ -283,6 +283,12 @@ pub const Lexer = struct {
                         if (!isClassSelectorLead(after_dot)) return self.lexNumber();
                     }
                     if (next == '-' or isIdentStart(next)) return self.lexIdent();
+                    // `-\41` is the identifier `-A`, not a negated `\41`.
+                    if (next == '\\' and self.pos + 2 < self.source.len and
+                        self.source[self.pos + 2] != '\n' and self.source[self.pos + 2] != '\r')
+                    {
+                        return self.lexIdent();
+                    }
                 }
                 return self.single(.minus);
             },
@@ -395,6 +401,35 @@ pub const Lexer = struct {
         }
     }
 
+    /// When the identifier token right before the `(` at `self.pos` is spelled
+    /// with escapes, classify the function by its decoded name (`\75 rl(` is
+    /// `url(`). Returns null when that token has no escape, so the caller
+    /// falls back to scanning the source text.
+    fn escapedParenFunctionKind(self: *Lexer) ?ParenFunctionKind {
+        var idx = self.tokens.items.len;
+        var name_end: u32 = self.pos;
+        while (idx > 0 and self.tokens.items[idx - 1].tag == .whitespace and
+            self.tokens.items[idx - 1].span.end == name_end)
+        {
+            const ws = self.tokens.items[idx - 1].span;
+            for (self.source[ws.start..ws.end]) |ch| {
+                if (ch != ' ' and ch != '\t') return null;
+            }
+            name_end = ws.start;
+            idx -= 1;
+        }
+        if (idx == 0) return null;
+        const tok = self.tokens.items[idx - 1];
+        if (tok.tag != .ident or tok.span.end != name_end) return null;
+        const text = self.source[tok.span.start..tok.span.end];
+        if (std.mem.findScalar(u8, text, '\\') == null) return null;
+        const name = self.unescapeIdent(text) catch return .none;
+        defer self.allocator.free(name);
+        if (isUrlFuncName(name)) return .url;
+        if (isCssSpecialFuncName(name)) return .css_special;
+        return .none;
+    }
+
     fn single(self: *Lexer, tag: Token.Tag) Token {
         const start = self.pos;
         self.pos += 1;
@@ -501,14 +536,14 @@ pub const Lexer = struct {
             i += 1;
             if (i >= text.len) break;
             if (std.ascii.isHex(text[i])) {
-                var value: u21 = 0;
+                var value: u32 = 0;
                 var count: u32 = 0;
                 while (i < text.len and count < 6 and std.ascii.isHex(text[i])) : (count += 1) {
                     value = value * 16 + hexValue(text[i]);
                     i += 1;
                 }
                 if (i < text.len and isWhitespaceChar(text[i])) i += 1;
-                if (value == 0 or value > 0x10FFFF) {
+                if (value == 0 or value > 0x10FFFF or (value >= 0xD800 and value <= 0xDFFF)) {
                     try buf.append(self.allocator, 0xEF);
                     try buf.append(self.allocator, 0xBF);
                     try buf.append(self.allocator, 0xBD);
@@ -864,30 +899,18 @@ fn parenFunctionKindBefore(source: []const u8, paren_pos: u32) ParenFunctionKind
     // First inspect just the nearest identifier-ish segment before `(` so
     // `background-image:url(` resolves to `url`, not `background-image:url`.
     var start = end;
-    var has_escape = false;
     while (start > 0) {
         const ch = source[start - 1];
         if (std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_') {
             start -= 1;
             continue;
         }
-        // A hex escape and its delimiter space (`\75 rl`) belong to the name.
-        if (hexEscapeStartBefore(source, start)) |escape_start| {
-            start = escape_start;
-            has_escape = true;
-            continue;
-        }
         break;
     }
     if (start < end) {
-        var decoded_buf: [32]u8 = undefined;
-        const base_name = if (has_escape)
-            decodeAsciiEscapes(source[start..end], &decoded_buf) orelse return .none
-        else
-            source[start..end];
+        const base_name = source[start..end];
         if (isUrlFuncName(base_name)) return .url;
         if (isCssSpecialFuncName(base_name)) return .css_special;
-        if (has_escape) return .none;
     }
 
     i = start;
@@ -905,45 +928,6 @@ fn parenFunctionKindBefore(source: []const u8, paren_pos: u32) ParenFunctionKind
     if (isUrlFuncName(name)) return .url;
     if (isCssSpecialFuncName(name)) return .css_special;
     return .none;
-}
-
-/// If the text ending at `end` is a hex escape (`\` plus one to six hex
-/// digits, with an optional delimiter space), return where it starts.
-fn hexEscapeStartBefore(source: []const u8, end: usize) ?usize {
-    var i = end;
-    if (i > 0 and source[i - 1] == ' ') i -= 1;
-    var count: usize = 0;
-    while (i > 0 and count < 6 and std.ascii.isHex(source[i - 1])) : (count += 1) i -= 1;
-    if (count == 0 or i == 0 or source[i - 1] != '\\') return null;
-    return i - 1;
-}
-
-/// Decode the hex escapes of an ASCII identifier into `buf`. Returns null when
-/// the result does not fit or an escape denotes a non-ASCII code point.
-fn decodeAsciiEscapes(text: []const u8, buf: []u8) ?[]const u8 {
-    var len: usize = 0;
-    var i: usize = 0;
-    while (i < text.len) {
-        var ch: u8 = text[i];
-        if (ch == '\\' and i + 1 < text.len and std.ascii.isHex(text[i + 1])) {
-            i += 1;
-            var value: u32 = 0;
-            var count: usize = 0;
-            while (i < text.len and count < 6 and std.ascii.isHex(text[i])) : (count += 1) {
-                value = value * 16 + (std.fmt.charToDigit(text[i], 16) catch 0);
-                i += 1;
-            }
-            if (i < text.len and text[i] == ' ') i += 1;
-            if (value == 0 or value >= 0x80) return null;
-            ch = @intCast(value);
-        } else {
-            i += 1;
-        }
-        if (len >= buf.len) return null;
-        buf[len] = ch;
-        len += 1;
-    }
-    return buf[0..len];
 }
 
 fn isCssSpecialFuncName(name: []const u8) bool {
