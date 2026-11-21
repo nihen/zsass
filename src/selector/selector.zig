@@ -1287,7 +1287,22 @@ fn compactAnB(allocator: std.mem.Allocator, anb: []const u8) ![]const u8 {
             j += 1;
             continue;
         }
-        try buf.append(allocator, c);
+        // An escaped letter is the letter itself: `\65 ven` is `even`.
+        if (c == '\\' and j + 1 < s.len and std.ascii.isHex(s[j + 1])) {
+            var k = j + 1;
+            var value: u32 = 0;
+            while (k < s.len and k - (j + 1) < 6 and std.ascii.isHex(s[k])) : (k += 1) {
+                value = value * 16 + (std.fmt.charToDigit(s[k], 16) catch 0);
+            }
+            if (value < 0x80 and std.ascii.isAlphabetic(@intCast(value))) {
+                if (k < s.len and (s[k] == ' ' or s[k] == '\t')) k += 1;
+                try buf.append(allocator, std.ascii.toLower(@intCast(value)));
+                j = k;
+                continue;
+            }
+        }
+        // `even`, `odd`, and `n` are case-insensitive and written lowercase.
+        try buf.append(allocator, std.ascii.toLower(c));
         j += 1;
     }
     return buf.toOwnedSlice(allocator);
