@@ -2506,6 +2506,26 @@ pub const Parser = struct {
         return k == keyword.len;
     }
 
+    /// Intern a number's unit with its escapes canonicalized (`1\65 m` is
+    /// `1em`). A unit always follows the number, so a `\0` escape denotes
+    /// U+FFFD here even when it is the whole unit.
+    fn internUnitName(self: *Parser, unit: []const u8) ParseError!InternId {
+        const canonical = css_utils.unescapeSassIdentifier(self.allocator, unit) catch return error.OutOfMemory;
+        defer if (canonical.ptr != unit.ptr) self.allocator.free(canonical);
+        if (std.mem.eql(u8, canonical, "\\0 ")) return try self.intern_pool.intern("\xEF\xBF\xBD");
+        return try self.intern_pool.intern(canonical);
+    }
+
+    fn identifierEqDashInsensitive(a: []const u8, b: []const u8) bool {
+        if (a.len != b.len) return false;
+        for (a, b) |x, y| {
+            const nx: u8 = if (x == '_') '-' else x;
+            const ny: u8 = if (y == '_') '-' else y;
+            if (nx != ny) return false;
+        }
+        return true;
+    }
+
     /// Intern a variable or parameter name (the text after `$`). Escapes are
     /// canonicalized so every spelling of one name shares an id: `$a\5f b`
     /// names the same variable as `$a_b`.
@@ -7249,7 +7269,7 @@ pub const Parser = struct {
             if (next.tag == .ident) {
                 const unit_text = next.slice(self.source);
                 if (!std.mem.startsWith(u8, unit_text, "--")) {
-                    unit_id = try self.intern_pool.intern(unit_text);
+                    unit_id = try self.internUnitName(unit_text);
                     end = next.span.end;
                     self.advance();
                 }
@@ -7292,7 +7312,7 @@ pub const Parser = struct {
             if (next.tag == .ident) {
                 const unit_text = next.slice(self.source);
                 if (!std.mem.startsWith(u8, unit_text, "--")) {
-                    unit_id = try self.intern_pool.intern(unit_text);
+                    unit_id = try self.internUnitName(unit_text);
                     end = next.span.end;
                     self.advance();
                 }
