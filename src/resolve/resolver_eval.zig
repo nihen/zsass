@@ -68,11 +68,13 @@ fn canonicalLiteralText(alloc: std.mem.Allocator, raw: []const u8, quoted: bool)
         return css_utils.canonicalizeIdentifierValueEscapes(alloc, raw) catch return error.OutOfMemory;
     }
     if (std.mem.startsWith(u8, raw, calc_arg_marker)) {
-        const arg = raw[calc_arg_marker.len..];
-        if (std.mem.findScalar(u8, arg, '\x01') != null) return error.NonStaticExpr;
+        const source_arg = raw[calc_arg_marker.len..];
+        if (std.mem.findScalar(u8, source_arg, '\x01') != null) return error.NonStaticExpr;
+        const arg = css_utils.replaceInvalidEscapeCodePoints(alloc, source_arg) catch return error.OutOfMemory;
+        defer if (arg.ptr != source_arg.ptr) alloc.free(arg);
         const arg_normalized = css_utils.canonicalizeCalcArgEscapes(alloc, arg) catch return error.OutOfMemory;
-        if (arg_normalized.ptr == arg.ptr) return raw;
-        defer alloc.free(arg_normalized);
+        defer if (arg_normalized.ptr != arg.ptr) alloc.free(arg_normalized);
+        if (arg_normalized.ptr == source_arg.ptr) return raw;
         return std.mem.concat(alloc, u8, &.{ calc_arg_marker, arg_normalized }) catch return error.OutOfMemory;
     }
     // Other marked fragments have no static value here.

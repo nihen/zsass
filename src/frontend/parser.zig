@@ -3817,7 +3817,20 @@ pub const Parser = struct {
             const tok = self.current();
             var item_line_start: u32 = 0;
             if (tok.tag == .dollar_ident or tok.tag == .ident) {
-                const id = try self.intern_pool.intern(tok.slice(self.source));
+                // Members are registered under canonical names, so the names
+                // listed here are canonicalized the same way.
+                const tok_text = tok.slice(self.source);
+                const sigil_len: usize = if (tok.tag == .dollar_ident) 1 else 0;
+                const member = tok_text[sigil_len..];
+                const canonical = css_utils.unescapeSassIdentifier(self.allocator, member) catch return error.OutOfMemory;
+                defer if (canonical.ptr != member.ptr) self.allocator.free(canonical);
+                const id = if (canonical.ptr == member.ptr)
+                    try self.intern_pool.intern(tok_text)
+                else blk: {
+                    const full = std.mem.concat(self.allocator, u8, &.{ tok_text[0..sigil_len], canonical }) catch return error.OutOfMemory;
+                    defer self.allocator.free(full);
+                    break :blk try self.intern_pool.intern(full);
+                };
                 try ids.append(self.allocator, id);
                 item_line_start = self.lineStartAtByte(tok.span.start);
                 self.advance();
@@ -3982,7 +3995,7 @@ pub const Parser = struct {
                 if (self.isAtEnd() or self.current().tag != .star) return error.SyntaxError;
                 const pref_end = self.current().span.start;
                 if (pref_end > pref_start) {
-                    prefix_id = try self.intern_pool.intern(self.source[pref_start..pref_end]);
+                    prefix_id = try self.internVariableName(self.source[pref_start..pref_end]);
                 }
                 end_pos = self.current().span.end;
                 self.advance(); // consume *
@@ -7604,7 +7617,12 @@ pub const Parser = struct {
         if (self.pos < self.tokens.len and self.tokens[self.pos].tag == .lparen) {
             // An escaped spelling names the same function as the plain one
             // (`\75 rl(` is `url(`), so classify the canonical name.
-            const call_name = css_utils.unescapeSassIdentifier(self.allocator, text) catch return error.OutOfMemory;
+            // A name with an interpolation is assembled at runtime; its
+            // `#{...}` source must reach the resolver as written.
+            const call_name = if (std.mem.find(u8, text, "#{") != null)
+                text
+            else
+                css_utils.unescapeSassIdentifier(self.allocator, text) catch return error.OutOfMemory;
             defer if (call_name.ptr != text.ptr) self.allocator.free(call_name);
             // An identifier that is exactly `\0` is not a function name; the
             // parenthesis that follows is a separate value.

@@ -3612,7 +3612,7 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
             defer parts.deinit(ctx.a);
             try parts.ensureTotalCapacity(ctx.a, 3 + 2 * arg_buf.items.len);
 
-            const printed_name = try css_utils.decodeSassIdentifier(ctx.a, raw_name_for_if);
+            const printed_name = try css_utils.decodeSassIdentifierOutsideInterpolation(ctx.a, raw_name_for_if);
             defer if (printed_name.ptr != raw_name_for_if.ptr) ctx.a.free(printed_name);
             parts.appendAssumeCapacity(try resolveInterpolatedTextExpr(ctx, printed_name, span, false));
             const open_id = try ctx.pool.intern("(");
@@ -3815,7 +3815,7 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
             });
         }
         // A plain CSS call prints its name with every escape decoded.
-        const printed_name = try css_utils.decodeSassIdentifier(ctx.a, raw_name_for_if);
+        const printed_name = try css_utils.decodeSassIdentifierOutsideInterpolation(ctx.a, raw_name_for_if);
         defer if (printed_name.ptr != raw_name_for_if.ptr) ctx.a.free(printed_name);
         const css_name_id = try ctx.pool.intern(printed_name);
         const cidx: u32 = @intCast(ctx.prog.call_exprs.items.len);
