@@ -61,6 +61,9 @@ pub fn eval(env: anytype, prog: anytype, expr_idx: anytype) Error!Value {
         },
         .literal_string => blk: {
             const lit = unpackLiteralStringPayload(ex.payload);
+            // The compiler canonicalizes a literal's escapes; the source text
+            // of one that has any is not its value, so leave it to runtime.
+            if (std.mem.findScalar(u8, env.pool().get(lit.id), '\\') != null) return error.NonStaticExpr;
             break :blk Value.stringWithFlagsEx(lit.id, lit.quoted, false, lit.named_color_literal);
         },
         .literal_color => try evalLiteralColor(env, prog, ex.payload),

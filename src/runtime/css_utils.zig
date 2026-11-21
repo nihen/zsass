@@ -837,6 +837,14 @@ pub fn unescapeSassIdentifier(allocator: std.mem.Allocator, text: []const u8) ![
         error.OutOfMemory => return error.OutOfMemory,
         else => replaced,
     };
+    // A value keeps a leading `\-` so it cannot read as a negation, but in a
+    // name the hyphen needs no escape: `\-a` names the same member as `-a`.
+    if (normalized.len >= 2 and normalized[0] == '\\' and normalized[1] == '-' and
+        !(normalized.len > 2 and std.ascii.isDigit(normalized[2])))
+    {
+        defer if (normalized.ptr != replaced.ptr) allocator.free(normalized);
+        return try allocator.dupe(u8, normalized[1..]);
+    }
     if (normalized.ptr != replaced.ptr) return normalized;
     if (replaced.ptr == text.ptr) return text;
     return try allocator.dupe(u8, replaced);
@@ -1540,6 +1548,8 @@ test "unescapeSassIdentifier maps every spelling of a name to one text" {
         .{ "a\\.b", "a\\.b" },
         .{ "\\9x", "\\9 x" },
         .{ "\\0 x", "\xEF\xBF\xBDx" },
+        .{ "\\-a", "-a" },
+        .{ "\\2d a", "-a" },
     };
     for (cases) |case| {
         const out = try unescapeSassIdentifier(alloc, case[0]);
