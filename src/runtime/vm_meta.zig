@@ -852,7 +852,7 @@ fn valueToInspectCssString(ctx: *BuiltinContext, value: Value) BuiltinError![]co
         // A module member is stored as `namespace.name`; only the member
         // name is shown, written as a quoted string.
         const member = if (!value.callableIsBuiltin(ctx.callable_payload_pool))
-            if (std.mem.findScalar(u8, name, '.')) |dot| name[dot + 1 ..] else name
+            if (value_mod.callableNamespaceDot(name)) |dot| name[dot + 1 ..] else name
         else
             name;
         var quoted: std.ArrayListUnmanaged(u8) = .empty;

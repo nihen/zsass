@@ -61,9 +61,6 @@ pub fn eval(env: anytype, prog: anytype, expr_idx: anytype) Error!Value {
         },
         .literal_string => blk: {
             const lit = unpackLiteralStringPayload(ex.payload);
-            // The compiler canonicalizes a literal's escapes; the source text
-            // of one that has any is not its value, so leave it to runtime.
-            if (std.mem.findScalar(u8, env.pool().get(lit.id), '\\') != null) return error.NonStaticExpr;
             break :blk Value.stringWithFlagsEx(lit.id, lit.quoted, false, lit.named_color_literal);
         },
         .literal_color => try evalLiteralColor(env, prog, ex.payload),
@@ -285,6 +282,14 @@ fn evalBuiltinCall(env: anytype, prog: anytype, payload: u32) Error!Value {
 
     for (arg_exprs, 0..) |arg_expr, i| {
         args[i] = eval(env, prog, arg_expr) catch return error.NonStaticExpr;
+        // A static string literal holds its source text; the compiler
+        // canonicalizes its escapes later. A builtin must see the canonical
+        // value, so a string with escapes defers the call to runtime.
+        if (args[i].kind() == .string and
+            std.mem.findScalar(u8, env.pool().get(args[i].stringIntern()), '\\') != null)
+        {
+            return error.NonStaticExpr;
+        }
     }
 
     // Build a temporary list pool seeded from the static eval store's lists.

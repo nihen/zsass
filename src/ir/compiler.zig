@@ -1383,32 +1383,7 @@ fn mediaPreludeStartsOnNewLine(text: []const u8) bool {
     return saw_newline and i < text.len;
 }
 
-fn unquotedLiteralLooksLikeIdentifierText(raw: []const u8) bool {
-    if (raw.len == 0) return false;
-    var i: usize = 0;
-    while (i < raw.len) {
-        const c = raw[i];
-        if (c == '\\') {
-            if (i + 1 >= raw.len) return false;
-            if (std.ascii.isHex(raw[i + 1])) {
-                // A hex escape spans up to six digits plus one delimiter space.
-                var j = i + 1;
-                while (j < raw.len and j - (i + 1) < 6 and std.ascii.isHex(raw[j])) j += 1;
-                if (j < raw.len and (raw[j] == ' ' or raw[j] == '\t')) j += 1;
-                i = j;
-                continue;
-            }
-            i += 2;
-            continue;
-        }
-        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_') {
-            i += 1;
-            continue;
-        }
-        return false;
-    }
-    return true;
-}
+const unquotedLiteralLooksLikeIdentifierText = css_utils.unquotedLiteralIsIdentifierText;
 
 fn literalStringHasLeadingDotDecimal(raw: []const u8) bool {
     var i: usize = 0;
@@ -1441,8 +1416,25 @@ fn normalizeLiteralStringIntern(
     else
         css_utils.replaceInvalidEscapeCodePoints(alloc, source_raw) catch return error.OutOfMemory;
     defer if (raw.ptr != source_raw.ptr) alloc.free(raw);
+    if (!quoted and is_value_literal and std.mem.startsWith(u8, raw, calc_utils.calc_arg_marker)) {
+        // A calculation argument kept as text: its identifiers are ordinary
+        // values, so canonicalize their escapes.
+        const arg = raw[calc_utils.calc_arg_marker.len..];
+        if (std.mem.findScalar(u8, arg, '\\') == null) {
+            if (raw.ptr == source_raw.ptr) return id;
+            return pool.intern(raw) catch return error.OutOfMemory;
+        }
+        const arg_normalized = css_utils.normalizeCssValueEscapes(alloc, arg) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => arg,
+        };
+        defer if (arg_normalized.ptr != arg.ptr) alloc.free(arg_normalized);
+        const marked = std.mem.concat(alloc, u8, &.{ calc_utils.calc_arg_marker, arg_normalized }) catch return error.OutOfMemory;
+        defer alloc.free(marked);
+        return pool.intern(marked) catch return error.OutOfMemory;
+    }
     if (!quoted and is_value_literal and !unquotedLiteralLooksLikeIdentifierText(source_raw)) {
-        // `name(...)` text: canonicalize an escaped name and `url(` contents.
+        // `name(...)` text: canonicalize an escaped name and its unquoted arguments.
         const call_normalized = css_utils.normalizeCssCallLiteralEscapes(alloc, raw) catch return error.OutOfMemory;
         if (call_normalized.ptr != raw.ptr) {
             defer alloc.free(call_normalized);
@@ -1491,7 +1483,7 @@ fn literalRawNeedsDeclBypass(raw: []const u8) bool {
 
         if (std.ascii.isHex(raw[i + 1])) {
             var j: usize = i + 1;
-            var value: u21 = 0;
+            var value: u32 = 0;
             var count: u32 = 0;
             while (j < raw.len and count < 6 and std.ascii.isHex(raw[j])) : (count += 1) {
                 value = value * 16 + css_utils.hexDigitValue(raw[j]);
@@ -2647,6 +2639,9 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
             const apply_preserve_empty_seps = ctx.in_loud_comment_text_outer;
             var inner_ctx = ctx;
             inner_ctx.in_loud_comment_text_outer = false;
+            // Only the raw text of an at-rule prelude keeps its escapes; an
+            // interpolated expression is an ordinary value.
+            inner_ctx.keep_escapes = false;
             if (ip.preserve_quote) {
                 const empty_id = try ctx.pool.intern("");
                 const quoted_empty_idx = try ctx.cb.addConst(Value.string(empty_id, true));
@@ -2674,7 +2669,10 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
                             s.id,
                             s.quoted,
                             false,
-                            !ctx.keep_escapes,
+                            // In an at-rule prelude only the raw text between
+                            // interpolations keeps its escapes; `#{\61}` is
+                            // an ordinary value.
+                            !(ctx.keep_escapes and s.raw_text),
                         );
                     const val = Value.stringWithFlagsEx(normalized_id, s.quoted, false, s.named_color_literal);
                     const idx = try ctx.cb.addConst(val);

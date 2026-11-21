@@ -829,6 +829,51 @@ pub fn unescapeSassString(allocator: std.mem.Allocator, text: []const u8) ![]con
 /// `\$`, a leading digit becomes `\31 `, control characters become `\9 `).
 /// Returns `text` itself when it has no escapes.
 pub fn unescapeSassIdentifier(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    const normalized = try canonicalizeIdentifierValueEscapes(allocator, text);
+    // A value keeps a leading `\-` so it cannot read as a negation, but in a
+    // name the hyphen needs no escape: `\-a` names the same member as `-a`.
+    if (normalized.len >= 2 and normalized[0] == '\\' and normalized[1] == '-' and
+        !(normalized.len > 2 and std.ascii.isDigit(normalized[2])))
+    {
+        defer if (normalized.ptr != text.ptr) allocator.free(normalized);
+        return try allocator.dupe(u8, normalized[1..]);
+    }
+    return normalized;
+}
+
+/// True when an unquoted literal is a single identifier: name characters and
+/// escapes only. Such a literal has its escapes canonicalized when compiled.
+pub fn unquotedLiteralIsIdentifierText(raw: []const u8) bool {
+    if (raw.len == 0) return false;
+    var i: usize = 0;
+    while (i < raw.len) {
+        const c = raw[i];
+        if (c == '\\') {
+            if (i + 1 >= raw.len) return false;
+            if (isHexDigit(raw[i + 1])) {
+                // A hex escape spans up to six digits plus one delimiter space.
+                var j = i + 1;
+                while (j < raw.len and j - (i + 1) < 6 and isHexDigit(raw[j])) j += 1;
+                if (j < raw.len and (raw[j] == ' ' or raw[j] == '\t')) j += 1;
+                i = j;
+                continue;
+            }
+            i += 2;
+            continue;
+        }
+        if (isIdentCharByte(c)) {
+            i += 1;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+/// The text an identifier written in source has as an unquoted string value:
+/// escapes canonicalized as in `unescapeSassIdentifier`, except that a leading
+/// `\-` stays escaped. Returns `text` itself when it has no escapes.
+pub fn canonicalizeIdentifierValueEscapes(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
     if (std.mem.findScalar(u8, text, '\\') == null) return text;
 
     const replaced = try replaceInvalidEscapeCodePoints(allocator, text);
@@ -837,14 +882,6 @@ pub fn unescapeSassIdentifier(allocator: std.mem.Allocator, text: []const u8) ![
         error.OutOfMemory => return error.OutOfMemory,
         else => replaced,
     };
-    // A value keeps a leading `\-` so it cannot read as a negation, but in a
-    // name the hyphen needs no escape: `\-a` names the same member as `-a`.
-    if (normalized.len >= 2 and normalized[0] == '\\' and normalized[1] == '-' and
-        !(normalized.len > 2 and std.ascii.isDigit(normalized[2])))
-    {
-        defer if (normalized.ptr != replaced.ptr) allocator.free(normalized);
-        return try allocator.dupe(u8, normalized[1..]);
-    }
     if (normalized.ptr != replaced.ptr) return normalized;
     if (replaced.ptr == text.ptr) return text;
     return try allocator.dupe(u8, replaced);
@@ -892,7 +929,10 @@ pub fn decodeSassIdentifier(allocator: std.mem.Allocator, text: []const u8) ![]c
 /// `unescapeSassIdentifier` produces for any spelling of that name. Returns
 /// `decoded` itself when no character needs an escape.
 pub fn canonicalizeDecodedIdentifier(allocator: std.mem.Allocator, decoded: []const u8) ![]const u8 {
-    var needs_escape = decoded.len > 0 and std.ascii.isDigit(decoded[0]);
+    // A digit cannot start a name, and `-` followed by a digit reads as a
+    // number, so those leading characters are escaped.
+    const hyphen_digit = decoded.len >= 2 and decoded[0] == '-' and std.ascii.isDigit(decoded[1]);
+    var needs_escape = hyphen_digit or (decoded.len > 0 and std.ascii.isDigit(decoded[0]));
     if (!needs_escape) {
         for (decoded) |c| {
             if (!isIdentCharByte(c)) {
@@ -906,7 +946,9 @@ pub fn canonicalizeDecodedIdentifier(allocator: std.mem.Allocator, decoded: []co
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     for (decoded, 0..) |c, idx| {
-        if (isIdentCharByte(c) and !(idx == 0 and std.ascii.isDigit(c))) {
+        if (idx == 0 and hyphen_digit) {
+            try buf.appendSlice(allocator, "\\-");
+        } else if (isIdentCharByte(c) and !(idx == 0 and std.ascii.isDigit(c))) {
             try buf.append(allocator, c);
         } else if (std.ascii.isDigit(c) or c < 0x20 or c == 0x7F) {
             var hex_buf: [8]u8 = undefined;
@@ -920,11 +962,12 @@ pub fn canonicalizeDecodedIdentifier(allocator: std.mem.Allocator, decoded: []co
     return try buf.toOwnedSlice(allocator);
 }
 
-/// Canonicalize an unquoted `name(...)` literal whose name is written with
-/// escapes, and the contents of an unquoted `url(...)`. The name is printed
-/// decoded (`\75 rl(` is `url(`); inside `url(` an escape for a name character
-/// decodes to it and any other escape keeps a backslash (`\41` is `A`, `\24`
-/// is `\$`). Returns `text` itself when nothing changes.
+/// Canonicalize the escapes of an unquoted `name(...)` literal: the text of a
+/// special function such as `url()`, `element()`, or a calculation kept as
+/// written. The name is printed decoded (`\75 rl(` is `url(`). In the unquoted
+/// parts of the arguments an escape for a name character decodes to it and any
+/// other escape keeps a backslash (`\41` is `A`, `\24` is `\$`). Quoted strings
+/// are left alone. Returns `text` itself when nothing changes.
 pub fn normalizeCssCallLiteralEscapes(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
     if (std.mem.findScalar(u8, text, '\\') == null) return text;
 
@@ -954,12 +997,8 @@ pub fn normalizeCssCallLiteralEscapes(allocator: std.mem.Allocator, text: []cons
         if (!isIdentCharByte(c)) return text;
     }
 
-    const is_url = std.ascii.eqlIgnoreCase(stripVendorPrefixFromFunctionName(name), "url");
-    var body_start = name_end + 1;
-    while (body_start < text.len and (text[body_start] == ' ' or text[body_start] == '\t' or text[body_start] == '\n')) body_start += 1;
-    const quoted_or_dynamic = body_start < text.len and (text[body_start] == '"' or text[body_start] == '\'');
     const body = text[name_end + 1 ..];
-    if (!is_url or quoted_or_dynamic or std.mem.findScalar(u8, body, '\\') == null) {
+    if (std.mem.findScalar(u8, body, '\\') == null) {
         if (name.ptr == raw_name.ptr) return text;
         return try std.mem.concat(allocator, u8, &.{ name, text[name_end..] });
     }
@@ -968,8 +1007,22 @@ pub fn normalizeCssCallLiteralEscapes(allocator: std.mem.Allocator, text: []cons
     errdefer buf.deinit(allocator);
     try buf.appendSlice(allocator, name);
     try buf.append(allocator, '(');
+    var in_string: u8 = 0;
     var i: usize = 0;
     while (i < body.len) {
+        if (in_string != 0) {
+            // Copy a quoted string through, keeping its escapes.
+            try buf.append(allocator, body[i]);
+            if (body[i] == '\\' and i + 1 < body.len) {
+                i += 1;
+                try buf.append(allocator, body[i]);
+            } else if (body[i] == in_string) {
+                in_string = 0;
+            }
+            i += 1;
+            continue;
+        }
+        if (body[i] == '"' or body[i] == '\'') in_string = body[i];
         if (body[i] != '\\' or i + 1 >= body.len) {
             try buf.append(allocator, body[i]);
             i += 1;
@@ -987,9 +1040,16 @@ pub fn normalizeCssCallLiteralEscapes(allocator: std.mem.Allocator, text: []cons
             if (i < body.len and (body[i] == ' ' or body[i] == '\t' or body[i] == '\n' or body[i] == '\r' or body[i] == '\x0c')) i += 1;
             code_point = if (isInvalidEscapeCodePoint(value)) 0xFFFD else @intCast(value);
         } else {
+            // An escaped byte that does not start valid UTF-8 is kept as is.
             const seq_len = std.unicode.utf8ByteSequenceLength(body[i]) catch 1;
-            const end = @min(body.len, i + seq_len);
-            code_point = std.unicode.utf8Decode(body[i..end]) catch body[i];
+            const end = i + seq_len;
+            if (seq_len > 1 and (end > body.len or !std.unicode.utf8ValidateSlice(body[i..end]))) {
+                try buf.append(allocator, '\\');
+                try buf.append(allocator, body[i]);
+                i += 1;
+                continue;
+            }
+            code_point = if (seq_len == 1) body[i] else std.unicode.utf8Decode(body[i..end]) catch unreachable;
             i = end;
         }
         if (code_point < 0x20 or code_point == 0x7F) {
@@ -1002,6 +1062,10 @@ pub fn normalizeCssCallLiteralEscapes(allocator: std.mem.Allocator, text: []cons
         var utf8_buf: [4]u8 = undefined;
         const len = std.unicode.utf8Encode(code_point, &utf8_buf) catch unreachable;
         try buf.appendSlice(allocator, utf8_buf[0..len]);
+    }
+    if (std.mem.eql(u8, buf.items, text)) {
+        buf.deinit(allocator);
+        return text;
     }
     return try buf.toOwnedSlice(allocator);
 }
@@ -1111,8 +1175,7 @@ pub fn normalizeCssValueEscapes(allocator: std.mem.Allocator, text: []const u8) 
                     const ch: u8 = @intCast(code_point);
                     // Digits at identifier start need to stay escaped
                     if (std.ascii.isDigit(ch)) {
-                        const prev_is_ident = buf.items.len > 0 and isIdentCharByte(buf.items[buf.items.len - 1]);
-                        if (!prev_is_ident) {
+                        if (!outputIsInsideIdentifier(buf.items)) {
                             // At start of identifier: keep as hex escape
                             try buf.append(allocator, '\\');
                             var digit_hex_buf: [6]u8 = undefined;
@@ -1215,6 +1278,40 @@ pub fn normalizeCssValueEscapes(allocator: std.mem.Allocator, text: []const u8) 
 pub fn isPrivateUseCodePoint(code_point: u21) bool {
     return (code_point >= 0xE000 and code_point <= 0xF8FF) or
         (code_point >= 0xF0000 and code_point <= 0x10FFFF);
+}
+
+/// True when `out` ends partway through an identifier that a digit may
+/// continue unescaped: after a name character or an escape, but not at the
+/// very start or right after the identifier's single leading hyphen (`\31`
+/// and `-\31` keep the escape, `a\31`, `\$\31`, and `--\31` do not).
+fn outputIsInsideIdentifier(out: []const u8) bool {
+    if (out.len == 0) return false;
+    const last = out[out.len - 1];
+    if (endsWithEscapeToken(out)) return true;
+    if (!isIdentCharByte(last)) return false;
+    if (last != '-') return true;
+    // A hyphen: inside only when something of the identifier precedes it.
+    const before = out[0 .. out.len - 1];
+    if (before.len == 0) return false;
+    return isIdentCharByte(before[before.len - 1]) or endsWithEscapeToken(before);
+}
+
+/// True when `out` ends with an escape: `\c`, or `\<hex>` with its
+/// delimiter space.
+fn endsWithEscapeToken(out: []const u8) bool {
+    if (out.len >= 2 and out[out.len - 2] == '\\') {
+        // `\\` followed by a character is an escaped backslash plus a plain
+        // character, unless the backslash count before it is odd.
+        var n: usize = 0;
+        var i = out.len - 2;
+        while (i > 0 and out[i - 1] == '\\') : (i -= 1) n += 1;
+        if (n % 2 == 0) return true;
+    }
+    if (out[out.len - 1] != ' ') return false;
+    var i = out.len - 1;
+    var count: usize = 0;
+    while (i > 0 and count < 6 and isHexDigit(out[i - 1])) : (count += 1) i -= 1;
+    return count > 0 and i > 0 and out[i - 1] == '\\';
 }
 
 /// Code points a CSS escape cannot denote: U+0000, surrogates, and values past
@@ -1550,6 +1647,8 @@ test "unescapeSassIdentifier maps every spelling of a name to one text" {
         .{ "\\0 x", "\xEF\xBF\xBDx" },
         .{ "\\-a", "-a" },
         .{ "\\2d a", "-a" },
+        .{ "\\200000", "\xEF\xBF\xBD" },
+        .{ "\\ffffff x", "\xEF\xBF\xBDx" },
     };
     for (cases) |case| {
         const out = try unescapeSassIdentifier(alloc, case[0]);
@@ -1587,6 +1686,8 @@ test "normalizeCssCallLiteralEscapes canonicalizes url() names and contents" {
         .{ "\\75 rl(http://example.org)", "url(http://example.org)" },
         .{ "\\75 rl(\"\\41\")", "url(\"\\41\")" },
         .{ "\\65 lement(#a)", "element(#a)" },
+        .{ "element(\\24 \\31 a \"\\61\" \\0)", "element(\\$1a \"\\61\" \xEF\xBF\xBD)" },
+        .{ "url(\\\xE2x)", "url(\\\xE2x)" },
     };
     for (cases) |case| {
         const out = try normalizeCssCallLiteralEscapes(alloc, case[0]);

@@ -1617,10 +1617,16 @@ fn parseWithConfigEntries(ctx: *Ctx, config_extra: ExtraIndex) ResolveError![]Wi
             else => return error.SassError,
         };
         var env: ResolverEvalEnv = .{ .ctx = ctx, .allow_configurable_defaults = true };
-        const value = resolver_eval.eval(&env, ctx.prog, expr_idx) catch |err| switch (err) {
+        const static_value = resolver_eval.eval(&env, ctx.prog, expr_idx) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.SassError,
         };
+        // Only a value written as one literal is its own source text; text
+        // assembled by an expression is not re-interpreted.
+        const value = if (ctx.prog.exprs.items[expr_idx].kind == .literal_string)
+            try canonicalizeStaticStringValue(ctx, static_value)
+        else
+            static_value;
         const name = ctx.pool.get(name_id);
         for (out.items) |existing| {
             if (identifierEq(existing.name, name)) return error.SassError;
@@ -1633,6 +1639,26 @@ fn parseWithConfigEntries(ctx: *Ctx, config_extra: ExtraIndex) ResolveError![]Wi
     }
 
     return try out.toOwnedSlice(ctx.a);
+}
+
+/// A statically evaluated string literal holds its source text. A module
+/// configuration value is used as is, so give it the canonical text the
+/// compiler would: decoded for a quoted string, canonical escapes for an
+/// unquoted identifier.
+fn canonicalizeStaticStringValue(ctx: *Ctx, value: value_mod.Value) ResolveError!value_mod.Value {
+    if (value.kind() != .string) return value;
+    const raw = ctx.pool.get(value.stringIntern());
+    if (std.mem.findScalar(u8, raw, '\\') == null) return value;
+    const flags = ctx.prog.value_string_flags_pool.items;
+    const quoted = value.stringQuoted(flags);
+    if (!quoted and !css_utils.unquotedLiteralIsIdentifierText(raw)) return value;
+    const text = if (quoted)
+        try css_utils.unescapeSassString(ctx.a, raw)
+    else
+        try css_utils.canonicalizeIdentifierValueEscapes(ctx.a, raw);
+    defer if (text.ptr != raw.ptr) ctx.a.free(text);
+    const id = try ctx.pool.intern(text);
+    return value_mod.Value.stringWithFlagsEx(id, quoted, false, value.stringNamedColorLiteral(flags));
 }
 
 fn updateTopLevelStaticConfigValue(ctx: *Ctx, slot: SlotId, value_expr: ExprIndex) ResolveError!void {
@@ -2764,8 +2790,10 @@ const LiteralNameText = struct {
 };
 
 /// The runtime text of a string literal used as a member name: a quoted
-/// literal has its escapes decoded, an unquoted one is canonicalized like any
-/// identifier. So `"\\$"` and `\24` both name `\$`, while `"$"` does not.
+/// literal has its escapes decoded, an unquoted one has them canonicalized
+/// as the compiler does for a value. So `"\\$"` and `\24` both name `\$`,
+/// while `"$"` and the unquoted `\-a` (whose value is `\-a`, not `-a`) do not
+/// name `$` and `-a`.
 fn literalNameText(ctx: *Ctx, expr_idx: ExprIndex) ResolveError!?LiteralNameText {
     if (expr_idx >= ctx.prog.exprs.items.len) return null;
     const ex = ctx.prog.exprs.items[expr_idx];
@@ -2775,7 +2803,7 @@ fn literalNameText(ctx: *Ctx, expr_idx: ExprIndex) ResolveError!?LiteralNameText
     const text = if (payload.quoted)
         try css_utils.unescapeSassString(ctx.a, raw)
     else
-        try css_utils.unescapeSassIdentifier(ctx.a, raw);
+        try css_utils.canonicalizeIdentifierValueEscapes(ctx.a, raw);
     return .{ .text = text, .owned = text.ptr != raw.ptr };
 }
 

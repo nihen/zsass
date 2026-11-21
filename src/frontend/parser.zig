@@ -176,8 +176,10 @@ pub const Parser = struct {
     /// In the indented syntax the first line with content (a statement or a
     /// comment) must start at column one.
     fn rejectIndentedFirstStatement(self: *Parser) ParseError!void {
-        var line_start: usize = 0;
-        var i: usize = 0;
+        // A UTF-8 byte order mark is not content.
+        const bom_len: usize = if (std.mem.startsWith(u8, self.source, "\xEF\xBB\xBF")) 3 else 0;
+        var line_start: usize = bom_len;
+        var i: usize = bom_len;
         while (i < self.source.len) : (i += 1) {
             const c = self.source[i];
             if (c == '\n' or c == '\r' or c == '\x0c') {
@@ -7604,6 +7606,19 @@ pub const Parser = struct {
             // (`\75 rl(` is `url(`), so classify the canonical name.
             const call_name = css_utils.unescapeSassIdentifier(self.allocator, text) catch return error.OutOfMemory;
             defer if (call_name.ptr != text.ptr) self.allocator.free(call_name);
+            // An identifier that is exactly `\0` is not a function name; the
+            // parenthesis that follows is a separate value.
+            const lone_nul = std.mem.eql(u8, call_name, "\\0 ");
+            if (lone_nul) {
+                const id = try self.intern_pool.intern(text);
+                return try ast.addNode(.{
+                    .tag = .expr_unquoted_ident,
+                    .flags = 0,
+                    .payload = @intFromEnum(id),
+                    .span_start = tok.span.start,
+                    .span_end = tok.span.end,
+                });
+            }
             if ((self.in_declaration_value_context and shouldTreatAsOpaqueCssFunctionInDecl(call_name)) or
                 shouldTreatAsOpaqueCssFunctionInScript(call_name, self.hasInterpolationInCurrentCallParens()) or
                 self.shouldTreatUrlRawPathAsOpaque(call_name))
