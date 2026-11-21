@@ -131,6 +131,21 @@ pub const ListHandle = u32;
 
 pub const module_ref_separator: u8 = 0;
 
+/// Position of the `.` that separates the namespace from the member in a
+/// callable stored as `namespace.name`. A `.` written as the escape `\.` is
+/// part of the name, not a separator.
+pub fn callableNamespaceDot(name: []const u8) ?usize {
+    var i: usize = 0;
+    while (i < name.len) : (i += 1) {
+        if (name[i] == '\\') {
+            i += 1;
+            continue;
+        }
+        if (name[i] == '.') return i;
+    }
+    return null;
+}
+
 /// Display text (`get-module("name")`) of an interned module reference key.
 pub fn moduleRefDisplay(raw_key: []const u8) []const u8 {
     const sep = std.mem.indexOfScalar(u8, raw_key, module_ref_separator) orelse return raw_key;

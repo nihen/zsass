@@ -78,16 +78,19 @@ fn formatCallableValue(ctx: *const Context, value: Value) std.mem.Allocator.Erro
     if (value.callableIsCss(ctx.callable_payload_pool)) {
         return std.fmt.allocPrint(ctx.allocator, "{s}(\"{s}\", $css: true)", .{ display, name }) catch error.OutOfMemory;
     }
-    if (!value.callableIsBuiltin(ctx.callable_payload_pool)) {
-        if (std.mem.findScalar(u8, name, '.')) |dot| {
-            return std.fmt.allocPrint(ctx.allocator, "{s}(\"{s}\", $module: \"{s}\")", .{
-                display,
-                name[dot + 1 ..],
-                name[0..dot],
-            }) catch error.OutOfMemory;
-        }
+    // A module member is stored as `namespace.name`; only the member name is
+    // shown, written as a quoted string.
+    const member = if (!value.callableIsBuiltin(ctx.callable_payload_pool))
+        if (value_mod.callableNamespaceDot(name)) |dot| name[dot + 1 ..] else name
+    else
+        name;
+    var quoted: std.ArrayListUnmanaged(u8) = .empty;
+    defer quoted.deinit(ctx.allocator);
+    for (member) |ch| {
+        if (ch == '"' or ch == '\\') try quoted.append(ctx.allocator, '\\');
+        try quoted.append(ctx.allocator, ch);
     }
-    return std.fmt.allocPrint(ctx.allocator, "{s}(\"{s}\")", .{ display, name }) catch error.OutOfMemory;
+    return std.fmt.allocPrint(ctx.allocator, "{s}(\"{s}\")", .{ display, quoted.items }) catch error.OutOfMemory;
 }
 
 fn formatListValue(ctx: *const Context, value: Value) std.mem.Allocator.Error![]const u8 {

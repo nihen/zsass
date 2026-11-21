@@ -780,13 +780,13 @@ pub fn unescapeSassString(allocator: std.mem.Allocator, text: []const u8) ![]con
                     after_hex += 1;
                 }
                 const hex_str = text[hex_start..hex_end];
-                const raw_code_point = std.fmt.parseInt(u21, hex_str, 16) catch {
+                const raw_code_point = std.fmt.parseInt(u32, hex_str, 16) catch {
                     try buf.append(allocator, text[i]);
                     i += 1;
                     continue;
                 };
-                // U+0000 is replaced with U+FFFD (replacement character) per CSS spec
-                const code_point = if (raw_code_point == 0) @as(u21, 0xFFFD) else raw_code_point;
+                // U+0000, surrogates, and values past U+10FFFF all decode to U+FFFD.
+                const code_point: u21 = if (isInvalidEscapeCodePoint(raw_code_point)) 0xFFFD else @intCast(raw_code_point);
                 if (code_point < 0x80) {
                     try buf.append(allocator, @intCast(code_point));
                 } else {
@@ -822,73 +822,459 @@ pub fn unescapeSassString(allocator: std.mem.Allocator, text: []const u8) ![]con
     return buf.toOwnedSlice(allocator);
 }
 
-/// Unescape Sass identifier escape sequences while preserving control escapes.
+/// Canonicalize the escapes in a Sass identifier (a function, mixin, variable,
+/// parameter, or unit name). Every spelling of the same identifier maps to one
+/// text: an escape for a name character decodes to that character, while a
+/// character that cannot appear bare stays escaped (`\24` and `\$` both become
+/// `\$`, a leading digit becomes `\31 `, control characters become `\9 `).
+/// Returns `text` itself when it has no escapes.
 pub fn unescapeSassIdentifier(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
-    if (std.mem.find(u8, text, "\\") == null) return text;
+    const named = try unescapeSassIdentifierKeepingPrivateUse(allocator, text);
+    const escaped = escapePrivateUseInName(allocator, named) catch |err| {
+        if (named.ptr != text.ptr) allocator.free(named);
+        return err;
+    };
+    if (escaped.ptr != named.ptr and named.ptr != text.ptr) allocator.free(named);
+    return escaped;
+}
+
+fn unescapeSassIdentifierKeepingPrivateUse(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    const normalized = try canonicalizeIdentifierValueEscapes(allocator, text);
+    // A value keeps a leading `\-` so it cannot read as a negation, but in a
+    // name the hyphen needs no escape: `\-a` names the same member as `-a`.
+    if (normalized.len >= 2 and normalized[0] == '\\' and normalized[1] == '-' and
+        !(normalized.len > 2 and std.ascii.isDigit(normalized[2])))
+    {
+        defer if (normalized.ptr != text.ptr) allocator.free(normalized);
+        return try allocator.dupe(u8, normalized[1..]);
+    }
+    return normalized;
+}
+
+/// True when an unquoted literal is a single identifier: name characters and
+/// escapes only. Such a literal has its escapes canonicalized when compiled.
+pub fn unquotedLiteralIsIdentifierText(raw: []const u8) bool {
+    if (raw.len == 0) return false;
+    var i: usize = 0;
+    while (i < raw.len) {
+        const c = raw[i];
+        if (c == '\\') {
+            if (i + 1 >= raw.len) return false;
+            if (isHexDigit(raw[i + 1])) {
+                // A hex escape spans up to six digits plus one delimiter space.
+                var j = i + 1;
+                while (j < raw.len and j - (i + 1) < 6 and isHexDigit(raw[j])) j += 1;
+                if (j < raw.len and (raw[j] == ' ' or raw[j] == '\t' or raw[j] == '\n' or raw[j] == '\x0c')) {
+                    j += 1;
+                } else if (j < raw.len and raw[j] == '\r') {
+                    j += 1;
+                    if (j < raw.len and raw[j] == '\n') j += 1;
+                }
+                i = j;
+                continue;
+            }
+            i += 2;
+            continue;
+        }
+        if (isIdentCharByte(c)) {
+            i += 1;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+/// The text an identifier written in source has as an unquoted string value:
+/// escapes canonicalized as in `unescapeSassIdentifier`, except that a leading
+/// `\-` stays escaped. Returns `text` itself when it has no escapes.
+pub fn canonicalizeIdentifierValueEscapes(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    if (std.mem.findScalar(u8, text, '\\') == null) return text;
+
+    const replaced = try replaceInvalidEscapeCodePoints(allocator, text);
+    defer if (replaced.ptr != text.ptr) allocator.free(replaced);
+    const normalized = normalizeCssValueEscapes(allocator, replaced) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => replaced,
+    };
+    if (normalized.ptr != replaced.ptr) return normalized;
+    if (replaced.ptr == text.ptr) return text;
+    return try allocator.dupe(u8, replaced);
+}
+
+/// Decode every escape in an identifier to the character it denotes. This is
+/// the spelling Sass prints for the name of a plain CSS function call written
+/// in source (`\24(1)` is emitted as `$(1)`). Returns `text` itself when it has
+/// no escapes.
+pub fn decodeSassIdentifier(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    if (std.mem.findScalar(u8, text, '\\') == null) return text;
 
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
-
     var i: usize = 0;
     while (i < text.len) {
-        if (text[i] != '\\') {
+        if (text[i] != '\\' or i + 1 >= text.len) {
             try buf.append(allocator, text[i]);
             i += 1;
             continue;
         }
-
-        // Trailing backslash: preserve as-is.
-        if (i + 1 >= text.len) {
-            try buf.append(allocator, '\\');
-            break;
-        }
         i += 1;
-
         if (isHexDigit(text[i])) {
-            var value: u21 = 0;
-            var count: u32 = 0;
+            var value: u32 = 0;
+            var count: usize = 0;
             while (i < text.len and count < 6 and isHexDigit(text[i])) : (count += 1) {
                 value = value * 16 + hexDigitValue(text[i]);
                 i += 1;
             }
-            if (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n' or text[i] == '\r' or text[i] == '\x0c')) {
-                i += 1;
-            }
-
-            // Identifier contexts preserve control/NUL escapes as escaped text
-            // rather than decoding to raw control bytes.
-            if (value == 0 or value <= 0x1F or value == 0x7F) {
-                try buf.append(allocator, '\\');
-                var hex_buf: [6]u8 = undefined;
-                const hex = std.fmt.bufPrint(&hex_buf, "{x}", .{value}) catch "0";
-                try buf.appendSlice(allocator, hex);
-                // Keep one delimiter space so the escape cannot absorb following hex.
-                try buf.append(allocator, ' ');
-            } else if (value > 0x10FFFF) {
-                try buf.appendSlice(allocator, "\xEF\xBF\xBD");
-            } else {
-                var utf8_buf: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(@intCast(value), &utf8_buf) catch 0;
-                try buf.appendSlice(allocator, utf8_buf[0..len]);
-            }
+            if (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n' or text[i] == '\r' or text[i] == '\x0c')) i += 1;
+            const code_point: u21 = if (isInvalidEscapeCodePoint(value)) 0xFFFD else @intCast(value);
+            var utf8_buf: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(code_point, &utf8_buf) catch unreachable;
+            try buf.appendSlice(allocator, utf8_buf[0..len]);
             continue;
         }
-
-        if (text[i] == '\r') {
-            i += 1;
-            if (i < text.len and text[i] == '\n') i += 1;
-            continue;
-        }
-        if (text[i] == '\n' or text[i] == '\x0c') {
-            i += 1;
-            continue;
-        }
-
         try buf.append(allocator, text[i]);
         i += 1;
     }
+    return try buf.toOwnedSlice(allocator);
+}
 
-    return buf.toOwnedSlice(allocator);
+/// `decodeSassIdentifier` for a name that may contain `#{...}`: only the
+/// literal text around an interpolation is decoded. The interpolation is
+/// SassScript source, evaluated later, and is copied as written. Returns
+/// `text` itself when nothing changes.
+pub fn decodeSassIdentifierOutsideInterpolation(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    if (std.mem.find(u8, text, "#{") == null) return decodeSassIdentifier(allocator, text);
+    if (std.mem.findScalar(u8, text, '\\') == null) return text;
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var i: usize = 0;
+    while (i < text.len) {
+        const open = std.mem.findPos(u8, text, i, "#{") orelse text.len;
+        // An escaped `\#{` is not an interpolation; it stays in the literal part.
+        const literal = text[i..open];
+        const decoded = try decodeSassIdentifier(allocator, literal);
+        defer if (decoded.ptr != literal.ptr) allocator.free(decoded);
+        try buf.appendSlice(allocator, decoded);
+        if (open >= text.len) break;
+        // Copy the interpolation through its matching brace.
+        var depth: usize = 0;
+        var j = open;
+        var in_string: u8 = 0;
+        while (j < text.len) : (j += 1) {
+            const c = text[j];
+            if (in_string != 0) {
+                if (c == '\\' and j + 1 < text.len) {
+                    j += 1;
+                } else if (c == in_string) {
+                    in_string = 0;
+                }
+                continue;
+            }
+            if (c == '"' or c == '\'') {
+                in_string = c;
+            } else if (c == '/' and j + 1 < text.len and text[j + 1] == '*') {
+                // A `}` inside a comment does not close the interpolation.
+                const close = std.mem.findPos(u8, text, j + 2, "*/") orelse text.len;
+                j = @min(close + 1, text.len - 1);
+            } else if (c == '/' and j + 1 < text.len and text[j + 1] == '/') {
+                // A line comment runs to the end of the line.
+                const eol = std.mem.findScalarPos(u8, text, j, '\n') orelse text.len;
+                j = @min(eol, text.len - 1);
+            } else if (c == '{') {
+                depth += 1;
+            } else if (c == '}') {
+                depth -= 1;
+                if (depth == 0) {
+                    j += 1;
+                    break;
+                }
+            }
+        }
+        try buf.appendSlice(allocator, text[open..j]);
+        i = j;
+    }
+    if (std.mem.eql(u8, buf.items, text)) {
+        buf.deinit(allocator);
+        return text;
+    }
+    return try buf.toOwnedSlice(allocator);
+}
+
+/// Inverse of `decodeSassIdentifier` up to canonical spelling: escape the
+/// characters of a decoded name that cannot appear bare, giving the text
+/// `unescapeSassIdentifier` produces for any spelling of that name. Returns
+/// `decoded` itself when no character needs an escape.
+pub fn canonicalizeDecodedIdentifier(allocator: std.mem.Allocator, decoded: []const u8) ![]const u8 {
+    const base = try canonicalizeDecodedIdentifierImpl(allocator, decoded);
+    const escaped = escapePrivateUseInName(allocator, base) catch |err| {
+        if (base.ptr != decoded.ptr) allocator.free(base);
+        return err;
+    };
+    if (escaped.ptr != base.ptr and base.ptr != decoded.ptr) allocator.free(base);
+    return escaped;
+}
+
+/// Write each private-use character of a name as a hex escape. A name spells
+/// those characters one way whether the source wrote them bare or escaped,
+/// so `\e000` and the bare U+E000 name the same member. Returns `name` itself
+/// when it has none.
+fn escapePrivateUseInName(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
+    // Private-use code points encode with a lead byte of 0xEE or above.
+    var may_have = false;
+    for (name) |c| {
+        if (c >= 0xEE) {
+            may_have = true;
+            break;
+        }
+    }
+    if (!may_have) return name;
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var changed = false;
+    var i: usize = 0;
+    while (i < name.len) {
+        const seq_len = std.unicode.utf8ByteSequenceLength(name[i]) catch 1;
+        const end = i + seq_len;
+        if (seq_len > 1 and end <= name.len and std.unicode.utf8ValidateSlice(name[i..end])) {
+            const code_point = std.unicode.utf8Decode(name[i..end]) catch unreachable;
+            if (isPrivateUseCodePoint(code_point)) {
+                var hex_buf: [8]u8 = undefined;
+                const hex = std.fmt.bufPrint(&hex_buf, "\\{x}", .{code_point}) catch unreachable;
+                try buf.appendSlice(allocator, hex);
+                // The delimiter space is written only before a hex digit.
+                if (end < name.len and isHexDigit(name[end])) try buf.append(allocator, ' ');
+                changed = true;
+                i = end;
+                continue;
+            }
+            try buf.appendSlice(allocator, name[i..end]);
+            i = end;
+            continue;
+        }
+        try buf.append(allocator, name[i]);
+        i += 1;
+    }
+    if (!changed) {
+        buf.deinit(allocator);
+        return name;
+    }
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn canonicalizeDecodedIdentifierImpl(allocator: std.mem.Allocator, decoded: []const u8) ![]const u8 {
+    // A digit cannot start a name, and `-` followed by a digit reads as a
+    // number, so those leading characters are escaped.
+    const hyphen_digit = decoded.len >= 2 and decoded[0] == '-' and std.ascii.isDigit(decoded[1]);
+    var needs_escape = hyphen_digit or (decoded.len > 0 and std.ascii.isDigit(decoded[0]));
+    if (!needs_escape) {
+        for (decoded) |c| {
+            if (!isIdentCharByte(c)) {
+                needs_escape = true;
+                break;
+            }
+        }
+    }
+    if (!needs_escape) return decoded;
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    for (decoded, 0..) |c, idx| {
+        if (idx == 0 and hyphen_digit) {
+            try buf.appendSlice(allocator, "\\-");
+        } else if (isIdentCharByte(c) and !(idx == 0 and std.ascii.isDigit(c))) {
+            try buf.append(allocator, c);
+        } else if (std.ascii.isDigit(c) or c < 0x20 or c == 0x7F) {
+            var hex_buf: [8]u8 = undefined;
+            const hex = std.fmt.bufPrint(&hex_buf, "\\{x} ", .{c}) catch unreachable;
+            try buf.appendSlice(allocator, hex);
+        } else {
+            try buf.append(allocator, '\\');
+            try buf.append(allocator, c);
+        }
+    }
+    return try buf.toOwnedSlice(allocator);
+}
+
+/// Canonicalize the escapes of an unquoted `name(...)` literal: the text of a
+/// special function such as `url()`, `element()`, or a calculation kept as
+/// written. The name is printed decoded (`\75 rl(` is `url(`). Unquoted
+/// arguments are canonicalized as identifiers (`\61` is `a`, `\31` stays
+/// `\31 `); inside `url(` every escape for a name character decodes, a digit
+/// included (`\31 a` is `1a`). Quoted strings are left alone. Returns `text`
+/// itself when nothing changes.
+/// True when `text` is the text of a function call other than `url()`, such
+/// as `element(...)`: a name, written plainly or with escapes, then `(`.
+pub fn isNonUrlCallLiteral(text: []const u8) bool {
+    const lparen = std.mem.findScalar(u8, text, '(') orelse return false;
+    if (lparen == 0) return false;
+    var saw_escape = false;
+    for (text[0..lparen]) |c| {
+        if (c == '\\') saw_escape = true;
+        if (!isIdentCharByte(c) and c != '\\' and c != ' ' and c != ':' and c != '.') return false;
+        // A space belongs to a name only as the delimiter of a hex escape.
+        if (c == ' ' and !saw_escape) return false;
+    }
+    // `url` spelled plainly; an escaped spelling is resolved by the caller's
+    // normalization, which handles both kinds.
+    return !std.ascii.eqlIgnoreCase(stripVendorPrefixFromFunctionName(text[0..lparen]), "url") and !saw_escape;
+}
+
+pub fn normalizeCssCallLiteralEscapes(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    if (std.mem.findScalar(u8, text, '\\') == null) return text;
+
+    // Leading identifier, up to `(`.
+    var name_end: usize = 0;
+    while (name_end < text.len) {
+        const c = text[name_end];
+        if (isIdentCharByte(c)) {
+            name_end += 1;
+        } else if (c == '\\' and name_end + 1 < text.len) {
+            if (isHexDigit(text[name_end + 1])) {
+                var j = name_end + 1;
+                while (j < text.len and j - (name_end + 1) < 6 and isHexDigit(text[j])) j += 1;
+                if (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
+                name_end = j;
+            } else {
+                name_end += 2;
+            }
+        } else break;
+    }
+    // `progid:DXImageTransform.Microsoft.Alpha(` names a legacy filter; its
+    // name runs to the parenthesis.
+    if (std.ascii.startsWithIgnoreCase(text, "progid:")) {
+        name_end = std.mem.findScalar(u8, text, '(') orelse return text;
+        for (text[0..name_end]) |c| {
+            if (!isIdentCharByte(c) and c != ':' and c != '.') return text;
+        }
+    }
+    if (name_end == 0 or name_end >= text.len or text[name_end] != '(') return text;
+
+    const raw_name = text[0..name_end];
+    const name = try decodeSassIdentifier(allocator, raw_name);
+    defer if (name.ptr != raw_name.ptr) allocator.free(name);
+    for (name) |c| {
+        if (!isIdentCharByte(c) and c != ':' and c != '.') return text;
+    }
+
+    const body = text[name_end + 1 ..];
+    if (std.mem.findScalar(u8, body, '\\') == null) {
+        if (name.ptr == raw_name.ptr) return text;
+        return try std.mem.concat(allocator, u8, &.{ name, text[name_end..] });
+    }
+
+    if (!std.ascii.eqlIgnoreCase(stripVendorPrefixFromFunctionName(name), "url")) {
+        // The arguments are ordinary identifiers: canonicalize them as
+        // values. An argument is never the lone `\0` identifier.
+        // Quoted strings in the text of a special function are copied as written.
+        const replaced = try replaceInvalidEscapeCodePointsImpl(allocator, body, false, false);
+        defer if (replaced.ptr != body.ptr) allocator.free(replaced);
+        const normalized = normalizeCssValueEscapes(allocator, replaced) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => replaced,
+        };
+        defer if (normalized.ptr != replaced.ptr) allocator.free(normalized);
+        if (name.ptr == raw_name.ptr and normalized.ptr == body.ptr) return text;
+        return try std.mem.concat(allocator, u8, &.{ name, "(", normalized });
+    }
+
+    // url(): every escape for a name character decodes, digits included.
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, name);
+    try buf.append(allocator, '(');
+    var in_string: u8 = 0;
+    var i: usize = 0;
+    while (i < body.len) {
+        if (in_string != 0) {
+            // Copy a quoted string through, keeping its escapes.
+            try buf.append(allocator, body[i]);
+            if (body[i] == '\\' and i + 1 < body.len) {
+                i += 1;
+                try buf.append(allocator, body[i]);
+            } else if (body[i] == in_string) {
+                in_string = 0;
+            }
+            i += 1;
+            continue;
+        }
+        if (body[i] == '"' or body[i] == '\'') in_string = body[i];
+        if (body[i] != '\\' or i + 1 >= body.len) {
+            try buf.append(allocator, body[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        var code_point: u21 = undefined;
+        if (isHexDigit(body[i])) {
+            var value: u32 = 0;
+            var count: usize = 0;
+            while (i < body.len and count < 6 and isHexDigit(body[i])) : (count += 1) {
+                value = value * 16 + hexDigitValue(body[i]);
+                i += 1;
+            }
+            if (i < body.len and (body[i] == ' ' or body[i] == '\t' or body[i] == '\n' or body[i] == '\r' or body[i] == '\x0c')) i += 1;
+            code_point = if (isInvalidEscapeCodePoint(value)) 0xFFFD else @intCast(value);
+        } else {
+            // An escaped byte that does not start valid UTF-8 is kept as is.
+            const seq_len = std.unicode.utf8ByteSequenceLength(body[i]) catch 1;
+            const end = i + seq_len;
+            if (seq_len > 1 and (end > body.len or !std.unicode.utf8ValidateSlice(body[i..end]))) {
+                try buf.append(allocator, '\\');
+                try buf.append(allocator, body[i]);
+                i += 1;
+                continue;
+            }
+            code_point = if (seq_len == 1) body[i] else std.unicode.utf8Decode(body[i..end]) catch unreachable;
+            i = end;
+        }
+        if (code_point < 0x20 or code_point == 0x7F) {
+            var hex_buf: [8]u8 = undefined;
+            const hex = std.fmt.bufPrint(&hex_buf, "\\{x} ", .{code_point}) catch unreachable;
+            try buf.appendSlice(allocator, hex);
+            continue;
+        }
+        if (code_point < 0x80 and !isIdentCharByte(@intCast(code_point))) try buf.append(allocator, '\\');
+        var utf8_buf: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(code_point, &utf8_buf) catch unreachable;
+        try buf.appendSlice(allocator, utf8_buf[0..len]);
+    }
+    if (std.mem.eql(u8, buf.items, text)) {
+        buf.deinit(allocator);
+        return text;
+    }
+    return try buf.toOwnedSlice(allocator);
+}
+
+/// Canonicalize the escapes in the text of a calculation argument, whose
+/// identifiers are ordinary values. An argument with an escaped hyphen stays
+/// as written: decoded, the calculation formatter would read the hyphen as a
+/// subtraction. Returns `arg` itself when nothing changes.
+pub fn canonicalizeCalcArgEscapes(allocator: std.mem.Allocator, arg: []const u8) ![]const u8 {
+    if (std.mem.findScalar(u8, arg, '\\') == null or calcArgHasEscapedHyphen(arg)) return arg;
+    return normalizeCssValueEscapes(allocator, arg) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => arg,
+    };
+}
+
+fn calcArgHasEscapedHyphen(arg: []const u8) bool {
+    var i: usize = 0;
+    while (i + 1 < arg.len) : (i += 1) {
+        if (arg[i] != '\\') continue;
+        if (arg[i + 1] == '-') return true;
+        var j = i + 1;
+        var value: u32 = 0;
+        while (j < arg.len and j - (i + 1) < 6 and isHexDigit(arg[j])) : (j += 1) {
+            value = value * 16 + hexDigitValue(arg[j]);
+        }
+        if (j > i + 1 and value == '-') return true;
+        // Skip the escaped character so `\\-` is not taken for `\-`.
+        i += 1;
+    }
+    return false;
 }
 
 pub fn hexDigitValue(c: u8) u21 {
@@ -953,16 +1339,23 @@ pub fn normalizeCssValueEscapes(allocator: std.mem.Allocator, text: []const u8) 
             }
 
             if (hex_end > i + 1) {
-                const code_point = std.fmt.parseInt(u32, text[i + 1 .. hex_end], 16) catch {
+                const raw_code_point = std.fmt.parseInt(u32, text[i + 1 .. hex_end], 16) catch {
                     return EvalError.SassError;
                 };
-                if (code_point > 0x10FFFF) return EvalError.SassError;
                 changed = true;
                 i = hex_end;
                 // Skip optional whitespace separator after hex escape
                 if (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n' or text[i] == '\r' or text[i] == '\x0c')) {
                     i += 1;
                 }
+                // Surrogates and out-of-range values denote U+FFFD. `\0` stays
+                // escaped here: source literals had it rewritten already by
+                // `replaceInvalidEscapeCodePoints`, and text assembled at runtime
+                // keeps its spelling.
+                const code_point: u32 = if (raw_code_point != 0 and isInvalidEscapeCodePoint(raw_code_point))
+                    0xFFFD
+                else
+                    raw_code_point;
                 if (code_point == 0x20) {
                     try buf.appendSlice(allocator, "\\ ");
                     continue;
@@ -989,8 +1382,7 @@ pub fn normalizeCssValueEscapes(allocator: std.mem.Allocator, text: []const u8) 
                     const ch: u8 = @intCast(code_point);
                     // Digits at identifier start need to stay escaped
                     if (std.ascii.isDigit(ch)) {
-                        const prev_is_ident = buf.items.len > 0 and isIdentCharByte(buf.items[buf.items.len - 1]);
-                        if (!prev_is_ident) {
+                        if (!outputIsInsideIdentifier(buf.items)) {
                             // At start of identifier: keep as hex escape
                             try buf.append(allocator, '\\');
                             var digit_hex_buf: [6]u8 = undefined;
@@ -1092,8 +1484,134 @@ pub fn normalizeCssValueEscapes(allocator: std.mem.Allocator, text: []const u8) 
 }
 pub fn isPrivateUseCodePoint(code_point: u21) bool {
     return (code_point >= 0xE000 and code_point <= 0xF8FF) or
-        (code_point >= 0xF0000 and code_point <= 0xFFFFD) or
-        (code_point >= 0x100000 and code_point <= 0x10FFFD);
+        (code_point >= 0xF0000 and code_point <= 0x10FFFF);
+}
+
+/// True when `out` ends partway through an identifier that a digit may
+/// continue unescaped: after a name character or an escape, but not at the
+/// very start or right after the identifier's single leading hyphen (`\31`
+/// and `-\31` keep the escape, `a\31`, `\$\31`, and `--\31` do not).
+fn outputIsInsideIdentifier(out: []const u8) bool {
+    if (out.len == 0) return false;
+    const last = out[out.len - 1];
+    if (endsWithEscapeToken(out)) return true;
+    if (!isIdentCharByte(last)) return false;
+    if (last != '-') return true;
+    // A hyphen: inside only when something of the identifier precedes it.
+    const before = out[0 .. out.len - 1];
+    if (before.len == 0) return false;
+    return isIdentCharByte(before[before.len - 1]) or endsWithEscapeToken(before);
+}
+
+/// True when `out` ends with an escape: `\c`, or `\<hex>` with its
+/// delimiter space.
+fn endsWithEscapeToken(out: []const u8) bool {
+    if (out.len >= 2 and out[out.len - 2] == '\\') {
+        // `\\` followed by a character is an escaped backslash plus a plain
+        // character, unless the backslash count before it is odd.
+        var n: usize = 0;
+        var i = out.len - 2;
+        while (i > 0 and out[i - 1] == '\\') : (i -= 1) n += 1;
+        if (n % 2 == 0) return true;
+    }
+    if (out[out.len - 1] != ' ') return false;
+    var i = out.len - 1;
+    var count: usize = 0;
+    while (i > 0 and count < 6 and isHexDigit(out[i - 1])) : (count += 1) i -= 1;
+    if (count == 0 or i == 0 or out[i - 1] != '\\') return false;
+    // The backslash starts an escape only when it is not itself escaped.
+    var backslashes: usize = 0;
+    var j = i;
+    while (j > 0 and out[j - 1] == '\\') : (j -= 1) backslashes += 1;
+    return backslashes % 2 == 1;
+}
+
+/// Code points a CSS escape cannot denote: U+0000, surrogates, and values past
+/// U+10FFFF. Sass normalizes escapes for all of them to U+FFFD.
+pub fn isInvalidEscapeCodePoint(code_point: u32) bool {
+    return code_point == 0 or (code_point >= 0xD800 and code_point <= 0xDFFF) or code_point > 0x10FFFF;
+}
+
+/// Rewrite escapes for U+0000, surrogates, and out-of-range values in source
+/// text to U+FFFD. An unquoted identifier that is exactly `\0` keeps its
+/// escaped spelling. Returns `text` itself when nothing changes.
+pub fn replaceInvalidEscapeCodePoints(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    return replaceInvalidEscapeCodePointsImpl(allocator, text, true, true);
+}
+
+fn replaceInvalidEscapeCodePointsImpl(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    keep_lone_nul: bool,
+    replace_in_strings: bool,
+) ![]const u8 {
+    if (std.mem.findScalar(u8, text, '\\') == null) return text;
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var changed = false;
+    var in_string: u8 = 0;
+    // True while the bytes just copied belong to an identifier (so a following
+    // escape continues it rather than starting a new one).
+    var prev_continues = false;
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        if (c != '\\') {
+            if (in_string != 0) {
+                if (c == in_string) in_string = 0;
+            } else if (c == '"' or c == '\'') {
+                in_string = c;
+            }
+            prev_continues = in_string == 0 and isIdentCharByte(c);
+            try buf.append(allocator, c);
+            i += 1;
+            continue;
+        }
+        if (i + 1 >= text.len) {
+            try buf.append(allocator, c);
+            break;
+        }
+        if (!isHexDigit(text[i + 1])) {
+            const seq_len = std.unicode.utf8ByteSequenceLength(text[i + 1]) catch 1;
+            const end = @min(text.len, i + 1 + seq_len);
+            try buf.appendSlice(allocator, text[i..end]);
+            prev_continues = in_string == 0;
+            i = end;
+            continue;
+        }
+        var hex_end = i + 1;
+        var value: u32 = 0;
+        while (hex_end < text.len and hex_end - (i + 1) < 6 and isHexDigit(text[hex_end])) : (hex_end += 1) {
+            value = value * 16 + hexDigitValue(text[hex_end]);
+        }
+        var after = hex_end;
+        if (after < text.len and (text[after] == ' ' or text[after] == '\t' or text[after] == '\n' or text[after] == '\r' or text[after] == '\x0c')) {
+            if (text[after] == '\r' and after + 1 < text.len and text[after + 1] == '\n') after += 1;
+            after += 1;
+        }
+        const replace = blk: {
+            if (!isInvalidEscapeCodePoint(value)) break :blk false;
+            if (in_string != 0 and !replace_in_strings) break :blk false;
+            if (value != 0 or in_string != 0 or !keep_lone_nul) break :blk true;
+            const next_continues = after < text.len and (isIdentCharByte(text[after]) or text[after] == '\\');
+            break :blk prev_continues or next_continues;
+        };
+        if (replace) {
+            try buf.appendSlice(allocator, "\xEF\xBF\xBD");
+            changed = true;
+        } else {
+            try buf.appendSlice(allocator, text[i..after]);
+        }
+        prev_continues = in_string == 0;
+        i = after;
+    }
+
+    if (!changed) {
+        buf.deinit(allocator);
+        return text;
+    }
+    return try buf.toOwnedSlice(allocator);
 }
 
 /// Normalize only `\-` escapes in an interpolated CSS value result.
@@ -1314,4 +1832,125 @@ test "normalizeAttributeSelectors trims whitespace before unquoted values" {
     const normalized = try normalizeAttributeSelectors(std.testing.allocator, "[data-theme= dark] .x");
     defer std.testing.allocator.free(normalized);
     try std.testing.expectEqualStrings("[data-theme=dark] .x", normalized);
+}
+
+test "replaceInvalidEscapeCodePoints rewrites invalid escapes to U+FFFD" {
+    const alloc = std.testing.allocator;
+    const cases = [_][2][]const u8{
+        .{ "\\0 x", "\xEF\xBF\xBDx" },
+        .{ "x\\0", "x\xEF\xBF\xBD" },
+        .{ "\\0\\0", "\xEF\xBF\xBD\xEF\xBF\xBD" },
+        .{ "\\d800", "\xEF\xBF\xBD" },
+        .{ "\\110000 x", "\xEF\xBF\xBDx" },
+        .{ "#f00\\9\\0\\;", "#f00\\9\xEF\xBF\xBD\\;" },
+    };
+    for (cases) |case| {
+        const out = try replaceInvalidEscapeCodePoints(alloc, case[0]);
+        defer if (out.ptr != case[0].ptr) alloc.free(out);
+        try std.testing.expectEqualStrings(case[1], out);
+    }
+    // A lone `\0` identifier and valid escapes keep their spelling.
+    for ([_][]const u8{ "\\0", "\\0 ", "a, \\0", "\\10ffff", "\\9 x" }) |text| {
+        const out = try replaceInvalidEscapeCodePoints(alloc, text);
+        try std.testing.expect(out.ptr == text.ptr);
+    }
+}
+
+test "unescapeSassIdentifier maps every spelling of a name to one text" {
+    const alloc = std.testing.allocator;
+    const cases = [_][2][]const u8{
+        .{ "\\24", "\\$" },
+        .{ "\\$", "\\$" },
+        .{ "a\\5f b", "a_b" },
+        .{ "\\61 bc", "abc" },
+        .{ "\\31 a", "\\31 a" },
+        .{ "a\\.b", "a\\.b" },
+        .{ "\\9x", "\\9 x" },
+        .{ "\\0 x", "\xEF\xBF\xBDx" },
+        .{ "\\-a", "-a" },
+        .{ "\\2d a", "-a" },
+        .{ "\\200000", "\xEF\xBF\xBD" },
+        .{ "\\ffffff x", "\xEF\xBF\xBDx" },
+    };
+    for (cases) |case| {
+        const out = try unescapeSassIdentifier(alloc, case[0]);
+        defer if (out.ptr != case[0].ptr) alloc.free(out);
+        try std.testing.expectEqualStrings(case[1], out);
+    }
+}
+
+test "decodeSassIdentifierOutsideInterpolation leaves interpolation source alone" {
+    const alloc = std.testing.allocator;
+    const cases = [_][2][]const u8{
+        .{ "f\\6fo#{string.length(\"\\\\61\")}", "foo#{string.length(\"\\\\61\")}" },
+        .{ "\\61#{$b}\\62", "a#{$b}b" },
+    };
+    for (cases) |case| {
+        const out = try decodeSassIdentifierOutsideInterpolation(alloc, case[0]);
+        defer if (out.ptr != case[0].ptr) alloc.free(out);
+        try std.testing.expectEqualStrings(case[1], out);
+    }
+}
+
+test "a name spells private-use characters as escapes" {
+    const alloc = std.testing.allocator;
+    const cases = [_][2][]const u8{
+        .{ "\xEE\x80\x80", "\\e000" },
+        .{ "\\e000", "\\e000" },
+        .{ "\xEE\x80\x80a", "\\e000 a" },
+        .{ "x\xEE\x80\x80y", "x\\e000y" },
+    };
+    for (cases) |case| {
+        const out = try unescapeSassIdentifier(alloc, case[0]);
+        defer if (out.ptr != case[0].ptr) alloc.free(out);
+        try std.testing.expectEqualStrings(case[1], out);
+    }
+    const out = try canonicalizeDecodedIdentifier(alloc, "\xEE\x80\x80a$");
+    defer alloc.free(out);
+    try std.testing.expectEqualStrings("\\e000 a\\$", out);
+    const plain = "ab\xC3\xA9";
+    try std.testing.expect((try unescapeSassIdentifier(alloc, plain)).ptr == plain.ptr);
+}
+
+test "decodeSassIdentifier and canonicalizeDecodedIdentifier round-trip" {
+    const alloc = std.testing.allocator;
+    const cases = [_][3][]const u8{
+        // source spelling, decoded, canonical
+        .{ "\\24", "$", "\\$" },
+        .{ "x\\.y", "x.y", "x\\.y" },
+        .{ "\\31 a", "1a", "\\31 a" },
+        .{ "a\\5f b", "a_b", "a_b" },
+    };
+    for (cases) |case| {
+        const decoded = try decodeSassIdentifier(alloc, case[0]);
+        defer if (decoded.ptr != case[0].ptr) alloc.free(decoded);
+        try std.testing.expectEqualStrings(case[1], decoded);
+        const canonical = try canonicalizeDecodedIdentifier(alloc, decoded);
+        defer if (canonical.ptr != decoded.ptr) alloc.free(canonical);
+        try std.testing.expectEqualStrings(case[2], canonical);
+    }
+}
+
+test "normalizeCssCallLiteralEscapes canonicalizes url() names and contents" {
+    const alloc = std.testing.allocator;
+    const cases = [_][2][]const u8{
+        .{ "url(\\41)", "url(A)" },
+        .{ "url(\\31 a)", "url(1a)" },
+        .{ "url(\\24)", "url(\\$)" },
+        .{ "url(\\41  b)", "url(A b)" },
+        .{ "\\75 rl(http://example.org)", "url(http://example.org)" },
+        .{ "\\75 rl(\"\\41\")", "url(\"\\41\")" },
+        .{ "\\65 lement(#a)", "element(#a)" },
+        .{ "element(\\24 \\31 a \"\\61\" \\0)", "element(\\$1a \"\\61\" \xEF\xBF\xBD)" },
+        .{ "element(\\31 a \\31)", "element(\\31 a \\31 )" },
+        .{ "progid:DXImageTransform.Microsoft.Alpha(\\61)", "progid:DXImageTransform.Microsoft.Alpha(a)" },
+        .{ "url(\\\xE2x)", "url(\\\xE2x)" },
+    };
+    for (cases) |case| {
+        const out = try normalizeCssCallLiteralEscapes(alloc, case[0]);
+        defer if (out.ptr != case[0].ptr) alloc.free(out);
+        try std.testing.expectEqualStrings(case[1], out);
+    }
+    const untouched = "url(\"\\41\")";
+    try std.testing.expect((try normalizeCssCallLiteralEscapes(alloc, untouched)).ptr == untouched.ptr);
 }

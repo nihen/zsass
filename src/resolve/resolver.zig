@@ -1055,6 +1055,9 @@ fn lookupModuleStaticOrConfigSeedValue(loader: *const ModuleResolver, module_id:
 const ResolverEvalEnv = struct {
     ctx: *Ctx,
     allow_configurable_defaults: bool = false,
+    /// Evaluate string literals to their canonical text. Set when the result
+    /// is a final value (a module configuration), not compiled again.
+    canonical_literals: bool = false,
 
     pub fn allocator(self: *const ResolverEvalEnv) std.mem.Allocator {
         return self.ctx.a;
@@ -1155,15 +1158,32 @@ fn tryStaticEvalValue(ctx: *Ctx, expr: ExprIndex) ?value_mod.Value {
 fn tryAppendStaticValueExpr(ctx: *Ctx, value: value_mod.Value, span: Span) ResolveError!?ExprIndex {
     switch (value.kind()) {
         .number => return try appendNumberLiteral(ctx.prog, ctx.a, value.asF64(ctx.prog.value_number_pool), value.unitId(ctx.prog.value_number_pool), span),
-        .string => return try appendExpr(ctx.prog, ctx.a, .{
-            .kind = .literal_string,
-            .payload = packLiteralStringPayload(
-                value.stringIntern(),
-                value.stringQuoted(ctx.prog.value_string_flags_pool.items),
-                value.stringNamedColorLiteral(ctx.prog.value_string_flags_pool.items),
-            ),
-            .span = span,
-        }),
+        .string => {
+            const quoted = value.stringQuoted(ctx.prog.value_string_flags_pool.items);
+            var id = value.stringIntern();
+            const text = ctx.pool.get(id);
+            // An unquoted value with a backslash cannot be written back: the
+            // compiler would canonicalize its escapes again (`\\61` built by
+            // string.unquote() must stay `\\61`, not become `a`).
+            if (!quoted and std.mem.findScalar(u8, text, '\\') != null) return null;
+            // The value holds canonical text, and the compiler decodes a
+            // quoted literal's escapes again. Write a backslash as `\\\\` so
+            // the literal decodes back to this value.
+            if (quoted and std.mem.findScalar(u8, text, '\\') != null) {
+                const escaped = try std.mem.replaceOwned(u8, ctx.a, text, "\\", "\\\\");
+                defer ctx.a.free(escaped);
+                id = try ctx.pool.intern(escaped);
+            }
+            return try appendExpr(ctx.prog, ctx.a, .{
+                .kind = .literal_string,
+                .payload = packLiteralStringPayload(
+                    id,
+                    quoted,
+                    value.stringNamedColorLiteral(ctx.prog.value_string_flags_pool.items),
+                ),
+                .span = span,
+            });
+        },
         .boolean => return try appendExpr(ctx.prog, ctx.a, .{
             .kind = .literal_bool,
             .payload = if (value.p64Of() != 0) 1 else 0,
@@ -1616,7 +1636,7 @@ fn parseWithConfigEntries(ctx: *Ctx, config_extra: ExtraIndex) ResolveError![]Wi
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.SassError,
         };
-        var env: ResolverEvalEnv = .{ .ctx = ctx, .allow_configurable_defaults = true };
+        var env: ResolverEvalEnv = .{ .ctx = ctx, .allow_configurable_defaults = true, .canonical_literals = true };
         const value = resolver_eval.eval(&env, ctx.prog, expr_idx) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.SassError,
@@ -1636,7 +1656,9 @@ fn parseWithConfigEntries(ctx: *Ctx, config_extra: ExtraIndex) ResolveError![]Wi
 }
 
 fn updateTopLevelStaticConfigValue(ctx: *Ctx, slot: SlotId, value_expr: ExprIndex) ResolveError!void {
-    var env: ResolverEvalEnv = .{ .ctx = ctx, .allow_configurable_defaults = true };
+    // The stored value is used as is (as a configuration seed, or written
+    // back as a literal), so literals are evaluated to their canonical text.
+    var env: ResolverEvalEnv = .{ .ctx = ctx, .allow_configurable_defaults = true, .canonical_literals = true };
     const value = resolver_eval.eval(&env, ctx.prog, value_expr) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
@@ -2251,8 +2273,9 @@ fn lookupScopedSlotByName(ctx: *Ctx, name: []const u8) ?SlotId {
 fn resolveBuiltinLocalSlotHint(ctx: *Ctx, builtin_id: u32, arg_start: u32, arg_count: u32) u32 {
     if (builtin_id != meta_variable_exists_builtin_id) return std.math.maxInt(u32);
     const name_expr = findVariableExistsNameArgExpr(ctx, arg_start, arg_count) orelse return std.math.maxInt(u32);
-    const info = literalStringInfo(ctx, name_expr) orelse return std.math.maxInt(u32);
-    return lookupScopedSlotByName(ctx, info.text) orelse std.math.maxInt(u32);
+    const query = (literalNameText(ctx, name_expr) catch return std.math.maxInt(u32)) orelse return std.math.maxInt(u32);
+    defer query.deinit(ctx.a);
+    return lookupScopedSlotByName(ctx, query.text) orelse std.math.maxInt(u32);
 }
 
 fn mapBinOp(op: AstBinOp) BinOp {
@@ -2753,6 +2776,33 @@ fn exprLiteralStringText(ctx: *Ctx, expr_idx: ExprIndex) ?[]const u8 {
     return ctx.pool.get(payload.id);
 }
 
+const LiteralNameText = struct {
+    text: []const u8,
+    owned: bool,
+
+    fn deinit(self: LiteralNameText, allocator: std.mem.Allocator) void {
+        if (self.owned) allocator.free(self.text);
+    }
+};
+
+/// The runtime text of a string literal used as a member name: a quoted
+/// literal has its escapes decoded, an unquoted one has them canonicalized
+/// as the compiler does for a value. So `"\\$"` and `\24` both name `\$`,
+/// while `"$"` and the unquoted `\-a` (whose value is `\-a`, not `-a`) do not
+/// name `$` and `-a`.
+fn literalNameText(ctx: *Ctx, expr_idx: ExprIndex) ResolveError!?LiteralNameText {
+    if (expr_idx >= ctx.prog.exprs.items.len) return null;
+    const ex = ctx.prog.exprs.items[expr_idx];
+    if (ex.kind != .literal_string) return null;
+    const payload = unpackLiteralStringPayload(ex.payload);
+    const raw = ctx.pool.get(payload.id);
+    const text = if (payload.quoted)
+        try css_utils.unescapeSassString(ctx.a, raw)
+    else
+        try css_utils.canonicalizeIdentifierValueEscapes(ctx.a, raw);
+    return .{ .text = text, .owned = text.ptr != raw.ptr };
+}
+
 fn collapseStaticTextExprToIntern(ctx: *Ctx, expr_idx: ExprIndex) ?InternId {
     if (expr_idx >= ctx.prog.exprs.items.len) return null;
     const ex = ctx.prog.exprs.items[expr_idx];
@@ -2885,7 +2935,9 @@ fn tryFoldMetaBuiltinExists(
         };
         if (!identifierEq(arg_name, expected_name)) return null;
     }
-    const query_name = exprLiteralStringText(ctx, arg_exprs[0]) orelse return null;
+    const query = (try literalNameText(ctx, arg_exprs[0])) orelse return null;
+    defer query.deinit(ctx.a);
+    const query_name = query.text;
 
     return switch (builtin_id) {
         meta_variable_exists_id => blk: {
@@ -3560,7 +3612,9 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
             defer parts.deinit(ctx.a);
             try parts.ensureTotalCapacity(ctx.a, 3 + 2 * arg_buf.items.len);
 
-            parts.appendAssumeCapacity(try resolveInterpolatedTextExpr(ctx, name_slice, span, false));
+            const printed_name = try css_utils.decodeSassIdentifierOutsideInterpolation(ctx.a, raw_name_for_if);
+            defer if (printed_name.ptr != raw_name_for_if.ptr) ctx.a.free(printed_name);
+            parts.appendAssumeCapacity(try resolveInterpolatedTextExpr(ctx, printed_name, span, false));
             const open_id = try ctx.pool.intern("(");
             parts.appendAssumeCapacity(try appendStringLiteralExpr(ctx.prog, ctx.a, open_id, span));
             for (arg_buf.items, 0..) |arg_expr, idx| {
@@ -3760,7 +3814,10 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
                 .span = span,
             });
         }
-        const css_name_id = try ctx.pool.intern(name_slice);
+        // A plain CSS call prints its name with every escape decoded.
+        const printed_name = try css_utils.decodeSassIdentifierOutsideInterpolation(ctx.a, raw_name_for_if);
+        defer if (printed_name.ptr != raw_name_for_if.ptr) ctx.a.free(printed_name);
+        const css_name_id = try ctx.pool.intern(printed_name);
         const cidx: u32 = @intCast(ctx.prog.call_exprs.items.len);
         try ctx.prog.call_exprs.append(ctx.a, .{
             .callee_module = 0,

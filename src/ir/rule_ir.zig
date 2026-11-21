@@ -6948,10 +6948,7 @@ pub const RuleIR = struct {
                     if (next == ' ') {
                         var k = i;
                         while (k < text.len and isValueWhitespace(text[k])) : (k += 1) {}
-                        if (k < text.len and text[k] == '\\') {
-                            try out.append(allocator, ' ');
-                            if (k != i + 1 or (i < text.len and !isValueWhitespace(text[i]))) changed = true;
-                        } else if (k != i) {
+                        if (k != i) {
                             try out.append(allocator, ' ');
                             if (k != i + 1 or (i < text.len and !isValueWhitespace(text[i]))) changed = true;
                         }
@@ -7027,13 +7024,6 @@ pub const RuleIR = struct {
                     if (!(url_normalized.ptr == current.ptr and url_normalized.len == current.len)) {
                         current = url_normalized;
                         owned_current = url_normalized;
-                    }
-
-                    const escape_normalized = try css_utils.normalizeCssValueEscapes(allocator, current);
-                    if (!(escape_normalized.ptr == current.ptr and escape_normalized.len == current.len)) {
-                        if (owned_current) |owned| allocator.free(owned);
-                        current = escape_normalized;
-                        owned_current = escape_normalized;
                     }
 
                     const escape_spaced = try normalizeDeclarationEscapeTokenSpacing(allocator, current);

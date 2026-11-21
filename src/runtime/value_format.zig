@@ -586,7 +586,13 @@ pub fn formatNumberWithUnit(
     errdefer alloc.free(core);
     if (unit == null or unit.?.len == 0) return core;
     defer alloc.free(core);
-    return std.fmt.allocPrint(alloc, "{s}{s}", .{ core, unit.? });
+    const u = unit.?;
+    // A unit such as `e1` would read back as an exponent (`1e1` is 10), so
+    // its leading `e` is written as an escape.
+    if (u.len > 1 and (u[0] == 'e' or u[0] == 'E') and std.ascii.isDigit(u[1])) {
+        return std.fmt.allocPrint(alloc, "{s}\\65 {s}", .{ core, u[1..] });
+    }
+    return std.fmt.allocPrint(alloc, "{s}{s}", .{ core, u });
 }
 
 test "formatNumberCore: integers" {

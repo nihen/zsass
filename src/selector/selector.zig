@@ -834,6 +834,11 @@ fn appendSelectorHexEscapeForIdentifier(
     try buf.append(allocator, ' ');
 }
 
+/// U+0000, surrogates, and values past U+10FFFF cannot be denoted by a CSS escape.
+fn isInvalidEscapeCodePoint(code_point: u32) bool {
+    return code_point == 0 or (code_point >= 0xD800 and code_point <= 0xDFFF) or code_point > 0x10FFFF;
+}
+
 fn isSelectorEscapeHexOnly(ch: u8) bool {
     return ch == ' ' or ch < 0x20 or ch == 0x7f;
 }
@@ -910,11 +915,13 @@ fn normalizeIdentifierEscapesForParse(
             var after_hex = hex_end;
             if (after_hex < ident.len and isWhitespace(ident[after_hex])) after_hex += 1;
 
-            const code_point = std.fmt.parseInt(u21, ident[i + 1 .. hex_end], 16) catch {
+            const raw_code_point = std.fmt.parseInt(u32, ident[i + 1 .. hex_end], 16) catch {
                 try buf.append(allocator, ident[i]);
                 i += 1;
                 continue;
             };
+            // Escapes for U+0000, surrogates, and out-of-range values denote U+FFFD.
+            const code_point: u21 = if (isInvalidEscapeCodePoint(raw_code_point)) 0xFFFD else @intCast(raw_code_point);
 
             const prev_is_ident = buf.items.len > 0 and isIdentChar(buf.items[buf.items.len - 1]);
             if (code_point < 0x80) {
@@ -1280,7 +1287,22 @@ fn compactAnB(allocator: std.mem.Allocator, anb: []const u8) ![]const u8 {
             j += 1;
             continue;
         }
-        try buf.append(allocator, c);
+        // An escaped letter is the letter itself: `\65 ven` is `even`.
+        if (c == '\\' and j + 1 < s.len and std.ascii.isHex(s[j + 1])) {
+            var k = j + 1;
+            var value: u32 = 0;
+            while (k < s.len and k - (j + 1) < 6 and std.ascii.isHex(s[k])) : (k += 1) {
+                value = value * 16 + (std.fmt.charToDigit(s[k], 16) catch 0);
+            }
+            if (value < 0x80 and std.ascii.isAlphabetic(@intCast(value))) {
+                if (k < s.len and (s[k] == ' ' or s[k] == '\t')) k += 1;
+                try buf.append(allocator, std.ascii.toLower(@intCast(value)));
+                j = k;
+                continue;
+            }
+        }
+        // `even`, `odd`, and `n` are case-insensitive and written lowercase.
+        try buf.append(allocator, std.ascii.toLower(c));
         j += 1;
     }
     return buf.toOwnedSlice(allocator);

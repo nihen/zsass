@@ -222,7 +222,7 @@ pub const Lexer = struct {
                 } else if (self.css_special_paren_depth > 0) {
                     self.css_special_paren_depth += 1;
                 } else {
-                    switch (parenFunctionKindBefore(self.source, self.pos)) {
+                    switch (self.escapedParenFunctionKind() orelse parenFunctionKindBefore(self.source, self.pos)) {
                         .url => self.url_paren_depth = 1,
                         .css_special => self.css_special_paren_depth = 1,
                         .none => {},
@@ -283,6 +283,13 @@ pub const Lexer = struct {
                         if (!isClassSelectorLead(after_dot)) return self.lexNumber();
                     }
                     if (next == '-' or isIdentStart(next)) return self.lexIdent();
+                    // `-\41` is the identifier `-A`, not a negated `\41`.
+                    if (next == '\\' and self.pos + 2 < self.source.len and
+                        self.source[self.pos + 2] != '\n' and self.source[self.pos + 2] != '\r' and
+                        self.source[self.pos + 2] != '\x0c')
+                    {
+                        return self.lexIdent();
+                    }
                 }
                 return self.single(.minus);
             },
@@ -395,6 +402,35 @@ pub const Lexer = struct {
         }
     }
 
+    /// When the identifier token right before the `(` at `self.pos` is spelled
+    /// with escapes, classify the function by its decoded name (`\75 rl(` is
+    /// `url(`). Returns null when that token has no escape, so the caller
+    /// falls back to scanning the source text.
+    fn escapedParenFunctionKind(self: *Lexer) ?ParenFunctionKind {
+        var idx = self.tokens.items.len;
+        var name_end: u32 = self.pos;
+        while (idx > 0 and self.tokens.items[idx - 1].tag == .whitespace and
+            self.tokens.items[idx - 1].span.end == name_end)
+        {
+            const ws = self.tokens.items[idx - 1].span;
+            for (self.source[ws.start..ws.end]) |ch| {
+                if (ch != ' ' and ch != '\t') return null;
+            }
+            name_end = ws.start;
+            idx -= 1;
+        }
+        if (idx == 0) return null;
+        const tok = self.tokens.items[idx - 1];
+        if (tok.tag != .ident or tok.span.end != name_end) return null;
+        const text = self.source[tok.span.start..tok.span.end];
+        if (std.mem.findScalar(u8, text, '\\') == null) return null;
+        const name = self.unescapeIdent(text) catch return .none;
+        defer self.allocator.free(name);
+        if (isUrlFuncName(name)) return .url;
+        if (isCssSpecialFuncName(name)) return .css_special;
+        return .none;
+    }
+
     fn single(self: *Lexer, tag: Token.Tag) Token {
         const start = self.pos;
         self.pos += 1;
@@ -501,14 +537,14 @@ pub const Lexer = struct {
             i += 1;
             if (i >= text.len) break;
             if (std.ascii.isHex(text[i])) {
-                var value: u21 = 0;
+                var value: u32 = 0;
                 var count: u32 = 0;
                 while (i < text.len and count < 6 and std.ascii.isHex(text[i])) : (count += 1) {
                     value = value * 16 + hexValue(text[i]);
                     i += 1;
                 }
                 if (i < text.len and isWhitespaceChar(text[i])) i += 1;
-                if (value == 0 or value > 0x10FFFF) {
+                if (value == 0 or value > 0x10FFFF or (value >= 0xD800 and value <= 0xDFFF)) {
                     try buf.append(self.allocator, 0xEF);
                     try buf.append(self.allocator, 0xBF);
                     try buf.append(self.allocator, 0xBD);

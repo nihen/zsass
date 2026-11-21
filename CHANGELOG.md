@@ -4,6 +4,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+Tracks Dart Sass 1.108.2. The vendored `sass-spec` pin moves to
+`acbdcd391`.
+
+### Changed
+- CSS escapes for U+0000, surrogates, and values past U+10FFFF become
+  U+FFFD in expressions and selectors instead of an error or an escaped
+  spelling (Dart Sass 1.106.0). An identifier that is exactly `\0` is still
+  written as `\0 `.
+- Function, mixin, variable, parameter, and unit names treat every escaped
+  spelling of a name as the same name, so `\24` and `\$` name one member,
+  `$a\5f b` is `$a-b`, and `1\65 m` equals `1em` (Dart Sass 1.106.0). A
+  string passed to `sass:meta` functions or used as a keyword in a map
+  splat is matched as written: `"\\$"` finds that member while `"$"` and
+  `"\\24"` do not (Dart Sass 1.108.0).
+- An unquoted string built at runtime, such as `string.unquote("\\24")`,
+  and the prelude of an unknown at-rule are emitted as written rather than
+  with their escapes re-normalized (Dart Sass 1.106.0).
+- A plain CSS function call prints its name with escapes decoded, and an
+  escaped spelling of `url`, `!important`, `!default`, or `!global` is
+  recognized as the plain one (Dart Sass 1.106.0).
+- Escapes in the arguments of special functions are canonicalized when the
+  value is compiled: `url(\41)` is `url(A)`, and `element(\31)` keeps
+  `\31 ` (Dart Sass 1.106.0).
+- A unit that reads like an exponent is serialized with an escaped `e`, such
+  as `1\65 1` for the unit `e1` (Dart Sass 1.106.0).
+- `meta.module-functions()` and `meta.module-mixins()` return maps keyed by
+  quoted strings, and `meta.inspect()` writes a function or mixin reference
+  as `get-function("name")` without a `$module` argument.
+- `even`, `odd`, and `n` in `:nth-child()` and `:nth-last-child()` are
+  written lowercase, with escaped letters decoded.
+- Private-use code points U+FFFFE, U+FFFFF, U+10FFFE, and U+10FFFF are
+  written as escapes in expanded output, like the rest of planes 15 and 16.
+
+### Fixed
+- A parameter list that declares the same parameter twice is an error
+  ("Duplicate parameter."), including when one of them is a rest parameter
+  (Dart Sass 1.106.0).
+- In the indented syntax, an indented first statement is an error wherever
+  in the file it appears (Dart Sass 1.106.0).
+- A surrogate escape such as `\d800` in a declaration value no longer
+  crashes the compiler.
+- A string literal with escapes is no longer compared or concatenated as
+  source text when an expression is folded at compile time, so a top-level
+  `@if \61 == a` is true. A module configured with such a literal
+  (`@use "m" with ($a: "\61")`) receives its decoded value.
+- `-\41` is the identifier `-A` rather than a negated `\41`.
+
 ## 0.4.1 (2026-10-21)
 
 ### Fixed

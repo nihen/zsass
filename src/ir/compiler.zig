@@ -1268,6 +1268,9 @@ const CompileCtx = struct {
     /// declarations keep their normal whitespace collapse.
     in_loud_comment_text_outer: bool = false,
     skip_decimal_normalize: bool = false,
+    /// Set while compiling the prelude of a non-`@media` at-rule: that text is
+    /// emitted as written, so its escapes stay untouched.
+    keep_escapes: bool = false,
     /// True while compiling an `@function` body. Functions can't emit CSS,
     /// so the blank-retention `emit_stmt_gap` markers between sibling
     /// statements are dead weight there (the VM either early-outs on them or
@@ -1380,24 +1383,7 @@ fn mediaPreludeStartsOnNewLine(text: []const u8) bool {
     return saw_newline and i < text.len;
 }
 
-fn unquotedLiteralLooksLikeIdentifierText(raw: []const u8) bool {
-    if (raw.len == 0) return false;
-    var i: usize = 0;
-    while (i < raw.len) {
-        const c = raw[i];
-        if (c == '\\') {
-            if (i + 1 >= raw.len) return false;
-            i += 2;
-            continue;
-        }
-        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_') {
-            i += 1;
-            continue;
-        }
-        return false;
-    }
-    return true;
-}
+const unquotedLiteralLooksLikeIdentifierText = css_utils.unquotedLiteralIsIdentifierText;
 
 fn literalStringHasLeadingDotDecimal(raw: []const u8) bool {
     var i: usize = 0;
@@ -1421,14 +1407,48 @@ fn normalizeLiteralStringIntern(
     id: InternId,
     quoted: bool,
     apply_decimal_normalize: bool,
+    /// False for raw statement text, which keeps escapes as written.
+    is_value_literal: bool,
 ) CompileError!InternId {
-    const raw = pool.get(id);
-    if (!quoted and !unquotedLiteralLooksLikeIdentifierText(raw)) {
+    const source_raw = pool.get(id);
+    // The text of a special function such as `element("\0")` keeps its quoted
+    // strings as written, so it is left to the call normalization below.
+    const raw = if (quoted or !is_value_literal or css_utils.isNonUrlCallLiteral(source_raw))
+        source_raw
+    else
+        css_utils.replaceInvalidEscapeCodePoints(alloc, source_raw) catch return error.OutOfMemory;
+    defer if (raw.ptr != source_raw.ptr) alloc.free(raw);
+    if (!quoted and is_value_literal and std.mem.startsWith(u8, raw, calc_utils.calc_arg_marker)) {
+        // A calculation argument kept as text: its identifiers are ordinary
+        // values, so canonicalize their escapes.
+        const arg = raw[calc_utils.calc_arg_marker.len..];
+        const arg_normalized = css_utils.canonicalizeCalcArgEscapes(alloc, arg) catch return error.OutOfMemory;
+        if (arg_normalized.ptr == arg.ptr) {
+            if (raw.ptr == source_raw.ptr) return id;
+            return pool.intern(raw) catch return error.OutOfMemory;
+        }
+        defer alloc.free(arg_normalized);
+        const marked = std.mem.concat(alloc, u8, &.{ calc_utils.calc_arg_marker, arg_normalized }) catch return error.OutOfMemory;
+        defer alloc.free(marked);
+        return pool.intern(marked) catch return error.OutOfMemory;
+    }
+    if (!quoted and is_value_literal and !unquotedLiteralLooksLikeIdentifierText(source_raw)) {
+        // `name(...)` text: canonicalize an escaped name and its unquoted arguments.
+        const call_normalized = css_utils.normalizeCssCallLiteralEscapes(alloc, raw) catch return error.OutOfMemory;
+        if (call_normalized.ptr != raw.ptr) {
+            defer alloc.free(call_normalized);
+            return pool.intern(call_normalized) catch return error.OutOfMemory;
+        }
+    }
+    if (!quoted and (!is_value_literal or !unquotedLiteralLooksLikeIdentifierText(source_raw))) {
         // Unquoted strings that are not identifier-like (such as interp CSS value fragments) are
         // escape does not pass normalization, but in decl value context leading-zero like `.5`
         // Fill in the gaps. literal inside quoted-interp (`url("data:...#{x}...")`) is
         // Apply_decimal_normalize=false because SVG's `-.4` etc. should not be touched.
-        if (!apply_decimal_normalize or !literalStringHasLeadingDotDecimal(raw)) return id;
+        if (!apply_decimal_normalize or !literalStringHasLeadingDotDecimal(raw)) {
+            if (raw.ptr == source_raw.ptr) return id;
+            return pool.intern(raw) catch return error.OutOfMemory;
+        }
         const normalized = value_format.normalizeLeadingZeros(alloc, raw) catch return error.OutOfMemory;
         defer alloc.free(normalized);
         return pool.intern(normalized) catch return error.OutOfMemory;
@@ -1462,7 +1482,7 @@ fn literalRawNeedsDeclBypass(raw: []const u8) bool {
 
         if (std.ascii.isHex(raw[i + 1])) {
             var j: usize = i + 1;
-            var value: u21 = 0;
+            var value: u32 = 0;
             var count: u32 = 0;
             while (j < raw.len and count < 6 and std.ascii.isHex(raw[j])) : (count += 1) {
                 value = value * 16 + css_utils.hexDigitValue(raw[j]);
@@ -1859,7 +1879,7 @@ fn compileParamDefaultConstValue(ctx: CompileCtx, ex: ResolvedExpr) CompileError
         .literal_number => try numberExprValue(ctx.resolved, ex.payload, ctx.cb.shared_pool_alloc),
         .literal_string => blk: {
             const s = resolver.unpackLiteralStringPayload(ex.payload);
-            const normalized_id = try normalizeLiteralStringIntern(ctx.pool, ctx.cb.alloc, s.id, s.quoted, true);
+            const normalized_id = try normalizeLiteralStringIntern(ctx.pool, ctx.cb.alloc, s.id, s.quoted, true, true);
             break :blk Value.stringWithFlagsEx(normalized_id, s.quoted, false, s.named_color_literal);
         },
         .literal_color => try literalColorValue(ctx, ex.payload),
@@ -2409,7 +2429,7 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
         },
         .literal_string => {
             const s = resolver.unpackLiteralStringPayload(ex.payload);
-            const normalized_id = try normalizeLiteralStringIntern(ctx.pool, ctx.cb.alloc, s.id, s.quoted, !ctx.skip_decimal_normalize);
+            const normalized_id = try normalizeLiteralStringIntern(ctx.pool, ctx.cb.alloc, s.id, s.quoted, !ctx.skip_decimal_normalize, !s.raw_text and !ctx.keep_escapes);
             if (!s.quoted and !s.named_color_literal and !s.raw_text) {
                 const raw = ctx.pool.get(normalized_id);
                 if (raw.len == 1 and raw[0] == '&') {
@@ -2618,6 +2638,9 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
             const apply_preserve_empty_seps = ctx.in_loud_comment_text_outer;
             var inner_ctx = ctx;
             inner_ctx.in_loud_comment_text_outer = false;
+            // Only the raw text of an at-rule prelude keeps its escapes; an
+            // interpolated expression is an ordinary value.
+            inner_ctx.keep_escapes = false;
             if (ip.preserve_quote) {
                 const empty_id = try ctx.pool.intern("");
                 const quoted_empty_idx = try ctx.cb.addConst(Value.string(empty_id, true));
@@ -2645,6 +2668,10 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
                             s.id,
                             s.quoted,
                             false,
+                            // In an at-rule prelude only the raw text between
+                            // interpolations keeps its escapes; `#{\61}` is
+                            // an ordinary value.
+                            !(ctx.keep_escapes and s.raw_text),
                         );
                     const val = Value.stringWithFlagsEx(normalized_id, s.quoted, false, s.named_color_literal);
                     const idx = try ctx.cb.addConst(val);
@@ -2782,7 +2809,9 @@ fn compileAtRuleBody(
         const ci = try ctx.cb.addConst(Value.string(override_id, false));
         try ctx.cb.emit(.load_const, 0, ci);
     } else {
-        try compileExprOrNil(ctx, prelude_expr);
+        var prelude_ctx = ctx;
+        prelude_ctx.keep_escapes = !std.mem.eql(u8, raw_name, "media");
+        try compileExprOrNil(prelude_ctx, prelude_expr);
     }
 
     try ctx.cb.noteIntern(name_intern);
