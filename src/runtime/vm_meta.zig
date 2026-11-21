@@ -849,16 +849,19 @@ fn valueToInspectCssString(ctx: *BuiltinContext, value: Value) BuiltinError![]co
         if (value.callableIsCss(ctx.callable_payload_pool)) {
             return std.fmt.allocPrint(ctx.allocator, "{s}(\"{s}\", $css: true)", .{ display, name }) catch error.OutOfMemory;
         }
-        if (!value.callableIsBuiltin(ctx.callable_payload_pool)) {
-            if (std.mem.findScalar(u8, name, '.')) |dot| {
-                return std.fmt.allocPrint(ctx.allocator, "{s}(\"{s}\", $module: \"{s}\")", .{
-                    display,
-                    name[dot + 1 ..],
-                    name[0..dot],
-                }) catch error.OutOfMemory;
-            }
+        // A module member is stored as `namespace.name`; only the member
+        // name is shown, written as a quoted string.
+        const member = if (!value.callableIsBuiltin(ctx.callable_payload_pool))
+            if (std.mem.findScalar(u8, name, '.')) |dot| name[dot + 1 ..] else name
+        else
+            name;
+        var quoted: std.ArrayListUnmanaged(u8) = .empty;
+        defer quoted.deinit(ctx.allocator);
+        for (member) |ch| {
+            if (ch == '"' or ch == '\\') try quoted.append(ctx.allocator, '\\');
+            try quoted.append(ctx.allocator, ch);
         }
-        return std.fmt.allocPrint(ctx.allocator, "{s}(\"{s}\")", .{ display, name }) catch error.OutOfMemory;
+        return std.fmt.allocPrint(ctx.allocator, "{s}(\"{s}\")", .{ display, quoted.items }) catch error.OutOfMemory;
     }
     if (value.kind() == .list) {
         const view = value_mod.inspectLogicalListView(ctx.list_pool.items, value) orelse unreachable;
@@ -1400,7 +1403,7 @@ fn meta_module_functions(ctx: *BuiltinContext, args: []const Value, arg_names: [
                 if (voidMapContainsIdentifier(&mod.ambiguous_export_functions, entry.key_ptr.*)) continue;
                 const display_id = try internDisplayIdentifier(ctx, entry.key_ptr.*);
                 try pairs.append(ctx.allocator, .{
-                    .key = Value.string(display_id, false),
+                    .key = Value.string(display_id, true),
                     .value = try makeModuleFunctionCallable(ctx, module_name, entry.value_ptr.*.module_id, entry.value_ptr.*.id, entry.key_ptr.*),
                 });
             }
@@ -1408,7 +1411,7 @@ fn meta_module_functions(ctx: *BuiltinContext, args: []const Value, arg_names: [
             while (bit.next()) |entry| {
                 const display_id = try internDisplayIdentifier(ctx, entry.key_ptr.*);
                 try pairs.append(ctx.allocator, .{
-                    .key = Value.string(display_id, false),
+                    .key = Value.string(display_id, true),
                     .value = try makeBuiltinFunctionCallable(ctx, entry.value_ptr.*, entry.key_ptr.*, false),
                 });
             }
@@ -1421,7 +1424,7 @@ fn meta_module_functions(ctx: *BuiltinContext, args: []const Value, arg_names: [
                     if (voidMapContainsIdentifier(&mod.ambiguous_export_functions, entry.key_ptr.*)) continue;
                     const display_id = try internDisplayIdentifier(ctx, entry.key_ptr.*);
                     try pairs.append(ctx.allocator, .{
-                        .key = Value.string(display_id, false),
+                        .key = Value.string(display_id, true),
                         .value = try makeModuleFunctionCallable(ctx, module_name, entry.value_ptr.*.module_id, entry.value_ptr.*.id, entry.key_ptr.*),
                     });
                 }
@@ -1429,7 +1432,7 @@ fn meta_module_functions(ctx: *BuiltinContext, args: []const Value, arg_names: [
                 while (bit.next()) |entry| {
                     const display_id = try internDisplayIdentifier(ctx, entry.key_ptr.*);
                     try pairs.append(ctx.allocator, .{
-                        .key = Value.string(display_id, false),
+                        .key = Value.string(display_id, true),
                         .value = try makeBuiltinFunctionCallable(ctx, entry.value_ptr.*, entry.key_ptr.*, false),
                     });
                 }
@@ -1443,7 +1446,7 @@ fn meta_module_functions(ctx: *BuiltinContext, args: []const Value, arg_names: [
             while (it.next()) |entry| {
                 const display_id = try internDisplayIdentifier(ctx, entry.key_ptr.*);
                 try pairs.append(ctx.allocator, .{
-                    .key = Value.string(display_id, false),
+                    .key = Value.string(display_id, true),
                     .value = try makeBuiltinFunctionCallable(ctx, entry.value_ptr.*, entry.key_ptr.*, false),
                 });
             }
@@ -1474,7 +1477,7 @@ fn meta_module_mixins(ctx: *BuiltinContext, args: []const Value, arg_names: []co
                 if (voidMapContainsIdentifier(&mod.ambiguous_export_mixins, entry.key_ptr.*)) continue;
                 const display_id = try internDisplayIdentifier(ctx, entry.key_ptr.*);
                 try pairs.append(ctx.allocator, .{
-                    .key = Value.string(display_id, false),
+                    .key = Value.string(display_id, true),
                     .value = try makeUserMixinCallable(ctx, entry.value_ptr.*.module_id, entry.value_ptr.*.id, entry.key_ptr.*, mixinAcceptsContent(vm, entry.value_ptr.*.module_id, entry.value_ptr.*.id)),
                 });
             }
@@ -1487,7 +1490,7 @@ fn meta_module_mixins(ctx: *BuiltinContext, args: []const Value, arg_names: []co
                     if (voidMapContainsIdentifier(&mod.ambiguous_export_mixins, entry.key_ptr.*)) continue;
                     const display_id = try internDisplayIdentifier(ctx, entry.key_ptr.*);
                     try pairs.append(ctx.allocator, .{
-                        .key = Value.string(display_id, false),
+                        .key = Value.string(display_id, true),
                         .value = try makeUserMixinCallable(ctx, entry.value_ptr.*.module_id, entry.value_ptr.*.id, entry.key_ptr.*, mixinAcceptsContent(vm, entry.value_ptr.*.module_id, entry.value_ptr.*.id)),
                     });
                 }
