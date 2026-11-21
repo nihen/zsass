@@ -1269,8 +1269,8 @@ const CompileCtx = struct {
     in_loud_comment_text_outer: bool = false,
     skip_decimal_normalize: bool = false,
     /// Set while compiling the prelude of a non-`@media` at-rule: that text is
-    /// emitted as written, so escapes for invalid code points stay untouched.
-    keep_invalid_escapes: bool = false,
+    /// emitted as written, so its escapes stay untouched.
+    keep_escapes: bool = false,
     /// True while compiling an `@function` body. Functions can't emit CSS,
     /// so the blank-retention `emit_stmt_gap` markers between sibling
     /// statements are dead weight there (the VM either early-outs on them or
@@ -1390,6 +1390,14 @@ fn unquotedLiteralLooksLikeIdentifierText(raw: []const u8) bool {
         const c = raw[i];
         if (c == '\\') {
             if (i + 1 >= raw.len) return false;
+            if (std.ascii.isHex(raw[i + 1])) {
+                // A hex escape spans up to six digits plus one delimiter space.
+                var j = i + 1;
+                while (j < raw.len and j - (i + 1) < 6 and std.ascii.isHex(raw[j])) j += 1;
+                if (j < raw.len and (raw[j] == ' ' or raw[j] == '\t')) j += 1;
+                i = j;
+                continue;
+            }
             i += 2;
             continue;
         }
@@ -1433,7 +1441,15 @@ fn normalizeLiteralStringIntern(
     else
         css_utils.replaceInvalidEscapeCodePoints(alloc, source_raw) catch return error.OutOfMemory;
     defer if (raw.ptr != source_raw.ptr) alloc.free(raw);
-    if (!quoted and !unquotedLiteralLooksLikeIdentifierText(source_raw)) {
+    if (!quoted and is_value_literal and !unquotedLiteralLooksLikeIdentifierText(source_raw)) {
+        // `name(...)` text: canonicalize an escaped name and `url(` contents.
+        const call_normalized = css_utils.normalizeCssCallLiteralEscapes(alloc, raw) catch return error.OutOfMemory;
+        if (call_normalized.ptr != raw.ptr) {
+            defer alloc.free(call_normalized);
+            return pool.intern(call_normalized) catch return error.OutOfMemory;
+        }
+    }
+    if (!quoted and (!is_value_literal or !unquotedLiteralLooksLikeIdentifierText(source_raw))) {
         // Unquoted strings that are not identifier-like (such as interp CSS value fragments) are
         // escape does not pass normalization, but in decl value context leading-zero like `.5`
         // Fill in the gaps. literal inside quoted-interp (`url("data:...#{x}...")`) is
@@ -2422,7 +2438,7 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
         },
         .literal_string => {
             const s = resolver.unpackLiteralStringPayload(ex.payload);
-            const normalized_id = try normalizeLiteralStringIntern(ctx.pool, ctx.cb.alloc, s.id, s.quoted, !ctx.skip_decimal_normalize, !s.raw_text and !ctx.keep_invalid_escapes);
+            const normalized_id = try normalizeLiteralStringIntern(ctx.pool, ctx.cb.alloc, s.id, s.quoted, !ctx.skip_decimal_normalize, !s.raw_text and !ctx.keep_escapes);
             if (!s.quoted and !s.named_color_literal and !s.raw_text) {
                 const raw = ctx.pool.get(normalized_id);
                 if (raw.len == 1 and raw[0] == '&') {
@@ -2658,7 +2674,7 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
                             s.id,
                             s.quoted,
                             false,
-                            !ctx.keep_invalid_escapes,
+                            !ctx.keep_escapes,
                         );
                     const val = Value.stringWithFlagsEx(normalized_id, s.quoted, false, s.named_color_literal);
                     const idx = try ctx.cb.addConst(val);
@@ -2797,7 +2813,7 @@ fn compileAtRuleBody(
         try ctx.cb.emit(.load_const, 0, ci);
     } else {
         var prelude_ctx = ctx;
-        prelude_ctx.keep_invalid_escapes = !std.mem.eql(u8, raw_name, "media");
+        prelude_ctx.keep_escapes = !std.mem.eql(u8, raw_name, "media");
         try compileExprOrNil(prelude_ctx, prelude_expr);
     }
 

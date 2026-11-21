@@ -1,4 +1,5 @@
 const std = @import("std");
+const css_utils = @import("css_utils.zig");
 const builtin_mod = @import("../builtin/mod.zig");
 const color_mod = @import("../color/color.zig");
 const error_format = @import("error_format.zig");
@@ -347,8 +348,12 @@ pub fn invokeCallable(
     if (target_v.callableIsCss(&self.callable_payload_pool)) {
         if (expect_mixin) return error.BuiltinType;
         const name_id = target_v.callableNameIntern(&self.callable_payload_pool);
-        const name = self.intern_pool.get(name_id);
+        const printed_name = self.intern_pool.get(name_id);
         if (target_v.callableCssLateSassResolution(&self.callable_payload_pool)) {
+            // The callable carries the decoded name it prints with; members
+            // are registered under the canonical escaped spelling.
+            const name = try css_utils.canonicalizeDecodedIdentifier(self.allocator, printed_name);
+            defer if (name.ptr != printed_name.ptr) self.allocator.free(name);
             if (lookupIdentifierIdMap(&self.program.modules[self.current_module].function_names, name)) |fid| {
                 const module_id: u32 = self.current_module;
                 try self.doCallPrepared(module_id, .{ .function = fid }, args, arg_names, rest_separator_override, false);

@@ -864,18 +864,30 @@ fn parenFunctionKindBefore(source: []const u8, paren_pos: u32) ParenFunctionKind
     // First inspect just the nearest identifier-ish segment before `(` so
     // `background-image:url(` resolves to `url`, not `background-image:url`.
     var start = end;
+    var has_escape = false;
     while (start > 0) {
         const ch = source[start - 1];
         if (std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_') {
             start -= 1;
             continue;
         }
+        // A hex escape and its delimiter space (`\75 rl`) belong to the name.
+        if (hexEscapeStartBefore(source, start)) |escape_start| {
+            start = escape_start;
+            has_escape = true;
+            continue;
+        }
         break;
     }
     if (start < end) {
-        const base_name = source[start..end];
+        var decoded_buf: [32]u8 = undefined;
+        const base_name = if (has_escape)
+            decodeAsciiEscapes(source[start..end], &decoded_buf) orelse return .none
+        else
+            source[start..end];
         if (isUrlFuncName(base_name)) return .url;
         if (isCssSpecialFuncName(base_name)) return .css_special;
+        if (has_escape) return .none;
     }
 
     i = start;
@@ -893,6 +905,45 @@ fn parenFunctionKindBefore(source: []const u8, paren_pos: u32) ParenFunctionKind
     if (isUrlFuncName(name)) return .url;
     if (isCssSpecialFuncName(name)) return .css_special;
     return .none;
+}
+
+/// If the text ending at `end` is a hex escape (`\` plus one to six hex
+/// digits, with an optional delimiter space), return where it starts.
+fn hexEscapeStartBefore(source: []const u8, end: usize) ?usize {
+    var i = end;
+    if (i > 0 and source[i - 1] == ' ') i -= 1;
+    var count: usize = 0;
+    while (i > 0 and count < 6 and std.ascii.isHex(source[i - 1])) : (count += 1) i -= 1;
+    if (count == 0 or i == 0 or source[i - 1] != '\\') return null;
+    return i - 1;
+}
+
+/// Decode the hex escapes of an ASCII identifier into `buf`. Returns null when
+/// the result does not fit or an escape denotes a non-ASCII code point.
+fn decodeAsciiEscapes(text: []const u8, buf: []u8) ?[]const u8 {
+    var len: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        var ch: u8 = text[i];
+        if (ch == '\\' and i + 1 < text.len and std.ascii.isHex(text[i + 1])) {
+            i += 1;
+            var value: u32 = 0;
+            var count: usize = 0;
+            while (i < text.len and count < 6 and std.ascii.isHex(text[i])) : (count += 1) {
+                value = value * 16 + (std.fmt.charToDigit(text[i], 16) catch 0);
+                i += 1;
+            }
+            if (i < text.len and text[i] == ' ') i += 1;
+            if (value == 0 or value >= 0x80) return null;
+            ch = @intCast(value);
+        } else {
+            i += 1;
+        }
+        if (len >= buf.len) return null;
+        buf[len] = ch;
+        len += 1;
+    }
+    return buf[0..len];
 }
 
 fn isCssSpecialFuncName(name: []const u8) bool {

@@ -2251,8 +2251,9 @@ fn lookupScopedSlotByName(ctx: *Ctx, name: []const u8) ?SlotId {
 fn resolveBuiltinLocalSlotHint(ctx: *Ctx, builtin_id: u32, arg_start: u32, arg_count: u32) u32 {
     if (builtin_id != meta_variable_exists_builtin_id) return std.math.maxInt(u32);
     const name_expr = findVariableExistsNameArgExpr(ctx, arg_start, arg_count) orelse return std.math.maxInt(u32);
-    const info = literalStringInfo(ctx, name_expr) orelse return std.math.maxInt(u32);
-    return lookupScopedSlotByName(ctx, info.text) orelse std.math.maxInt(u32);
+    const query = (literalNameText(ctx, name_expr) catch return std.math.maxInt(u32)) orelse return std.math.maxInt(u32);
+    defer query.deinit(ctx.a);
+    return lookupScopedSlotByName(ctx, query.text) orelse std.math.maxInt(u32);
 }
 
 fn mapBinOp(op: AstBinOp) BinOp {
@@ -2753,6 +2754,31 @@ fn exprLiteralStringText(ctx: *Ctx, expr_idx: ExprIndex) ?[]const u8 {
     return ctx.pool.get(payload.id);
 }
 
+const LiteralNameText = struct {
+    text: []const u8,
+    owned: bool,
+
+    fn deinit(self: LiteralNameText, allocator: std.mem.Allocator) void {
+        if (self.owned) allocator.free(self.text);
+    }
+};
+
+/// The runtime text of a string literal used as a member name: a quoted
+/// literal has its escapes decoded, an unquoted one is canonicalized like any
+/// identifier. So `"\\$"` and `\24` both name `\$`, while `"$"` does not.
+fn literalNameText(ctx: *Ctx, expr_idx: ExprIndex) ResolveError!?LiteralNameText {
+    if (expr_idx >= ctx.prog.exprs.items.len) return null;
+    const ex = ctx.prog.exprs.items[expr_idx];
+    if (ex.kind != .literal_string) return null;
+    const payload = unpackLiteralStringPayload(ex.payload);
+    const raw = ctx.pool.get(payload.id);
+    const text = if (payload.quoted)
+        try css_utils.unescapeSassString(ctx.a, raw)
+    else
+        try css_utils.unescapeSassIdentifier(ctx.a, raw);
+    return .{ .text = text, .owned = text.ptr != raw.ptr };
+}
+
 fn collapseStaticTextExprToIntern(ctx: *Ctx, expr_idx: ExprIndex) ?InternId {
     if (expr_idx >= ctx.prog.exprs.items.len) return null;
     const ex = ctx.prog.exprs.items[expr_idx];
@@ -2885,7 +2911,9 @@ fn tryFoldMetaBuiltinExists(
         };
         if (!identifierEq(arg_name, expected_name)) return null;
     }
-    const query_name = exprLiteralStringText(ctx, arg_exprs[0]) orelse return null;
+    const query = (try literalNameText(ctx, arg_exprs[0])) orelse return null;
+    defer query.deinit(ctx.a);
+    const query_name = query.text;
 
     return switch (builtin_id) {
         meta_variable_exists_id => blk: {
@@ -3560,7 +3588,9 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
             defer parts.deinit(ctx.a);
             try parts.ensureTotalCapacity(ctx.a, 3 + 2 * arg_buf.items.len);
 
-            parts.appendAssumeCapacity(try resolveInterpolatedTextExpr(ctx, name_slice, span, false));
+            const printed_name = try css_utils.decodeSassIdentifier(ctx.a, raw_name_for_if);
+            defer if (printed_name.ptr != raw_name_for_if.ptr) ctx.a.free(printed_name);
+            parts.appendAssumeCapacity(try resolveInterpolatedTextExpr(ctx, printed_name, span, false));
             const open_id = try ctx.pool.intern("(");
             parts.appendAssumeCapacity(try appendStringLiteralExpr(ctx.prog, ctx.a, open_id, span));
             for (arg_buf.items, 0..) |arg_expr, idx| {
@@ -3760,7 +3790,10 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
                 .span = span,
             });
         }
-        const css_name_id = try ctx.pool.intern(name_slice);
+        // A plain CSS call prints its name with every escape decoded.
+        const printed_name = try css_utils.decodeSassIdentifier(ctx.a, raw_name_for_if);
+        defer if (printed_name.ptr != raw_name_for_if.ptr) ctx.a.free(printed_name);
+        const css_name_id = try ctx.pool.intern(printed_name);
         const cidx: u32 = @intCast(ctx.prog.call_exprs.items.len);
         try ctx.prog.call_exprs.append(ctx.a, .{
             .callee_module = 0,

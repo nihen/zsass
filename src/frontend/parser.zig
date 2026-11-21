@@ -21,6 +21,7 @@ const InternId = intern_pool_mod.InternId;
 const BinOp = ast_flat.BinOp;
 const UnaryOp = ast_flat.UnaryOp;
 const error_format = @import("../runtime/error_format.zig");
+const css_utils = @import("../runtime/css_utils.zig");
 
 const ParseError = error{ UnexpectedEof, OutOfMemory, SyntaxError, HardSyntaxError };
 
@@ -102,6 +103,10 @@ pub const Parser = struct {
     /// Used to keep CSS special/url-like function calls in opaque raw form
     /// so evaluator-side CSS normalization handles escapes/comments.
     in_declaration_value_context: bool = false,
+    /// Replacement text for the first token of the range passed to
+    /// `emitUnquotedTextExprFromTokenRange`: the canonical spelling of a
+    /// function name written with escapes. Null outside such a call.
+    text_range_head_override: ?[]const u8 = null,
 
     /// True when an expression parse consumed a binary operator and then hit a
     /// declaration terminator before finding any right-hand operand token.
@@ -1650,9 +1655,9 @@ pub const Parser = struct {
             }
             if (p >= self.tokens.len or self.tokens[p].tag != .ident) return false;
             const text = self.tokens[p].slice(self.source);
-            if (!(std.ascii.eqlIgnoreCase(text, "important") or
-                std.ascii.eqlIgnoreCase(text, "default") or
-                std.ascii.eqlIgnoreCase(text, "global"))) return false;
+            if (!(identEqlIgnoreCaseUnescaped(text, "important") or
+                identEqlIgnoreCaseUnescaped(text, "default") or
+                identEqlIgnoreCaseUnescaped(text, "global"))) return false;
             p += 1;
             while (p < self.tokens.len) {
                 const t = self.tokens[p].tag;
@@ -2429,6 +2434,66 @@ pub const Parser = struct {
 
     // -- @mixin / @function / @include / generic at-rule (R.2c.7) -----------
 
+    /// Case-insensitive comparison of an identifier token against an ASCII
+    /// keyword, with the token's escapes decoded first (`\69 mportant`
+    /// matches `important`).
+    fn identEqlIgnoreCaseUnescaped(text: []const u8, keyword: []const u8) bool {
+        return identEqlUnescapedImpl(text, keyword, true);
+    }
+
+    /// Case-sensitive variant of `identEqlIgnoreCaseUnescaped`.
+    fn identEqlUnescaped(text: []const u8, keyword: []const u8) bool {
+        return identEqlUnescapedImpl(text, keyword, false);
+    }
+
+    fn identEqlUnescapedImpl(text: []const u8, keyword: []const u8, ignore_case: bool) bool {
+        if (std.mem.findScalar(u8, text, '\\') == null) {
+            return if (ignore_case) std.ascii.eqlIgnoreCase(text, keyword) else std.mem.eql(u8, text, keyword);
+        }
+        var i: usize = 0;
+        var k: usize = 0;
+        while (i < text.len) {
+            var ch: u21 = text[i];
+            if (text[i] == '\\' and i + 1 < text.len) {
+                i += 1;
+                if (std.ascii.isHex(text[i])) {
+                    var value: u32 = 0;
+                    var count: usize = 0;
+                    while (i < text.len and count < 6 and std.ascii.isHex(text[i])) : (count += 1) {
+                        value = value * 16 + (std.fmt.charToDigit(text[i], 16) catch 0);
+                        i += 1;
+                    }
+                    if (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n' or text[i] == '\r' or text[i] == '\x0c')) i += 1;
+                    if (value >= 0x80) return false;
+                    ch = @intCast(value);
+                } else {
+                    ch = text[i];
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+            if (k >= keyword.len or ch >= 0x80) return false;
+            const byte: u8 = @intCast(ch);
+            const matches = if (ignore_case)
+                std.ascii.toLower(byte) == std.ascii.toLower(keyword[k])
+            else
+                byte == keyword[k];
+            if (!matches) return false;
+            k += 1;
+        }
+        return k == keyword.len;
+    }
+
+    /// Intern a variable or parameter name (the text after `$`). Escapes are
+    /// canonicalized so every spelling of one name shares an id: `$a\5f b`
+    /// names the same variable as `$a_b`.
+    fn internVariableName(self: *Parser, name: []const u8) ParseError!InternId {
+        const canonical = css_utils.unescapeSassIdentifier(self.allocator, name) catch return error.OutOfMemory;
+        defer if (canonical.ptr != name.ptr) self.allocator.free(canonical);
+        return try self.intern_pool.intern(canonical);
+    }
+
     /// Parse a `($name [: default], $more..., ...)` parameter list.
     ///
     /// On entry, `self.pos` must index the opening `(`.  On success,
@@ -2462,7 +2527,7 @@ pub const Parser = struct {
             const var_tok = self.current();
             const var_text = var_tok.slice(self.source);
             std.debug.assert(var_text.len >= 1 and var_text[0] == '$');
-            const name_id = try self.intern_pool.intern(var_text[1..]);
+            const name_id = try self.internVariableName(var_text[1..]);
             self.advance();
             self.skipWhitespaceAndComments();
 
@@ -3477,7 +3542,10 @@ pub const Parser = struct {
             }
             if (span_start_opt == null) span_start_opt = tok.span.start;
             span_end = tok.span.end;
-            const tok_text = tok.slice(self.source);
+            const tok_text = if (i == start_idx and self.text_range_head_override != null)
+                self.text_range_head_override.?
+            else
+                tok.slice(self.source);
 
             if (pending_dropped_line_comment_space) {
                 try self.appendLiteralSliceWithLowercasePrefix(
@@ -3618,7 +3686,7 @@ pub const Parser = struct {
             const name_tok = self.current();
             const name_text = name_tok.slice(self.source);
             if (name_text.len <= 1) return error.SyntaxError;
-            const name_id = try self.intern_pool.intern(name_text[1..]);
+            const name_id = try self.internVariableName(name_text[1..]);
             self.advance();
 
             self.skipWhitespaceAndComments();
@@ -3640,7 +3708,7 @@ pub const Parser = struct {
                     break;
                 }
                 const flag_text = self.current().slice(self.source);
-                if (std.mem.eql(u8, flag_text, "default")) {
+                if (identEqlUnescaped(flag_text, "default")) {
                     flags |= 0b0000_0001;
                     self.advance();
                     continue;
@@ -3999,7 +4067,7 @@ pub const Parser = struct {
             entry_end = tok.span.end;
             self.advance();
             url_end_idx = self.pos;
-        } else if (tok.tag == .ident and std.ascii.eqlIgnoreCase(tok.slice(self.source), "url")) {
+        } else if (tok.tag == .ident and identEqlIgnoreCaseUnescaped(tok.slice(self.source), "url")) {
             // `url(...)` functional form -- consume balanced parens.
             const next_pos = self.pos + 1;
             if (next_pos >= self.tokens.len or self.tokens[next_pos].tag != .lparen) {
@@ -4122,6 +4190,16 @@ pub const Parser = struct {
     }
 
     fn emitImportNode(self: *Parser, ast: *Ast, entry: ImportEntry) ParseError!NodeIndex {
+        // `\75 rl(...)` is `url(...)`; emit the plain spelling.
+        const prev_override = self.text_range_head_override;
+        defer self.text_range_head_override = prev_override;
+        const head_tok = self.tokens[entry.url_start_idx];
+        if (head_tok.tag == .ident) {
+            const head_text = head_tok.slice(self.source);
+            if (std.mem.findScalar(u8, head_text, '\\') != null and identEqlIgnoreCaseUnescaped(head_text, "url")) {
+                self.text_range_head_override = "url";
+            }
+        }
         const url_node = (try self.emitUnquotedTextExprFromTokenRange(
             ast,
             entry.url_start_idx,
@@ -4131,6 +4209,7 @@ pub const Parser = struct {
             false,
             0,
         )) orelse return error.SyntaxError;
+        self.text_range_head_override = prev_override;
         const cond_slot: u32 = if (entry.cond_start_idx) |cond_start_idx| blk: {
             const cond_node = try self.emitUnquotedTextExprFromTokenRange(
                 ast,
@@ -4204,7 +4283,7 @@ pub const Parser = struct {
         if (t == .string) return true;
         if (t == .ident) {
             const text = self.tokens[p].span.slice(self.source);
-            if (std.ascii.eqlIgnoreCase(text, "url")) {
+            if (identEqlIgnoreCaseUnescaped(text, "url")) {
                 const next = p + 1;
                 if (next < self.tokens.len and self.tokens[next].tag == .lparen) return true;
             }
@@ -4598,7 +4677,7 @@ pub const Parser = struct {
             const v_tok = self.current();
             const v_text = v_tok.slice(self.source);
             std.debug.assert(v_text.len >= 1 and v_text[0] == '$');
-            try vars.append(self.allocator, try self.intern_pool.intern(v_text[1..]));
+            try vars.append(self.allocator, try self.internVariableName(v_text[1..]));
             self.advance();
             self.skipWhitespaceAndComments();
             if (!self.isAtEnd() and self.current().tag == .comma) {
@@ -4876,7 +4955,7 @@ pub const Parser = struct {
         const v_tok = self.current();
         const v_text = v_tok.slice(self.source);
         std.debug.assert(v_text.len >= 1 and v_text[0] == '$');
-        const var_id = try self.intern_pool.intern(v_text[1..]);
+        const var_id = try self.internVariableName(v_text[1..]);
         self.advance();
         self.skipWhitespaceAndComments();
 
@@ -5060,7 +5139,7 @@ pub const Parser = struct {
         std.debug.assert(name_tok.tag == .dollar_ident);
         const name_text = name_tok.slice(self.source);
         std.debug.assert(name_text.len >= 1 and name_text[0] == '$');
-        const name_id = try self.intern_pool.intern(name_text[1..]);
+        const name_id = try self.internVariableName(name_text[1..]);
         self.advance(); // skip $name
 
         self.skipWhitespaceAndComments();
@@ -5133,13 +5212,13 @@ pub const Parser = struct {
                 break;
             }
             const text = self.current().slice(self.source);
-            if (std.mem.eql(u8, text, "default")) {
+            if (identEqlUnescaped(text, "default")) {
                 flags_u32 |= 0b0000_0001;
                 end_pos = self.current().span.end;
                 self.advance();
                 continue;
             }
-            if (std.mem.eql(u8, text, "global")) {
+            if (identEqlUnescaped(text, "global")) {
                 flags_u32 |= 0b0000_0010;
                 end_pos = self.current().span.end;
                 self.advance();
@@ -5711,9 +5790,9 @@ pub const Parser = struct {
             .bang => switch (next_tok.tag) {
                 .ident => blk: {
                     const text = next_tok.slice(self.source);
-                    break :blk std.ascii.eqlIgnoreCase(text, "important") or
-                        std.ascii.eqlIgnoreCase(text, "default") or
-                        std.ascii.eqlIgnoreCase(text, "global");
+                    break :blk identEqlIgnoreCaseUnescaped(text, "important") or
+                        identEqlIgnoreCaseUnescaped(text, "default") or
+                        identEqlIgnoreCaseUnescaped(text, "global");
                 },
                 else => false,
             },
@@ -5826,7 +5905,7 @@ pub const Parser = struct {
         while (p < self.tokens.len) : (p += 1) {
             const t = self.tokens[p].tag;
             if (t == .whitespace or t == .newline or t == .comment) continue;
-            if (t == .ident and std.ascii.eqlIgnoreCase(self.tokens[p].slice(self.source), "important")) return true;
+            if (t == .ident and identEqlIgnoreCaseUnescaped(self.tokens[p].slice(self.source), "important")) return true;
             return false;
         }
         return false;
@@ -5842,7 +5921,7 @@ pub const Parser = struct {
         self.skipWhitespaceAndComments();
         const ident_tok = self.current();
         std.debug.assert(ident_tok.tag == .ident);
-        std.debug.assert(std.ascii.eqlIgnoreCase(ident_tok.slice(self.source), "important"));
+        std.debug.assert(identEqlIgnoreCaseUnescaped(ident_tok.slice(self.source), "important"));
         self.advance();
         const id = try self.intern_pool.intern("!important");
         return try ast.addNode(.{
@@ -7467,13 +7546,17 @@ pub const Parser = struct {
         // Function call: `ident(` -- no whitespace between.  The opening
         // paren must be the very next token.
         if (self.pos < self.tokens.len and self.tokens[self.pos].tag == .lparen) {
-            if ((self.in_declaration_value_context and shouldTreatAsOpaqueCssFunctionInDecl(text)) or
-                shouldTreatAsOpaqueCssFunctionInScript(text, self.hasInterpolationInCurrentCallParens()) or
-                self.shouldTreatUrlRawPathAsOpaque(text))
+            // An escaped spelling names the same function as the plain one
+            // (`\75 rl(` is `url(`), so classify the canonical name.
+            const call_name = css_utils.unescapeSassIdentifier(self.allocator, text) catch return error.OutOfMemory;
+            defer if (call_name.ptr != text.ptr) self.allocator.free(call_name);
+            if ((self.in_declaration_value_context and shouldTreatAsOpaqueCssFunctionInDecl(call_name)) or
+                shouldTreatAsOpaqueCssFunctionInScript(call_name, self.hasInterpolationInCurrentCallParens()) or
+                self.shouldTreatUrlRawPathAsOpaque(call_name))
             {
-                return try self.parseOpaqueCssFunctionCallAsTextExpr(ast, ident_pos, text);
+                return try self.parseOpaqueCssFunctionCallAsTextExpr(ast, ident_pos, call_name);
             }
-            const name_id = try self.intern_pool.intern(text);
+            const name_id = try self.intern_pool.intern(call_name);
             return try self.parseFunctionCallBody(ast, name_id, .none, tok.span.start);
         }
 
@@ -7554,7 +7637,7 @@ pub const Parser = struct {
                     // error: `ns.$_member` (decl-time / parse-time).
                     if (var_text.len >= 2 and var_text[1] == '_') return error.HardSyntaxError;
                     const ns_id = try self.intern_pool.intern(text);
-                    const name_id = try self.intern_pool.intern(var_text[1..]);
+                    const name_id = try self.internVariableName(var_text[1..]);
                     self.advance(); // consume dollar_ident
 
                     const extra_off = try ast.appendExtraU32(@intFromEnum(ns_id));
@@ -7738,6 +7821,12 @@ pub const Parser = struct {
             fn_name.len
         else
             0;
+        // `fn_name` is the canonical name; emit it in place of an escaped
+        // spelling so later stages see `url(`, not `\75 rl(`.
+        const head_tok_text = self.tokens[start_pos].slice(self.source);
+        const prev_override = self.text_range_head_override;
+        defer self.text_range_head_override = prev_override;
+        self.text_range_head_override = if (std.mem.eql(u8, head_tok_text, fn_name)) null else fn_name;
         return (try self.emitUnquotedTextExprFromTokenRange(
             ast,
             start_pos,
@@ -7981,7 +8070,7 @@ pub const Parser = struct {
                 if (!self.isAtEnd() and self.current().tag == .colon) {
                     const var_text = var_tok.slice(self.source);
                     std.debug.assert(var_text.len >= 1 and var_text[0] == '$');
-                    kw_name = try self.intern_pool.intern(var_text[1..]);
+                    kw_name = try self.internVariableName(var_text[1..]);
                     self.advance(); // skip :
                     self.skipWhitespaceAndComments();
                 } else {
@@ -8279,7 +8368,7 @@ pub const Parser = struct {
         if (text.len == 1) return error.HardSyntaxError;
         self.advance();
 
-        const name_id = try self.intern_pool.intern(text[1..]);
+        const name_id = try self.internVariableName(text[1..]);
 
         return try ast.addNode(.{
             .tag = .expr_variable,

@@ -822,73 +822,180 @@ pub fn unescapeSassString(allocator: std.mem.Allocator, text: []const u8) ![]con
     return buf.toOwnedSlice(allocator);
 }
 
-/// Unescape Sass identifier escape sequences while preserving control escapes.
+/// Canonicalize the escapes in a Sass identifier (a function, mixin, variable,
+/// parameter, or unit name). Every spelling of the same identifier maps to one
+/// text: an escape for a name character decodes to that character, while a
+/// character that cannot appear bare stays escaped (`\24` and `\$` both become
+/// `\$`, a leading digit becomes `\31 `, control characters become `\9 `).
+/// Returns `text` itself when it has no escapes.
 pub fn unescapeSassIdentifier(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
-    if (std.mem.find(u8, text, "\\") == null) return text;
+    if (std.mem.findScalar(u8, text, '\\') == null) return text;
+
+    const replaced = try replaceInvalidEscapeCodePoints(allocator, text);
+    defer if (replaced.ptr != text.ptr) allocator.free(replaced);
+    const normalized = normalizeCssValueEscapes(allocator, replaced) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => replaced,
+    };
+    if (normalized.ptr != replaced.ptr) return normalized;
+    if (replaced.ptr == text.ptr) return text;
+    return try allocator.dupe(u8, replaced);
+}
+
+/// Decode every escape in an identifier to the character it denotes. This is
+/// the spelling Sass prints for the name of a plain CSS function call written
+/// in source (`\24(1)` is emitted as `$(1)`). Returns `text` itself when it has
+/// no escapes.
+pub fn decodeSassIdentifier(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    if (std.mem.findScalar(u8, text, '\\') == null) return text;
 
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
-
     var i: usize = 0;
     while (i < text.len) {
-        if (text[i] != '\\') {
+        if (text[i] != '\\' or i + 1 >= text.len) {
             try buf.append(allocator, text[i]);
             i += 1;
             continue;
         }
-
-        // Trailing backslash: preserve as-is.
-        if (i + 1 >= text.len) {
-            try buf.append(allocator, '\\');
-            break;
-        }
         i += 1;
-
         if (isHexDigit(text[i])) {
-            var value: u21 = 0;
-            var count: u32 = 0;
+            var value: u32 = 0;
+            var count: usize = 0;
             while (i < text.len and count < 6 and isHexDigit(text[i])) : (count += 1) {
                 value = value * 16 + hexDigitValue(text[i]);
                 i += 1;
             }
-            if (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n' or text[i] == '\r' or text[i] == '\x0c')) {
-                i += 1;
-            }
-
-            // Identifier contexts preserve control/NUL escapes as escaped text
-            // rather than decoding to raw control bytes.
-            if (value == 0 or value <= 0x1F or value == 0x7F) {
-                try buf.append(allocator, '\\');
-                var hex_buf: [6]u8 = undefined;
-                const hex = std.fmt.bufPrint(&hex_buf, "{x}", .{value}) catch "0";
-                try buf.appendSlice(allocator, hex);
-                // Keep one delimiter space so the escape cannot absorb following hex.
-                try buf.append(allocator, ' ');
-            } else if (value > 0x10FFFF) {
-                try buf.appendSlice(allocator, "\xEF\xBF\xBD");
-            } else {
-                var utf8_buf: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(@intCast(value), &utf8_buf) catch 0;
-                try buf.appendSlice(allocator, utf8_buf[0..len]);
-            }
+            if (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n' or text[i] == '\r' or text[i] == '\x0c')) i += 1;
+            const code_point: u21 = if (isInvalidEscapeCodePoint(value)) 0xFFFD else @intCast(value);
+            var utf8_buf: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(code_point, &utf8_buf) catch unreachable;
+            try buf.appendSlice(allocator, utf8_buf[0..len]);
             continue;
         }
-
-        if (text[i] == '\r') {
-            i += 1;
-            if (i < text.len and text[i] == '\n') i += 1;
-            continue;
-        }
-        if (text[i] == '\n' or text[i] == '\x0c') {
-            i += 1;
-            continue;
-        }
-
         try buf.append(allocator, text[i]);
         i += 1;
     }
+    return try buf.toOwnedSlice(allocator);
+}
 
-    return buf.toOwnedSlice(allocator);
+/// Inverse of `decodeSassIdentifier` up to canonical spelling: escape the
+/// characters of a decoded name that cannot appear bare, giving the text
+/// `unescapeSassIdentifier` produces for any spelling of that name. Returns
+/// `decoded` itself when no character needs an escape.
+pub fn canonicalizeDecodedIdentifier(allocator: std.mem.Allocator, decoded: []const u8) ![]const u8 {
+    var needs_escape = decoded.len > 0 and std.ascii.isDigit(decoded[0]);
+    if (!needs_escape) {
+        for (decoded) |c| {
+            if (!isIdentCharByte(c)) {
+                needs_escape = true;
+                break;
+            }
+        }
+    }
+    if (!needs_escape) return decoded;
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    for (decoded, 0..) |c, idx| {
+        if (isIdentCharByte(c) and !(idx == 0 and std.ascii.isDigit(c))) {
+            try buf.append(allocator, c);
+        } else if (std.ascii.isDigit(c) or c < 0x20 or c == 0x7F) {
+            var hex_buf: [8]u8 = undefined;
+            const hex = std.fmt.bufPrint(&hex_buf, "\\{x} ", .{c}) catch unreachable;
+            try buf.appendSlice(allocator, hex);
+        } else {
+            try buf.append(allocator, '\\');
+            try buf.append(allocator, c);
+        }
+    }
+    return try buf.toOwnedSlice(allocator);
+}
+
+/// Canonicalize an unquoted `name(...)` literal whose name is written with
+/// escapes, and the contents of an unquoted `url(...)`. The name is printed
+/// decoded (`\75 rl(` is `url(`); inside `url(` an escape for a name character
+/// decodes to it and any other escape keeps a backslash (`\41` is `A`, `\24`
+/// is `\$`). Returns `text` itself when nothing changes.
+pub fn normalizeCssCallLiteralEscapes(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    if (std.mem.findScalar(u8, text, '\\') == null) return text;
+
+    // Leading identifier, up to `(`.
+    var name_end: usize = 0;
+    while (name_end < text.len) {
+        const c = text[name_end];
+        if (isIdentCharByte(c)) {
+            name_end += 1;
+        } else if (c == '\\' and name_end + 1 < text.len) {
+            if (isHexDigit(text[name_end + 1])) {
+                var j = name_end + 1;
+                while (j < text.len and j - (name_end + 1) < 6 and isHexDigit(text[j])) j += 1;
+                if (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
+                name_end = j;
+            } else {
+                name_end += 2;
+            }
+        } else break;
+    }
+    if (name_end == 0 or name_end >= text.len or text[name_end] != '(') return text;
+
+    const raw_name = text[0..name_end];
+    const name = try decodeSassIdentifier(allocator, raw_name);
+    defer if (name.ptr != raw_name.ptr) allocator.free(name);
+    for (name) |c| {
+        if (!isIdentCharByte(c)) return text;
+    }
+
+    const is_url = std.ascii.eqlIgnoreCase(stripVendorPrefixFromFunctionName(name), "url");
+    var body_start = name_end + 1;
+    while (body_start < text.len and (text[body_start] == ' ' or text[body_start] == '\t' or text[body_start] == '\n')) body_start += 1;
+    const quoted_or_dynamic = body_start < text.len and (text[body_start] == '"' or text[body_start] == '\'');
+    const body = text[name_end + 1 ..];
+    if (!is_url or quoted_or_dynamic or std.mem.findScalar(u8, body, '\\') == null) {
+        if (name.ptr == raw_name.ptr) return text;
+        return try std.mem.concat(allocator, u8, &.{ name, text[name_end..] });
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, name);
+    try buf.append(allocator, '(');
+    var i: usize = 0;
+    while (i < body.len) {
+        if (body[i] != '\\' or i + 1 >= body.len) {
+            try buf.append(allocator, body[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        var code_point: u21 = undefined;
+        if (isHexDigit(body[i])) {
+            var value: u32 = 0;
+            var count: usize = 0;
+            while (i < body.len and count < 6 and isHexDigit(body[i])) : (count += 1) {
+                value = value * 16 + hexDigitValue(body[i]);
+                i += 1;
+            }
+            if (i < body.len and (body[i] == ' ' or body[i] == '\t' or body[i] == '\n' or body[i] == '\r' or body[i] == '\x0c')) i += 1;
+            code_point = if (isInvalidEscapeCodePoint(value)) 0xFFFD else @intCast(value);
+        } else {
+            const seq_len = std.unicode.utf8ByteSequenceLength(body[i]) catch 1;
+            const end = @min(body.len, i + seq_len);
+            code_point = std.unicode.utf8Decode(body[i..end]) catch body[i];
+            i = end;
+        }
+        if (code_point < 0x20 or code_point == 0x7F) {
+            var hex_buf: [8]u8 = undefined;
+            const hex = std.fmt.bufPrint(&hex_buf, "\\{x} ", .{code_point}) catch unreachable;
+            try buf.appendSlice(allocator, hex);
+            continue;
+        }
+        if (code_point < 0x80 and !isIdentCharByte(@intCast(code_point))) try buf.append(allocator, '\\');
+        var utf8_buf: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(code_point, &utf8_buf) catch unreachable;
+        try buf.appendSlice(allocator, utf8_buf[0..len]);
+    }
+    return try buf.toOwnedSlice(allocator);
 }
 
 pub fn hexDigitValue(c: u8) u21 {
@@ -1420,4 +1527,62 @@ test "replaceInvalidEscapeCodePoints rewrites invalid escapes to U+FFFD" {
         const out = try replaceInvalidEscapeCodePoints(alloc, text);
         try std.testing.expect(out.ptr == text.ptr);
     }
+}
+
+test "unescapeSassIdentifier maps every spelling of a name to one text" {
+    const alloc = std.testing.allocator;
+    const cases = [_][2][]const u8{
+        .{ "\\24", "\\$" },
+        .{ "\\$", "\\$" },
+        .{ "a\\5f b", "a_b" },
+        .{ "\\61 bc", "abc" },
+        .{ "\\31 a", "\\31 a" },
+        .{ "a\\.b", "a\\.b" },
+        .{ "\\9x", "\\9 x" },
+        .{ "\\0 x", "\xEF\xBF\xBDx" },
+    };
+    for (cases) |case| {
+        const out = try unescapeSassIdentifier(alloc, case[0]);
+        defer if (out.ptr != case[0].ptr) alloc.free(out);
+        try std.testing.expectEqualStrings(case[1], out);
+    }
+}
+
+test "decodeSassIdentifier and canonicalizeDecodedIdentifier round-trip" {
+    const alloc = std.testing.allocator;
+    const cases = [_][3][]const u8{
+        // source spelling, decoded, canonical
+        .{ "\\24", "$", "\\$" },
+        .{ "x\\.y", "x.y", "x\\.y" },
+        .{ "\\31 a", "1a", "\\31 a" },
+        .{ "a\\5f b", "a_b", "a_b" },
+    };
+    for (cases) |case| {
+        const decoded = try decodeSassIdentifier(alloc, case[0]);
+        defer if (decoded.ptr != case[0].ptr) alloc.free(decoded);
+        try std.testing.expectEqualStrings(case[1], decoded);
+        const canonical = try canonicalizeDecodedIdentifier(alloc, decoded);
+        defer if (canonical.ptr != decoded.ptr) alloc.free(canonical);
+        try std.testing.expectEqualStrings(case[2], canonical);
+    }
+}
+
+test "normalizeCssCallLiteralEscapes canonicalizes url() names and contents" {
+    const alloc = std.testing.allocator;
+    const cases = [_][2][]const u8{
+        .{ "url(\\41)", "url(A)" },
+        .{ "url(\\31 a)", "url(1a)" },
+        .{ "url(\\24)", "url(\\$)" },
+        .{ "url(\\41  b)", "url(A b)" },
+        .{ "\\75 rl(http://example.org)", "url(http://example.org)" },
+        .{ "\\75 rl(\"\\41\")", "url(\"\\41\")" },
+        .{ "\\65 lement(#a)", "element(#a)" },
+    };
+    for (cases) |case| {
+        const out = try normalizeCssCallLiteralEscapes(alloc, case[0]);
+        defer if (out.ptr != case[0].ptr) alloc.free(out);
+        try std.testing.expectEqualStrings(case[1], out);
+    }
+    const untouched = "url(\"\\41\")";
+    try std.testing.expect((try normalizeCssCallLiteralEscapes(alloc, untouched)).ptr == untouched.ptr);
 }

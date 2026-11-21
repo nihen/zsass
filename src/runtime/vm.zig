@@ -12783,6 +12783,12 @@ fn appendSerializedDeclStringImpl(
                 } else if (preserve_linebreak_escape) {
                     try appendForcedHexEscape(alloc, acc, code_point);
                     prev_was_hex_escape = false;
+                } else if (quote_char == null and !codePointNeedsHexEscape(code_point)) {
+                    // Unquoted text keeps its escapes as written: source
+                    // literals were canonicalized when compiled, and text
+                    // built at runtime is emitted verbatim.
+                    try acc.appendSlice(alloc, raw[i..j]);
+                    prev_was_hex_escape = false;
                 } else {
                     if (prev_was_hex_escape and codePointNeedsHexEscapeSeparator(code_point)) {
                         try acc.append(alloc, ' ');
