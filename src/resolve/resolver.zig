@@ -1055,6 +1055,9 @@ fn lookupModuleStaticOrConfigSeedValue(loader: *const ModuleResolver, module_id:
 const ResolverEvalEnv = struct {
     ctx: *Ctx,
     allow_configurable_defaults: bool = false,
+    /// Evaluate string literals to their canonical text. Set when the result
+    /// is a final value (a module configuration), not compiled again.
+    canonical_literals: bool = false,
 
     pub fn allocator(self: *const ResolverEvalEnv) std.mem.Allocator {
         return self.ctx.a;
@@ -1155,15 +1158,28 @@ fn tryStaticEvalValue(ctx: *Ctx, expr: ExprIndex) ?value_mod.Value {
 fn tryAppendStaticValueExpr(ctx: *Ctx, value: value_mod.Value, span: Span) ResolveError!?ExprIndex {
     switch (value.kind()) {
         .number => return try appendNumberLiteral(ctx.prog, ctx.a, value.asF64(ctx.prog.value_number_pool), value.unitId(ctx.prog.value_number_pool), span),
-        .string => return try appendExpr(ctx.prog, ctx.a, .{
-            .kind = .literal_string,
-            .payload = packLiteralStringPayload(
-                value.stringIntern(),
-                value.stringQuoted(ctx.prog.value_string_flags_pool.items),
-                value.stringNamedColorLiteral(ctx.prog.value_string_flags_pool.items),
-            ),
-            .span = span,
-        }),
+        .string => {
+            const quoted = value.stringQuoted(ctx.prog.value_string_flags_pool.items);
+            var id = value.stringIntern();
+            const text = ctx.pool.get(id);
+            // The value holds canonical text, and the compiler decodes a
+            // quoted literal's escapes again. Write a backslash as `\\\\` so
+            // the literal decodes back to this value.
+            if (quoted and std.mem.findScalar(u8, text, '\\') != null) {
+                const escaped = try std.mem.replaceOwned(u8, ctx.a, text, "\\", "\\\\");
+                defer ctx.a.free(escaped);
+                id = try ctx.pool.intern(escaped);
+            }
+            return try appendExpr(ctx.prog, ctx.a, .{
+                .kind = .literal_string,
+                .payload = packLiteralStringPayload(
+                    id,
+                    quoted,
+                    value.stringNamedColorLiteral(ctx.prog.value_string_flags_pool.items),
+                ),
+                .span = span,
+            });
+        },
         .boolean => return try appendExpr(ctx.prog, ctx.a, .{
             .kind = .literal_bool,
             .payload = if (value.p64Of() != 0) 1 else 0,
@@ -1616,17 +1632,11 @@ fn parseWithConfigEntries(ctx: *Ctx, config_extra: ExtraIndex) ResolveError![]Wi
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.SassError,
         };
-        var env: ResolverEvalEnv = .{ .ctx = ctx, .allow_configurable_defaults = true };
-        const static_value = resolver_eval.eval(&env, ctx.prog, expr_idx) catch |err| switch (err) {
+        var env: ResolverEvalEnv = .{ .ctx = ctx, .allow_configurable_defaults = true, .canonical_literals = true };
+        const value = resolver_eval.eval(&env, ctx.prog, expr_idx) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.SassError,
         };
-        // Only a value written as one literal is its own source text; text
-        // assembled by an expression is not re-interpreted.
-        const value = if (ctx.prog.exprs.items[expr_idx].kind == .literal_string)
-            try canonicalizeStaticStringValue(ctx, static_value)
-        else
-            static_value;
         const name = ctx.pool.get(name_id);
         for (out.items) |existing| {
             if (identifierEq(existing.name, name)) return error.SassError;
@@ -1641,28 +1651,10 @@ fn parseWithConfigEntries(ctx: *Ctx, config_extra: ExtraIndex) ResolveError![]Wi
     return try out.toOwnedSlice(ctx.a);
 }
 
-/// A statically evaluated string literal holds its source text. A module
-/// configuration value is used as is, so give it the canonical text the
-/// compiler would: decoded for a quoted string, canonical escapes for an
-/// unquoted identifier.
-fn canonicalizeStaticStringValue(ctx: *Ctx, value: value_mod.Value) ResolveError!value_mod.Value {
-    if (value.kind() != .string) return value;
-    const raw = ctx.pool.get(value.stringIntern());
-    if (std.mem.findScalar(u8, raw, '\\') == null) return value;
-    const flags = ctx.prog.value_string_flags_pool.items;
-    const quoted = value.stringQuoted(flags);
-    if (!quoted and !css_utils.unquotedLiteralIsIdentifierText(raw)) return value;
-    const text = if (quoted)
-        try css_utils.unescapeSassString(ctx.a, raw)
-    else
-        try css_utils.canonicalizeIdentifierValueEscapes(ctx.a, raw);
-    defer if (text.ptr != raw.ptr) ctx.a.free(text);
-    const id = try ctx.pool.intern(text);
-    return value_mod.Value.stringWithFlagsEx(id, quoted, false, value.stringNamedColorLiteral(flags));
-}
-
 fn updateTopLevelStaticConfigValue(ctx: *Ctx, slot: SlotId, value_expr: ExprIndex) ResolveError!void {
-    var env: ResolverEvalEnv = .{ .ctx = ctx, .allow_configurable_defaults = true };
+    // The stored value is used as is (as a configuration seed, or written
+    // back as a literal), so literals are evaluated to their canonical text.
+    var env: ResolverEvalEnv = .{ .ctx = ctx, .allow_configurable_defaults = true, .canonical_literals = true };
     const value = resolver_eval.eval(&env, ctx.prog, value_expr) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {

@@ -1401,6 +1401,23 @@ fn literalStringHasLeadingDotDecimal(raw: []const u8) bool {
     return false;
 }
 
+fn calcArgHasEscapedHyphen(arg: []const u8) bool {
+    var i: usize = 0;
+    while (i + 1 < arg.len) : (i += 1) {
+        if (arg[i] != '\\') continue;
+        if (arg[i + 1] == '-') return true;
+        var j = i + 1;
+        var value: u32 = 0;
+        while (j < arg.len and j - (i + 1) < 6 and std.ascii.isHex(arg[j])) : (j += 1) {
+            value = value * 16 + css_utils.hexDigitValue(arg[j]);
+        }
+        if (j > i + 1 and value == '-') return true;
+        // Skip the escaped character so `\\-` is not taken for `\-`.
+        i += 1;
+    }
+    return false;
+}
+
 fn normalizeLiteralStringIntern(
     pool: *InternPool,
     alloc: std.mem.Allocator,
@@ -1411,7 +1428,9 @@ fn normalizeLiteralStringIntern(
     is_value_literal: bool,
 ) CompileError!InternId {
     const source_raw = pool.get(id);
-    const raw = if (quoted or !is_value_literal)
+    // The text of a special function such as `element("\0")` keeps its quoted
+    // strings as written, so it is left to the call normalization below.
+    const raw = if (quoted or !is_value_literal or css_utils.isNonUrlCallLiteral(source_raw))
         source_raw
     else
         css_utils.replaceInvalidEscapeCodePoints(alloc, source_raw) catch return error.OutOfMemory;
@@ -1420,7 +1439,9 @@ fn normalizeLiteralStringIntern(
         // A calculation argument kept as text: its identifiers are ordinary
         // values, so canonicalize their escapes.
         const arg = raw[calc_utils.calc_arg_marker.len..];
-        if (std.mem.findScalar(u8, arg, '\\') == null) {
+        // An escaped hyphen stays as written: decoded, the calculation
+        // formatter would read it as a subtraction.
+        if (std.mem.findScalar(u8, arg, '\\') == null or calcArgHasEscapedHyphen(arg)) {
             if (raw.ptr == source_raw.ptr) return id;
             return pool.intern(raw) catch return error.OutOfMemory;
         }

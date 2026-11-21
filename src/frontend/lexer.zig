@@ -285,7 +285,8 @@ pub const Lexer = struct {
                     if (next == '-' or isIdentStart(next)) return self.lexIdent();
                     // `-\41` is the identifier `-A`, not a negated `\41`.
                     if (next == '\\' and self.pos + 2 < self.source.len and
-                        self.source[self.pos + 2] != '\n' and self.source[self.pos + 2] != '\r')
+                        self.source[self.pos + 2] != '\n' and self.source[self.pos + 2] != '\r' and
+                        self.source[self.pos + 2] != '\x0c')
                     {
                         return self.lexIdent();
                     }

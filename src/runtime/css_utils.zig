@@ -964,10 +964,28 @@ pub fn canonicalizeDecodedIdentifier(allocator: std.mem.Allocator, decoded: []co
 
 /// Canonicalize the escapes of an unquoted `name(...)` literal: the text of a
 /// special function such as `url()`, `element()`, or a calculation kept as
-/// written. The name is printed decoded (`\75 rl(` is `url(`). In the unquoted
-/// parts of the arguments an escape for a name character decodes to it and any
-/// other escape keeps a backslash (`\41` is `A`, `\24` is `\$`). Quoted strings
-/// are left alone. Returns `text` itself when nothing changes.
+/// written. The name is printed decoded (`\75 rl(` is `url(`). Unquoted
+/// arguments are canonicalized as identifiers (`\61` is `a`, `\31` stays
+/// `\31 `); inside `url(` every escape for a name character decodes, a digit
+/// included (`\31 a` is `1a`). Quoted strings are left alone. Returns `text`
+/// itself when nothing changes.
+/// True when `text` is the text of a function call other than `url()`, such
+/// as `element(...)`: a name, written plainly or with escapes, then `(`.
+pub fn isNonUrlCallLiteral(text: []const u8) bool {
+    const lparen = std.mem.findScalar(u8, text, '(') orelse return false;
+    if (lparen == 0) return false;
+    var saw_escape = false;
+    for (text[0..lparen]) |c| {
+        if (c == '\\') saw_escape = true;
+        if (!isIdentCharByte(c) and c != '\\' and c != ' ' and c != ':' and c != '.') return false;
+        // A space belongs to a name only as the delimiter of a hex escape.
+        if (c == ' ' and !saw_escape) return false;
+    }
+    // `url` spelled plainly; an escaped spelling is resolved by the caller's
+    // normalization, which handles both kinds.
+    return !std.ascii.eqlIgnoreCase(stripVendorPrefixFromFunctionName(text[0..lparen]), "url") and !saw_escape;
+}
+
 pub fn normalizeCssCallLiteralEscapes(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
     if (std.mem.findScalar(u8, text, '\\') == null) return text;
 
@@ -988,13 +1006,21 @@ pub fn normalizeCssCallLiteralEscapes(allocator: std.mem.Allocator, text: []cons
             }
         } else break;
     }
+    // `progid:DXImageTransform.Microsoft.Alpha(` names a legacy filter; its
+    // name runs to the parenthesis.
+    if (std.ascii.startsWithIgnoreCase(text, "progid:")) {
+        name_end = std.mem.findScalar(u8, text, '(') orelse return text;
+        for (text[0..name_end]) |c| {
+            if (!isIdentCharByte(c) and c != ':' and c != '.') return text;
+        }
+    }
     if (name_end == 0 or name_end >= text.len or text[name_end] != '(') return text;
 
     const raw_name = text[0..name_end];
     const name = try decodeSassIdentifier(allocator, raw_name);
     defer if (name.ptr != raw_name.ptr) allocator.free(name);
     for (name) |c| {
-        if (!isIdentCharByte(c)) return text;
+        if (!isIdentCharByte(c) and c != ':' and c != '.') return text;
     }
 
     const body = text[name_end + 1 ..];
@@ -1003,6 +1029,22 @@ pub fn normalizeCssCallLiteralEscapes(allocator: std.mem.Allocator, text: []cons
         return try std.mem.concat(allocator, u8, &.{ name, text[name_end..] });
     }
 
+    if (!std.ascii.eqlIgnoreCase(stripVendorPrefixFromFunctionName(name), "url")) {
+        // The arguments are ordinary identifiers: canonicalize them as
+        // values. An argument is never the lone `\0` identifier.
+        // Quoted strings in the text of a special function are copied as written.
+        const replaced = try replaceInvalidEscapeCodePointsImpl(allocator, body, false, false);
+        defer if (replaced.ptr != body.ptr) allocator.free(replaced);
+        const normalized = normalizeCssValueEscapes(allocator, replaced) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => replaced,
+        };
+        defer if (normalized.ptr != replaced.ptr) allocator.free(normalized);
+        if (name.ptr == raw_name.ptr and normalized.ptr == body.ptr) return text;
+        return try std.mem.concat(allocator, u8, &.{ name, "(", normalized });
+    }
+
+    // url(): every escape for a name character decodes, digits included.
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try buf.appendSlice(allocator, name);
@@ -1311,7 +1353,12 @@ fn endsWithEscapeToken(out: []const u8) bool {
     var i = out.len - 1;
     var count: usize = 0;
     while (i > 0 and count < 6 and isHexDigit(out[i - 1])) : (count += 1) i -= 1;
-    return count > 0 and i > 0 and out[i - 1] == '\\';
+    if (count == 0 or i == 0 or out[i - 1] != '\\') return false;
+    // The backslash starts an escape only when it is not itself escaped.
+    var backslashes: usize = 0;
+    var j = i;
+    while (j > 0 and out[j - 1] == '\\') : (j -= 1) backslashes += 1;
+    return backslashes % 2 == 1;
 }
 
 /// Code points a CSS escape cannot denote: U+0000, surrogates, and values past
@@ -1324,6 +1371,15 @@ pub fn isInvalidEscapeCodePoint(code_point: u32) bool {
 /// text to U+FFFD. An unquoted identifier that is exactly `\0` keeps its
 /// escaped spelling. Returns `text` itself when nothing changes.
 pub fn replaceInvalidEscapeCodePoints(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    return replaceInvalidEscapeCodePointsImpl(allocator, text, true, true);
+}
+
+fn replaceInvalidEscapeCodePointsImpl(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    keep_lone_nul: bool,
+    replace_in_strings: bool,
+) ![]const u8 {
     if (std.mem.findScalar(u8, text, '\\') == null) return text;
 
     var buf: std.ArrayList(u8) = .empty;
@@ -1371,7 +1427,8 @@ pub fn replaceInvalidEscapeCodePoints(allocator: std.mem.Allocator, text: []cons
         }
         const replace = blk: {
             if (!isInvalidEscapeCodePoint(value)) break :blk false;
-            if (value != 0 or in_string != 0) break :blk true;
+            if (in_string != 0 and !replace_in_strings) break :blk false;
+            if (value != 0 or in_string != 0 or !keep_lone_nul) break :blk true;
             const next_continues = after < text.len and (isIdentCharByte(text[after]) or text[after] == '\\');
             break :blk prev_continues or next_continues;
         };
@@ -1687,6 +1744,8 @@ test "normalizeCssCallLiteralEscapes canonicalizes url() names and contents" {
         .{ "\\75 rl(\"\\41\")", "url(\"\\41\")" },
         .{ "\\65 lement(#a)", "element(#a)" },
         .{ "element(\\24 \\31 a \"\\61\" \\0)", "element(\\$1a \"\\61\" \xEF\xBF\xBD)" },
+        .{ "element(\\31 a \\31)", "element(\\31 a \\31 )" },
+        .{ "progid:DXImageTransform.Microsoft.Alpha(\\61)", "progid:DXImageTransform.Microsoft.Alpha(a)" },
         .{ "url(\\\xE2x)", "url(\\\xE2x)" },
     };
     for (cases) |case| {

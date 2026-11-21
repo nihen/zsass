@@ -50,6 +50,14 @@ fn unpackLiteralStringPayload(payload: u32) LiteralStringPayload {
     };
 }
 
+/// True when the environment asks for string literals in their canonical
+/// (compiled) text rather than their source text: its result is used as a
+/// final value instead of being compiled again.
+fn envWantsCanonicalLiterals(env: anytype) bool {
+    const Env = @typeInfo(@TypeOf(env)).pointer.child;
+    return @hasField(Env, "canonical_literals") and env.canonical_literals;
+}
+
 pub fn eval(env: anytype, prog: anytype, expr_idx: anytype) Error!Value {
     const ex = prog.exprs.items[expr_idx];
     return switch (ex.kind) {
@@ -61,6 +69,26 @@ pub fn eval(env: anytype, prog: anytype, expr_idx: anytype) Error!Value {
         },
         .literal_string => blk: {
             const lit = unpackLiteralStringPayload(ex.payload);
+            const raw = env.pool().get(lit.id);
+            if (std.mem.findScalar(u8, raw, '\\') != null) {
+                // The compiler canonicalizes a literal's escapes, so its
+                // source text is not its value. Unless this evaluation
+                // produces final values, leave the literal to runtime.
+                if (!envWantsCanonicalLiterals(env)) return error.NonStaticExpr;
+                {
+                    // Text that is not one identifier (call text, marked
+                    // fragments) has no static value here.
+                    if (!lit.quoted and !css_utils.unquotedLiteralIsIdentifierText(raw)) return error.NonStaticExpr;
+                    const alloc = env.allocator();
+                    const text = if (lit.quoted)
+                        css_utils.unescapeSassString(alloc, raw) catch return error.OutOfMemory
+                    else
+                        css_utils.canonicalizeIdentifierValueEscapes(alloc, raw) catch return error.OutOfMemory;
+                    defer if (text.ptr != raw.ptr) alloc.free(text);
+                    const id = env.pool().intern(text) catch return error.OutOfMemory;
+                    break :blk Value.stringWithFlagsEx(id, lit.quoted, false, lit.named_color_literal);
+                }
+            }
             break :blk Value.stringWithFlagsEx(lit.id, lit.quoted, false, lit.named_color_literal);
         },
         .literal_color => try evalLiteralColor(env, prog, ex.payload),
@@ -282,14 +310,6 @@ fn evalBuiltinCall(env: anytype, prog: anytype, payload: u32) Error!Value {
 
     for (arg_exprs, 0..) |arg_expr, i| {
         args[i] = eval(env, prog, arg_expr) catch return error.NonStaticExpr;
-        // A static string literal holds its source text; the compiler
-        // canonicalizes its escapes later. A builtin must see the canonical
-        // value, so a string with escapes defers the call to runtime.
-        if (args[i].kind() == .string and
-            std.mem.findScalar(u8, env.pool().get(args[i].stringIntern()), '\\') != null)
-        {
-            return error.NonStaticExpr;
-        }
     }
 
     // Build a temporary list pool seeded from the static eval store's lists.
