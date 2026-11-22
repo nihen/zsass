@@ -5186,7 +5186,7 @@ pub const RuleIR = struct {
                 if (first.items.len != 0) {
                     const last = first.items[first.items.len - 1];
                     const separated = last == ' ' and !css_utils.endsWithEscapeWhitespace(first.items);
-                    if (last != '{' and last != '}' and last != ';' and !separated and
+                    if (!separated and
                         std.mem.startsWith(u8, std.mem.trimStart(u8, first.items[first_statement_start..], " "), "--"))
                     {
                         try first.append(allocator, ' ');
@@ -5417,7 +5417,7 @@ pub const RuleIR = struct {
                 continue;
             }
 
-            if ((c == '+' or c == '>' or c == '~') and isCompressedSelectorContext(first.items, i)) {
+            if (!in_custom_decl and (c == '+' or c == '>' or c == '~') and isCompressedSelectorContext(first.items, i)) {
                 if (out.items.len != 0 and out.items[out.items.len - 1] == ' ' and
                     !css_utils.endsWithHexEscape(out.items[0 .. out.items.len - 1])) out.items.len -= 1;
                 try out.append(allocator, c);
