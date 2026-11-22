@@ -646,6 +646,12 @@ pub const VM = struct {
     shadow_context_root_tag: ?u32 = null,
     /// load-css child VM: Do not include top-level declaration in caller's style-rule context.
     load_css_strict_top_level: bool = false,
+    /// Set on a `meta.load-css()` child VM, which emits into the rule IR of
+    /// the VM that loaded it.
+    shares_parent_rule_ir: bool = false,
+    /// Set on a `meta.load-css()` child VM that was loaded inside a style
+    /// rule or an at-rule block: its top-level statements are nested ones.
+    nested_in_parent_block: bool = false,
     /// Leave globals before sync in child load-css VM.
     keep_mod_globals_after_run: bool = false,
 
@@ -2202,6 +2208,9 @@ pub const VM = struct {
             self.module_currently_running[self.program.root_index] = false;
         };
         try self.runTopModuleWithSelectorPrefix(self.program.root_index, selector_prefix, false);
+        // A `meta.load-css()` child appends to its parent's rule IR, which
+        // may have open blocks; the parent normalizes the finished IR.
+        if (self.shares_parent_rule_ir) return;
         try self.rule_ir.normalizeAtRootBubblesRuleIR(self.allocator, self.intern_pool);
         try self.rule_ir.normalizeNestedMediaRuleIR(self.allocator, self.intern_pool);
     }
@@ -4738,7 +4747,7 @@ pub const VM = struct {
                 // If and inside at_rule block (open_block_depth > 0), do not stack stmt_gap.
                 // The latter is between @for/@each/@while expanded rules in @layer / @media / @supports
                 // To avoid inserting unnecessary blanks (actual behavior of official Sass CLI, confirmed with sass CLI 1.99.0).
-                if (self.selector_stack.items.len == 0 and self.open_block_depth == 0) {
+                if (self.selector_stack.items.len == 0 and self.open_block_depth == 0 and !self.nested_in_parent_block) {
                     // Empty scope was popped immediately after the previous visible emit (= trailing
                     // empty rule), consume this stmt_gap without accumulating it. official Sass CLI is
                     // Suppress blank after `&.empty{}` in `.parent { .child {} &.empty {} } .next{}`.
@@ -8168,6 +8177,8 @@ pub const VM = struct {
         child_vm.load_css_module_tag_override = self.load_css_next_tag_ptr.?.* - 1;
         child_vm.shadow_context_root_tag = child_vm.load_css_module_tag_override;
         child_vm.load_css_strict_top_level = is_plain_css_source and has_parent_selector;
+        child_vm.shares_parent_rule_ir = true;
+        child_vm.nested_in_parent_block = self.nested_in_parent_block or has_parent_selector or self.open_block_depth > 0;
         child_vm.keep_mod_globals_after_run = true;
         return child_vm;
     }

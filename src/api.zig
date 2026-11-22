@@ -921,3 +921,98 @@ test "api: identifier hyphens in math functions and decimals in url()" {
         \\
     , css);
 }
+
+test "api: meta.load-css() nested in a style rule or an at-rule" {
+    const alloc = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    try writeApiTmpFileAll(&tmp_dir, "_lib.scss",
+        \\/* note */
+        \\a { b: c; d { e: f; } }
+        \\@keyframes z { from { g: h; } }
+    );
+
+    const tmp_path = try zsass_io.realPathAlloc(tmp_dir.dir, ".", alloc);
+    defer alloc.free(tmp_path);
+    const entry_path = try std.fs.path.join(alloc, &.{ tmp_path, "entry.scss" });
+    defer alloc.free(entry_path);
+
+    // Inside a style rule: no blank lines between the loaded rules, a
+    // comment gets a rule of its own, and keyframe selectors stay as written.
+    const in_rule = try compileSourceToCss(alloc,
+        \\@use "sass:meta";
+        \\.w { @include meta.load-css("lib"); }
+        \\q { r: s; }
+    , entry_path, &.{}, .{});
+    defer alloc.free(in_rule);
+    try std.testing.expectEqualStrings(
+        \\.w {
+        \\  /* note */
+        \\}
+        \\.w a {
+        \\  b: c;
+        \\}
+        \\.w a d {
+        \\  e: f;
+        \\}
+        \\@keyframes z {
+        \\  from {
+        \\    g: h;
+        \\  }
+        \\}
+        \\
+        \\q {
+        \\  r: s;
+        \\}
+        \\
+    , in_rule);
+
+    const in_media = try compileSourceToCss(alloc,
+        \\@use "sass:meta";
+        \\@media screen { @include meta.load-css("lib"); }
+    , entry_path, &.{}, .{});
+    defer alloc.free(in_media);
+    try std.testing.expectEqualStrings(
+        \\@media screen {
+        \\  /* note */
+        \\  a {
+        \\    b: c;
+        \\  }
+        \\  a d {
+        \\    e: f;
+        \\  }
+        \\  @keyframes z {
+        \\    from {
+        \\      g: h;
+        \\    }
+        \\  }
+        \\}
+        \\
+    , in_media);
+
+    // At the top level every loaded rule is a top-level statement.
+    const at_top = try compileSourceToCss(alloc,
+        \\@use "sass:meta";
+        \\@include meta.load-css("lib");
+    , entry_path, &.{}, .{});
+    defer alloc.free(at_top);
+    try std.testing.expectEqualStrings(
+        \\/* note */
+        \\a {
+        \\  b: c;
+        \\}
+        \\
+        \\a d {
+        \\  e: f;
+        \\}
+        \\
+        \\@keyframes z {
+        \\  from {
+        \\    g: h;
+        \\  }
+        \\}
+        \\
+    , at_top);
+}

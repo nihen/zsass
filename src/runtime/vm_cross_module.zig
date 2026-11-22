@@ -579,19 +579,35 @@ pub fn wrapRuleIrTopLevelAmpRulesWithParent(self: anytype, start_idx: usize, par
     }
 }
 
+fn isKeyframesAtRuleName(name: []const u8) bool {
+    const raw = if (name.len > 0 and name[0] == '@') name[1..] else name;
+    const suffix = "keyframes";
+    if (raw.len < suffix.len) return false;
+    return std.ascii.eqlIgnoreCase(raw[raw.len - suffix.len ..], suffix);
+}
+
+/// Nest the statements a `meta.load-css()` call appended from `start_idx` on
+/// under `parent_selector`: an outermost style rule gets the parent selector
+/// prepended, and an outermost comment is wrapped in a rule of its own.
+/// Keyframe selectors are not style rules and stay as written.
 pub fn prefixRuleIrRangeTopLevelRules(self: anytype, start_idx: usize, parent_selector: InternId) !void {
     if (start_idx >= self.rule_ir.nodes.items.len) return;
     const parent_raw = self.intern_pool.get(parent_selector);
     if (std.mem.trim(u8, parent_raw, " \t\r\n").len == 0) return;
 
+    var comment_indices: std.ArrayListUnmanaged(usize) = .empty;
+    defer comment_indices.deinit(self.allocator);
+
     var rule_depth: usize = 0;
     var at_rule_depth: usize = 0;
+    // Depth of the outermost open `@keyframes` block, when inside one.
+    var keyframes_depth: ?usize = null;
     var i = start_idx;
     while (i < self.rule_ir.nodes.items.len) : (i += 1) {
         const node = self.rule_ir.nodes.items[i];
         switch (node.kind) {
             .rule_begin => {
-                if (rule_depth == 0) {
+                if (rule_depth == 0 and keyframes_depth == null) {
                     const selector_u = self.rule_ir.extra.items[node.payload];
                     const selector_id: InternId = @enumFromInt(selector_u);
                     const selector_raw = self.intern_pool.get(selector_id);
@@ -605,19 +621,129 @@ pub fn prefixRuleIrRangeTopLevelRules(self: anytype, start_idx: usize, parent_se
             .rule_end => {
                 if (rule_depth > 0) rule_depth -= 1;
             },
-            .at_rule_begin => at_rule_depth += 1,
+            .at_rule_begin => {
+                at_rule_depth += 1;
+                if (keyframes_depth == null) {
+                    const name_id: InternId = @enumFromInt(self.rule_ir.extra.items[node.payload]);
+                    if (isKeyframesAtRuleName(self.intern_pool.get(name_id))) keyframes_depth = at_rule_depth;
+                }
+            },
             .at_rule_end => {
+                if (keyframes_depth) |depth| {
+                    if (depth == at_rule_depth) keyframes_depth = null;
+                }
                 if (at_rule_depth > 0) at_rule_depth -= 1;
+            },
+            .comment => {
+                if (rule_depth == 0 and keyframes_depth == null) try comment_indices.append(self.allocator, i);
             },
             .decl,
             .decl_raw,
             .at_rule_simple,
-            .comment,
             .stmt_gap,
             .group_boundary,
             .sourcemap_gap,
             .stream_chunk,
             => {},
+        }
+    }
+
+    // Insert from the back so that the collected indices stay valid.
+    var ci = comment_indices.items.len;
+    while (ci > 0) {
+        ci -= 1;
+        const idx = comment_indices.items[ci];
+        const comment_node = self.rule_ir.nodes.items[idx];
+        const file_id = self.rule_ir.node_source_files.items[idx];
+        const extra_off: u32 = @intCast(self.rule_ir.extra.items.len);
+        const extend_snapshot: u32 = @intCast(self.rule_ir.extend_edges.items.len);
+        try self.rule_ir.extra.appendSlice(self.allocator, &[_]u32{ @intFromEnum(parent_selector), 1, 0, extend_snapshot });
+        try self.rule_ir.nodes.insert(self.allocator, idx + 1, .{
+            .kind = .rule_end,
+            .payload = 0,
+            .source_start = comment_node.source_start,
+            .source_end = comment_node.source_end,
+        });
+        try self.rule_ir.node_source_files.insert(self.allocator, idx + 1, file_id);
+        try self.rule_ir.nodes.insert(self.allocator, idx, .{
+            .kind = .rule_begin,
+            .payload = extra_off,
+            .source_start = comment_node.source_start,
+            .source_end = comment_node.source_end,
+        });
+        try self.rule_ir.node_source_files.insert(self.allocator, idx, file_id);
+    }
+}
+
+/// Mark the rules and at-rules a nested `meta.load-css()` appended from
+/// `start_idx` on as nested statements, which are not separated by blank
+/// lines the way top-level statements are.
+fn markRuleIrRangeAsNested(self: anytype, start_idx: usize) void {
+    var depth: usize = 0;
+    // The outermost at-rule block the range ends with, if it ends with one.
+    var trailing_at_rule: ?usize = null;
+    var i = start_idx;
+    while (i < self.rule_ir.nodes.items.len) : (i += 1) {
+        const node = self.rule_ir.nodes.items[i];
+        switch (node.kind) {
+            .rule_begin => {
+                if (depth == 0) {
+                    trailing_at_rule = null;
+                    if (self.rule_ir.extra.items[node.payload + 1] == 0) self.rule_ir.extra.items[node.payload + 1] = 1;
+                }
+                depth += 1;
+            },
+            .at_rule_begin => {
+                if (depth == 0) {
+                    trailing_at_rule = i;
+                    if (self.rule_ir.extra.items[node.payload + 2] == 0) self.rule_ir.extra.items[node.payload + 2] = 1;
+                }
+                depth += 1;
+            },
+            .rule_end, .at_rule_end => {
+                if (depth > 0) depth -= 1;
+            },
+            .decl, .decl_raw, .at_rule_simple, .comment, .stream_chunk => {
+                if (depth == 0) trailing_at_rule = null;
+            },
+            .stmt_gap, .group_boundary, .sourcemap_gap => {},
+        }
+    }
+    // An at-rule block that bubbles out of a style rule to the top level is
+    // followed by a blank line like any other top-level block.
+    if (trailing_at_rule) |idx| {
+        if (self.open_block_depth == self.open_rule_depth) self.rule_ir.setPreserveAtRuleBlockFollowingBlankAt(idx, true);
+    }
+}
+
+/// Mark the outermost rules and at-rules a top-level `meta.load-css()`
+/// appended from `start_idx` on as top-level statements. The official CLI
+/// separates all of them by a blank line, including a rule that was nested in
+/// the loaded stylesheet (`a { b { ... } }` prints `a` and `a b` apart).
+fn markRuleIrRangeAsTopLevel(self: anytype, start_idx: usize) void {
+    var depth: usize = 0;
+    var i = start_idx;
+    while (i < self.rule_ir.nodes.items.len) : (i += 1) {
+        const node = self.rule_ir.nodes.items[i];
+        switch (node.kind) {
+            .rule_begin => {
+                if (depth == 0) {
+                    self.rule_ir.extra.items[node.payload + 1] = 0;
+                    self.rule_ir.setSuppressLeadingBlankAt(i, false);
+                }
+                depth += 1;
+            },
+            .at_rule_begin => {
+                if (depth == 0) {
+                    self.rule_ir.extra.items[node.payload + 2] = 0;
+                    self.rule_ir.setSuppressLeadingBlankAt(i, false);
+                }
+                depth += 1;
+            },
+            .rule_end, .at_rule_end => {
+                if (depth > 0) depth -= 1;
+            },
+            else => {},
         }
     }
 }
@@ -715,6 +841,11 @@ pub fn runLoadCssModule(self: anytype, resolved_path: []const u8, config: LoadCs
         }
     } else {
         try child_vm.runTopWithSelectorPrefix(&.{});
+    }
+    if (child_vm.nested_in_parent_block) {
+        markRuleIrRangeAsNested(self, start_node_idx);
+    } else {
+        markRuleIrRangeAsTopLevel(self, start_node_idx);
     }
     if (opts.sync_state) try self.syncLoadCssChildStates(&child_vm);
 }
