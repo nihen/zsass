@@ -6853,19 +6853,12 @@ fn applyExtensionToComplex(
     const estimated_results = saturatingMulUsize(complex.components.items.len, @max(ext.extender.selectors.items.len, 1));
     try results.ensureTotalCapacity(allocator, estimated_results);
 
-    // When the target appears in more than one compound, every combination
-    // of extended and unextended positions is a result, not only the ones
-    // that replace a single position.
-    var skipped_combination = false;
-    const repeated_target = try appendRepeatedTargetProduct(frame, allocator, complex, ext, &.{}, frame.config.replace_mode, repeated_target_max_results, &skipped_combination, &results);
-
     // Walk through the complex selector's compound components
     for (complex.components.items, 0..) |comp, comp_idx| {
         switch (comp) {
             .compound => |compound| {
                 // Check if this compound selector matches the extension target
                 if (compoundContainsTarget(&compound, &ext.target)) {
-                    if (repeated_target) continue;
                     // Generate extended selectors by replacing the target with the extender
                     try results.ensureUnusedCapacity(allocator, ext.extender.selectors.items.len);
                     for (ext.extender.selectors.items) |extender_complex| {
@@ -7101,8 +7094,8 @@ fn appendSingleTargetReplacements(
                         doomed.deinit();
                     }
                     try results.append(allocator, joined);
+                    continue;
                 }
-                continue;
             }
             var extra: std.ArrayList(ComplexSelector) = .empty;
             defer {
@@ -7153,6 +7146,12 @@ fn joinExtenderAfterDescendant(
     if (items[comp_idx - 1] != .combinator or items[comp_idx - 1].combinator != .descendant) return null;
     const extender_last = extender_items[extender_items.len - 1];
     if (extender_last != .compound) return null;
+    // An extender with ancestors of its own (`.x .f + .g`) shares them with
+    // what is already there; that takes a weave.
+    for (extender_items) |component| {
+        if (component != .combinator) continue;
+        if (component.combinator != .next_sibling and component.combinator != .general_sibling) return null;
+    }
 
     var joined = ComplexSelector.init(allocator);
     errdefer joined.deinit();
