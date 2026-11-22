@@ -12521,7 +12521,11 @@ fn endsWithCssHexEscape(text: []const u8) bool {
         count += 1;
     }
     if (count == 0 or i == 0) return false;
-    return text[i - 1] == '\\';
+    // An odd run of backslashes ends in one that starts the escape; in an
+    // even run every backslash is itself escaped (`a\\b`).
+    var backslashes: usize = 0;
+    while (i > 0 and text[i - 1] == '\\') : (i -= 1) backslashes += 1;
+    return backslashes % 2 == 1;
 }
 
 fn cssEscapeWhitespace(c: u8) bool {

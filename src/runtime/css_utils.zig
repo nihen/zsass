@@ -171,6 +171,12 @@ pub fn normalizeAttributeSelectors(allocator: std.mem.Allocator, text: []const u
             i += 1;
             continue;
         }
+        // An escaped bracket is part of a name (`.grid-cols-\[1fr\]`).
+        if (text[i] == '\\' and i + 1 < text.len) {
+            try buf.appendSlice(allocator, text[i .. i + 2]);
+            i += 2;
+            continue;
+        }
         if (text[i] == '[') {
             var bend: ?usize = null;
             var depth: u32 = 1;
@@ -183,6 +189,8 @@ pub fn normalizeAttributeSelectors(allocator: std.mem.Allocator, text: []const u
                     } else if (text[j] == bq) {
                         bq = 0;
                     }
+                } else if (text[j] == '\\' and j + 1 < text.len) {
+                    j += 1;
                 } else {
                     if (text[j] == '"' or text[j] == '\'') bq = text[j];
                     if (text[j] == '[') depth += 1;
@@ -1781,7 +1789,7 @@ pub fn trimRightPreservingHexEscape(text: []const u8) []const u8 {
             if (hex_j == 0) break;
             hex_j -= 1;
         }
-        if (hex_count > 0 and text[hex_j] == '\\') {
+        if (hex_count > 0 and text[hex_j] == '\\' and !expr_scan.isEscapedCharacter(text, hex_j)) {
             // Trailing space is a hex escape delimiter; preserve one space
             return text[0 .. end + 1];
         }

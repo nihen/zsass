@@ -1016,3 +1016,34 @@ test "api: meta.load-css() nested in a style rule or an at-rule" {
         \\
     , at_top);
 }
+
+test "api: escapes in selectors have one canonical spelling" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\.\61 b, #\61, \61, a:\68over, a:not(.\62) { x: y; }
+        \\.\31 0, .sm\:w-1\/2, .a\2c b, .g\[1fr\2c 2fr\] { x: y; }
+        \\[\61=b], [a="\62"], [a=\62], [a="\31 b"], a[href^="http\3a //"], [a="b\"c"] { x: y; }
+        \\.\61 { x: y; }
+        \\.c { @extend .a; }
+    ;
+    const css = try compileSourceToCss(alloc, src, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.ab, #a, a, a:hover, a:not(.b) {
+        \\  x: y;
+        \\}
+        \\
+        \\.\31 0, .sm\:w-1\/2, .a\,b, .g\[1fr\,2fr\] {
+        \\  x: y;
+        \\}
+        \\
+        \\[a=b], [a=b], [a=b], [a="1b"], a[href^="http://"], [a='b"c'] {
+        \\  x: y;
+        \\}
+        \\
+        \\.a, .c {
+        \\  x: y;
+        \\}
+        \\
+    , css);
+}
