@@ -5130,6 +5130,7 @@ pub const RuleIR = struct {
         var first_in_string: u8 = 0;
         var first_escaped = false;
         var first_paren_depth: usize = 0;
+        var first_no_comment_end = false;
 
         var i: usize = 0;
         while (i < expanded.len) : (i += 1) {
@@ -5138,7 +5139,9 @@ pub const RuleIR = struct {
             // A comment is dropped, except where it is text: inside a string
             // or in the value of a custom property.
             if (c == '/' and i + 1 < expanded.len and expanded[i + 1] == '*' and first_in_string == 0 and !first_escaped) {
-                const comment_end = std.mem.indexOfPos(u8, expanded, i + 2, "*/");
+                // Once a search finds no end, no later one will.
+                const comment_end = if (first_no_comment_end) null else std.mem.indexOfPos(u8, expanded, i + 2, "*/");
+                if (comment_end == null) first_no_comment_end = true;
                 const kept = std.mem.startsWith(u8, std.mem.trimStart(u8, first.items[first_statement_start..], " "), "--");
                 if (!kept) {
                     i = if (comment_end) |end| end + 1 else expanded.len - 1;
@@ -5236,6 +5239,7 @@ pub const RuleIR = struct {
         // is a style rule, worked out once per statement when first needed.
         var input_statement_start: usize = 0;
         var statement_is_style_rule: ?bool = null;
+        var no_comment_end = false;
         i = 0;
         while (i < first.items.len) : (i += 1) {
             if (std.mem.startsWith(u8, first.items[i..], interp_decl_marker)) {
@@ -5277,18 +5281,21 @@ pub const RuleIR = struct {
             if (c == '/' and i + 1 < first.items.len and first.items[i + 1] == '*' and
                 std.mem.startsWith(u8, std.mem.trimStart(u8, out.items[statement_start..], " "), "--"))
             {
-                if (std.mem.indexOfPos(u8, first.items, i + 2, "*/")) |end| {
+                const comment_end = if (no_comment_end) null else std.mem.indexOfPos(u8, first.items, i + 2, "*/");
+                if (comment_end) |end| {
                     try out.appendSlice(allocator, first.items[i .. end + 2]);
                     i = end + 1;
                     continue;
                 }
+                // Once a search finds no end, no later one will.
+                no_comment_end = true;
             }
 
-            // Inside parentheses these do not end the declaration.
-            if ((c == ';' or c == '}') and paren_depth == 0) {
+            if (c == ';' or c == '}') {
                 preserve_decl_zero = false;
                 preserve_calc_ops = false;
-                in_custom_decl = false;
+                // Inside parentheses these do not end a custom property.
+                if (paren_depth == 0) in_custom_decl = false;
             }
             if (try appendCompressedImport(&out, allocator, first.items, &i)) {
                 statement_start = out.items.len;

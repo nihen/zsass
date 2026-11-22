@@ -1318,12 +1318,12 @@ test "api: compressed output keeps a comment that is text" {
         \\  --r: url(s;t) /* {u}
         \\    v */ w\/*x;
         \\}
-        \\l { m: n; }
+        \\l { m: url(#{"n;o"}) 0.5em; }
         \\
     ;
     const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .output_style = .compressed });
     defer alloc.free(css);
-    try std.testing.expectEqualStrings("a{--b: c /*d*/e;f:\"g /* h */ i\" k;--o: p /*{};(\"*/ white, q;--r: url(s;t) /* {u} v */ w\\/*x}l{m:n}\n", css);
+    try std.testing.expectEqualStrings("a{--b: c /*d*/e;f:\"g /* h */ i\" k;--o: p /*{};(\"*/ white, q;--r: url(s;t) /* {u} v */ w\\/*x}l{m:url(n;o) .5em}\n", css);
 }
 
 test "api: a hex escape gets its space only where a selector name ends" {
