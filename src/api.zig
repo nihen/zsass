@@ -1307,6 +1307,22 @@ test "api: compressed output reads strings and parentheses when it looks for a s
     try std.testing.expectEqualStrings("@supports selector([x=\";\"]:is(.a, .b)){a{x:y}}[x=\";\"]:is(.a,.b){--c: \"d;e\" f g}\n", css);
 }
 
+test "api: compressed output keeps a comment that is text" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\a {
+        \\  --b: c
+        \\    /*d*/e;
+        \\  f: "g /* h */ i" /* j */ k;
+        \\}
+        \\l { m: n; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .output_style = .compressed });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings("a{--b: c /*d*/e;f:\"g /* h */ i\" k}l{m:n}\n", css);
+}
+
 test "api: a hex escape gets its space only where a selector name ends" {
     // Lists a built-in function returns live until the allocator is torn
     // down, so this compile runs in an arena.

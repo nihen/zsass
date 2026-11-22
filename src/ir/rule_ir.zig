@@ -5135,7 +5135,11 @@ pub const RuleIR = struct {
         while (i < expanded.len) : (i += 1) {
             const c = expanded[i];
 
-            if (c == '/' and i + 1 < expanded.len and expanded[i + 1] == '*') {
+            // A comment is dropped, except where it is text: inside a string
+            // or in the value of a custom property.
+            if (c == '/' and i + 1 < expanded.len and expanded[i + 1] == '*' and first_in_string == 0 and
+                !std.mem.startsWith(u8, std.mem.trimStart(u8, first.items[first_statement_start..], " "), "--"))
+            {
                 i += 2;
                 while (i + 1 < expanded.len) : (i += 1) {
                     if (expanded[i] == '*' and expanded[i + 1] == '/') {
@@ -5151,13 +5155,11 @@ pub const RuleIR = struct {
                     i += 1;
                 }
                 // A line break inside a custom property value separates two
-                // tokens, so it becomes a space rather than nothing. Before a
-                // comment the space after the comment does that.
-                const comment_follows = std.mem.startsWith(u8, expanded[i + 1 ..], "/*");
-                if (first.items.len != 0 and !comment_follows) {
+                // tokens, so it becomes a space rather than nothing.
+                if (first.items.len != 0) {
                     const last = first.items[first.items.len - 1];
                     const separated = last == ' ' and !css_utils.endsWithEscapeWhitespace(first.items);
-                    if (last != '{' and last != '}' and last != ';' and last != '/' and !separated and
+                    if (last != '{' and last != '}' and last != ';' and !separated and
                         std.mem.startsWith(u8, std.mem.trimStart(u8, first.items[first_statement_start..], " "), "--"))
                     {
                         try first.append(allocator, ' ');
@@ -5190,6 +5192,8 @@ pub const RuleIR = struct {
                     first.items[first.items.len - 2] = '}';
                     first.items.len -= 1;
                 }
+                // Dropping the semicolons moved the end of the text.
+                first_statement_start = @min(first_statement_start, first.items.len);
             }
         }
 

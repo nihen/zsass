@@ -110,7 +110,8 @@ Tracks Dart Sass 1.108.2. The vendored `sass-spec` pin moves to
 - Compressed output writes the selectors given to `:is()`, `:not()`, and
   the other selector pseudo-classes without a space after the comma, and
   turns a line break inside a custom property value into a space instead
-  of joining the two tokens.
+  of joining the two tokens. A `/* */` inside a string or a custom
+  property value is kept; it was removed as if it were a comment.
 
 ## 0.4.1 (2026-10-21)
 
