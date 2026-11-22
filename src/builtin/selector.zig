@@ -206,6 +206,16 @@ pub fn selector_append(ctx: *BuiltinContext, args: []const Value) BuiltinError!V
         if (current.selectors.items.len == 0) return error.SassError;
     }
 
+    // A suffix joined to an escaped name makes one name, which has its own
+    // canonical spelling (`\\2d ` and `a` are `-a`).
+    const appended_css = try selector_mod.toCss(ctx.allocator, &current);
+    defer ctx.allocator.free(appended_css);
+    if (std.mem.indexOfScalar(u8, appended_css, '\\') != null) {
+        const reparsed = selector_mod.parse(ctx.allocator, appended_css) catch return error.SassError;
+        current.deinit();
+        current = reparsed;
+    }
+
     return selectorListToValue(ctx, &current);
 }
 

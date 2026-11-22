@@ -768,7 +768,7 @@ fn stripSelectorCommentsForMatching(allocator: std.mem.Allocator, text: []const 
         if (c == '/' and i + 1 < text.len) {
             if (text[i + 1] == '*') {
                 var saw_newline = false;
-                while (buf.items.len > 0 and
+                while (buf.items.len > 0 and !css_utils.endsWithEscapeWhitespace(buf.items) and
                     (buf.items[buf.items.len - 1] == ' ' or
                         buf.items[buf.items.len - 1] == '\t' or
                         buf.items[buf.items.len - 1] == '\n' or
@@ -778,6 +778,8 @@ fn stripSelectorCommentsForMatching(allocator: std.mem.Allocator, text: []const 
                     if (last == '\n' or last == '\r') saw_newline = true;
                     _ = buf.pop();
                 }
+                // A comment ends a hex escape the way whitespace does.
+                if (css_utils.endsWithHexEscape(buf.items)) try buf.append(allocator, ' ');
 
                 i += 2;
                 while (i + 1 < text.len) {
@@ -808,7 +810,7 @@ fn stripSelectorCommentsForMatching(allocator: std.mem.Allocator, text: []const 
 
             if (text[i + 1] == '/') {
                 var saw_newline = false;
-                while (buf.items.len > 0 and
+                while (buf.items.len > 0 and !css_utils.endsWithEscapeWhitespace(buf.items) and
                     (buf.items[buf.items.len - 1] == ' ' or
                         buf.items[buf.items.len - 1] == '\t' or
                         buf.items[buf.items.len - 1] == '\n' or
@@ -818,6 +820,8 @@ fn stripSelectorCommentsForMatching(allocator: std.mem.Allocator, text: []const 
                     if (last == '\n' or last == '\r') saw_newline = true;
                     _ = buf.pop();
                 }
+                // A comment ends a hex escape the way whitespace does.
+                if (css_utils.endsWithHexEscape(buf.items)) try buf.append(allocator, ' ');
 
                 i += 2;
                 while (i < text.len and text[i] != '\n' and text[i] != '\r') i += 1;
@@ -5124,7 +5128,7 @@ pub const RuleIR = struct {
                 continue;
             }
 
-            if (c == ' ' and i + 1 < expanded.len and expanded[i + 1] == '{') continue;
+            if (c == ' ' and i + 1 < expanded.len and expanded[i + 1] == '{' and !css_utils.endsWithHexEscape(first.items)) continue;
             if (c == ';' and i + 1 < expanded.len and expanded[i + 1] == '}') continue;
 
             try first.append(allocator, c);
@@ -5252,6 +5256,11 @@ pub const RuleIR = struct {
                     continue;
                 }
                 if (out.items.len == 0) continue;
+                // The space that ends a hex escape is part of the escape.
+                if (css_utils.endsWithHexEscape(out.items)) {
+                    try out.append(allocator, c);
+                    continue;
+                }
                 const prev = out.items[out.items.len - 1];
                 const next = if (i + 1 < first.items.len) first.items[i + 1] else 0;
                 if (previousLooksLikeIeHack(out.items) and (next == ';' or next == '}')) {
@@ -5281,7 +5290,8 @@ pub const RuleIR = struct {
             }
 
             if ((c == '+' or c == '>' or c == '~') and isCompressedSelectorContext(first.items, i)) {
-                if (out.items.len != 0 and out.items[out.items.len - 1] == ' ') out.items.len -= 1;
+                if (out.items.len != 0 and out.items[out.items.len - 1] == ' ' and
+                    !css_utils.endsWithHexEscape(out.items[0 .. out.items.len - 1])) out.items.len -= 1;
                 try out.append(allocator, c);
                 if (i + 1 < first.items.len and first.items[i + 1] == ' ') i += 1;
                 continue;
@@ -6248,6 +6258,7 @@ pub const RuleIR = struct {
                 has_ws: bool = false,
                 has_newline: bool = false,
                 has_combinator_candidate: bool = false,
+                has_backslash: bool = false,
             };
 
             fn scanSelectorEmitHints(text: []const u8) SelectorEmitHints {
@@ -6263,6 +6274,7 @@ pub const RuleIR = struct {
                             hints.has_newline = true;
                         },
                         '>', '+', '~', '|' => hints.has_combinator_candidate = true,
+                        '\\' => hints.has_backslash = true,
                         else => {},
                     }
                 }
@@ -6303,7 +6315,7 @@ pub const RuleIR = struct {
                     if (c == '/' and i + 1 < text.len) {
                         if (text[i + 1] == '*') {
                             var saw_newline = false;
-                            while (buf.items.len > 0 and
+                            while (buf.items.len > 0 and !css_utils.endsWithEscapeWhitespace(buf.items) and
                                 (buf.items[buf.items.len - 1] == ' ' or
                                     buf.items[buf.items.len - 1] == '\t' or
                                     buf.items[buf.items.len - 1] == '\n' or
@@ -6313,6 +6325,8 @@ pub const RuleIR = struct {
                                 if (last == '\n' or last == '\r') saw_newline = true;
                                 _ = buf.pop();
                             }
+                            // A comment ends a hex escape the way whitespace does.
+                            if (css_utils.endsWithHexEscape(buf.items)) try buf.append(allocator, ' ');
 
                             i += 2;
                             while (i + 1 < text.len) {
@@ -6343,7 +6357,7 @@ pub const RuleIR = struct {
 
                         if (text[i + 1] == '/') {
                             var saw_newline = false;
-                            while (buf.items.len > 0 and
+                            while (buf.items.len > 0 and !css_utils.endsWithEscapeWhitespace(buf.items) and
                                 (buf.items[buf.items.len - 1] == ' ' or
                                     buf.items[buf.items.len - 1] == '\t' or
                                     buf.items[buf.items.len - 1] == '\n' or
@@ -6353,6 +6367,8 @@ pub const RuleIR = struct {
                                 if (last == '\n' or last == '\r') saw_newline = true;
                                 _ = buf.pop();
                             }
+                            // A comment ends a hex escape the way whitespace does.
+                            if (css_utils.endsWithHexEscape(buf.items)) try buf.append(allocator, ' ');
 
                             i += 2;
                             while (i < text.len and text[i] != '\n' and text[i] != '\r') i += 1;
@@ -6924,8 +6940,11 @@ pub const RuleIR = struct {
                                 }
                             }
                         } else if (ws_count != 0) {
+                            // The first space ends the escape; a second one
+                            // is the separator before the next value.
                             try out.append(allocator, ' ');
-                            if (ws_count > 1) changed = true;
+                            if (ws_count > 1) try out.append(allocator, ' ');
+                            if (ws_count > 2) changed = true;
                         }
                         i = k;
                         continue;
@@ -7548,6 +7567,48 @@ pub const RuleIR = struct {
                 return std.fmt.allocPrint(allocator, "{s} ", .{text});
             }
 
+            /// A hex escape in a selector name is always written with the
+            /// space that ends it, whatever follows. The whitespace passes
+            /// above drop that space before a comma and at the end of the
+            /// selector; this puts it back.
+            fn ensureSelectorHexEscapeDelimiters(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+                var out: std.ArrayListUnmanaged(u8) = .empty;
+                errdefer out.deinit(allocator);
+                var copied: usize = 0;
+                var in_string: u8 = 0;
+                var i: usize = 0;
+                while (i < text.len) {
+                    const c = text[i];
+                    if (c != '\\') {
+                        if (in_string != 0) {
+                            if (c == in_string) in_string = 0;
+                        } else if (c == '"' or c == '\'') {
+                            in_string = c;
+                        }
+                        i += 1;
+                        continue;
+                    }
+                    if (i + 1 >= text.len) break;
+                    if (in_string != 0 or !std.ascii.isHex(text[i + 1])) {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    var digits: usize = 0;
+                    while (i < text.len and digits < 6 and std.ascii.isHex(text[i])) : (digits += 1) i += 1;
+                    if (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n' or text[i] == '\r' or text[i] == '\x0c')) {
+                        i += 1;
+                        continue;
+                    }
+                    try out.appendSlice(allocator, text[copied..i]);
+                    try out.append(allocator, ' ');
+                    copied = i;
+                }
+                if (out.items.len == 0) return text;
+                try out.appendSlice(allocator, text[copied..]);
+                return out.toOwnedSlice(allocator);
+            }
+
             /// Whitespace (space/tab/newline) in one compound selector to single space
             /// collapses. The newline of top-level comma (`.a, .b`) is preserved, so
             /// Split with comma and normalize only the inside of each segment. string / `(` `[`
@@ -7739,7 +7800,12 @@ pub const RuleIR = struct {
                         // skip any further ws
                         var k = j + 1;
                         while (k < end and (seg[k] == ' ' or seg[k] == '\t' or seg[k] == '\n' or seg[k] == '\r')) : (k += 1) {}
-                        if (j > start and seg[j - 1] == '\\' and k > j + 1) {
+                        // An escaped space, or the space that ends a hex
+                        // escape, is part of the name before it; whitespace
+                        // after it is still a combinator.
+                        const ends_escape = j > start and
+                            css_utils.endsWithEscapeWhitespace(seg[start .. j + 1]);
+                        if (ends_escape and k > j + 1) {
                             try out.appendSlice(allocator, "  ");
                         } else {
                             try out.append(allocator, ' ');
@@ -8656,6 +8722,24 @@ pub const RuleIR = struct {
 
                     try out.append(allocator, c);
                     i += 1;
+                    if (c != '\\' or i >= value.len) continue;
+                    // An escape keeps the character it escapes, and a hex
+                    // escape keeps the space that ends it: neither is
+                    // merged with the whitespace that follows.
+                    if (!std.ascii.isHex(value[i])) {
+                        try out.append(allocator, value[i]);
+                        i += 1;
+                        continue;
+                    }
+                    var digits: usize = 0;
+                    while (i < value.len and digits < 6 and std.ascii.isHex(value[i])) : (digits += 1) {
+                        try out.append(allocator, value[i]);
+                        i += 1;
+                    }
+                    if (i < value.len and (value[i] == ' ' or value[i] == '\t')) {
+                        try out.append(allocator, value[i]);
+                        i += 1;
+                    }
                 }
                 if (pending_ws) |ws| try out.append(allocator, ws);
 
@@ -10198,11 +10282,6 @@ pub const RuleIR = struct {
                             sel_owned = nth_normalized_sel;
                         }
                     }
-                    const escaped_sel = try WriterHelpers.ensureTrailingControlHexEscapeSpace(temp, sel_str);
-                    if (!(escaped_sel.ptr == sel_str.ptr and escaped_sel.len == sel_str.len)) {
-                        sel_str = escaped_sel;
-                        sel_owned = escaped_sel;
-                    }
                     if (selector_hints.has_paren and selector_hints.has_ws) {
                         const paren_normalized_sel = try WriterHelpers.collapseSelectorParenEdgeWhitespace(temp, sel_str);
                         if (!(paren_normalized_sel.ptr == sel_str.ptr and paren_normalized_sel.len == sel_str.len)) {
@@ -10240,6 +10319,13 @@ pub const RuleIR = struct {
                         if (try normalizeNestedNotHasExtendSelector(temp, sel_str)) |nested_not_has_sel| {
                             sel_str = nested_not_has_sel;
                             sel_owned = nested_not_has_sel;
+                        }
+                    }
+                    if (selector_hints.has_backslash) {
+                        const escaped_sel = try WriterHelpers.ensureSelectorHexEscapeDelimiters(temp, sel_str);
+                        if (!(escaped_sel.ptr == sel_str.ptr and escaped_sel.len == sel_str.len)) {
+                            sel_str = escaped_sel;
+                            sel_owned = escaped_sel;
                         }
                     }
                     if (std.mem.trim(u8, sel_str, " \t\r\n").len == 0) continue;

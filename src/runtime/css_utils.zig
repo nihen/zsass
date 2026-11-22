@@ -1786,6 +1786,34 @@ pub fn normalizeInterpolatedEscapedHyphens(allocator: std.mem.Allocator, text: [
     return try buf.toOwnedSlice(allocator);
 }
 
+/// Whether `text` ends in a hex escape that has not been ended by
+/// whitespace yet (`\\31`, but not `\\\\31`).
+pub fn endsWithHexEscape(text: []const u8) bool {
+    var i: usize = text.len;
+    var digits: usize = 0;
+    while (i > 0 and digits < 6 and isHexDigit(text[i - 1])) : (digits += 1) i -= 1;
+    if (digits == 0) return false;
+    var backslashes: usize = 0;
+    while (i > 0 and text[i - 1] == '\\') : (i -= 1) backslashes += 1;
+    return backslashes % 2 == 1;
+}
+
+/// Whether the last character of `text` is whitespace that belongs to an
+/// escape: the character a backslash escapes, or the one that ends a hex
+/// escape. Such whitespace is part of a name, not a separator.
+pub fn endsWithEscapeWhitespace(text: []const u8) bool {
+    if (text.len < 2) return false;
+    const last = text[text.len - 1];
+    if (last != ' ' and last != '\t' and last != '\n' and last != '\r' and last != '\x0c') return false;
+    const before = text[0 .. text.len - 1];
+    if (endsWithHexEscape(before)) return true;
+    if (last == '\n' or last == '\r' or last == '\x0c') return false;
+    var backslashes: usize = 0;
+    var i: usize = before.len;
+    while (i > 0 and before[i - 1] == '\\') : (i -= 1) backslashes += 1;
+    return backslashes % 2 == 1;
+}
+
 /// Trim trailing whitespace from a string, but preserve a single trailing space
 /// that serves as a hex escape delimiter (e.g., `\9 `  ->  keep the space), or that
 /// completes a direct CSS escape (`\ `) when the `\` is not itself escaped.

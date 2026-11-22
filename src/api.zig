@@ -1236,10 +1236,49 @@ test "api: meta.load-css() keeps @at-root and at-rule comments in place" {
 
 test "api: a lone escaped hyphen stays escaped in a selector" {
     const alloc = std.testing.allocator;
-    const css = try compileSourceToCss(alloc, ".\\-, .\\-a, .\\- .b { x: y; }\n", "", &.{}, .{});
+    const css = try compileSourceToCss(alloc, ".\\-, .\\-a, .\\- .b, .\\-1 { x: y; }\n", "", &.{}, .{});
     defer alloc.free(css);
-    // The official CLI spells the lone hyphen `\2d `; `\-` names the same class.
-    try std.testing.expectEqualStrings(".\\-, .-a, .\\- .b {\n  x: y;\n}\n", css);
+    try std.testing.expectEqualStrings(".\\2d , .-a, .\\2d  .b, .-\\31  {\n  x: y;\n}\n", css);
+}
+
+test "api: the space that ends a hex escape is kept apart from what follows" {
+    // Lists a built-in function returns live until the allocator is torn
+    // down, so these compiles run in an arena.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const source =
+        \\@use "sass:selector";
+        \\.\31  .b, .\31 .c, .\31  > .d, .\31 /* x */ .e { x: y; }
+        \\.\32  { & + & { x: y; } }
+        \\.f { @extend .\31 ; }
+        \\a {
+        \\  b: \31  x;
+        \\  --c: \31  x;
+        \\  d: selector.append(".\\-", "a");
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    try std.testing.expectEqualStrings(
+        \\.\31  .b, .f .b, .\31 .c, .c.f, .\31  > .d, .f > .d, .\31  .e, .f .e {
+        \\  x: y;
+        \\}
+        \\
+        \\.\32  + .\32  {
+        \\  x: y;
+        \\}
+        \\
+        \\a {
+        \\  b: \31  x;
+        \\  --c: \31  x;
+        \\  d: .-a;
+        \\}
+        \\
+    , css);
+
+    const compressed = try compileSourceToCss(alloc, ".\\31  .b, .\\31  + .c, .\\31  { x: y; }\n", "", &.{}, .{ .output_style = .compressed });
+    try std.testing.expectEqualStrings(".\\31  .b,.\\31 +.c,.\\31 {x:y}\n", compressed);
 }
 
 test "api: compressed output drops an empty rule without its enclosing block" {

@@ -874,19 +874,23 @@ fn normalizeIdentifierEscapesForParse(
     }
     // A selector name is an identifier: every spelling of it has one
     // canonical text (`\61` is `a`, `\31 a` stays escaped).
-    const canonical = css_utils.unescapeSassIdentifier(allocator, ident) catch return ParseError.OutOfMemory;
-    if (canonical.ptr == ident.ptr) return dupeForParse(allocator, ident);
+    const unescaped = css_utils.unescapeSassIdentifier(allocator, ident) catch return ParseError.OutOfMemory;
+    const canonical = if (unescaped.ptr == ident.ptr) try dupeForParse(allocator, ident) else unescaped;
     // A value that is exactly `\0` keeps its escape; a selector name does not.
     if (std.mem.eql(u8, canonical, "\\0 ")) {
         allocator.free(canonical);
         return dupeForParse(allocator, "\u{FFFD}");
     }
-    // A lone hyphen is not an identifier and has to stay escaped. It is
-    // written `\-` rather than as a hex escape: the space that ends a hex
-    // escape is not yet kept apart from a following descendant combinator.
+    // A lone hyphen is not an identifier and has to stay escaped.
     if (std.mem.eql(u8, canonical, "-")) {
         allocator.free(canonical);
-        return dupeForParse(allocator, "\\-");
+        return dupeForParse(allocator, "\\2d ");
+    }
+    // A hyphen before a digit stays as it is in a selector name and the
+    // digit is escaped (`-\31 `), where a value escapes the hyphen (`\-1`).
+    if (canonical.len >= 3 and canonical[0] == '\\' and canonical[1] == '-' and std.ascii.isDigit(canonical[2])) {
+        defer allocator.free(canonical);
+        return std.fmt.allocPrint(allocator, "-\\3{c} {s}", .{ canonical[2], canonical[3..] }) catch return ParseError.OutOfMemory;
     }
     return canonical;
 }
