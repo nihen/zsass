@@ -61,6 +61,12 @@ Tracks Dart Sass 1.108.2. The vendored `sass-spec` pin moves to
   written as escapes in expanded output, like the rest of planes 15 and 16.
 
 ### Fixed
+- `@extend` covers every combination when its target appears more than
+  once in a selector. `.a + .a` extended by `.f` is now
+  `.a + .a, .f + .a, .a + .f, .f + .f`; `.f + .f` was missing, and
+  `.a .a .a` gave four of its eight selectors. `selector.extend()` and
+  `selector.replace()` follow, so `selector.replace(".a .a", ".a", ".f")`
+  is `.f .f`.
 - A parameter list that declares the same parameter twice is an error
   ("Duplicate parameter."), including when one of them is a rest parameter
   (Dart Sass 1.106.0).

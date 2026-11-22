@@ -1258,3 +1258,46 @@ test "api: compressed output drops an empty rule without its enclosing block" {
     defer alloc.free(css);
     try std.testing.expectEqualStrings("@media print{.w a{b:c}}@media print{a{b:c}}e{f:g}k{l:url(a;b);n:o}\n", css);
 }
+
+test "api: @extend covers every combination of a repeated target" {
+    // Lists a built-in function returns live until the allocator is torn
+    // down, so this compile runs in an arena.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const source =
+        \\@use "sass:selector";
+        \\.a + .a { x: y; }
+        \\.b .c .b { x: y; }
+        \\%p > %p { x: y; }
+        \\.f { @extend .a; }
+        \\.g { @extend .b; }
+        \\.h { @extend .c; }
+        \\.i, .j { @extend %p; }
+        \\k {
+        \\  l: selector.extend(".m .m", ".m", ".n .o");
+        \\  p: selector.replace(".m .m", ".m", ".n");
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    try std.testing.expectEqualStrings(
+        \\.a + .a, .f + .a, .a + .f, .f + .f {
+        \\  x: y;
+        \\}
+        \\
+        \\.b .c .b, .b .h .b, .g .c .b, .g .h .b, .b .c .g, .b .h .g, .g .c .g, .g .h .g {
+        \\  x: y;
+        \\}
+        \\
+        \\.i > .i, .j > .i, .i > .j, .j > .j {
+        \\  x: y;
+        \\}
+        \\
+        \\k {
+        \\  l: .m .m, .n .o .m, .m .n .o, .n .m .o, .n .o .o;
+        \\  p: .n .n;
+        \\}
+        \\
+    , css);
+}
