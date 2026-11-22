@@ -784,7 +784,11 @@ pub fn unescapeSassString(allocator: std.mem.Allocator, text: []const u8) ![]con
                 }
                 // Optional trailing whitespace
                 var after_hex = hex_end;
-                if (after_hex < text.len and (text[after_hex] == ' ' or text[after_hex] == '\t')) {
+                // One whitespace character ends a hex escape, a newline or
+                // form feed included.
+                if (after_hex < text.len and (text[after_hex] == ' ' or text[after_hex] == '\t' or
+                    text[after_hex] == '\n' or text[after_hex] == '\x0c'))
+                {
                     after_hex += 1;
                 }
                 const hex_str = text[hex_start..hex_end];
@@ -2115,6 +2119,21 @@ test "decodePrivateUseEscapes decodes only private-use escapes" {
     };
     for (cases) |case| {
         const out = try decodePrivateUseEscapes(std.testing.allocator, case[0]);
+        defer if (out.ptr != case[0].ptr) std.testing.allocator.free(out);
+        try std.testing.expectEqualStrings(case[1], out);
+    }
+}
+
+test "unescapeSassString ends a hex escape at a newline or form feed" {
+    const cases = [_][2][]const u8{
+        .{ "\\62\nc", "bc" },
+        .{ "\\62\x0cc", "bc" },
+        .{ "\\62 c", "bc" },
+        .{ "\\62\tc", "bc" },
+        .{ "\\62  c", "b c" },
+    };
+    for (cases) |case| {
+        const out = try unescapeSassString(std.testing.allocator, case[0]);
         defer if (out.ptr != case[0].ptr) std.testing.allocator.free(out);
         try std.testing.expectEqualStrings(case[1], out);
     }
