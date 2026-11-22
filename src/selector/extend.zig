@@ -3756,6 +3756,11 @@ pub const ApplyState = struct {
                                 }
                                 expanded.deinit(self.allocator);
                             }
+                            var related_exts: std.ArrayList(*const Extension) = .empty;
+                            defer related_exts.deinit(self.allocator);
+                            for (repeated_target_exts.items) |repeated_ext_i| {
+                                try related_exts.append(self.allocator, &self.extensions.items[repeated_ext_i]);
+                            }
                             try generated.append(self.allocator, .{
                                 .selector = try complex.clone(self.allocator),
                                 .applied = try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, self.extensions.items.len),
@@ -3768,17 +3773,26 @@ pub const ApplyState = struct {
                                         for (product.items) |*g| g.deinit();
                                         product.deinit(self.allocator);
                                     }
-                                    if (!try appendRepeatedTargetProduct(frame, self.allocator, &base.selector, repeated_ext, frame.config.replace_mode, &product)) {
-                                        try appendSingleTargetReplacements(frame, self.allocator, &base.selector, repeated_ext, &product);
+                                    // The limit holds for everything the
+                                    // extensions produce together.
+                                    if (expanded.items.len < repeated_target_max_results and
+                                        !try appendRepeatedTargetProduct(frame, self.allocator, &base.selector, repeated_ext, related_exts.items, frame.config.replace_mode, &product))
+                                    {
+                                        try appendSingleTargetReplacements(frame, self.allocator, &base.selector, repeated_ext, related_exts.items, &product);
                                     }
+                                    if (expanded.items.len + product.items.len > repeated_target_max_results) {
+                                        for (product.items) |*g| g.deinit();
+                                        product.clearRetainingCapacity();
+                                    }
+                                    try expanded.ensureUnusedCapacity(self.allocator, 1 + product.items.len);
                                     const moved = base.*;
                                     base.* = .{ .selector = ComplexSelector.init(self.allocator), .applied = .{} };
-                                    try expanded.append(self.allocator, moved);
+                                    expanded.appendAssumeCapacity(moved);
                                     for (product.items) |*selector| {
                                         var applied = try moved.applied.clone(self.allocator);
                                         errdefer applied.deinit(self.allocator);
                                         applied.set(repeated_ext_i);
-                                        try expanded.append(self.allocator, .{ .selector = selector.*, .applied = applied });
+                                        expanded.appendAssumeCapacity(.{ .selector = selector.*, .applied = applied });
                                         selector.* = ComplexSelector.init(self.allocator);
                                     }
                                 }
@@ -4121,6 +4135,14 @@ pub const ApplyState = struct {
                             if (!nested_ext_candidates[ext_i]) continue;
                             const ext = self.extensions.items[ext_i];
                             if (first_pass.applied_exts.items[fi].isSet(ext_i)) {
+                                // An extension applied to every compound at
+                                // once has nothing left to do here, except
+                                // inside a pseudo-class argument.
+                                if (std.mem.indexOfScalar(usize, repeated_target_exts.items, ext_i) != null and
+                                    !try complexContainsTargetInPseudos(&first_pass.selectors.items[fi], &ext.target))
+                                {
+                                    continue;
+                                }
                                 if (!compoundContainsTargetInComplex(&first_pass.selectors.items[fi], &ext.target)) {
                                     continue;
                                 }
@@ -6803,7 +6825,7 @@ fn applyExtensionToComplex(
     // When the target appears in more than one compound, every combination
     // of extended and unextended positions is a result, not only the ones
     // that replace a single position.
-    const repeated_target = try appendRepeatedTargetProduct(frame, allocator, complex, ext, frame.config.replace_mode, &results);
+    const repeated_target = try appendRepeatedTargetProduct(frame, allocator, complex, ext, &.{}, frame.config.replace_mode, &results);
 
     // Walk through the complex selector's compound components
     for (complex.components.items, 0..) |comp, comp_idx| {
@@ -6904,6 +6926,42 @@ fn collectRepeatedTargetExtensions(
     std.mem.sort(usize, out.items, Context{ .extensions = extensions }, Context.lessThan);
 }
 
+/// List the extenders of `ext` that no other extender covers: `.x .f` adds
+/// nothing next to `.f`, whether `.f` is in the same extension or in one
+/// of `related` with the same target.
+fn collectUncoveredExtenders(
+    allocator: std.mem.Allocator,
+    ext: *const Extension,
+    related: []const *const Extension,
+    out: *std.ArrayList(*const ComplexSelector),
+) error{OutOfMemory}!void {
+    for (ext.extender.selectors.items, 0..) |*candidate, candidate_idx| {
+        var covered = false;
+        for (ext.extender.selectors.items, 0..) |*other, other_idx| {
+            if (other_idx == candidate_idx) continue;
+            if (!selector_mod.complexIsSuperSelector(other, candidate)) continue;
+            // Of two extenders that cover each other the first one stays.
+            if (other_idx > candidate_idx and selector_mod.complexIsSuperSelector(candidate, other)) continue;
+            covered = true;
+            break;
+        }
+        for (related) |other_ext| {
+            if (covered) break;
+            if (other_ext == ext) continue;
+            if (!compoundContainsTarget(&other_ext.target, &ext.target) or
+                !compoundContainsTarget(&ext.target, &other_ext.target)) continue;
+            for (other_ext.extender.selectors.items) |*other| {
+                if (!selector_mod.complexIsSuperSelector(other, candidate)) continue;
+                // The same extender written in two extensions is kept in both.
+                if (selector_mod.complexIsSuperSelector(candidate, other)) continue;
+                covered = true;
+                break;
+            }
+        }
+        if (!covered) try out.append(allocator, candidate);
+    }
+}
+
 /// Replace the target in each compound that holds it, one compound at a
 /// time. Used where the full product is not built.
 fn appendSingleTargetReplacements(
@@ -6911,12 +6969,16 @@ fn appendSingleTargetReplacements(
     allocator: std.mem.Allocator,
     complex: *const ComplexSelector,
     ext: *const Extension,
+    related: []const *const Extension,
     results: *std.ArrayList(ComplexSelector),
 ) error{OutOfMemory}!void {
+    var extenders: std.ArrayList(*const ComplexSelector) = .empty;
+    defer extenders.deinit(allocator);
+    try collectUncoveredExtenders(allocator, ext, related, &extenders);
     for (complex.components.items, 0..) |comp, comp_idx| {
         if (comp != .compound) continue;
         if (!compoundContainsTarget(&comp.compound, &ext.target)) continue;
-        for (ext.extender.selectors.items) |*extender_complex| {
+        for (extenders.items) |extender_complex| {
             var extra: std.ArrayList(ComplexSelector) = .empty;
             defer {
                 for (extra.items) |*e| e.deinit();
@@ -6939,14 +7001,26 @@ fn appendSingleTargetReplacements(
                 }
                 try results.append(allocator, selector);
             }
-            for (extra.items) |selector| try results.append(allocator, selector);
-            extra.items.len = 0;
+            try results.ensureUnusedCapacity(allocator, extra.items.len);
+            for (extra.items) |*selector| {
+                results.appendAssumeCapacity(selector.*);
+                selector.* = ComplexSelector.init(allocator);
+            }
         }
     }
 }
 
-const repeated_target_max_positions = 12;
-const repeated_target_max_results = 4096;
+fn complexHasExplicitCombinator(complex: *const ComplexSelector) bool {
+    for (complex.components.items) |component| {
+        if (component == .combinator and component.combinator != .descendant) return true;
+    }
+    return false;
+}
+
+const repeated_target_max_positions = 10;
+/// Later passes compare the results with one another, so the time grows
+/// with the square of this.
+const repeated_target_max_results = 1024;
 
 /// Extend a complex selector whose compounds contain the target more than
 /// once. Each such compound is either kept or replaced by one of the
@@ -6960,6 +7034,10 @@ fn appendRepeatedTargetProduct(
     allocator: std.mem.Allocator,
     complex: *const ComplexSelector,
     ext: *const Extension,
+    /// Extensions applied to the same selector, `ext` among them. An
+    /// extender of `ext` that one of their extenders for the same target
+    /// covers is left out.
+    related: []const *const Extension,
     replace_every_target: bool,
     results: *std.ArrayList(ComplexSelector),
 ) error{OutOfMemory}!bool {
@@ -6974,16 +7052,23 @@ fn appendRepeatedTargetProduct(
     }
     if (position_count < 2) return false;
 
-    const extenders = ext.extender.selectors.items;
-    if (extenders.len == 0) return false;
-    const radix = extenders.len + 1;
+    var extenders: std.ArrayList(*const ComplexSelector) = .empty;
+    defer extenders.deinit(allocator);
+    try collectUncoveredExtenders(allocator, ext, related, &extenders);
+    if (extenders.items.len == 0) return false;
+    const radix = extenders.items.len + 1;
     var combination_count: usize = 1;
     for (0..position_count) |_| {
         combination_count = saturatingMulUsize(combination_count, radix);
         if (combination_count > repeated_target_max_results) return false;
     }
 
-    const Partial = struct { selector: ComplexSelector, shift: usize };
+    const Partial = struct {
+        selector: ComplexSelector,
+        shift: usize,
+        /// An extender with `+`, `~`, or `>` has been put into the selector.
+        has_combinator_extender: bool = false,
+    };
     var current: std.ArrayList(Partial) = .empty;
     var next: std.ArrayList(Partial) = .empty;
     defer {
@@ -6994,7 +7079,7 @@ fn appendRepeatedTargetProduct(
     }
 
     var may_repeat = false;
-    for (extenders) |*extender_complex| {
+    for (extenders.items) |extender_complex| {
         if (extender_complex.components.items.len > 1) may_repeat = true;
     }
 
@@ -7024,9 +7109,15 @@ fn appendRepeatedTargetProduct(
             const choice = digits % radix;
             digits /= radix;
             if (choice == 0) continue;
-            const extender_complex = &extenders[choice - 1];
+            const extender_complex = extenders.items[choice - 1];
+            const extender_has_combinator = complexHasExplicitCombinator(extender_complex);
 
             for (current.items) |*partial| {
+                // Weaving a second extender into a selector that already
+                // holds one with a sibling or child combinator is not
+                // reliable; that combination is left out rather than
+                // written wrongly.
+                if (partial.has_combinator_extender and extender_complex.components.items.len > 1) continue;
                 const comp_idx = position + partial.shift;
                 const before_len = partial.selector.components.items.len;
                 const compound = partial.selector.components.items[comp_idx].compound;
@@ -7053,15 +7144,18 @@ fn appendRepeatedTargetProduct(
                     try next.append(allocator, .{
                         .selector = selector,
                         .shift = partial.shift + selector.components.items.len - before_len,
+                        .has_combinator_extender = partial.has_combinator_extender or extender_has_combinator,
                     });
                 }
-                for (extra.items) |selector| {
-                    try next.append(allocator, .{
-                        .selector = selector,
+                try next.ensureUnusedCapacity(allocator, extra.items.len);
+                for (extra.items) |*selector| {
+                    next.appendAssumeCapacity(.{
+                        .selector = selector.*,
                         .shift = partial.shift + selector.components.items.len - before_len,
+                        .has_combinator_extender = partial.has_combinator_extender or extender_has_combinator,
                     });
+                    selector.* = ComplexSelector.init(allocator);
                 }
-                extra.items.len = 0;
             }
             for (current.items) |*partial| partial.selector.deinit();
             current.clearRetainingCapacity();
