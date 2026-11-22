@@ -772,3 +772,152 @@ test "api: @page declarations are valid inside @media" {
         \\
     , css);
 }
+
+test "api: a forwarded !default configuration yields to the using module" {
+    const alloc = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    try writeApiTmpFileAll(&tmp_dir, "_lib.scss",
+        \\$a: 1 !default;
+        \\$b: 1 !default;
+        \\@if $a == 1 { x { y: one; } } @else if $a == 2 { x { y: two; } } @else { x { y: other; } }
+        \\@if $b == 1 { v { y: one; } } @else { v { y: other; } }
+        \\z { a: $a; b: $b; }
+    );
+    try writeApiTmpFileAll(&tmp_dir, "_inner.scss",
+        \\@forward "lib" with ($a: 1 !default);
+    );
+    try writeApiTmpFileAll(&tmp_dir, "_outer.scss",
+        \\@forward "inner" with ($a: 7 !default);
+    );
+
+    const tmp_path = try zsass_io.realPathAlloc(tmp_dir.dir, ".", alloc);
+    defer alloc.free(tmp_path);
+    const entry_path = try std.fs.path.join(alloc, &.{ tmp_path, "entry.scss" });
+    defer alloc.free(entry_path);
+
+    // The using module overrides the forwarded default and configures a
+    // variable the `@forward` does not mention.
+    const overridden = try compileSourceToCss(alloc, "@use \"inner\" with ($a: 2, $b: 3);\n", entry_path, &.{}, .{});
+    defer alloc.free(overridden);
+    try std.testing.expectEqualStrings(
+        \\x {
+        \\  y: two;
+        \\}
+        \\
+        \\v {
+        \\  y: other;
+        \\}
+        \\
+        \\z {
+        \\  a: 2;
+        \\  b: 3;
+        \\}
+        \\
+    , overridden);
+
+    // The outer `!default` takes precedence over the inner one.
+    const chained = try compileSourceToCss(alloc, "@use \"outer\";\n", entry_path, &.{}, .{});
+    defer alloc.free(chained);
+    try std.testing.expectEqualStrings(
+        \\x {
+        \\  y: other;
+        \\}
+        \\
+        \\v {
+        \\  y: one;
+        \\}
+        \\
+        \\z {
+        \\  a: 7;
+        \\  b: 1;
+        \\}
+        \\
+    , chained);
+}
+
+test "api: string functions and equality use the text of a string as is" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\@use "sass:string";
+        \\@use "sass:map";
+        \\a {
+        \\  length: string.length("\\61") string.length(a\.b);
+        \\  upper: string.to-upper-case("\\61") string.to-upper-case(a\.b);
+        \\  index: string.index("a\\b", "b");
+        \\  slice: string.slice("\\61 b", 2);
+        \\  equal: ("\\61" == "a") ("\61" == a);
+        \\  key: map.get(("\\61": 1), "a") == null;
+        \\  quote: string.quote(string.unquote("\\61"));
+        \\  name: foo#{string.length("\\61")}(1);
+        \\}
+    ;
+    const css = try compileSourceToCss(alloc, src, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\a {
+        \\  length: 3 4;
+        \\  upper: "\\61" A\.B;
+        \\  index: 3;
+        \\  slice: "61 b";
+        \\  equal: false true;
+        \\  key: true;
+        \\  quote: "\\61";
+        \\  name: foo3(1);
+        \\}
+        \\
+    , css);
+}
+
+test "api: a private-use character in a quoted string" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\@use "sass:string";
+        \\$icon: \f00c;
+        \\a {
+        \\  spaced: "\f00c Done" "\f00c  x" "x\f00c y";
+        \\  joined: "\f00c" + "Done";
+        \\  interpolated: "#{$icon}" "#{$icon}Done";
+        \\  appended: "" + $icon;
+        \\  quoted: string.quote($icon);
+        \\}
+    ;
+    const css = try compileSourceToCss(alloc, src, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\a {
+        \\  spaced: "\f00c Done" "\f00c  x" "x\f00cy";
+        \\  joined: "\f00c Done";
+        \\  interpolated: "\f00c" "\f00c Done";
+        \\  appended: "\f00c";
+        \\  quoted: "\f00c";
+        \\}
+        \\
+    , css);
+}
+
+test "api: identifier hyphens in math functions and decimals in url()" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\$v: var(--x);
+        \\a {
+        \\  ident: min(a-b) clamp(a-b, c-d, e-f) min(a\2d b);
+        \\  spaced: min(a-b - c-d) min(a -b);
+        \\  number: max(0px, (48px - $v) / 2);
+        \\  url: url(a/.5.png) .5s;
+        \\}
+    ;
+    const css = try compileSourceToCss(alloc, src, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\a {
+        \\  ident: min(a-b) clamp(a-b, c-d, e-f) min(a-b);
+        \\  spaced: min(a-b - c-d) min(a -b);
+        \\  number: max(0px, (48px - var(--x)) / 2);
+        \\  url: url(a/.5.png) 0.5s;
+        \\}
+        \\
+    , css);
+}

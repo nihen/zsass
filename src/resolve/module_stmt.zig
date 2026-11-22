@@ -122,6 +122,53 @@ pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: b
     return try appendModuleDep(ctx, mid, span, rerun_each_call, false);
 }
 
+/// The name a forwarded member `forwarded` has inside the forwarded module,
+/// or null when it lacks the `@forward ... as` prefix.
+fn stripForwardPrefix(forwarded: []const u8, prefix: ?[]const u8) ?[]const u8 {
+    const p = prefix orelse return forwarded;
+    if (forwarded.len < p.len) return null;
+    if (!identifierEq(forwarded[0..p.len], p)) return null;
+    return forwarded[p.len..];
+}
+
+/// The configuration a module loaded by `@forward ... with (...)` is
+/// statically evaluated with. A `!default` entry yields to a value the
+/// forwarding module was itself configured with, and the remaining upstream
+/// entries pass through to the forwarded module.
+fn forwardedInitialConfig(
+    ctx: anytype,
+    config_entries: []const WithConfigEntry,
+    prefix: ?[]const u8,
+) ResolveError![]const WithConfigEntry {
+    const upstream: []const WithConfigEntry = ctx.initial_config_entries;
+    if (upstream.len == 0) return config_entries;
+
+    var out: std.ArrayListUnmanaged(WithConfigEntry) = .empty;
+    errdefer out.deinit(ctx.a);
+    try out.ensureTotalCapacity(ctx.a, config_entries.len + upstream.len);
+    for (config_entries) |entry| {
+        var merged = entry;
+        if (entry.is_default) {
+            for (upstream) |up| {
+                const target_name = stripForwardPrefix(up.name, prefix) orelse continue;
+                if (!identifierEq(target_name, entry.name)) continue;
+                merged = .{ .name = entry.name, .value = up.value, .is_default = up.is_default };
+                break;
+            }
+        }
+        out.appendAssumeCapacity(merged);
+    }
+    for (upstream) |up| {
+        const target_name = stripForwardPrefix(up.name, prefix) orelse continue;
+        const covered = for (config_entries) |entry| {
+            if (identifierEq(entry.name, target_name)) break true;
+        } else false;
+        if (covered) continue;
+        out.appendAssumeCapacity(.{ .name = target_name, .value = up.value, .is_default = up.is_default });
+    }
+    return try out.toOwnedSlice(ctx.a);
+}
+
 pub fn resolveForwardStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: bool, comptime deps: anytype) ResolveError!StmtIndex {
     if (is_top_level_stmt and ctx.module_directive_locked) return error.SassError;
     const off: ExtraIndex = n.payload;
@@ -157,7 +204,7 @@ pub fn resolveForwardStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stm
     setCurrentErrorFrameSpan(span);
     const saved_pending_config = loader.pending_next_config_entries;
     const forward_initial_entries = if (config_entries.len > 0)
-        config_entries
+        try forwardedInitialConfig(ctx, config_entries, prefix)
     else if (ctx.initial_config_entries.len != 0)
         ctx.initial_config_entries
     else
