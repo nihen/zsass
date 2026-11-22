@@ -5087,70 +5087,30 @@ pub const RuleIR = struct {
         return true;
     }
 
-    /// Whether the comma at `pos` separates the selectors given to a
-    /// pseudo-class such as `:is()` in a style rule's selector. Those lists
-    /// are written without a space in compressed output; other arguments
-    /// (`:lang(en, fr)`, a function in a value, an at-rule prelude) are not.
-    fn isSelectorPseudoArgumentComma(text: []const u8, pos: usize) bool {
-        var open: ?usize = null;
-        var depth: usize = 0;
-        var i = pos;
-        while (i > 0) {
-            i -= 1;
-            switch (text[i]) {
-                ')' => depth += 1,
-                '(' => {
-                    if (depth == 0) {
-                        open = i;
-                        break;
-                    }
-                    depth -= 1;
-                },
-                '{', '}', ';' => return false,
-                '"', '\'' => {
-                    // Step back over a string, which may hold any of these.
-                    const quote = text[i];
-                    while (i > 0) {
-                        i -= 1;
-                        if (text[i] != quote) continue;
-                        var backslashes: usize = 0;
-                        while (backslashes < i and text[i - 1 - backslashes] == '\\') backslashes += 1;
-                        if (backslashes % 2 == 0) break;
-                    }
-                },
-                else => {},
-            }
-        }
-        const open_idx = open orelse return false;
-        var name_start = open_idx;
-        while (name_start > 0 and (std.ascii.isAlphanumeric(text[name_start - 1]) or
-            text[name_start - 1] == '-' or text[name_start - 1] == '_')) name_start -= 1;
-        if (name_start == open_idx or name_start == 0 or text[name_start - 1] != ':') return false;
-        if (!selector_mod.isSelectorPseudo(text[name_start..open_idx])) return false;
-
-        // The statement is a style rule: it is not an at-rule, and a block
-        // follows it.
-        var start = name_start;
-        while (start > 0 and text[start - 1] != '{' and text[start - 1] != '}' and text[start - 1] != ';') start -= 1;
-        while (start < name_start and (text[start] == ' ' or text[start] == '\n')) start += 1;
-        if (text[start] == '@') return false;
+    /// Whether the statement that starts at `start` is a style rule: it is
+    /// not an at-rule, and a block follows its prelude.
+    fn statementIsStyleRule(text: []const u8, start: usize) bool {
+        var i = start;
+        while (i < text.len and (text[i] == ' ' or text[i] == '\n')) i += 1;
+        if (i >= text.len or text[i] == '@') return false;
         var in_string: u8 = 0;
-        var j = pos;
-        while (j < text.len) : (j += 1) {
-            const c = text[j];
+        var depth: usize = 0;
+        while (i < text.len) : (i += 1) {
+            const c = text[i];
+            if (c == '\\') {
+                i += 1;
+                continue;
+            }
             if (in_string != 0) {
-                if (c == '\\') {
-                    j += 1;
-                } else if (c == in_string) {
-                    in_string = 0;
-                }
+                if (c == in_string) in_string = 0;
                 continue;
             }
             switch (c) {
                 '"', '\'' => in_string = c,
-                '\\' => j += 1,
-                '{' => return true,
-                '}', ';' => return false,
+                '(' => depth += 1,
+                ')' => depth -|= 1,
+                '{' => if (depth == 0) return true,
+                '}', ';' => if (depth == 0) return false,
                 else => {},
             }
         }
@@ -5161,22 +5121,15 @@ pub const RuleIR = struct {
         return out.len >= 2 and out[out.len - 2] == '\\' and (out[out.len - 1] == '0' or out[out.len - 1] == '9');
     }
 
-    fn currentDeclPropertyIsCustom(out: []const u8) bool {
-        var start = out.len;
-        while (start > 0) {
-            const prev = out[start - 1];
-            if (prev == '{' or prev == ';' or prev == '}') break;
-            start -= 1;
-        }
-        const prop = std.mem.trim(u8, out[start..], " ");
-        return std.mem.startsWith(u8, prop, "--");
-    }
-
     fn compressCss(allocator: std.mem.Allocator, expanded: []const u8) error{OutOfMemory}![]const u8 {
         var first: std.ArrayList(u8) = .empty;
         errdefer first.deinit(allocator);
-        // Where the statement being copied starts in `first`.
+        // Where the statement being copied starts in `first`. A brace or
+        // semicolon inside a string or parentheses does not end a statement.
         var first_statement_start: usize = 0;
+        var first_in_string: u8 = 0;
+        var first_escaped = false;
+        var first_paren_depth: usize = 0;
 
         var i: usize = 0;
         while (i < expanded.len) : (i += 1) {
@@ -5198,8 +5151,10 @@ pub const RuleIR = struct {
                     i += 1;
                 }
                 // A line break inside a custom property value separates two
-                // tokens, so it becomes a space rather than nothing.
-                if (first.items.len != 0) {
+                // tokens, so it becomes a space rather than nothing. Before a
+                // comment the space after the comment does that.
+                const comment_follows = std.mem.startsWith(u8, expanded[i + 1 ..], "/*");
+                if (first.items.len != 0 and !comment_follows) {
                     const last = first.items[first.items.len - 1];
                     const separated = last == ' ' and !css_utils.endsWithEscapeWhitespace(first.items);
                     if (last != '{' and last != '}' and last != ';' and last != '/' and !separated and
@@ -5215,7 +5170,21 @@ pub const RuleIR = struct {
             if (c == ';' and i + 1 < expanded.len and expanded[i + 1] == '}') continue;
 
             try first.append(allocator, c);
-            if (c == '{' or c == '}' or c == ';') first_statement_start = first.items.len;
+            if (first_escaped) {
+                first_escaped = false;
+            } else if (c == '\\') {
+                first_escaped = true;
+            } else if (first_in_string != 0) {
+                if (c == first_in_string) first_in_string = 0;
+            } else switch (c) {
+                '"', '\'' => first_in_string = c,
+                '(' => first_paren_depth += 1,
+                ')' => first_paren_depth -|= 1,
+                '{', '}', ';' => if (first_paren_depth == 0) {
+                    first_statement_start = first.items.len;
+                },
+                else => {},
+            }
             if (c == '}') {
                 while (first.items.len >= 2 and first.items[first.items.len - 2] == ';') {
                     first.items[first.items.len - 2] = '}';
@@ -5240,6 +5209,17 @@ pub const RuleIR = struct {
         var statement_start: usize = 0;
         var block_prelude_starts: std.ArrayList(usize) = .empty;
         defer block_prelude_starts.deinit(allocator);
+        // For every open parenthesis, whether it holds the selectors given
+        // to a pseudo-class such as `:is()` in a style rule's selector.
+        // Those lists are written without a space after the comma; other
+        // arguments (`:lang(en, fr)`, a function in a value, an at-rule
+        // prelude) keep it.
+        var selector_argument_parens: std.ArrayList(bool) = .empty;
+        defer selector_argument_parens.deinit(allocator);
+        // Where the statement being read starts in `first`, and whether it
+        // is a style rule, worked out once per statement when first needed.
+        var input_statement_start: usize = 0;
+        var statement_is_style_rule: ?bool = null;
         i = 0;
         while (i < first.items.len) : (i += 1) {
             if (std.mem.startsWith(u8, first.items[i..], interp_decl_marker)) {
@@ -5307,10 +5287,19 @@ pub const RuleIR = struct {
                     color_func_depth = paren_depth;
                 }
                 if (std.ascii.eqlIgnoreCase(name, "calc")) calc_func_depth = paren_depth;
+                const holds_selectors = !in_custom_decl and name_start > 0 and out.items[name_start - 1] == ':' and
+                    selector_mod.isSelectorPseudo(name) and blk: {
+                    if (statement_is_style_rule == null) {
+                        statement_is_style_rule = statementIsStyleRule(first.items, input_statement_start);
+                    }
+                    break :blk statement_is_style_rule.?;
+                };
+                try selector_argument_parens.append(allocator, holds_selectors);
                 try out.append(allocator, c);
                 continue;
             }
             if (c == ')') {
+                _ = selector_argument_parens.pop();
                 if (paren_depth != 0) {
                     if (color_func_depth == paren_depth) color_func_depth = 0;
                     if (calc_func_depth == paren_depth) calc_func_depth = 0;
@@ -5321,7 +5310,7 @@ pub const RuleIR = struct {
             }
 
             if (c == ':' and paren_depth == 0) {
-                in_custom_decl = currentDeclPropertyIsCustom(out.items);
+                in_custom_decl = std.mem.startsWith(u8, std.mem.trim(u8, out.items[statement_start..], " "), "--");
             }
             if (!in_custom_decl and c == ':' and i + 1 < first.items.len and first.items[i + 1] == ' ' and paren_depth == 0) {
                 try out.append(allocator, ':');
@@ -5329,7 +5318,8 @@ pub const RuleIR = struct {
                 continue;
             }
             if (!in_custom_decl and c == ',' and i + 1 < first.items.len and first.items[i + 1] == ' ' and
-                (paren_depth == 0 or color_func_depth != 0 or isSelectorPseudoArgumentComma(first.items, i)))
+                (paren_depth == 0 or color_func_depth != 0 or
+                    (selector_argument_parens.items.len != 0 and selector_argument_parens.items[selector_argument_parens.items.len - 1])))
             {
                 try out.append(allocator, ',');
                 i += 1;
@@ -5410,7 +5400,11 @@ pub const RuleIR = struct {
 
             if (c == '{' and structural) try block_prelude_starts.append(allocator, statement_start);
             try out.append(allocator, c);
-            if (structural and (c == '{' or c == '}' or c == ';')) statement_start = out.items.len;
+            if (structural and (c == '{' or c == '}' or c == ';')) {
+                statement_start = out.items.len;
+                input_statement_start = i + 1;
+                statement_is_style_rule = null;
+            }
         }
         first.deinit(allocator);
         return try out.toOwnedSlice(allocator);
@@ -7654,14 +7648,19 @@ pub const RuleIR = struct {
             }
 
             /// A hex escape in a selector name is always written with the
-            /// space that ends it, whatever follows. The whitespace passes
-            /// above drop that space before a comma and at the end of the
-            /// selector; this puts it back.
+            /// space that ends it. The whitespace passes above drop that space
+            /// before a comma and at the end of the selector; this puts it
+            /// back there.
             fn ensureSelectorHexEscapeDelimiters(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
                 var out: std.ArrayListUnmanaged(u8) = .empty;
                 errdefer out.deinit(allocator);
                 var copied: usize = 0;
                 var in_string: u8 = 0;
+                // One bit per open parenthesis, set while it holds selectors
+                // (`:not(...)`) and clear for other arguments (`:lang(...)`),
+                // whose text is not made of selector names.
+                var selector_parens: u64 = 0;
+                var paren_depth: usize = 0;
                 var i: usize = 0;
                 while (i < text.len) {
                     const c = text[i];
@@ -7670,6 +7669,20 @@ pub const RuleIR = struct {
                             if (c == in_string) in_string = 0;
                         } else if (c == '"' or c == '\'') {
                             in_string = c;
+                        } else if (c == '(') {
+                            var name_start = i;
+                            while (name_start > 0 and (std.ascii.isAlphanumeric(text[name_start - 1]) or
+                                text[name_start - 1] == '-' or text[name_start - 1] == '_')) name_start -= 1;
+                            const holds_selectors = name_start > 0 and text[name_start - 1] == ':' and
+                                selector_mod.isSelectorPseudo(text[name_start..i]) and
+                                (paren_depth == 0 or (paren_depth <= 64 and selector_parens & (@as(u64, 1) << @intCast(paren_depth - 1)) != 0));
+                            if (paren_depth < 64) {
+                                const bit = @as(u64, 1) << @intCast(paren_depth);
+                                selector_parens = if (holds_selectors) selector_parens | bit else selector_parens & ~bit;
+                            }
+                            paren_depth += 1;
+                        } else if (c == ')') {
+                            paren_depth -|= 1;
                         }
                         i += 1;
                         continue;
@@ -7686,6 +7699,10 @@ pub const RuleIR = struct {
                         i += 1;
                         continue;
                     }
+                    // Elsewhere the text is as it was built.
+                    if (i < text.len and text[i] != ',' and text[i] != ')') continue;
+                    if (paren_depth != 0 and
+                        (paren_depth > 64 or selector_parens & (@as(u64, 1) << @intCast(paren_depth - 1)) == 0)) continue;
                     try out.appendSlice(allocator, text[copied..i]);
                     try out.append(allocator, ' ');
                     copied = i;

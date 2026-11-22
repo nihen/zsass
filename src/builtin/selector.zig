@@ -203,9 +203,15 @@ pub fn selector_append(ctx: *BuiltinContext, args: []const Value) BuiltinError!V
     const appended_css = try selector_mod.toCss(ctx.allocator, &current);
     defer ctx.allocator.free(appended_css);
     if (std.mem.indexOfScalar(u8, appended_css, '\\') != null) {
-        const reparsed = selector_mod.parse(ctx.allocator, appended_css) catch return error.SassError;
-        current.deinit();
-        current = reparsed;
+        // A name the parser does not read back, such as one that ends in
+        // an escaped space, stays as it was joined.
+        if (selector_mod.parse(ctx.allocator, appended_css)) |reparsed| {
+            current.deinit();
+            current = reparsed;
+        } else |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {},
+        }
     }
 
     return selectorListToValue(ctx, &current);

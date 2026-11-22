@@ -1294,6 +1294,34 @@ test "api: compressed output keeps selector pseudo-class arguments and custom pr
     try std.testing.expectEqualStrings(":is(.a,.b):not(.c,[d=\"e, f\"]) :lang(en, fr){g:h(i, j)}k{--l: m n}\n", css);
 }
 
+test "api: compressed output reads strings and parentheses when it looks for a statement" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\@supports selector([x=";"]:is(.a, .b)) { a { x: y; } }
+        \\[x=";"]:is(.a, .b) { --c: "d;e" f
+        \\  g; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .output_style = .compressed });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings("@supports selector([x=\";\"]:is(.a, .b)){a{x:y}}[x=\";\"]:is(.a,.b){--c: \"d;e\" f g}\n", css);
+}
+
+test "api: a hex escape gets its space only where a selector name ends" {
+    // Lists a built-in function returns live until the allocator is torn
+    // down, so this compile runs in an arena.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const source =
+        \\@use "sass:selector";
+        \\:lang(\31), :not(.\31 ), :is(:lang(\32), .\33 ) { x: selector.append(".a\\20 "); }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    try std.testing.expectEqualStrings(":lang(\\31), :not(.\\31 ), :is(:lang(\\32), .\\33 ) {\n  x: .a\\ ;\n}\n", css);
+}
+
 test "api: selector.nest returns a selector list" {
     // Lists a built-in function returns live until the allocator is torn
     // down, so these compiles run in an arena.
