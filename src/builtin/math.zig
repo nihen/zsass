@@ -638,6 +638,20 @@ fn unwrapOuterParensForCssMathArg(ctx: *BuiltinContext, text: []const u8) Builti
     return ctx.allocator.dupe(u8, text);
 }
 
+/// Whether the hyphen at `index` directly follows an identifier, as opposed
+/// to a number (with or without a unit) or anything else.
+fn hyphenContinuesIdentifier(text: []const u8, index: usize) bool {
+    var start = index;
+    while (start > 0 and isCssIdentCharByte(text[start - 1])) : (start -= 1) {}
+    if (start == index) return false;
+    var first = start;
+    while (first < index and text[first] == '-') : (first += 1) {}
+    if (first == index) return true;
+    if (std.ascii.isDigit(text[first])) return false;
+    // `.5px-a`: the token after a decimal point is still a number.
+    return !(start > 0 and text[start - 1] == '.');
+}
+
 fn normalizeCssMathArgText(ctx: *BuiltinContext, text: []const u8) BuiltinError![]u8 {
     var stage1: std.ArrayListUnmanaged(u8) = .empty;
     defer stage1.deinit(ctx.allocator);
@@ -656,10 +670,10 @@ fn normalizeCssMathArgText(ctx: *BuiltinContext, text: []const u8) BuiltinError!
             i += 2;
             continue;
         }
-        // A hyphen that directly follows an identifier character belongs to
-        // that identifier or unit (`a-b`, `a- b`, `1px-a`); it is never an
-        // operator.
-        if (c == '-' and i > 0 and isCssIdentCharByte(text[i - 1])) {
+        // A hyphen inside an identifier (`a-b`, `a- b`) is never an operator.
+        // After a number it still is one: a number minus a string evaluates
+        // to compact text such as `48px-var(--x)`.
+        if (c == '-' and hyphenContinuesIdentifier(text, i)) {
             try stage1.append(ctx.allocator, c);
             i += 1;
             continue;
@@ -3118,6 +3132,10 @@ test "css math argument text keeps identifier hyphens and glued signs" {
         .{ "1% -b", "1% -b" },
         .{ "a\\+b", "a\\+b" },
         .{ "1px - a", "1px - a" },
+        .{ "48px-var(--x)", "48px - var(--x)" },
+        .{ "-1.5px-var(--x)", "-1.5px - var(--x)" },
+        .{ "--a-b", "--a-b" },
+        .{ "-a-b", "-a-b" },
     };
     for (cases) |case| {
         const rendered = try normalizeCssMathArgText(&ctx, case[0]);
@@ -3126,7 +3144,7 @@ test "css math argument text keeps identifier hyphens and glued signs" {
     }
 }
 
-test "math.exp keeps a hyphen glued to a unit in css fallback" {
+test "math.exp normalizes compact subtraction in css fallback" {
     var harness = try MathTestHarness.init(testing.allocator);
     defer harness.deinit();
 
@@ -3135,7 +3153,7 @@ test "math.exp keeps a hyphen glued to a unit in css fallback" {
     const args = [_]Value{Value.string(expr_id, false)};
     const result = try math_exp(&ctx, &args);
     try testing.expectEqual(.string, result.kind());
-    try testing.expectEqualStrings("exp(3px-var(--c))", ctx.intern_pool.get(result.stringIntern()));
+    try testing.expectEqualStrings("exp(3px - var(--c))", ctx.intern_pool.get(result.stringIntern()));
 }
 
 test "math.abs keeps named-argument type errors for css-like values" {
