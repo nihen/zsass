@@ -952,7 +952,24 @@ pub fn decodeSassIdentifier(allocator: std.mem.Allocator, text: []const u8) ![]c
 /// SassScript source, evaluated later, and is copied as written. Returns
 /// `text` itself when nothing changes.
 pub fn decodeSassIdentifierOutsideInterpolation(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
-    if (std.mem.find(u8, text, "#{") == null) return decodeSassIdentifier(allocator, text);
+    return mapIdentifierOutsideInterpolation(allocator, text, decodeSassIdentifier);
+}
+
+/// `unescapeSassIdentifier` for a name that may contain `#{...}`: the literal
+/// text around an interpolation gets its canonical spelling, so an escape can
+/// no longer run into the text an interpolation produces (`a\62#{1}` is `ab`
+/// followed by `1`, not the escape `\621`). Returns `text` itself when nothing
+/// changes.
+pub fn canonicalizeSassIdentifierOutsideInterpolation(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    return mapIdentifierOutsideInterpolation(allocator, text, unescapeSassIdentifier);
+}
+
+fn mapIdentifierOutsideInterpolation(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    comptime mapLiteral: anytype,
+) ![]const u8 {
+    if (std.mem.find(u8, text, "#{") == null) return mapLiteral(allocator, text);
     if (std.mem.findScalar(u8, text, '\\') == null) return text;
 
     var buf: std.ArrayList(u8) = .empty;
@@ -962,7 +979,7 @@ pub fn decodeSassIdentifierOutsideInterpolation(allocator: std.mem.Allocator, te
         const open = std.mem.findPos(u8, text, i, "#{") orelse text.len;
         // An escaped `\#{` is not an interpolation; it stays in the literal part.
         const literal = text[i..open];
-        const decoded = try decodeSassIdentifier(allocator, literal);
+        const decoded = try mapLiteral(allocator, literal);
         defer if (decoded.ptr != literal.ptr) allocator.free(decoded);
         try buf.appendSlice(allocator, decoded);
         if (open >= text.len) break;

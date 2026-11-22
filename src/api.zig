@@ -1047,3 +1047,25 @@ test "api: escapes in selectors have one canonical spelling" {
         \\
     , css);
 }
+
+test "api: an escape next to an interpolation in a function name" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\$x: 1;
+        \\a {
+        \\  literal: a\62#{1}(2) \31#{1}(2) a\.#{1}(2);
+        \\  variable: a\62#{$x}(2) #{$x}\62 c(2);
+        \\  operands: min(var(--a) var(--b)) min(1px + 1px + var(--c));
+        \\}
+    ;
+    const css = try compileSourceToCss(alloc, src, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\a {
+        \\  literal: ab1(2) \31 1(2) a\.1(2);
+        \\  variable: ab1(2) 1bc(2);
+        \\  operands: min(var(--a) var(--b)) min(2px + var(--c));
+        \\}
+        \\
+    , css);
+}
