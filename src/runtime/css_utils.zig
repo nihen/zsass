@@ -1463,6 +1463,47 @@ pub fn normalizeCssValueEscapes(allocator: std.mem.Allocator, text: []const u8) 
 
     return try buf.toOwnedSlice(allocator);
 }
+/// Replace each hex escape of a private-use character (`\\f00c`, with its
+/// optional delimiter space) by the character itself. Other escapes stay as
+/// written. Returns `text` itself when nothing changes.
+pub fn decodePrivateUseEscapes(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    if (std.mem.findScalar(u8, text, '\\') == null) return text;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var changed = false;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] != '\\' or i + 1 >= text.len) {
+            try out.append(allocator, text[i]);
+            i += 1;
+            continue;
+        }
+        var j = i + 1;
+        var value: u32 = 0;
+        while (j < text.len and j - (i + 1) < 6 and isHexDigit(text[j])) : (j += 1) {
+            value = value * 16 + hexDigitValue(text[j]);
+        }
+        if (j > i + 1 and value <= 0x10FFFF and isPrivateUseCodePoint(@intCast(value))) {
+            var utf8_buf: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(@intCast(value), &utf8_buf) catch unreachable;
+            try out.appendSlice(allocator, utf8_buf[0..len]);
+            if (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
+            changed = true;
+            i = j;
+            continue;
+        }
+        // Copy the backslash together with the character it escapes.
+        const end = if (j > i + 1) j else i + 2;
+        try out.appendSlice(allocator, text[i..end]);
+        i = end;
+    }
+    if (!changed) {
+        out.deinit(allocator);
+        return text;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
 /// Write every private-use character of rendered CSS text as a hex escape,
 /// the way expanded output prints them. Returns `text` itself when it has none.
 pub fn escapePrivateUseCodePoints(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
@@ -2032,6 +2073,23 @@ test "escapePrivateUseCodePoints separates the escape from a hex digit or space"
     };
     for (cases) |case| {
         const out = try escapePrivateUseCodePoints(std.testing.allocator, case[0]);
+        defer if (out.ptr != case[0].ptr) std.testing.allocator.free(out);
+        try std.testing.expectEqualStrings(case[1], out);
+    }
+}
+
+test "decodePrivateUseEscapes decodes only private-use escapes" {
+    const cases = [_][2][]const u8{
+        .{ "\\f00c", "\u{f00c}" },
+        .{ "\\f00c Done", "\u{f00c}Done" },
+        .{ "a\\e000 b", "a\u{e000}b" },
+        .{ "\\31 a", "\\31 a" },
+        .{ "a\\.b", "a\\.b" },
+        .{ "\\\\f00c", "\\\\f00c" },
+        .{ "plain", "plain" },
+    };
+    for (cases) |case| {
+        const out = try decodePrivateUseEscapes(std.testing.allocator, case[0]);
         defer if (out.ptr != case[0].ptr) std.testing.allocator.free(out);
         try std.testing.expectEqualStrings(case[1], out);
     }

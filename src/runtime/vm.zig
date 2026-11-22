@@ -3499,6 +3499,7 @@ pub const VM = struct {
                 defer acc.deinit(self.allocator);
                 const interpolation_context = (inst.arg_b & opcode_mod.make_selector_flag_interpolation_context) != 0;
                 const preserve_empty_seps = (inst.arg_b & opcode_mod.make_selector_flag_preserve_empty_separators) != 0;
+                const quoted_result = (inst.arg_b & opcode_mod.make_selector_flag_quoted_result) != 0;
                 const source_name_interp = (inst.arg_b & opcode_mod.make_selector_flag_source_name_interp) != 0;
                 const source_args_interp = (inst.arg_b & opcode_mod.make_selector_flag_source_args_interp) != 0;
                 const source_has_interp = source_name_interp or source_args_interp;
@@ -3585,7 +3586,15 @@ pub const VM = struct {
                         )
                     else
                         try valueToInternIdRaw(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, part);
-                    const s = self.intern_pool.get(id);
+                    const part_text = self.intern_pool.get(id);
+                    // An unquoted string spells a private-use character as an
+                    // escape; inside a quoted string it is the character.
+                    const s = if (quoted_result and part.kind() == .string and
+                        !part.stringQuoted(self.string_flags_pool.items))
+                        try css_utils.decodePrivateUseEscapes(self.allocator, part_text)
+                    else
+                        part_text;
+                    defer if (s.ptr != part_text.ptr) self.allocator.free(s);
                     if (s.len == 0) {
                         if (!preserve_empty_seps and acc.items.len > 0) {
                             const last = acc.items[acc.items.len - 1];
@@ -3655,6 +3664,8 @@ pub const VM = struct {
                 // Push with preserve_ampersand flag to prevent it from resolving.
                 const merged_value = if (preserved_parent_marker)
                     Value.stringPreservingAmpersand(merged, false)
+                else if (quoted_result)
+                    Value.string(merged, true)
                 else if (interpolation_context)
                     Value.string(merged, false).withPreserveLiteralText()
                 else
@@ -8105,14 +8116,6 @@ pub const VM = struct {
         recordArgumentTypeMismatchMessage(self, param_name, value, expected);
     }
 
-    pub fn stripCalcArgMarkerForDispatch(_: *VM, text: []const u8) []const u8 {
-        return calc_utils.stripCalcArgMarker(text);
-    }
-
-    pub fn serializeUnquotedDeclStringForDispatch(self: *VM, raw: []const u8) VMError![]u8 {
-        return serializeUnquotedDeclString(self.allocator, raw);
-    }
-
     pub fn invokeMetaLoad(self: *VM, ctx: anytype, args: []const Value, arg_names: []const InternId) builtin_shared.BuiltinError!Value {
         return vm_module_load.invokeMetaLoad(self, ctx, args, arg_names);
     }
@@ -8836,7 +8839,11 @@ fn addValues(
                     (rhs_calc_like and lhs_trim.len != 0));
             if (!allow_concat) return error.SassError;
         }
-        const merged = try std.fmt.allocPrint(alloc, "{s}{s}", .{ sa, sb });
+        // Appended to a quoted string, an unquoted string contributes its
+        // characters: a private-use escape becomes the character itself.
+        const sb_text = if (qa and !qb) try css_utils.decodePrivateUseEscapes(alloc, sb) else sb;
+        defer if (sb_text.ptr != sb.ptr) alloc.free(sb_text);
+        const merged = try std.fmt.allocPrint(alloc, "{s}{s}", .{ sa, sb_text });
         defer alloc.free(merged);
         const id = try internGeneratedString(pool, merged);
         const keep_rhs_quote = qb and !qa and isUnquotedCalcLikeString(pool, lhs);
