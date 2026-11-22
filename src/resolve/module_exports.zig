@@ -590,7 +590,9 @@ pub fn applyConfigTarget(
 
     if (is_default) {
         // A module is configured from the inside out, so a later `!default`
-        // comes from an outer `@forward` and takes precedence.
+        // comes from an outer `@forward` and takes precedence. A `null`
+        // leaves the default that is already in place.
+        if (acc.default_set and value.kind() == .nil) return;
         acc.default_set = true;
         acc.default_value = value;
         return;

@@ -881,6 +881,13 @@ fn normalizeIdentifierEscapesForParse(
         allocator.free(canonical);
         return dupeForParse(allocator, "\u{FFFD}");
     }
+    // A lone hyphen is not an identifier and has to stay escaped. It is
+    // written `\-` rather than as a hex escape: the space that ends a hex
+    // escape is not yet kept apart from a following descendant combinator.
+    if (std.mem.eql(u8, canonical, "-")) {
+        allocator.free(canonical);
+        return dupeForParse(allocator, "\\-");
+    }
     return canonical;
 }
 

@@ -7020,6 +7020,7 @@ pub const Parser = struct {
         byte_offset: u32,
     ) ParseError!NodeIndex {
         var lexer = lexer_mod.Lexer.init(self.allocator, expr_source);
+        lexer.source_is_fragment = true;
         defer lexer.deinit();
         const sub_tokens = lexer.tokenize() catch return error.SyntaxError;
 

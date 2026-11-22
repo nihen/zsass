@@ -4674,6 +4674,7 @@ fn parseSubExpr(ctx: *Ctx, inner: []const u8, _: Span) ResolveError!ExprIndex {
     var sub_ast = ast_flat.Ast.init(ctx.a, inner, .none);
     defer sub_ast.deinit();
     var lexer = lexer_mod.Lexer.init(ctx.a, inner);
+    lexer.source_is_fragment = true;
     defer lexer.deinit();
     const tokens = lexer.tokenize() catch return error.SassError;
     var parser = parser_mod.Parser.init(ctx.a, ctx.pool, tokens, inner);
@@ -8955,6 +8956,7 @@ fn resolveExprFromSourceText(ctx: *Ctx, raw_src: []const u8) ResolveError!ExprIn
     var sub_ast = ast_flat.Ast.init(ctx.a, raw_src, .none);
     defer sub_ast.deinit();
     var lexer = lexer_mod.Lexer.init(ctx.a, raw_src);
+    lexer.source_is_fragment = true;
     defer lexer.deinit();
     const tokens = lexer.tokenize() catch return error.SassError;
     var parser = parser_mod.Parser.init(ctx.a, ctx.pool, tokens, raw_src);
@@ -9014,6 +9016,7 @@ fn resolveIncludeArgsFromSource(ctx: *Ctx, inner_src: []const u8) ResolveError!R
     var sub_ast = ast_flat.Ast.init(ctx.a, fake_call_src, .none);
     defer sub_ast.deinit();
     var lexer = lexer_mod.Lexer.init(ctx.a, fake_call_src);
+    lexer.source_is_fragment = true;
     defer lexer.deinit();
     const tokens = lexer.tokenize() catch return error.SassError;
     var parser = parser_mod.Parser.init(ctx.a, ctx.pool, tokens, fake_call_src);

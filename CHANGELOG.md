@@ -75,11 +75,17 @@ Tracks Dart Sass 1.108.2. The vendored `sass-spec` pin moves to
 - `-\41` is the identifier `-A` rather than a negated `\41`.
 - `meta.load-css()` works inside `@media`, `@supports`, and other at-rule
   blocks; it failed with a compile error. Nested in a style rule or an
-  at-rule, the loaded rules are no longer separated by blank lines, a
-  comment gets a rule of its own, and keyframe selectors are left alone.
+  at-rule, the loaded rules are no longer separated by blank lines,
+  comments get a rule of their own, and keyframe selectors are left alone.
+  A chain of more than 200 modules that load one another is an error
+  instead of a crash.
+- Compressed output removes an empty rule without the block around it.
+  `@media print { a { /* x */ } b { c: d } }` lost its `@media`.
 - A module loaded through `@forward ... with ($a: 1 !default)` takes the
   value the using module configured when a top-level `@if` is evaluated,
-  and an outer `@forward` default takes precedence over an inner one.
+  and an outer `@forward` default takes precedence over an inner one. A
+  prefixed name (`@forward "m" as p-*`) reaches the forwarded module the
+  same way.
 - `url(a/.5.png)` keeps its path instead of becoming `url(a/0.5.png)`.
 - A private-use character in a quoted string is followed by a space when a
   hex digit or a space comes next, so `"\f00c Done"` is no longer printed

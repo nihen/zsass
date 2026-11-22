@@ -638,24 +638,48 @@ fn unwrapOuterParensForCssMathArg(ctx: *BuiltinContext, text: []const u8) Builti
     return ctx.allocator.dupe(u8, text);
 }
 
-/// Whether the hyphen at `index` directly follows an identifier, as opposed
-/// to a number (with or without a unit) or anything else.
-fn hyphenContinuesIdentifier(text: []const u8, index: usize) bool {
-    var start = index;
-    while (start > 0 and isCssIdentCharByte(text[start - 1])) : (start -= 1) {}
-    if (start == index) return false;
-    var first = start;
-    while (first < index and text[first] == '-') : (first += 1) {}
-    if (first == index) return true;
-    if (std.ascii.isDigit(text[first])) return false;
-    // `.5px-a`: the token after a decimal point is still a number.
-    return !(start > 0 and text[start - 1] == '.');
-}
+/// Tracks, during one forward pass over calculation text, where the run of
+/// identifier characters that ends just before the cursor began. Looking
+/// back from every hyphen instead would be quadratic for `a-a-a-...`.
+const IdentRunTracker = struct {
+    /// Everything before this index has been scanned.
+    scanned: usize = 0,
+    /// Start of the identifier-character run ending at `scanned`.
+    run_start: usize = 0,
+    /// First character of that run that is not a hyphen, if it has one.
+    first_non_hyphen: ?usize = null,
+
+    fn advanceTo(self: *IdentRunTracker, text: []const u8, index: usize) void {
+        while (self.scanned < index) : (self.scanned += 1) {
+            const c = text[self.scanned];
+            if (!isCssIdentCharByte(c)) {
+                self.run_start = self.scanned + 1;
+                self.first_non_hyphen = null;
+            } else if (c != '-' and self.first_non_hyphen == null) {
+                self.first_non_hyphen = self.scanned;
+            }
+        }
+    }
+
+    /// Whether the hyphen at `index` directly follows an identifier, as
+    /// opposed to a number (with or without a unit) or anything else.
+    fn hyphenContinuesIdentifier(self: *IdentRunTracker, text: []const u8, index: usize) bool {
+        self.advanceTo(text, index);
+        const start = self.run_start;
+        if (start >= index) return false;
+        // Only hyphens so far: `--` starts a custom identifier.
+        const first = self.first_non_hyphen orelse return true;
+        if (std.ascii.isDigit(text[first])) return false;
+        // `.5px-a`: the token after a decimal point is still a number.
+        return !(start > 0 and text[start - 1] == '.');
+    }
+};
 
 fn normalizeCssMathArgText(ctx: *BuiltinContext, text: []const u8) BuiltinError![]u8 {
     var stage1: std.ArrayListUnmanaged(u8) = .empty;
     defer stage1.deinit(ctx.allocator);
 
+    var ident_runs: IdentRunTracker = .{};
     var i: usize = 0;
     while (i < text.len) {
         if (cssVarOrEnvCallEnd(text, i)) |end_i| {
@@ -673,7 +697,7 @@ fn normalizeCssMathArgText(ctx: *BuiltinContext, text: []const u8) BuiltinError!
         // A hyphen inside an identifier (`a-b`, `a- b`) is never an operator.
         // After a number it still is one: a number minus a string evaluates
         // to compact text such as `48px-var(--x)`.
-        if (c == '-' and hyphenContinuesIdentifier(text, i)) {
+        if (c == '-' and ident_runs.hyphenContinuesIdentifier(text, i)) {
             try stage1.append(ctx.allocator, c);
             i += 1;
             continue;

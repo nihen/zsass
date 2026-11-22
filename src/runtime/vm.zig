@@ -649,6 +649,8 @@ pub const VM = struct {
     /// Set on a `meta.load-css()` child VM, which emits into the rule IR of
     /// the VM that loaded it.
     shares_parent_rule_ir: bool = false,
+    /// Index of the first rule IR node this child appends.
+    shared_rule_ir_start: usize = 0,
     /// Set on a `meta.load-css()` child VM that was loaded inside a style
     /// rule or an at-rule block: its top-level statements are nested ones.
     nested_in_parent_block: bool = false,
@@ -2209,8 +2211,12 @@ pub const VM = struct {
         };
         try self.runTopModuleWithSelectorPrefix(self.program.root_index, selector_prefix, false);
         // A `meta.load-css()` child appends to its parent's rule IR, which
-        // may have open blocks; the parent normalizes the finished IR.
-        if (self.shares_parent_rule_ir) return;
+        // may have open blocks. It resolves `@at-root` within what it
+        // appended; the parent normalizes the finished IR.
+        if (self.shares_parent_rule_ir) {
+            try self.rule_ir.normalizeAtRootBubblesFrom(self.allocator, self.intern_pool, self.shared_rule_ir_start);
+            return;
+        }
         try self.rule_ir.normalizeAtRootBubblesRuleIR(self.allocator, self.intern_pool);
         try self.rule_ir.normalizeNestedMediaRuleIR(self.allocator, self.intern_pool);
     }
@@ -6762,8 +6768,16 @@ pub const VM = struct {
                 &self.slash_list_preserve,
                 coerced,
             );
-            const s = self.intern_pool.get(id);
-            if (s.len == 0) continue;
+            const part_text = self.intern_pool.get(id);
+            if (part_text.len == 0) continue;
+            // As in `make_selector`: inside a quoted string an unquoted
+            // string contributes a private-use character, not its escape.
+            const s = if (ip.preserve_quote and coerced.kind() == .string and
+                !coerced.stringQuoted(self.string_flags_pool.items))
+                try css_utils.decodePrivateUseEscapes(self.allocator, part_text)
+            else
+                part_text;
+            defer if (s.ptr != part_text.ptr) self.allocator.free(s);
             try acc.appendSlice(self.allocator, s);
         }
         const dup = try self.allocator.dupe(u8, acc.items);
@@ -8178,6 +8192,7 @@ pub const VM = struct {
         child_vm.shadow_context_root_tag = child_vm.load_css_module_tag_override;
         child_vm.load_css_strict_top_level = is_plain_css_source and has_parent_selector;
         child_vm.shares_parent_rule_ir = true;
+        child_vm.shared_rule_ir_start = self.rule_ir.nodes.items.len;
         child_vm.nested_in_parent_block = self.nested_in_parent_block or has_parent_selector or self.open_block_depth > 0;
         child_vm.keep_mod_globals_after_run = true;
         return child_vm;

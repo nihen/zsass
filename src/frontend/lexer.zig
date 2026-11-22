@@ -41,6 +41,10 @@ pub const Lexer = struct {
     allocator: std.mem.Allocator,
     source_name: ?[]const u8 = null,
     last_error_detail: ?ErrorDetail = null,
+    /// Set when `source` is a piece of an already lexed stylesheet. Such a
+    /// piece was validated as UTF-8 with its stylesheet and is not checked
+    /// again; re-lexing can happen once per statement.
+    source_is_fragment: bool = false,
     /// True when lexing indented-syntax `.sass` input.
     is_indented_syntax: bool = false,
     allow_silent_comments: bool = true,
@@ -82,12 +86,14 @@ pub const Lexer = struct {
         self.last_error_detail = null;
         // A stylesheet must be valid UTF-8; anything else would be copied
         // into the output as broken text.
-        if (firstInvalidUtf8Offset(self.source)) |offset| {
-            self.last_error_detail = .{
-                .span = .{ .start = offset, .end = offset + 1 },
-                .reason = .invalid_utf8,
-            };
-            return error.SyntaxError;
+        if (!self.source_is_fragment) {
+            if (firstInvalidUtf8Offset(self.source)) |offset| {
+                self.last_error_detail = .{
+                    .span = .{ .start = offset, .end = offset + 1 },
+                    .reason = .invalid_utf8,
+                };
+                return error.SyntaxError;
+            }
         }
         // Heuristic: ~1 token per 4 bytes reduces ArrayList reallocations on large inputs.
         try self.tokens.ensureTotalCapacity(self.allocator, self.source.len / 4 + 8);
