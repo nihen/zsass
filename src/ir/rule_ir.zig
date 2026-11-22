@@ -5137,17 +5137,29 @@ pub const RuleIR = struct {
 
             // A comment is dropped, except where it is text: inside a string
             // or in the value of a custom property.
-            if (c == '/' and i + 1 < expanded.len and expanded[i + 1] == '*' and first_in_string == 0 and
-                !std.mem.startsWith(u8, std.mem.trimStart(u8, first.items[first_statement_start..], " "), "--"))
-            {
-                i += 2;
-                while (i + 1 < expanded.len) : (i += 1) {
-                    if (expanded[i] == '*' and expanded[i + 1] == '/') {
-                        i += 1;
-                        break;
-                    }
+            if (c == '/' and i + 1 < expanded.len and expanded[i + 1] == '*' and first_in_string == 0 and !first_escaped) {
+                const comment_end = std.mem.indexOfPos(u8, expanded, i + 2, "*/");
+                const kept = std.mem.startsWith(u8, std.mem.trimStart(u8, first.items[first_statement_start..], " "), "--");
+                if (!kept) {
+                    i = if (comment_end) |end| end + 1 else expanded.len - 1;
+                    continue;
                 }
-                continue;
+                // A kept comment is copied whole: nothing in it is a quote,
+                // a parenthesis, or the end of a statement. A line break in
+                // it becomes a space, as elsewhere in the value. Without an
+                // end it is not a comment and is read as ordinary text.
+                if (comment_end) |end| {
+                    while (i < end + 2) : (i += 1) {
+                        if (expanded[i] != '\n') {
+                            try first.append(allocator, expanded[i]);
+                            continue;
+                        }
+                        while (i + 1 < end and (expanded[i + 1] == ' ' or expanded[i + 1] == '\t' or expanded[i + 1] == '\n')) i += 1;
+                        try first.append(allocator, ' ');
+                    }
+                    i = end + 1;
+                    continue;
+                }
             }
 
             if (c == '\n') {
@@ -5260,8 +5272,20 @@ pub const RuleIR = struct {
                 i += 1;
                 continue;
             }
+            // A comment the first pass kept, in a custom property, is copied
+            // whole. The test is the one the first pass made.
+            if (c == '/' and i + 1 < first.items.len and first.items[i + 1] == '*' and
+                std.mem.startsWith(u8, std.mem.trimStart(u8, out.items[statement_start..], " "), "--"))
+            {
+                if (std.mem.indexOfPos(u8, first.items, i + 2, "*/")) |end| {
+                    try out.appendSlice(allocator, first.items[i .. end + 2]);
+                    i = end + 1;
+                    continue;
+                }
+            }
 
-            if (c == ';' or c == '}') {
+            // Inside parentheses these do not end the declaration.
+            if ((c == ';' or c == '}') and paren_depth == 0) {
                 preserve_decl_zero = false;
                 preserve_calc_ops = false;
                 in_custom_decl = false;
