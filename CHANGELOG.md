@@ -106,6 +106,7 @@ Tracks Dart Sass 1.108.2. The vendored `sass-spec` pin moves to
   a comment, in custom properties, after `@extend`, and in compressed
   output, which printed `.\31 +.b` as `.\31+.b`. A lone escaped hyphen is
   written `\2d ` and a hyphen before a digit as `-\31 `.
+- `selector.nest()` returns a selector list rather than a string.
 - Compressed output writes the selectors given to `:is()`, `:not()`, and
   the other selector pseudo-classes without a space after the comma, and
   turns a line break inside a custom property value into a space instead

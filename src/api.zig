@@ -1294,6 +1294,22 @@ test "api: compressed output keeps selector pseudo-class arguments and custom pr
     try std.testing.expectEqualStrings(":is(.a,.b):not(.c,[d=\"e, f\"]) :lang(en, fr){g:h(i, j)}k{--l: m n}\n", css);
 }
 
+test "api: selector.nest returns a selector list" {
+    // Lists a built-in function returns live until the allocator is torn
+    // down, so these compiles run in an arena.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const source =
+        \\@use "sass:selector";
+        \\@use "sass:meta";
+        \\a { b: meta.type-of(selector.nest(".c", ".d")); e: meta.inspect(selector.nest(".c", ".d")); }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    try std.testing.expectEqualStrings("a {\n  b: list;\n  e: (.c .d,);\n}\n", css);
+}
+
 test "api: compressed output drops an empty rule without its enclosing block" {
     const alloc = std.testing.allocator;
     const src =
