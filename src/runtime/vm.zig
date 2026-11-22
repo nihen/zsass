@@ -4686,7 +4686,9 @@ pub const VM = struct {
             },
             .emit_error => {
                 const val = try self.pop();
-                const msg = try self.valueToDiagnosticMessage(val, true);
+                const rendered_msg = try self.valueToDiagnosticMessage(val, true);
+                const msg = try css_utils.escapePrivateUseCodePoints(self.allocator, rendered_msg);
+                defer if (msg.ptr != rendered_msg.ptr) self.allocator.free(msg);
                 if (!self.suppress_diagnostics) vmStderrPrint("Error: {s}\n", .{msg});
                 return error.SassError;
             },

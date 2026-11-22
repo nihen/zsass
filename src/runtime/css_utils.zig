@@ -1463,6 +1463,90 @@ pub fn normalizeCssValueEscapes(allocator: std.mem.Allocator, text: []const u8) 
 
     return try buf.toOwnedSlice(allocator);
 }
+/// Write every private-use character of rendered CSS text as a hex escape,
+/// the way expanded output prints them. Returns `text` itself when it has none.
+pub fn escapePrivateUseCodePoints(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    var needs_change = false;
+    var scan: usize = 0;
+    while (scan < text.len) {
+        const b = text[scan];
+        if (b < 0x80) {
+            scan += 1;
+            continue;
+        }
+        const seq_len = std.unicode.utf8ByteSequenceLength(b) catch {
+            scan += 1;
+            continue;
+        };
+        if (scan + seq_len > text.len) break;
+        const slice = text[scan .. scan + seq_len];
+        if (!std.unicode.utf8ValidateSlice(slice)) {
+            scan += 1;
+            continue;
+        }
+        const code_point = std.unicode.utf8Decode(slice) catch {
+            scan += seq_len;
+            continue;
+        };
+        if (isPrivateUseCodePoint(code_point)) {
+            needs_change = true;
+            break;
+        }
+        scan += seq_len;
+    }
+    if (!needs_change) return text;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, text.len);
+    var i: usize = 0;
+    while (i < text.len) {
+        const b = text[i];
+        if (b < 0x80) {
+            try out.append(allocator, b);
+            i += 1;
+            continue;
+        }
+        const seq_len = std.unicode.utf8ByteSequenceLength(b) catch {
+            try out.append(allocator, b);
+            i += 1;
+            continue;
+        };
+        if (i + seq_len > text.len) {
+            try out.appendSlice(allocator, text[i..]);
+            break;
+        }
+        const slice = text[i .. i + seq_len];
+        if (!std.unicode.utf8ValidateSlice(slice)) {
+            try out.append(allocator, b);
+            i += 1;
+            continue;
+        }
+        const code_point = std.unicode.utf8Decode(slice) catch {
+            try out.appendSlice(allocator, slice);
+            i += seq_len;
+            continue;
+        };
+        if (isPrivateUseCodePoint(code_point)) {
+            var buf: [16]u8 = undefined;
+            const escaped = std.fmt.bufPrint(&buf, "\\{x}", .{code_point}) catch unreachable;
+            try out.appendSlice(allocator, escaped);
+            // A hex digit or whitespace right after the escape would be read
+            // as part of it, so a separator space is required.
+            const next_i = i + seq_len;
+            if (next_i < text.len and
+                (std.ascii.isHex(text[next_i]) or text[next_i] == ' ' or text[next_i] == '\t'))
+            {
+                try out.append(allocator, ' ');
+            }
+        } else {
+            try out.appendSlice(allocator, slice);
+        }
+        i += seq_len;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
 pub fn isPrivateUseCodePoint(code_point: u21) bool {
     return (code_point >= 0xE000 and code_point <= 0xF8FF) or
         (code_point >= 0xF0000 and code_point <= 0x10FFFF);
@@ -1934,4 +2018,21 @@ test "normalizeCssCallLiteralEscapes canonicalizes url() names and contents" {
     }
     const untouched = "url(\"\\41\")";
     try std.testing.expect((try normalizeCssCallLiteralEscapes(alloc, untouched)).ptr == untouched.ptr);
+}
+
+test "escapePrivateUseCodePoints separates the escape from a hex digit or space" {
+    const cases = [_][2][]const u8{
+        .{ "\"\u{f00c}Done\"", "\"\\f00c Done\"" },
+        .{ "\"\u{f00c} x\"", "\"\\f00c  x\"" },
+        .{ "\"\u{f00c}\tx\"", "\"\\f00c \tx\"" },
+        .{ "\"\u{f00c}y\"", "\"\\f00cy\"" },
+        .{ "\"\u{f00c}\"", "\"\\f00c\"" },
+        .{ "\"\u{10fffd}a\"", "\"\\10fffd a\"" },
+        .{ "plain", "plain" },
+    };
+    for (cases) |case| {
+        const out = try escapePrivateUseCodePoints(std.testing.allocator, case[0]);
+        defer if (out.ptr != case[0].ptr) std.testing.allocator.free(out);
+        try std.testing.expectEqualStrings(case[1], out);
+    }
 }

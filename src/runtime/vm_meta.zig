@@ -3,6 +3,7 @@ const std = @import("std");
 const shared = @import("../builtin/shared.zig");
 const meta_helpers = @import("../builtin/meta_helpers.zig");
 const value_mod = @import("value.zig");
+const css_utils = @import("css_utils.zig");
 const vm_mod = @import("vm.zig");
 const resolver = @import("../resolve/resolver.zig");
 const color_mod = @import("../color/color.zig");
@@ -699,12 +700,15 @@ fn inspectStringValue(ctx: *BuiltinContext, value: Value) BuiltinError![]const u
                 try acc.appendSlice(ctx.allocator, cp_slice);
                 continue;
             };
-            if (cp >= 0xE000 and cp <= 0xF8FF) {
+            if (css_utils.isPrivateUseCodePoint(cp)) {
                 var buf: [16]u8 = undefined;
                 const escaped = std.fmt.bufPrint(&buf, "\\{x}", .{cp}) catch |err| {
                     std.debug.panic("meta.inspectStringValue formatting failed: {s}", .{@errorName(err)});
                 };
                 try acc.appendSlice(ctx.allocator, escaped);
+                if (it.i < raw.len and (std.ascii.isHex(raw[it.i]) or raw[it.i] == ' ' or raw[it.i] == '\t')) {
+                    try acc.append(ctx.allocator, ' ');
+                }
                 continue;
             }
             try acc.appendSlice(ctx.allocator, cp_slice);
