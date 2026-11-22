@@ -729,15 +729,15 @@ fn normalizeCssMathArgText(ctx: *BuiltinContext, text: []const u8) BuiltinError!
             std.ascii.eqlIgnoreCase(stage1.items[i .. i + 3], "var") and
             stage1.items[i + 3] == '(')
         {
-            const prev = previousNonWhitespaceIndex(stage1.items, i);
-            if (prev) |p| {
-                const pc = stage1.items[p];
-                const needs_plus = !(isMathBinaryOperator(pc) or pc == '(');
-                if (needs_plus) {
-                    if (out.items.len != 0 and out.items[out.items.len - 1] != ' ') {
-                        try out.append(ctx.allocator, ' ');
-                    }
-                    try out.appendSlice(ctx.allocator, "+ ");
+            // A number plus a string evaluates to compact text such as
+            // `2pxvar(--c)`, which is the sum `2px + var(--c)`. Operands
+            // separated by whitespace are a space-separated list and stay.
+            if (i > 0) {
+                const pc = stage1.items[i - 1];
+                if (pc == ')') {
+                    try out.append(ctx.allocator, ' ');
+                } else if (!std.ascii.isWhitespace(pc) and !isMathBinaryOperator(pc) and pc != '(') {
+                    try out.appendSlice(ctx.allocator, " + ");
                 }
             }
             try out.appendSlice(ctx.allocator, stage1.items[i .. i + 4]);
@@ -3260,7 +3260,19 @@ test "math.cos preserves unresolved calculation as css function" {
     try testing.expectEqualStrings("cos(2px + var(--c))", ctx.intern_pool.get(result.stringIntern()));
 }
 
-test "math.cos normalizes compact var adjacency in css fallback" {
+test "math.cos keeps space-separated operands in css fallback" {
+    var harness = try MathTestHarness.init(testing.allocator);
+    defer harness.deinit();
+
+    var ctx = harness.context();
+    const expr_id = try internString(&ctx, "2px var(--c)");
+    const args = [_]Value{Value.string(expr_id, false)};
+    const result = try math_cos(&ctx, &args);
+    try testing.expectEqual(.string, result.kind());
+    try testing.expectEqualStrings("cos(2px var(--c))", ctx.intern_pool.get(result.stringIntern()));
+}
+
+test "math.cos reads compact number-var text as a sum in css fallback" {
     var harness = try MathTestHarness.init(testing.allocator);
     defer harness.deinit();
 
