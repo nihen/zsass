@@ -1302,24 +1302,29 @@ test "api: @extend covers every combination of a repeated target" {
     , css);
 }
 
-test "api: a repeated @extend target leaves out covered and unreliable combinations" {
+test "api: a repeated @extend target leaves out covered extenders and keeps sibling combinators" {
     const alloc = std.testing.allocator;
     const source =
         \\.a .a { x: y; }
         \\.b .b { x: y; }
+        \\.c .c { x: y; }
         \\.q .f, .f { @extend .a; }
         \\.g + .h { @extend .b; }
+        \\.i, #j.i { @extend .c; }
         \\
     ;
     const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
     defer alloc.free(css);
-    // The official CLI also writes `.g + .h .g + .h` for the second rule.
     try std.testing.expectEqualStrings(
         \\.a .a, .f .a, .a .f, .f .f {
         \\  x: y;
         \\}
         \\
-        \\.b .b, .g + .h .b, .b .g + .h {
+        \\.b .b, .g + .h .b, .b .g + .h, .g + .h .g + .h {
+        \\  x: y;
+        \\}
+        \\
+        \\.c .c, .i .c, #j.i .c, .c .i, .i .i, #j.i .i, .c #j.i, .i #j.i {
         \\  x: y;
         \\}
         \\

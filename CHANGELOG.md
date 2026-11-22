@@ -66,8 +66,8 @@ Tracks Dart Sass 1.108.2. The vendored `sass-spec` pin moves to
   `.a + .a, .f + .a, .a + .f, .f + .f`; `.f + .f` was missing, and
   `.a .a .a` gave four of its eight selectors. `selector.extend()` and
   `selector.replace()` follow, so `selector.replace(".a .a", ".a", ".f")`
-  is `.f .f`. Selectors with more than ten such compounds, or more than
-  1024 combinations, are extended one compound at a time as before.
+  is `.f .f`. A selector whose extensions would make more than 1024
+  combinations is extended one compound at a time as before.
 - A parameter list that declares the same parameter twice is an error
   ("Duplicate parameter."), including when one of them is a rest parameter
   (Dart Sass 1.106.0).
