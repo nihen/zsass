@@ -5121,6 +5121,15 @@ pub const RuleIR = struct {
         return out.len >= 2 and out[out.len - 2] == '\\' and (out[out.len - 1] == '0' or out[out.len - 1] == '9');
     }
 
+    /// Whether the last character of `text` is escaped by a backslash.
+    fn endsWithEscapedCharacter(text: []const u8) bool {
+        if (text.len < 2) return false;
+        var backslashes: usize = 0;
+        var i = text.len - 1;
+        while (i > 0 and text[i - 1] == '\\') : (i -= 1) backslashes += 1;
+        return backslashes % 2 == 1;
+    }
+
     fn compressCss(allocator: std.mem.Allocator, expanded: []const u8) error{OutOfMemory}![]const u8 {
         var first: std.ArrayList(u8) = .empty;
         errdefer first.deinit(allocator);
@@ -5166,6 +5175,9 @@ pub const RuleIR = struct {
             }
 
             if (c == '\n') {
+                // A string ends at a line break, so a lone quote written by
+                // an interpolation does not hold the rest of the text.
+                if (!first_escaped) first_in_string = 0;
                 while (i + 1 < expanded.len and (expanded[i + 1] == ' ' or expanded[i + 1] == '\t' or expanded[i + 1] == '\n')) {
                     i += 1;
                 }
@@ -5183,8 +5195,11 @@ pub const RuleIR = struct {
                 continue;
             }
 
-            if (c == ' ' and i + 1 < expanded.len and expanded[i + 1] == '{' and !css_utils.endsWithHexEscape(first.items)) continue;
-            if (c == ';' and i + 1 < expanded.len and expanded[i + 1] == '}') continue;
+            // Inside a string or parentheses, or after a backslash, these
+            // characters are text.
+            const first_structural = first_in_string == 0 and !first_escaped and first_paren_depth == 0;
+            if (first_structural and c == ' ' and i + 1 < expanded.len and expanded[i + 1] == '{' and !css_utils.endsWithHexEscape(first.items)) continue;
+            if (first_structural and c == ';' and i + 1 < expanded.len and expanded[i + 1] == '}') continue;
 
             try first.append(allocator, c);
             if (first_escaped) {
@@ -5202,8 +5217,10 @@ pub const RuleIR = struct {
                 },
                 else => {},
             }
-            if (c == '}') {
-                while (first.items.len >= 2 and first.items[first.items.len - 2] == ';') {
+            if (c == '}' and first_structural) {
+                while (first.items.len >= 2 and first.items[first.items.len - 2] == ';' and
+                    !endsWithEscapedCharacter(first.items[0 .. first.items.len - 1]))
+                {
                     first.items[first.items.len - 2] = '}';
                     first.items.len -= 1;
                 }
@@ -5413,8 +5430,8 @@ pub const RuleIR = struct {
                 if (prev != '-' and !std.ascii.isAlphanumeric(prev) and prev != '_' and prev != '.') continue;
             }
 
-            if (c == '}' and out.items.len != 0 and out.items[out.items.len - 1] == ';') {
-                while (out.items.len != 0 and out.items[out.items.len - 1] == ';') out.items.len -= 1;
+            if (c == '}' and paren_depth == 0) {
+                while (out.items.len != 0 and out.items[out.items.len - 1] == ';' and !endsWithEscapedCharacter(out.items)) out.items.len -= 1;
             }
 
             // Inside parentheses these characters are part of a value, such
@@ -5426,6 +5443,8 @@ pub const RuleIR = struct {
                     // Drop the empty block together with its prelude.
                     out.items.len = block_start orelse 0;
                     statement_start = out.items.len;
+                    input_statement_start = i + 1;
+                    statement_is_style_rule = null;
                     preserve_decl_zero = false;
                     preserve_calc_ops = false;
                     in_custom_decl = false;

@@ -111,7 +111,9 @@ Tracks Dart Sass 1.108.2. The vendored `sass-spec` pin moves to
   the other selector pseudo-classes without a space after the comma, and
   turns a line break inside a custom property value into a space instead
   of joining the two tokens. A `/* */` inside a string or a custom
-  property value is kept; it was removed as if it were a comment.
+  property value is kept; it was removed as if it were a comment. A
+  string keeps a space before `{` and a `;` before `}`, and an escaped
+  `;` or one inside `url()` is no longer dropped before a closing brace.
 
 ## 0.4.1 (2026-10-21)
 

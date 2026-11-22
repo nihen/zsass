@@ -1326,6 +1326,21 @@ test "api: compressed output keeps a comment that is text" {
     try std.testing.expectEqualStrings("a{--b: c /*d*/e;f:\"g /* h */ i\" k;--o: p /*{};(\"*/ white, q;--r: url(s;t) /* {u} v */ w\\/*x}l{m:url(n;o) .5em}\n", css);
 }
 
+test "api: compressed output leaves string contents alone and resets after an empty rule" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\a { b: "c {" "d ;}" ";}"; }
+        \\e { /* f */ }
+        \\:is(.g, .h) { i: j; }
+        \\k { l: m\; }
+        \\n { o: url(p;}) }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .output_style = .compressed });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings("a{b:\"c {\" \"d ;}\" \";}\"}:is(.g,.h){i:j}k{l:m\\;}n{o:url(p;})}\n", css);
+}
+
 test "api: a hex escape gets its space only where a selector name ends" {
     // Lists a built-in function returns live until the allocator is torn
     // down, so this compile runs in an arena.
