@@ -651,6 +651,30 @@ fn normalizeCssMathArgText(ctx: *BuiltinContext, text: []const u8) BuiltinError!
         }
 
         const c = text[i];
+        if (c == '\\' and i + 1 < text.len) {
+            try stage1.appendSlice(ctx.allocator, text[i .. i + 2]);
+            i += 2;
+            continue;
+        }
+        // A hyphen that directly follows an identifier character belongs to
+        // that identifier or unit (`a-b`, `a- b`, `1px-a`); it is never an
+        // operator.
+        if (c == '-' and i > 0 and isCssIdentCharByte(text[i - 1])) {
+            try stage1.append(ctx.allocator, c);
+            i += 1;
+            continue;
+        }
+        // A sign glued to the following operand is not a binary operator
+        // either (`a -b` is two space-separated operands).
+        if (c == '-' and i + 1 < text.len and !std.ascii.isWhitespace(text[i + 1]) and
+            (i == 0 or std.ascii.isWhitespace(text[i - 1]) or text[i - 1] == ')' or text[i - 1] == '%') and
+            (isCssIdentCharByte(text[i + 1]) or text[i + 1] == '.'))
+        {
+            if (i > 0 and !std.ascii.isWhitespace(text[i - 1])) try stage1.append(ctx.allocator, ' ');
+            try stage1.append(ctx.allocator, c);
+            i += 1;
+            continue;
+        }
         if (c == '+' or c == '-') {
             const prev_i = previousNonWhitespaceIndex(text, i);
             var next_i = i + 1;
@@ -3080,7 +3104,29 @@ test "math.exp preserves unresolved calculation as css function" {
     try testing.expectEqualStrings("exp(3px - var(--c))", ctx.intern_pool.get(result.stringIntern()));
 }
 
-test "math.exp normalizes compact subtraction in css fallback" {
+test "css math argument text keeps identifier hyphens and glued signs" {
+    var harness = try MathTestHarness.init(testing.allocator);
+    defer harness.deinit();
+
+    var ctx = harness.context();
+    const cases = [_][2][]const u8{
+        .{ "a-b", "a-b" },
+        .{ "a-b - c-d", "a-b - c-d" },
+        .{ "a -b", "a -b" },
+        .{ "a- b", "a- b" },
+        .{ "var(--x)-b", "var(--x) -b" },
+        .{ "1% -b", "1% -b" },
+        .{ "a\\+b", "a\\+b" },
+        .{ "1px - a", "1px - a" },
+    };
+    for (cases) |case| {
+        const rendered = try normalizeCssMathArgText(&ctx, case[0]);
+        defer ctx.allocator.free(rendered);
+        try testing.expectEqualStrings(case[1], rendered);
+    }
+}
+
+test "math.exp keeps a hyphen glued to a unit in css fallback" {
     var harness = try MathTestHarness.init(testing.allocator);
     defer harness.deinit();
 
@@ -3089,7 +3135,7 @@ test "math.exp normalizes compact subtraction in css fallback" {
     const args = [_]Value{Value.string(expr_id, false)};
     const result = try math_exp(&ctx, &args);
     try testing.expectEqual(.string, result.kind());
-    try testing.expectEqualStrings("exp(3px - var(--c))", ctx.intern_pool.get(result.stringIntern()));
+    try testing.expectEqualStrings("exp(3px-var(--c))", ctx.intern_pool.get(result.stringIntern()));
 }
 
 test "math.abs keeps named-argument type errors for css-like values" {
