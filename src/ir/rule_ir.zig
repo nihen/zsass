@@ -5087,6 +5087,76 @@ pub const RuleIR = struct {
         return true;
     }
 
+    /// Whether the comma at `pos` separates the selectors given to a
+    /// pseudo-class such as `:is()` in a style rule's selector. Those lists
+    /// are written without a space in compressed output; other arguments
+    /// (`:lang(en, fr)`, a function in a value, an at-rule prelude) are not.
+    fn isSelectorPseudoArgumentComma(text: []const u8, pos: usize) bool {
+        var open: ?usize = null;
+        var depth: usize = 0;
+        var i = pos;
+        while (i > 0) {
+            i -= 1;
+            switch (text[i]) {
+                ')' => depth += 1,
+                '(' => {
+                    if (depth == 0) {
+                        open = i;
+                        break;
+                    }
+                    depth -= 1;
+                },
+                '{', '}', ';' => return false,
+                '"', '\'' => {
+                    // Step back over a string, which may hold any of these.
+                    const quote = text[i];
+                    while (i > 0) {
+                        i -= 1;
+                        if (text[i] != quote) continue;
+                        var backslashes: usize = 0;
+                        while (backslashes < i and text[i - 1 - backslashes] == '\\') backslashes += 1;
+                        if (backslashes % 2 == 0) break;
+                    }
+                },
+                else => {},
+            }
+        }
+        const open_idx = open orelse return false;
+        var name_start = open_idx;
+        while (name_start > 0 and (std.ascii.isAlphanumeric(text[name_start - 1]) or
+            text[name_start - 1] == '-' or text[name_start - 1] == '_')) name_start -= 1;
+        if (name_start == open_idx or name_start == 0 or text[name_start - 1] != ':') return false;
+        if (!selector_mod.isSelectorPseudo(text[name_start..open_idx])) return false;
+
+        // The statement is a style rule: it is not an at-rule, and a block
+        // follows it.
+        var start = name_start;
+        while (start > 0 and text[start - 1] != '{' and text[start - 1] != '}' and text[start - 1] != ';') start -= 1;
+        while (start < name_start and (text[start] == ' ' or text[start] == '\n')) start += 1;
+        if (text[start] == '@') return false;
+        var in_string: u8 = 0;
+        var j = pos;
+        while (j < text.len) : (j += 1) {
+            const c = text[j];
+            if (in_string != 0) {
+                if (c == '\\') {
+                    j += 1;
+                } else if (c == in_string) {
+                    in_string = 0;
+                }
+                continue;
+            }
+            switch (c) {
+                '"', '\'' => in_string = c,
+                '\\' => j += 1,
+                '{' => return true,
+                '}', ';' => return false,
+                else => {},
+            }
+        }
+        return false;
+    }
+
     fn previousLooksLikeIeHack(out: []const u8) bool {
         return out.len >= 2 and out[out.len - 2] == '\\' and (out[out.len - 1] == '0' or out[out.len - 1] == '9');
     }
@@ -5105,6 +5175,8 @@ pub const RuleIR = struct {
     fn compressCss(allocator: std.mem.Allocator, expanded: []const u8) error{OutOfMemory}![]const u8 {
         var first: std.ArrayList(u8) = .empty;
         errdefer first.deinit(allocator);
+        // Where the statement being copied starts in `first`.
+        var first_statement_start: usize = 0;
 
         var i: usize = 0;
         while (i < expanded.len) : (i += 1) {
@@ -5125,6 +5197,17 @@ pub const RuleIR = struct {
                 while (i + 1 < expanded.len and (expanded[i + 1] == ' ' or expanded[i + 1] == '\t' or expanded[i + 1] == '\n')) {
                     i += 1;
                 }
+                // A line break inside a custom property value separates two
+                // tokens, so it becomes a space rather than nothing.
+                if (first.items.len != 0) {
+                    const last = first.items[first.items.len - 1];
+                    const separated = last == ' ' and !css_utils.endsWithEscapeWhitespace(first.items);
+                    if (last != '{' and last != '}' and last != ';' and last != '/' and !separated and
+                        std.mem.startsWith(u8, std.mem.trimStart(u8, first.items[first_statement_start..], " "), "--"))
+                    {
+                        try first.append(allocator, ' ');
+                    }
+                }
                 continue;
             }
 
@@ -5132,6 +5215,7 @@ pub const RuleIR = struct {
             if (c == ';' and i + 1 < expanded.len and expanded[i + 1] == '}') continue;
 
             try first.append(allocator, c);
+            if (c == '{' or c == '}' or c == ';') first_statement_start = first.items.len;
             if (c == '}') {
                 while (first.items.len >= 2 and first.items[first.items.len - 2] == ';') {
                     first.items[first.items.len - 2] = '}';
@@ -5244,7 +5328,9 @@ pub const RuleIR = struct {
                 i += 1;
                 continue;
             }
-            if (!in_custom_decl and c == ',' and i + 1 < first.items.len and first.items[i + 1] == ' ' and (paren_depth == 0 or color_func_depth != 0)) {
+            if (!in_custom_decl and c == ',' and i + 1 < first.items.len and first.items[i + 1] == ' ' and
+                (paren_depth == 0 or color_func_depth != 0 or isSelectorPseudoArgumentComma(first.items, i)))
+            {
                 try out.append(allocator, ',');
                 i += 1;
                 continue;

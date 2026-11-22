@@ -1281,6 +1281,19 @@ test "api: the space that ends a hex escape is kept apart from what follows" {
     try std.testing.expectEqualStrings(".\\31  .b,.\\31 +.c,.\\31 {x:y}\n", compressed);
 }
 
+test "api: compressed output keeps selector pseudo-class arguments and custom property lines apart" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\:is(.a, .b):not(.c, [d="e, f"]) :lang(en, fr) { g: h(i, j); }
+        \\k { --l: m
+        \\  n; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .output_style = .compressed });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(":is(.a,.b):not(.c,[d=\"e, f\"]) :lang(en, fr){g:h(i, j)}k{--l: m n}\n", css);
+}
+
 test "api: compressed output drops an empty rule without its enclosing block" {
     const alloc = std.testing.allocator;
     const src =

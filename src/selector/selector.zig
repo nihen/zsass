@@ -1164,7 +1164,7 @@ fn isCssIdentifier(val: []const u8) bool {
     return true;
 }
 
-fn isSelectorPseudo(name: []const u8) bool {
+pub fn isSelectorPseudo(name: []const u8) bool {
     const base = pseudoBaseName(name);
     const selector_pseudos = [_][]const u8{
         "not",  "is",           "has",     "where",   "matches",   "any",
