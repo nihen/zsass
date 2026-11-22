@@ -589,10 +589,12 @@ pub fn applyConfigTarget(
     const acc = gop.value_ptr;
 
     if (is_default) {
-        if (!acc.default_set) {
-            acc.default_set = true;
-            acc.default_value = value;
-        }
+        // A module is configured from the inside out, so a later `!default`
+        // comes from an outer `@forward` and takes precedence. A `null`
+        // leaves the default that is already in place.
+        if (acc.default_set and value.kind() == .nil) return;
+        acc.default_set = true;
+        acc.default_value = value;
         return;
     }
 

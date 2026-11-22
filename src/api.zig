@@ -772,3 +772,489 @@ test "api: @page declarations are valid inside @media" {
         \\
     , css);
 }
+
+test "api: a forwarded !default configuration yields to the using module" {
+    const alloc = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    try writeApiTmpFileAll(&tmp_dir, "_lib.scss",
+        \\$a: 1 !default;
+        \\$b: 1 !default;
+        \\@if $a == 1 { x { y: one; } } @else if $a == 2 { x { y: two; } } @else { x { y: other; } }
+        \\@if $b == 1 { v { y: one; } } @else { v { y: other; } }
+        \\z { a: $a; b: $b; }
+    );
+    try writeApiTmpFileAll(&tmp_dir, "_inner.scss",
+        \\@forward "lib" with ($a: 1 !default);
+    );
+    try writeApiTmpFileAll(&tmp_dir, "_outer.scss",
+        \\@forward "inner" with ($a: 7 !default);
+    );
+
+    const tmp_path = try zsass_io.realPathAlloc(tmp_dir.dir, ".", alloc);
+    defer alloc.free(tmp_path);
+    const entry_path = try std.fs.path.join(alloc, &.{ tmp_path, "entry.scss" });
+    defer alloc.free(entry_path);
+
+    // The using module overrides the forwarded default and configures a
+    // variable the `@forward` does not mention.
+    const overridden = try compileSourceToCss(alloc, "@use \"inner\" with ($a: 2, $b: 3);\n", entry_path, &.{}, .{});
+    defer alloc.free(overridden);
+    try std.testing.expectEqualStrings(
+        \\x {
+        \\  y: two;
+        \\}
+        \\
+        \\v {
+        \\  y: other;
+        \\}
+        \\
+        \\z {
+        \\  a: 2;
+        \\  b: 3;
+        \\}
+        \\
+    , overridden);
+
+    // `null` leaves a default in place, from the using module and from an
+    // outer `@forward`.
+    try writeApiTmpFileAll(&tmp_dir, "_outer_null.scss",
+        \\@forward "inner" with ($a: null !default);
+    );
+    inline for (.{ "@use \"inner\" with ($a: null);\n", "@use \"outer_null\";\n" }) |entry| {
+        const with_null = try compileSourceToCss(alloc, entry, entry_path, &.{}, .{});
+        defer alloc.free(with_null);
+        try std.testing.expectEqualStrings(
+            \\x {
+            \\  y: one;
+            \\}
+            \\
+            \\v {
+            \\  y: one;
+            \\}
+            \\
+            \\z {
+            \\  a: 1;
+            \\  b: 1;
+            \\}
+            \\
+        , with_null);
+    }
+
+    // The outer `!default` takes precedence over the inner one.
+    const chained = try compileSourceToCss(alloc, "@use \"outer\";\n", entry_path, &.{}, .{});
+    defer alloc.free(chained);
+    try std.testing.expectEqualStrings(
+        \\x {
+        \\  y: other;
+        \\}
+        \\
+        \\v {
+        \\  y: one;
+        \\}
+        \\
+        \\z {
+        \\  a: 7;
+        \\  b: 1;
+        \\}
+        \\
+    , chained);
+}
+
+test "api: string functions and equality use the text of a string as is" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\@use "sass:string";
+        \\@use "sass:map";
+        \\a {
+        \\  length: string.length("\\61") string.length(a\.b);
+        \\  upper: string.to-upper-case("\\61") string.to-upper-case(a\.b);
+        \\  index: string.index("a\\b", "b");
+        \\  slice: string.slice("\\61 b", 2);
+        \\  equal: ("\\61" == "a") ("\61" == a);
+        \\  key: map.get(("\\61": 1), "a") == null;
+        \\  quote: string.quote(string.unquote("\\61"));
+        \\  name: foo#{string.length("\\61")}(1);
+        \\}
+    ;
+    const css = try compileSourceToCss(alloc, src, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\a {
+        \\  length: 3 4;
+        \\  upper: "\\61" A\.B;
+        \\  index: 3;
+        \\  slice: "61 b";
+        \\  equal: false true;
+        \\  key: true;
+        \\  quote: "\\61";
+        \\  name: foo3(1);
+        \\}
+        \\
+    , css);
+}
+
+test "api: a private-use character in a quoted string" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\@use "sass:string";
+        \\$icon: \f00c;
+        \\a {
+        \\  spaced: "\f00c Done" "\f00c  x" "x\f00c y";
+        \\  joined: "\f00c" + "Done";
+        \\  interpolated: "#{$icon}" "#{$icon}Done";
+        \\  appended: "" + $icon;
+        \\  quoted: string.quote($icon);
+        \\}
+        \\@mixin m($i: \f00c, $s: "#{$i}Done") { b { default: $s string.length($s); } }
+        \\@include m;
+    ;
+    const css = try compileSourceToCss(alloc, src, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\a {
+        \\  spaced: "\f00c Done" "\f00c  x" "x\f00cy";
+        \\  joined: "\f00c Done";
+        \\  interpolated: "\f00c" "\f00c Done";
+        \\  appended: "\f00c";
+        \\  quoted: "\f00c";
+        \\}
+        \\
+        \\b {
+        \\  default: "\f00c Done" 5;
+        \\}
+        \\
+    , css);
+}
+
+test "api: identifier hyphens in math functions and decimals in url()" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\$v: var(--x);
+        \\a {
+        \\  ident: min(a-b) clamp(a-b, c-d, e-f) min(a\2d b);
+        \\  spaced: min(a-b - c-d) min(a -b);
+        \\  number: max(0px, (48px - $v) / 2);
+        \\  url: url(a/.5.png) .5s;
+        \\}
+    ;
+    const css = try compileSourceToCss(alloc, src, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\a {
+        \\  ident: min(a-b) clamp(a-b, c-d, e-f) min(a-b);
+        \\  spaced: min(a-b - c-d) min(a -b);
+        \\  number: max(0px, (48px - var(--x)) / 2);
+        \\  url: url(a/.5.png) 0.5s;
+        \\}
+        \\
+    , css);
+}
+
+test "api: meta.load-css() nested in a style rule or an at-rule" {
+    const alloc = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    try writeApiTmpFileAll(&tmp_dir, "_lib.scss",
+        \\/* note */
+        \\a { b: c; d { e: f; } }
+        \\@keyframes z { from { g: h; } }
+    );
+
+    const tmp_path = try zsass_io.realPathAlloc(tmp_dir.dir, ".", alloc);
+    defer alloc.free(tmp_path);
+    const entry_path = try std.fs.path.join(alloc, &.{ tmp_path, "entry.scss" });
+    defer alloc.free(entry_path);
+
+    // Inside a style rule: no blank lines between the loaded rules, a
+    // comment gets a rule of its own, and keyframe selectors stay as written.
+    const in_rule = try compileSourceToCss(alloc,
+        \\@use "sass:meta";
+        \\.w { @include meta.load-css("lib"); }
+        \\q { r: s; }
+    , entry_path, &.{}, .{});
+    defer alloc.free(in_rule);
+    try std.testing.expectEqualStrings(
+        \\.w {
+        \\  /* note */
+        \\}
+        \\.w a {
+        \\  b: c;
+        \\}
+        \\.w a d {
+        \\  e: f;
+        \\}
+        \\@keyframes z {
+        \\  from {
+        \\    g: h;
+        \\  }
+        \\}
+        \\
+        \\q {
+        \\  r: s;
+        \\}
+        \\
+    , in_rule);
+
+    const in_media = try compileSourceToCss(alloc,
+        \\@use "sass:meta";
+        \\@media screen { @include meta.load-css("lib"); }
+    , entry_path, &.{}, .{});
+    defer alloc.free(in_media);
+    try std.testing.expectEqualStrings(
+        \\@media screen {
+        \\  /* note */
+        \\  a {
+        \\    b: c;
+        \\  }
+        \\  a d {
+        \\    e: f;
+        \\  }
+        \\  @keyframes z {
+        \\    from {
+        \\      g: h;
+        \\    }
+        \\  }
+        \\}
+        \\
+    , in_media);
+
+    // At the top level every loaded rule is a top-level statement.
+    const at_top = try compileSourceToCss(alloc,
+        \\@use "sass:meta";
+        \\@include meta.load-css("lib");
+    , entry_path, &.{}, .{});
+    defer alloc.free(at_top);
+    try std.testing.expectEqualStrings(
+        \\/* note */
+        \\a {
+        \\  b: c;
+        \\}
+        \\
+        \\a d {
+        \\  e: f;
+        \\}
+        \\
+        \\@keyframes z {
+        \\  from {
+        \\    g: h;
+        \\  }
+        \\}
+        \\
+    , at_top);
+}
+
+test "api: escapes in selectors have one canonical spelling" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\.\61 b, #\61, \61, a:\68over, a:not(.\62) { x: y; }
+        \\.\31 0, .sm\:w-1\/2, .a\2c b, .g\[1fr\2c 2fr\] { x: y; }
+        \\[\61=b], [a="\62"], [a=\62], [a="\31 b"], a[href^="http\3a //"], [a="b\"c"] { x: y; }
+        \\.\61 { x: y; }
+        \\.c { @extend .a; }
+    ;
+    const css = try compileSourceToCss(alloc, src, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.ab, #a, a, a:hover, a:not(.b) {
+        \\  x: y;
+        \\}
+        \\
+        \\.\31 0, .sm\:w-1\/2, .a\,b, .g\[1fr\,2fr\] {
+        \\  x: y;
+        \\}
+        \\
+        \\[a=b], [a=b], [a=b], [a="1b"], a[href^="http://"], [a='b"c'] {
+        \\  x: y;
+        \\}
+        \\
+        \\.a, .c {
+        \\  x: y;
+        \\}
+        \\
+    , css);
+}
+
+test "api: an escape next to an interpolation in a function name" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\$x: 1;
+        \\a {
+        \\  literal: a\62#{1}(2) \31#{1}(2) a\.#{1}(2);
+        \\  variable: a\62#{$x}(2) #{$x}\62 c(2);
+        \\  operands: min(var(--a) var(--b)) min(1px + 1px + var(--c));
+        \\}
+    ;
+    const css = try compileSourceToCss(alloc, src, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\a {
+        \\  literal: ab1(2) \31 1(2) a\.1(2);
+        \\  variable: ab1(2) 1bc(2);
+        \\  operands: min(var(--a) var(--b)) min(2px + var(--c));
+        \\}
+        \\
+    , css);
+}
+
+test "api: a forwarded module is not configured through names the @forward hides" {
+    const alloc = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    try writeApiTmpFileAll(&tmp_dir, "_lib.scss",
+        \\$a: 0 !default;
+        \\$b: 0 !default;
+        \\@if $a == 1 { x { a: one; } } @else { x { a: other; } }
+        \\@if $b == 0 { x { b: zero; } } @else { x { b: other; } }
+    );
+    try writeApiTmpFileAll(&tmp_dir, "_hidden.scss",
+        \\@forward "lib" hide $b with ($a: 1 !default);
+        \\$b: 0 !default;
+        \\z { b: $b; }
+    );
+    try writeApiTmpFileAll(&tmp_dir, "_prefixed.scss",
+        \\@forward "lib" as p-*;
+    );
+
+    const tmp_path = try zsass_io.realPathAlloc(tmp_dir.dir, ".", alloc);
+    defer alloc.free(tmp_path);
+    const entry_path = try std.fs.path.join(alloc, &.{ tmp_path, "entry.scss" });
+    defer alloc.free(entry_path);
+
+    // `$b` configures the forwarding module's own variable, not the hidden
+    // one of the forwarded module.
+    const hidden = try compileSourceToCss(alloc, "@use \"hidden\" with ($b: 3);\n", entry_path, &.{}, .{});
+    defer alloc.free(hidden);
+    try std.testing.expectEqualStrings(
+        \\x {
+        \\  a: one;
+        \\}
+        \\
+        \\x {
+        \\  b: zero;
+        \\}
+        \\
+        \\z {
+        \\  b: 3;
+        \\}
+        \\
+    , hidden);
+
+    // Without `with`, a prefixed name still reaches the forwarded module.
+    const prefixed = try compileSourceToCss(alloc, "@use \"prefixed\" with ($p-a: 1);\n", entry_path, &.{}, .{});
+    defer alloc.free(prefixed);
+    try std.testing.expectEqualStrings(
+        \\x {
+        \\  a: one;
+        \\}
+        \\
+        \\x {
+        \\  b: zero;
+        \\}
+        \\
+    , prefixed);
+}
+
+test "api: meta.load-css() keeps @at-root and at-rule comments in place" {
+    const alloc = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    try writeApiTmpFileAll(&tmp_dir, "_root.scss",
+        \\@at-root (without: media) { a { b: c; } }
+    );
+    try writeApiTmpFileAll(&tmp_dir, "_notes.scss",
+        \\/* one */
+        \\/* two */
+        \\@font-face { /* face */ font-family: x; }
+        \\@media print { /* print */ a { b: c; } }
+        \\@notkeyframes k { a { b: c; } }
+        \\@-webkit-keyframes k { from { b: c; } }
+    );
+
+    const tmp_path = try zsass_io.realPathAlloc(tmp_dir.dir, ".", alloc);
+    defer alloc.free(tmp_path);
+    const entry_path = try std.fs.path.join(alloc, &.{ tmp_path, "entry.scss" });
+    defer alloc.free(entry_path);
+
+    // `@at-root` cannot leave the block the module was loaded into.
+    const in_media = try compileSourceToCss(alloc,
+        \\@use "sass:meta";
+        \\@media print { @include meta.load-css("root"); }
+    , entry_path, &.{}, .{});
+    defer alloc.free(in_media);
+    try std.testing.expectEqualStrings(
+        \\@media print {
+        \\  a {
+        \\    b: c;
+        \\  }
+        \\}
+        \\
+    , in_media);
+
+    const in_rule = try compileSourceToCss(alloc,
+        \\@use "sass:meta";
+        \\.w { @include meta.load-css("notes"); }
+    , entry_path, &.{}, .{});
+    defer alloc.free(in_rule);
+    try std.testing.expectEqualStrings(
+        \\.w {
+        \\  /* one */
+        \\  /* two */
+        \\}
+        \\@font-face { /* face */
+        \\  font-family: x;
+        \\}
+        \\@media print {
+        \\  .w {
+        \\    /* print */
+        \\  }
+        \\  .w a {
+        \\    b: c;
+        \\  }
+        \\}
+        \\@notkeyframes k {
+        \\  .w a {
+        \\    b: c;
+        \\  }
+        \\}
+        \\@-webkit-keyframes k {
+        \\  from {
+        \\    b: c;
+        \\  }
+        \\}
+        \\
+    , in_rule);
+}
+
+test "api: a lone escaped hyphen stays escaped in a selector" {
+    const alloc = std.testing.allocator;
+    const css = try compileSourceToCss(alloc, ".\\-, .\\-a, .\\- .b { x: y; }\n", "", &.{}, .{});
+    defer alloc.free(css);
+    // The official CLI spells the lone hyphen `\2d `; `\-` names the same class.
+    try std.testing.expectEqualStrings(".\\-, .-a, .\\- .b {\n  x: y;\n}\n", css);
+}
+
+test "api: compressed output drops an empty rule without its enclosing block" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\@media print { .w { /* x */ } .w a { b: c; } }
+        \\@media print { a { b: c; } d { } }
+        \\e { f: g; h { } }
+        \\[style*="display: none;"] { /* x */ }
+        \\[data-x="a{b"] { }
+        \\.i\;j { }
+        \\k { l: url(a;b); n: o; }
+        \\@supports (content: "a;b") { .w { /* x */ } }
+    ;
+    const css = try compileSourceToCss(alloc, src, "", &.{}, .{ .output_style = .compressed });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings("@media print{.w a{b:c}}@media print{a{b:c}}e{f:g}k{l:url(a;b);n:o}\n", css);
+}

@@ -238,6 +238,9 @@ pub const make_selector_flag_interpolation_context: u32 = 1 << 2;
 /// When constructing text for loud comments (`/*! ... #{...} ... */`), empty
 /// interpolation must not collapse an intentionally preserved separator.
 pub const make_selector_flag_preserve_empty_separators: u32 = 1 << 3;
+/// The merged text becomes a quoted string: it is pushed quoted, and an
+/// interpolated unquoted string contributes its characters, not its escapes.
+pub const make_selector_flag_quoted_result: u32 = 1 << 4;
 /// Low-byte transport flag for emit_at_rule_begin. Plain CSS nested
 /// conditional at-rules preserve CSS nesting semantics, so RuleIR must not
 /// apply Sass media-hoist body wrapping to their descendants. VM masks this

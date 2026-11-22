@@ -17,190 +17,12 @@ const reportArgumentTypeMismatch = shared.reportArgumentTypeMismatch;
 
 var unique_counter: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
 
-const DecodedString = struct {
-    bytes: []const u8,
-    needs_free: bool = false,
-
-    fn deinit(self: DecodedString, alloc: std.mem.Allocator) void {
-        if (self.needs_free) {
-            alloc.free(@constCast(self.bytes));
-        }
-    }
-};
-
-fn unescapeStringForStringOps(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
-    if (std.mem.find(u8, text, "\\") == null) return text;
-
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    var i: usize = 0;
-    while (i < text.len) {
-        if (text[i] == '\\' and i + 1 < text.len) {
-            const next = text[i + 1];
-            if (next == '\\') {
-                try buf.append(allocator, '\\');
-                i += 2;
-            } else if (next == '"' or next == '\'') {
-                try buf.append(allocator, next);
-                i += 2;
-            } else if (std.ascii.isHex(next)) {
-                const hex_start = i + 1;
-                var hex_end = hex_start;
-                while (hex_end < text.len and hex_end - hex_start < 6 and std.ascii.isHex(text[hex_end])) {
-                    hex_end += 1;
-                }
-                var after_hex = hex_end;
-                if (after_hex < text.len and (text[after_hex] == ' ' or text[after_hex] == '\t')) {
-                    after_hex += 1;
-                }
-                const raw_code_point = std.fmt.parseInt(u21, text[hex_start..hex_end], 16) catch {
-                    try buf.append(allocator, text[i]);
-                    i += 1;
-                    continue;
-                };
-                const code_point = if (raw_code_point == 0) @as(u21, 0xFFFD) else raw_code_point;
-                if (code_point < 0x80) {
-                    try buf.append(allocator, @intCast(code_point));
-                } else {
-                    var utf8_buf: [4]u8 = undefined;
-                    const len = std.unicode.utf8Encode(code_point, &utf8_buf) catch {
-                        try buf.append(allocator, text[i]);
-                        i += 1;
-                        continue;
-                    };
-                    try buf.appendSlice(allocator, utf8_buf[0..len]);
-                }
-                i = after_hex;
-            } else if (next == '\n' or next == 0x0c) {
-                i += 2;
-            } else if (next == '\r') {
-                i += 2;
-                if (i < text.len and text[i] == '\n') i += 1;
-            } else {
-                try buf.append(allocator, '\\');
-                try buf.append(allocator, next);
-                i += 2;
-            }
-        } else {
-            try buf.append(allocator, text[i]);
-            i += 1;
-        }
-    }
-    return buf.toOwnedSlice(allocator);
-}
-
-fn decodeQuotedStringForOps(ctx: *BuiltinContext, value: Value) BuiltinError!DecodedString {
-    if (!value.isString()) return error.BuiltinType;
-    const raw = ctx.intern_pool.get(value.stringIntern());
-    if (!value.stringQuoted(ctx.string_flags_pool.items)) {
-        if (std.mem.find(u8, raw, "\\") == null) {
-            return .{ .bytes = raw };
-        }
-        var buf: std.ArrayList(u8) = .empty;
-        errdefer buf.deinit(ctx.allocator);
-
-        var changed = false;
-        var i: usize = 0;
-        while (i < raw.len) {
-            if (raw[i] != '\\') {
-                try buf.append(ctx.allocator, raw[i]);
-                i += 1;
-                continue;
-            }
-
-            if (i + 1 >= raw.len) {
-                try buf.append(ctx.allocator, '\\');
-                break;
-            }
-            i += 1;
-
-            if (std.ascii.isHex(raw[i])) {
-                var value_cp: u21 = 0;
-                var count: u32 = 0;
-                while (i < raw.len and count < 6 and std.ascii.isHex(raw[i])) : (count += 1) {
-                    value_cp = value_cp * 16 + css_utils.hexDigitValue(raw[i]);
-                    i += 1;
-                }
-                if (i < raw.len and (raw[i] == ' ' or raw[i] == '\t' or raw[i] == '\n' or raw[i] == '\r' or raw[i] == '\x0c')) {
-                    i += 1;
-                }
-
-                if (value_cp == 0 or value_cp <= 0x1F or value_cp == 0x7F) {
-                    try buf.append(ctx.allocator, '\\');
-                    var hex_buf: [6]u8 = undefined;
-                    const hex = std.fmt.bufPrint(&hex_buf, "{x}", .{value_cp}) catch "0";
-                    try buf.appendSlice(ctx.allocator, hex);
-                    try buf.append(ctx.allocator, ' ');
-                } else if (value_cp > 0x10FFFF) {
-                    try buf.appendSlice(ctx.allocator, "\xEF\xBF\xBD");
-                    changed = true;
-                } else {
-                    var utf8_buf: [4]u8 = undefined;
-                    const len = std.unicode.utf8Encode(@intCast(value_cp), &utf8_buf) catch 0;
-                    try buf.appendSlice(ctx.allocator, utf8_buf[0..len]);
-                    changed = true;
-                }
-                continue;
-            }
-
-            if (raw[i] == '\r') {
-                i += 1;
-                if (i < raw.len and raw[i] == '\n') i += 1;
-                changed = true;
-                continue;
-            }
-            if (raw[i] == '\n' or raw[i] == '\x0c') {
-                i += 1;
-                changed = true;
-                continue;
-            }
-
-            if (raw[i] == '/') {
-                try buf.append(ctx.allocator, '\\');
-                try buf.append(ctx.allocator, raw[i]);
-            } else if (raw[i] == '"' or raw[i] == '\'' or raw[i] == '\\') {
-                try buf.append(ctx.allocator, '\\');
-                try buf.append(ctx.allocator, raw[i]);
-            } else {
-                try buf.append(ctx.allocator, raw[i]);
-                changed = true;
-            }
-            i += 1;
-        }
-
-        if (!changed and std.mem.eql(u8, buf.items, raw)) {
-            buf.deinit(ctx.allocator);
-            return .{ .bytes = raw };
-        }
-        const decoded = try buf.toOwnedSlice(ctx.allocator);
-        if (decoded.ptr == raw.ptr) {
-            return .{ .bytes = raw };
-        }
-        return .{
-            .bytes = decoded,
-            .needs_free = true,
-        };
-    }
-    if (std.mem.find(u8, raw, "\\") == null) {
-        return .{ .bytes = raw };
-    }
-    const decoded = unescapeStringForStringOps(ctx.allocator, raw) catch return error.OutOfMemory;
-    if (decoded.ptr == raw.ptr) {
-        return .{ .bytes = raw };
-    }
-    return .{
-        .bytes = decoded,
-        .needs_free = true,
-    };
-}
-
-fn decodeStringArgForOps(ctx: *BuiltinContext, param_name: []const u8, value: Value) BuiltinError!DecodedString {
+/// The text of a string argument. A string value already holds its decoded
+/// text (a quoted string) or its canonical identifier text (an unquoted one),
+/// so string functions work on these bytes directly.
+fn stringArgText(ctx: *BuiltinContext, param_name: []const u8, value: Value) BuiltinError![]const u8 {
     if (!value.isString()) return reportArgumentTypeMismatch(ctx, param_name, value, "string");
-    return decodeQuotedStringForOps(ctx, value) catch |err| switch (err) {
-        error.BuiltinType => return reportArgumentTypeMismatch(ctx, param_name, value, "string"),
-        else => return err,
-    };
+    return ctx.intern_pool.get(value.stringIntern());
 }
 
 fn pushListWithMeta(
@@ -210,70 +32,6 @@ fn pushListWithMeta(
     bracketed: bool,
 ) BuiltinError!Value {
     return shared.pushListWithMeta(ctx, items, separator, bracketed, false);
-}
-
-fn isHexEscapeDelimiterWhitespace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == '\x0c';
-}
-
-fn normalizeHexEscapesForQuotedOutput(alloc: std.mem.Allocator, raw: []const u8) BuiltinError!?[]u8 {
-    if (std.mem.find(u8, raw, "\\") == null) return null;
-
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    defer out.deinit(alloc);
-    var changed = false;
-    var i: usize = 0;
-    while (i < raw.len) {
-        const c = raw[i];
-        if (c == '\\' and i + 1 < raw.len and std.ascii.isHex(raw[i + 1])) {
-            try out.append(alloc, '\\');
-            i += 1;
-
-            var digits: usize = 0;
-            while (i < raw.len and digits < 6 and std.ascii.isHex(raw[i])) : (digits += 1) {
-                try out.append(alloc, raw[i]);
-                i += 1;
-            }
-
-            if (i < raw.len and isHexEscapeDelimiterWhitespace(raw[i])) {
-                try out.append(alloc, raw[i]);
-                i += 1;
-            } else {
-                const needs_delimiter = i == raw.len or std.ascii.isHex(raw[i]) or raw[i] == '"' or raw[i] == '\'';
-                if (needs_delimiter) {
-                    try out.append(alloc, ' ');
-                    changed = true;
-                }
-            }
-            continue;
-        }
-
-        try out.append(alloc, c);
-        i += 1;
-    }
-
-    if (!changed) return null;
-    return out.toOwnedSlice(alloc) catch error.OutOfMemory;
-}
-
-fn quotedUnquoteShouldPreserveRawEscapes(raw: []const u8) bool {
-    var i: usize = 0;
-    while (i + 1 < raw.len) : (i += 1) {
-        if (raw[i] != '\\') continue;
-        const next = raw[i + 1];
-        if (std.ascii.isHex(next)) return true;
-        // string.unquote() preserves CSS escapes that would otherwise be
-        // reparsed as punctuation in the resulting unquoted CSS token
-        // (`unquote("\"\$\"")` -> `"\$"`).  Quote/backslash escapes are
-        // string-syntax escapes, not CSS identifier escapes, so those continue
-        // through the normal string decoder.
-        if (next != '\'' and next != '"' and next != '\\' and
-            next != '\n' and next != '\r' and next != '\x0c')
-        {
-            return true;
-        }
-    }
-    return false;
 }
 
 fn utf8CodepointCount(s: []const u8) usize {
@@ -363,12 +121,8 @@ pub fn string_index(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
     const bound = try bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{ "string", "substring" }, 2);
     const hay_v = bound[0].?;
     const needle_v = bound[1].?;
-    var hay_decoded = try decodeStringArgForOps(ctx, "string", hay_v);
-    defer hay_decoded.deinit(ctx.allocator);
-    var needle_decoded = try decodeStringArgForOps(ctx, "substring", needle_v);
-    defer needle_decoded.deinit(ctx.allocator);
-    const hay = hay_decoded.bytes;
-    const needle = needle_decoded.bytes;
+    const hay = try stringArgText(ctx, "string", hay_v);
+    const needle = try stringArgText(ctx, "substring", needle_v);
     const byte_idx = std.mem.find(u8, hay, needle) orelse return Value.nil_v;
     const cp_idx = utf8CodepointCount(hay[0..byte_idx]) + 1;
     return Value.numberUnitless(@floatFromInt(cp_idx));
@@ -380,12 +134,8 @@ pub fn string_insert(ctx: *BuiltinContext, args: []const Value, arg_names: []con
     const ins_v = bound[1].?;
     const idx_v = bound[2].?;
     const idx = try parseIntIndexNamed(ctx, "index", idx_v);
-    var base_decoded = try decodeStringArgForOps(ctx, "string", base_v);
-    defer base_decoded.deinit(ctx.allocator);
-    var ins_decoded = try decodeStringArgForOps(ctx, "insert", ins_v);
-    defer ins_decoded.deinit(ctx.allocator);
-    const base = base_decoded.bytes;
-    const ins = ins_decoded.bytes;
+    const base = try stringArgText(ctx, "string", base_v);
+    const ins = try stringArgText(ctx, "insert", ins_v);
 
     const cp_len = utf8CodepointCount(base);
     const slen: i64 = @intCast(cp_len);
@@ -413,9 +163,7 @@ pub fn string_insert(ctx: *BuiltinContext, args: []const Value, arg_names: []con
 
 pub fn string_length(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 1);
-    var decoded = try decodeStringArgForOps(ctx, "string", args[0]);
-    defer decoded.deinit(ctx.allocator);
-    const s = decoded.bytes;
+    const s = try stringArgText(ctx, "string", args[0]);
     return Value.numberUnitless(@floatFromInt(utf8CodepointCount(s)));
 }
 
@@ -425,9 +173,7 @@ pub fn string_slice(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
     const str_v = bound[0].?;
     const start_v = bound[1].?;
     const end_v = bound[2];
-    var decoded = try decodeStringArgForOps(ctx, "string", str_v);
-    defer decoded.deinit(ctx.allocator);
-    const s = decoded.bytes;
+    const s = try stringArgText(ctx, "string", str_v);
     const quoted = str_v.stringQuoted(ctx.string_flags_pool.items);
     const start_raw = try parseIntIndexNamed(ctx, "start-at", start_v);
     const end_raw: ?i64 = if (end_v) |v| try parseIntIndexNamed(ctx, "end-at", v) else null;
@@ -504,12 +250,8 @@ pub fn string_split(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
     const str_v = bound[0].?;
     const separator_v = bound[1].?;
     const limit_v = bound[2];
-    var hay_decoded = try decodeStringArgForOps(ctx, "string", str_v);
-    defer hay_decoded.deinit(ctx.allocator);
-    var needle_decoded = try decodeStringArgForOps(ctx, "separator", separator_v);
-    defer needle_decoded.deinit(ctx.allocator);
-    const hay = hay_decoded.bytes;
-    const needle = needle_decoded.bytes;
+    const hay = try stringArgText(ctx, "string", str_v);
+    const needle = try stringArgText(ctx, "separator", separator_v);
     const quoted = str_v.stringQuoted(ctx.string_flags_pool.items);
     const limit: ?usize = if (limit_v) |v| try parseSplitLimitNamed(ctx, "limit", v) else null;
 
@@ -565,9 +307,7 @@ pub fn string_split(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
 
 pub fn string_to_lower(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 1);
-    var decoded = try decodeStringArgForOps(ctx, "string", args[0]);
-    defer decoded.deinit(ctx.allocator);
-    const s = decoded.bytes;
+    const s = try stringArgText(ctx, "string", args[0]);
     const out = try ctx.allocator.alloc(u8, s.len);
     defer ctx.allocator.free(out);
     for (s, 0..) |c, i| {
@@ -579,9 +319,7 @@ pub fn string_to_lower(ctx: *BuiltinContext, args: []const Value) BuiltinError!V
 
 pub fn string_to_upper(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 1);
-    var decoded = try decodeStringArgForOps(ctx, "string", args[0]);
-    defer decoded.deinit(ctx.allocator);
-    const s = decoded.bytes;
+    const s = try stringArgText(ctx, "string", args[0]);
     const out = try ctx.allocator.alloc(u8, s.len);
     defer ctx.allocator.free(out);
     for (s, 0..) |c, i| {
@@ -595,13 +333,14 @@ pub fn string_quote(ctx: *BuiltinContext, args: []const Value) BuiltinError!Valu
     try expectArity(args, 1);
     if (!args[0].isString()) return reportArgumentTypeMismatch(ctx, "string", args[0], "string");
     if (args[0].stringQuoted(ctx.string_flags_pool.items)) return Value.string(args[0].stringIntern(), true);
-    const raw = ctx.intern_pool.get(args[0].stringIntern());
-    if (try normalizeHexEscapesForQuotedOutput(ctx.allocator, raw)) |normalized| {
-        defer ctx.allocator.free(normalized);
-        const id = try internString(ctx, normalized);
-        return Value.string(id, true);
-    }
-    return Value.string(args[0].stringIntern(), true);
+    // An unquoted string spells a private-use character as an escape; the
+    // quoted string holds the character itself.
+    const stored = ctx.intern_pool.get(args[0].stringIntern());
+    const raw = calc_utils.stripCalcArgMarker(stored);
+    const text = try css_utils.decodePrivateUseEscapes(ctx.allocator, raw);
+    defer if (text.ptr != raw.ptr) ctx.allocator.free(text);
+    if (text.ptr == stored.ptr) return Value.string(args[0].stringIntern(), true);
+    return Value.string(try internString(ctx, text), true);
 }
 
 fn unquotedStringNeedsDeclTextPreserve(raw: []const u8) bool {
@@ -638,13 +377,7 @@ pub fn string_unquote(ctx: *BuiltinContext, args: []const Value) BuiltinError!Va
         return args[0].withPreserveLiteralText();
     }
     const raw = ctx.intern_pool.get(args[0].stringIntern());
-    if (quotedUnquoteShouldPreserveRawEscapes(raw)) {
-        return Value.string(args[0].stringIntern(), false).withPreserveLiteralText();
-    }
-    var decoded = try decodeStringArgForOps(ctx, "string", args[0]);
-    defer decoded.deinit(ctx.allocator);
-    const id = try internString(ctx, decoded.bytes);
-    return markUnquotedStringPreserve(decoded.bytes, Value.string(id, false));
+    return markUnquotedStringPreserve(raw, Value.string(args[0].stringIntern(), false));
 }
 
 pub fn string_unique_id(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
@@ -670,18 +403,4 @@ test "utf8 helpers fallback on invalid utf8 bytes" {
     const invalid = [_]u8{0xf0};
     try std.testing.expectEqual(@as(usize, 1), utf8CodepointCount(invalid[0..]));
     try std.testing.expectEqual(@as(?usize, 1), utf8OffsetForCodepoint(invalid[0..], 1));
-}
-
-test "normalizeHexEscapesForQuotedOutput inserts explicit delimiters" {
-    const allocator = std.testing.allocator;
-    const raw = "\\61\"";
-    const normalized = (try normalizeHexEscapesForQuotedOutput(allocator, raw)).?;
-    defer allocator.free(normalized);
-    try std.testing.expectEqualStrings("\\61 \"", normalized);
-}
-
-test "quotedUnquoteShouldPreserveRawEscapes detects css hex escapes" {
-    try std.testing.expect(quotedUnquoteShouldPreserveRawEscapes("\\0 "));
-    try std.testing.expect(quotedUnquoteShouldPreserveRawEscapes("\\61"));
-    try std.testing.expect(!quotedUnquoteShouldPreserveRawEscapes("\\\"c\\\""));
 }

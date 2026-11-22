@@ -9,93 +9,10 @@ pub const Value = value_mod.Value;
 const ColorPool = value_mod.ColorPool;
 const InternPool = intern_pool_mod.InternPool;
 
-const ComparableString = struct {
-    bytes: []const u8,
-    owned: ?[]u8 = null,
-
-    fn deinit(self: ComparableString, alloc: std.mem.Allocator) void {
-        if (self.owned) |buf| alloc.free(buf);
-    }
-};
-
-fn unescapeSassString(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
-    if (std.mem.find(u8, text, "\\") == null) return text;
-
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    var i: usize = 0;
-    while (i < text.len) {
-        if (text[i] == '\\' and i + 1 < text.len) {
-            const next = text[i + 1];
-            if (next == '\\') {
-                try buf.append(allocator, '\\');
-                i += 2;
-            } else if (next == '"' or next == '\'') {
-                try buf.append(allocator, next);
-                i += 2;
-            } else if (std.ascii.isHex(next)) {
-                const hex_start = i + 1;
-                var hex_end = hex_start;
-                while (hex_end < text.len and hex_end - hex_start < 6 and std.ascii.isHex(text[hex_end])) {
-                    hex_end += 1;
-                }
-                var after_hex = hex_end;
-                if (after_hex < text.len and (text[after_hex] == ' ' or text[after_hex] == '\t')) {
-                    after_hex += 1;
-                }
-                const hex_str = text[hex_start..hex_end];
-                const raw_code_point = std.fmt.parseInt(u21, hex_str, 16) catch {
-                    try buf.append(allocator, text[i]);
-                    i += 1;
-                    continue;
-                };
-                const code_point = if (raw_code_point == 0) @as(u21, 0xFFFD) else raw_code_point;
-                if (code_point < 0x80) {
-                    try buf.append(allocator, @intCast(code_point));
-                } else {
-                    var utf8_buf: [4]u8 = undefined;
-                    const len = std.unicode.utf8Encode(code_point, &utf8_buf) catch {
-                        try buf.append(allocator, text[i]);
-                        i += 1;
-                        continue;
-                    };
-                    try buf.appendSlice(allocator, utf8_buf[0..len]);
-                }
-                i = after_hex;
-            } else if (next == '\n' or next == 0x0c) {
-                i += 2;
-            } else if (next == '\r') {
-                i += 2;
-                if (i < text.len and text[i] == '\n') {
-                    i += 1;
-                }
-            } else {
-                try buf.append(allocator, next);
-                i += 2;
-            }
-        } else {
-            try buf.append(allocator, text[i]);
-            i += 1;
-        }
-    }
-    return buf.toOwnedSlice(allocator);
-}
-
-fn comparableStringBytes(pool: *InternPool, alloc: std.mem.Allocator, v: Value) ComparableString {
-    const raw = calc_utils.stripCalcArgMarker(pool.get(v.stringIntern()));
-    if (!v.stringQuoted(value_mod.empty_string_flags_pool)) {
-        return .{ .bytes = raw };
-    }
-    if (!pool.hasBackslash(v.stringIntern())) {
-        return .{ .bytes = raw };
-    }
-    const decoded = unescapeSassString(alloc, raw) catch return .{ .bytes = raw };
-    if (decoded.ptr == raw.ptr) return .{ .bytes = raw };
-    return .{
-        .bytes = decoded,
-        .owned = @constCast(decoded),
-    };
+/// The text two strings are compared by. A string value already holds its
+/// decoded text, so this is the stored text without the calculation marker.
+fn comparableStringBytes(pool: *InternPool, v: Value) []const u8 {
+    return calc_utils.stripCalcArgMarker(pool.get(v.stringIntern()));
 }
 
 fn comparableStringsEqualFast(pool: *InternPool, a: Value, b: Value) ?bool {
@@ -105,13 +22,8 @@ fn comparableStringsEqualFast(pool: *InternPool, a: Value, b: Value) ?bool {
         (!b.stringQuoted(value_mod.empty_string_flags_pool) and std.mem.indexOf(u8, raw_b, "calc(") != null))
         return null;
 
-    // Unquoted strings compare as raw text. Quoted strings without escapes also
-    // compare as raw text; only quoted backslash escapes need the slower decode
-    // path below. This is hot in large map/list equality checks where many
-    // distinct InternIds carry identical simple string bytes.
-    const a_needs_decode = a.stringQuoted(value_mod.empty_string_flags_pool) and pool.hasBackslash(a.stringIntern());
-    const b_needs_decode = b.stringQuoted(value_mod.empty_string_flags_pool) and pool.hasBackslash(b.stringIntern());
-    if (a_needs_decode or b_needs_decode) return null;
+    // Strings compare as their stored text. This is hot in large map/list
+    // equality checks where many distinct InternIds carry identical bytes.
     if (raw_a.len != raw_b.len) return false;
     return std.mem.eql(u8, raw_a, raw_b);
 }
@@ -257,14 +169,12 @@ fn valueEqInner(env: anytype, a: Value, b: Value) bool {
         if (a.stringNamedColorLiteral(env.stringFlagsPool().items) != b.stringNamedColorLiteral(env.stringFlagsPool().items)) return false;
         if (a.stringIntern() == b.stringIntern()) return true;
         if (comparableStringsEqualFast(env.pool(), a, b)) |fast| return fast;
-        const ca = comparableStringBytes(env.pool(), env.allocator(), a);
-        defer ca.deinit(env.allocator());
-        const cb = comparableStringBytes(env.pool(), env.allocator(), b);
-        defer cb.deinit(env.allocator());
+        const ca = comparableStringBytes(env.pool(), a);
+        const cb = comparableStringBytes(env.pool(), b);
         if (!a.stringQuoted(env.stringFlagsPool().items) and !b.stringQuoted(env.stringFlagsPool().items)) {
-            if (normalizedCalcStringEqual(env.allocator(), ca.bytes, cb.bytes)) |eq| return eq;
+            if (normalizedCalcStringEqual(env.allocator(), ca, cb)) |eq| return eq;
         }
-        return std.mem.eql(u8, ca.bytes, cb.bytes);
+        return std.mem.eql(u8, ca, cb);
     }
 
     if (a.kind() == .boolean) return a.p64Of() == b.p64Of();

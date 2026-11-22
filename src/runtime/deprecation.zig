@@ -45,23 +45,6 @@ pub const DeprecationKind = enum {
         }
         return null;
     }
-
-    /// Sass language version when this deprecation became active (official Sass CLI compatible thresholds).
-    pub fn activatedIn(self: DeprecationKind) ?SassVersion {
-        return switch (self) {
-            .import => .{ .major = 1, .minor = 80, .patch = 0 },
-            .slash_div => .{ .major = 1, .minor = 33, .patch = 0 },
-            .strict_unary => .{ .major = 1, .minor = 55, .patch = 0 },
-            .function_units => .{ .major = 1, .minor = 56, .patch = 0 },
-            .duplicate_var_flags => .{ .major = 1, .minor = 62, .patch = 0 },
-            .null_alpha => .{ .major = 1, .minor = 62, .patch = 3 },
-            .abs_percent => .{ .major = 1, .minor = 65, .patch = 0 },
-            .color_functions => .{ .major = 1, .minor = 79, .patch = 0 },
-            .mixed_decls => .{ .major = 1, .minor = 77, .patch = 7 },
-            .fs_importer_cwd => .{ .major = 1, .minor = 23, .patch = 0 },
-            .css_function_mixin => null,
-        };
-    }
 };
 
 pub const SassVersion = struct {
@@ -70,7 +53,7 @@ pub const SassVersion = struct {
     patch: u16,
 
     /// Highest Sass version accepted by `--fatal-deprecation=<version>` (official Sass CLI parity).
-    pub const known_max: SassVersion = .{ .major = 1, .minor = 99, .patch = 0 };
+    pub const known_max: SassVersion = .{ .major = 1, .minor = 108, .patch = 2 };
 
     pub fn parse(raw: []const u8) ?SassVersion {
         var parts = std.mem.splitScalar(u8, raw, '.');
@@ -95,12 +78,90 @@ pub const SassVersion = struct {
     }
 };
 
+/// A deprecation id the official Sass CLI accepts. zsass reports only the ids
+/// that have a `DeprecationKind`; the others are accepted so that a command
+/// line written for the official CLI keeps working.
+const KnownDeprecation = struct {
+    name: []const u8,
+    /// Version the deprecation became active in; null when no version
+    /// includes it.
+    since: ?SassVersion = null,
+    /// No longer reported by the official CLI; a version does not include it.
+    obsolete: bool = false,
+    /// Member of the `dart-sass-2` group: behavior removed in Dart Sass 2.0.0.
+    dart_sass_2: bool = false,
+};
+
+fn v(major: u16, minor: u16, patch: u16) SassVersion {
+    return .{ .major = major, .minor = minor, .patch = patch };
+}
+
+const known_deprecations = [_]KnownDeprecation{
+    .{ .name = "abs-percent", .since = v(1, 65, 0), .dart_sass_2 = true },
+    .{ .name = "adjacent-compounds", .since = v(1, 100, 0), .dart_sass_2 = true },
+    .{ .name = "bogus-combinators", .since = v(1, 54, 0), .dart_sass_2 = true },
+    .{ .name = "calc-interp" },
+    .{ .name = "call-string", .since = v(0, 0, 0), .dart_sass_2 = true },
+    .{ .name = "color-4-api", .since = v(1, 79, 0), .dart_sass_2 = true },
+    .{ .name = "color-functions", .since = v(1, 79, 0), .dart_sass_2 = true },
+    .{ .name = "color-module-compat", .since = v(1, 23, 0) },
+    .{ .name = "compile-string-relative-url", .since = v(1, 88, 0), .dart_sass_2 = true },
+    .{ .name = "css-function-mixin", .since = v(1, 76, 0), .obsolete = true },
+    .{ .name = "deprecation-version", .since = v(1, 107, 0) },
+    .{ .name = "duplicate-var-flags", .since = v(1, 62, 0), .dart_sass_2 = true },
+    .{ .name = "elseif", .since = v(1, 3, 2), .dart_sass_2 = true },
+    .{ .name = "feature-exists", .since = v(1, 78, 0), .dart_sass_2 = true },
+    .{ .name = "fs-importer-cwd", .since = v(1, 73, 0), .dart_sass_2 = true },
+    .{ .name = "function-name", .since = v(1, 98, 0), .dart_sass_2 = true },
+    .{ .name = "function-units", .since = v(1, 56, 0), .dart_sass_2 = true },
+    .{ .name = "global-builtin", .since = v(1, 80, 0) },
+    .{ .name = "if-function", .since = v(1, 95, 0) },
+    .{ .name = "import", .since = v(1, 80, 0) },
+    .{ .name = "legacy-js-api", .since = v(1, 79, 0), .dart_sass_2 = true },
+    .{ .name = "misplaced-rest", .since = v(1, 91, 0), .dart_sass_2 = true },
+    .{ .name = "mixed-decls", .since = v(1, 77, 7), .obsolete = true },
+    .{ .name = "moz-document", .since = v(1, 7, 2), .dart_sass_2 = true },
+    .{ .name = "new-global", .since = v(1, 17, 2), .dart_sass_2 = true },
+    .{ .name = "null-alpha", .since = v(1, 62, 3), .dart_sass_2 = true },
+    .{ .name = "relative-canonical", .since = v(1, 14, 2), .dart_sass_2 = true },
+    .{ .name = "slash-div", .since = v(1, 33, 0), .dart_sass_2 = true },
+    .{ .name = "strict-unary", .since = v(1, 55, 0), .dart_sass_2 = true },
+    .{ .name = "type-function", .since = v(1, 86, 0), .obsolete = true },
+    .{ .name = "user-authored" },
+    .{ .name = "with-private", .since = v(1, 92, 0), .dart_sass_2 = true },
+};
+
+comptime {
+    std.debug.assert(known_deprecations.len <= 64);
+    // Every reported kind must be an id the official CLI knows.
+    for (@typeInfo(DeprecationKind).@"enum".fields) |field| {
+        const kind: DeprecationKind = @enumFromInt(field.value);
+        std.debug.assert(lookupKnownDeprecation(kind.kindName()) != null);
+    }
+}
+
+fn lookupKnownDeprecation(name: []const u8) ?usize {
+    for (known_deprecations, 0..) |entry, index| {
+        if (std.mem.eql(u8, entry.name, name)) return index;
+    }
+    return null;
+}
+
+fn knownDeprecationBit(index: usize) u64 {
+    return @as(u64, 1) << @intCast(index);
+}
+
+/// Make the deprecation at `index` fatal.
+fn includeFatalDeprecation(opts: *DeprecationOpts, index: usize) void {
+    opts.fatal_included |= knownDeprecationBit(index);
+    if (DeprecationKind.parse(known_deprecations[index].name)) |kind| opts.fatal.insert(kind);
+}
+
 fn mergeFatalDeprecationsForVersion(opts: *DeprecationOpts, version: SassVersion) void {
-    inline for (@typeInfo(DeprecationKind).@"enum".fields) |field| {
-        const k: DeprecationKind = @field(DeprecationKind, field.name);
-        if (k.activatedIn()) |activated| {
-            if (activated.order(version) != .gt) opts.fatal.insert(k);
-        }
+    for (known_deprecations, 0..) |entry, index| {
+        if (entry.obsolete) continue;
+        const since = entry.since orelse continue;
+        if (since.order(version) != .gt) includeFatalDeprecation(opts, index);
     }
 }
 
@@ -116,6 +177,11 @@ pub const DeprecationOpts = struct {
     fatal: std.enums.EnumSet(DeprecationKind) = .empty,
     future: std.enums.EnumSet(DeprecationKind) = .empty,
     emitted: std.enums.EnumSet(DeprecationKind) = .empty,
+    /// Ids made fatal and ids excluded with `--fatal-deprecation=-<id>`, as
+    /// bits indexed like `known_deprecations`. `finalizeDeprecationOpts`
+    /// applies the exclusions once every flag has been read.
+    fatal_included: u64 = 0,
+    fatal_excluded: u64 = 0,
     verbose: bool = false,
     quiet: bool = false,
     /// When true, deprecation warnings print a stack trace when available (dart `--trace`).
@@ -248,47 +314,162 @@ pub const DeprecationSetType = enum { silence, fatal, future };
 pub const ParseDeprecationError = error{
     UnknownDeprecationToken,
     DeprecationVersionTooNew,
+    DeprecationExcludedWithoutInclude,
 };
 
+fn printDeprecationOptionMessage(comptime fmt: []const u8, args: anytype) void {
+    var err_file = std.Io.File.stderr();
+    var err_buf: [512]u8 = undefined;
+    var err_w = err_file.writer(zsass_io.io, err_buf[0..]);
+    err_w.interface.print(fmt, args) catch {};
+    err_w.interface.flush() catch |flush_err| switch (flush_err) {
+        else => {},
+    };
+}
+
+/// Read one `--silence-deprecation`, `--fatal-deprecation` or
+/// `--future-deprecation` value. A fatal list may also hold a Sass version
+/// (every deprecation active in or before it), `dart-sass-2`, and `-<id>` to
+/// exclude an id; call `finalizeDeprecationOpts` after the last flag.
 pub fn parseDeprecationList(opts: *DeprecationOpts, set_type: DeprecationSetType, raw: []const u8) ParseDeprecationError!void {
     var it = std.mem.splitScalar(u8, raw, ',');
     while (it.next()) |kind_name| {
         const trimmed = std.mem.trim(u8, kind_name, " \t\n\r");
         if (trimmed.len == 0) continue;
-        if (DeprecationKind.parse(trimmed)) |kind| {
+        if (set_type == .fatal and trimmed[0] == '-') {
+            if (lookupKnownDeprecation(trimmed[1..])) |index| {
+                opts.fatal_excluded |= knownDeprecationBit(index);
+                continue;
+            }
+        } else if (lookupKnownDeprecation(trimmed)) |index| {
+            const entry = known_deprecations[index];
+            switch (set_type) {
+                .silence => {
+                    if (entry.obsolete) {
+                        printDeprecationOptionMessage(
+                            "WARNING: {s} deprecation is obsolete. If you were previously silencing it, your code may now behave in unexpected ways.\n",
+                            .{entry.name},
+                        );
+                    }
+                    if (DeprecationKind.parse(entry.name)) |kind| opts.silenced.insert(kind);
+                },
+                .fatal => {
+                    if (entry.obsolete) {
+                        printDeprecationOptionMessage(
+                            "WARNING: {s} deprecation is obsolete, so does not need to be made fatal.\n",
+                            .{entry.name},
+                        );
+                    }
+                    includeFatalDeprecation(opts, index);
+                },
+                .future => {
+                    if (DeprecationKind.parse(entry.name)) |kind| opts.future.insert(kind);
+                },
+            }
+            continue;
+        } else if (DeprecationKind.parse(trimmed)) |kind| {
+            // Older zsass releases also accepted `slash_div` and `Slash-Div`.
             switch (set_type) {
                 .silence => opts.silenced.insert(kind),
-                .fatal => opts.fatal.insert(kind),
+                .fatal => includeFatalDeprecation(opts, lookupKnownDeprecation(kind.kindName()).?),
                 .future => opts.future.insert(kind),
             }
             continue;
-        }
-        if (set_type == .fatal) {
+        } else if (set_type == .fatal) {
+            if (std.mem.eql(u8, trimmed, "dart-sass-2")) {
+                for (known_deprecations, 0..) |entry, index| {
+                    if (entry.dart_sass_2) includeFatalDeprecation(opts, index);
+                }
+                continue;
+            }
             if (SassVersion.parse(trimmed)) |version| {
                 if (version.order(SassVersion.known_max) == .gt) {
-                    var err_file = std.Io.File.stderr();
-                    var err_buf: [256]u8 = undefined;
-                    var err_w = err_file.writer(zsass_io.io, err_buf[0..]);
-                    err_w.interface.print(
+                    printDeprecationOptionMessage(
                         "error: invalid version {d}.{d}.{d}; --fatal-deprecation requires a version <= {d}.{d}.{d}\n",
                         .{ version.major, version.minor, version.patch, SassVersion.known_max.major, SassVersion.known_max.minor, SassVersion.known_max.patch },
-                    ) catch {};
-                    err_w.interface.flush() catch |flush_err| switch (flush_err) {
-                        else => {},
-                    };
+                    );
                     return error.DeprecationVersionTooNew;
                 }
                 mergeFatalDeprecationsForVersion(opts, version);
                 continue;
             }
         }
-        var err_file = std.Io.File.stderr();
-        var err_buf: [512]u8 = undefined;
-        var err_w = err_file.writer(zsass_io.io, err_buf[0..]);
-        err_w.interface.print("error: unknown deprecation kind: '{s}'\n", .{trimmed}) catch {};
-        err_w.interface.flush() catch |flush_err| switch (flush_err) {
-            else => {},
-        };
+        printDeprecationOptionMessage("error: unknown deprecation kind: '{s}'\n", .{trimmed});
         return error.UnknownDeprecationToken;
     }
+}
+
+/// Apply the `--fatal-deprecation=-<id>` exclusions and settle conflicts
+/// between the flags. Call once, after every deprecation flag has been read:
+/// an exclusion is independent of the order the flags were written in.
+pub fn finalizeDeprecationOpts(opts: *DeprecationOpts) ParseDeprecationError!void {
+    for (known_deprecations, 0..) |entry, index| {
+        const bit = knownDeprecationBit(index);
+        if (opts.fatal_excluded & bit == 0) continue;
+        if (opts.fatal_included & bit == 0) {
+            printDeprecationOptionMessage(
+                "error: the fatal deprecation \"{s}\" was excluded without first being included\n",
+                .{entry.name},
+            );
+            return error.DeprecationExcludedWithoutInclude;
+        }
+        opts.fatal_included &= ~bit;
+        if (DeprecationKind.parse(entry.name)) |kind| opts.fatal.remove(kind);
+    }
+    opts.fatal_excluded = 0;
+
+    inline for (@typeInfo(DeprecationKind).@"enum".fields) |field| {
+        const kind: DeprecationKind = @field(DeprecationKind, field.name);
+        if (opts.fatal.contains(kind) and opts.silenced.contains(kind)) {
+            printDeprecationOptionMessage(
+                "WARNING: Ignoring setting to silence {s} deprecation, since it has also been made fatal.\n",
+                .{kind.kindName()},
+            );
+            opts.silenced.remove(kind);
+        }
+    }
+}
+
+test "fatal deprecation list: a version includes what was active by then" {
+    var opts: DeprecationOpts = .{};
+    try parseDeprecationList(&opts, .fatal, "1.79.9");
+    try finalizeDeprecationOpts(&opts);
+    try std.testing.expect(opts.fatal.contains(.slash_div));
+    try std.testing.expect(opts.fatal.contains(.color_functions));
+    try std.testing.expect(!opts.fatal.contains(.import));
+    // An obsolete deprecation is not included by a version.
+    try std.testing.expect(!opts.fatal.contains(.mixed_decls));
+}
+
+test "fatal deprecation list: an exclusion is independent of flag order" {
+    const lists = [_][]const []const u8{
+        &.{"1.80.0,-import"},
+        &.{"-import,1.80.0"},
+        &.{ "-import", "1.80.0" },
+        &.{ "import", "-import" },
+    };
+    for (lists) |flags| {
+        var opts: DeprecationOpts = .{};
+        for (flags) |flag| try parseDeprecationList(&opts, .fatal, flag);
+        try finalizeDeprecationOpts(&opts);
+        try std.testing.expect(!opts.fatal.contains(.import));
+    }
+}
+
+test "fatal deprecation list: dart-sass-2 leaves out what Dart Sass 3 removes" {
+    var opts: DeprecationOpts = .{};
+    try parseDeprecationList(&opts, .fatal, "dart-sass-2,-slash-div");
+    try finalizeDeprecationOpts(&opts);
+    try std.testing.expect(opts.fatal.contains(.color_functions));
+    try std.testing.expect(!opts.fatal.contains(.slash_div));
+    try std.testing.expect(!opts.fatal.contains(.import));
+}
+
+test "deprecation lists accept ids zsass does not report" {
+    var opts: DeprecationOpts = .{};
+    try parseDeprecationList(&opts, .silence, "global-builtin,if-function,import");
+    try parseDeprecationList(&opts, .fatal, "1.108.2,-global-builtin");
+    try finalizeDeprecationOpts(&opts);
+    try std.testing.expect(opts.silenced.contains(.import) == false);
+    try std.testing.expect(opts.fatal.contains(.import));
 }

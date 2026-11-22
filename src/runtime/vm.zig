@@ -646,6 +646,14 @@ pub const VM = struct {
     shadow_context_root_tag: ?u32 = null,
     /// load-css child VM: Do not include top-level declaration in caller's style-rule context.
     load_css_strict_top_level: bool = false,
+    /// Set on a `meta.load-css()` child VM, which emits into the rule IR of
+    /// the VM that loaded it.
+    shares_parent_rule_ir: bool = false,
+    /// Index of the first rule IR node this child appends.
+    shared_rule_ir_start: usize = 0,
+    /// Set on a `meta.load-css()` child VM that was loaded inside a style
+    /// rule or an at-rule block: its top-level statements are nested ones.
+    nested_in_parent_block: bool = false,
     /// Leave globals before sync in child load-css VM.
     keep_mod_globals_after_run: bool = false,
 
@@ -2202,6 +2210,13 @@ pub const VM = struct {
             self.module_currently_running[self.program.root_index] = false;
         };
         try self.runTopModuleWithSelectorPrefix(self.program.root_index, selector_prefix, false);
+        // A `meta.load-css()` child appends to its parent's rule IR, which
+        // may have open blocks. It resolves `@at-root` within what it
+        // appended; the parent normalizes the finished IR.
+        if (self.shares_parent_rule_ir) {
+            try self.rule_ir.normalizeAtRootBubblesFrom(self.allocator, self.intern_pool, self.shared_rule_ir_start);
+            return;
+        }
         try self.rule_ir.normalizeAtRootBubblesRuleIR(self.allocator, self.intern_pool);
         try self.rule_ir.normalizeNestedMediaRuleIR(self.allocator, self.intern_pool);
     }
@@ -3499,6 +3514,7 @@ pub const VM = struct {
                 defer acc.deinit(self.allocator);
                 const interpolation_context = (inst.arg_b & opcode_mod.make_selector_flag_interpolation_context) != 0;
                 const preserve_empty_seps = (inst.arg_b & opcode_mod.make_selector_flag_preserve_empty_separators) != 0;
+                const quoted_result = (inst.arg_b & opcode_mod.make_selector_flag_quoted_result) != 0;
                 const source_name_interp = (inst.arg_b & opcode_mod.make_selector_flag_source_name_interp) != 0;
                 const source_args_interp = (inst.arg_b & opcode_mod.make_selector_flag_source_args_interp) != 0;
                 const source_has_interp = source_name_interp or source_args_interp;
@@ -3585,7 +3601,15 @@ pub const VM = struct {
                         )
                     else
                         try valueToInternIdRaw(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, part);
-                    const s = self.intern_pool.get(id);
+                    const part_text = self.intern_pool.get(id);
+                    // An unquoted string spells a private-use character as an
+                    // escape; inside a quoted string it is the character.
+                    const s = if (quoted_result and part.kind() == .string and
+                        !part.stringQuoted(self.string_flags_pool.items))
+                        try css_utils.decodePrivateUseEscapes(self.allocator, part_text)
+                    else
+                        part_text;
+                    defer if (s.ptr != part_text.ptr) self.allocator.free(s);
                     if (s.len == 0) {
                         if (!preserve_empty_seps and acc.items.len > 0) {
                             const last = acc.items[acc.items.len - 1];
@@ -3655,6 +3679,8 @@ pub const VM = struct {
                 // Push with preserve_ampersand flag to prevent it from resolving.
                 const merged_value = if (preserved_parent_marker)
                     Value.stringPreservingAmpersand(merged, false)
+                else if (quoted_result)
+                    Value.string(merged, true)
                 else if (interpolation_context)
                     Value.string(merged, false).withPreserveLiteralText()
                 else
@@ -4686,7 +4712,9 @@ pub const VM = struct {
             },
             .emit_error => {
                 const val = try self.pop();
-                const msg = try self.valueToDiagnosticMessage(val, true);
+                const rendered_msg = try self.valueToDiagnosticMessage(val, true);
+                const msg = try css_utils.escapePrivateUseCodePoints(self.allocator, rendered_msg);
+                defer if (msg.ptr != rendered_msg.ptr) self.allocator.free(msg);
                 if (!self.suppress_diagnostics) vmStderrPrint("Error: {s}\n", .{msg});
                 return error.SassError;
             },
@@ -4725,7 +4753,7 @@ pub const VM = struct {
                 // If and inside at_rule block (open_block_depth > 0), do not stack stmt_gap.
                 // The latter is between @for/@each/@while expanded rules in @layer / @media / @supports
                 // To avoid inserting unnecessary blanks (actual behavior of official Sass CLI, confirmed with sass CLI 1.99.0).
-                if (self.selector_stack.items.len == 0 and self.open_block_depth == 0) {
+                if (self.selector_stack.items.len == 0 and self.open_block_depth == 0 and !self.nested_in_parent_block) {
                     // Empty scope was popped immediately after the previous visible emit (= trailing
                     // empty rule), consume this stmt_gap without accumulating it. official Sass CLI is
                     // Suppress blank after `&.empty{}` in `.parent { .child {} &.empty {} } .next{}`.
@@ -6740,8 +6768,16 @@ pub const VM = struct {
                 &self.slash_list_preserve,
                 coerced,
             );
-            const s = self.intern_pool.get(id);
-            if (s.len == 0) continue;
+            const part_text = self.intern_pool.get(id);
+            if (part_text.len == 0) continue;
+            // As in `make_selector`: inside a quoted string an unquoted
+            // string contributes a private-use character, not its escape.
+            const s = if (ip.preserve_quote and coerced.kind() == .string and
+                !coerced.stringQuoted(self.string_flags_pool.items))
+                try css_utils.decodePrivateUseEscapes(self.allocator, part_text)
+            else
+                part_text;
+            defer if (s.ptr != part_text.ptr) self.allocator.free(s);
             try acc.appendSlice(self.allocator, s);
         }
         const dup = try self.allocator.dupe(u8, acc.items);
@@ -8103,14 +8139,6 @@ pub const VM = struct {
         recordArgumentTypeMismatchMessage(self, param_name, value, expected);
     }
 
-    pub fn stripCalcArgMarkerForDispatch(_: *VM, text: []const u8) []const u8 {
-        return calc_utils.stripCalcArgMarker(text);
-    }
-
-    pub fn serializeUnquotedDeclStringForDispatch(self: *VM, raw: []const u8) VMError![]u8 {
-        return serializeUnquotedDeclString(self.allocator, raw);
-    }
-
     pub fn invokeMetaLoad(self: *VM, ctx: anytype, args: []const Value, arg_names: []const InternId) builtin_shared.BuiltinError!Value {
         return vm_module_load.invokeMetaLoad(self, ctx, args, arg_names);
     }
@@ -8163,6 +8191,9 @@ pub const VM = struct {
         child_vm.load_css_module_tag_override = self.load_css_next_tag_ptr.?.* - 1;
         child_vm.shadow_context_root_tag = child_vm.load_css_module_tag_override;
         child_vm.load_css_strict_top_level = is_plain_css_source and has_parent_selector;
+        child_vm.shares_parent_rule_ir = true;
+        child_vm.shared_rule_ir_start = self.rule_ir.nodes.items.len;
+        child_vm.nested_in_parent_block = self.nested_in_parent_block or has_parent_selector or self.open_block_depth > 0;
         child_vm.keep_mod_globals_after_run = true;
         return child_vm;
     }
@@ -8834,7 +8865,11 @@ fn addValues(
                     (rhs_calc_like and lhs_trim.len != 0));
             if (!allow_concat) return error.SassError;
         }
-        const merged = try std.fmt.allocPrint(alloc, "{s}{s}", .{ sa, sb });
+        // Appended to a quoted string, an unquoted string contributes its
+        // characters: a private-use escape becomes the character itself.
+        const sb_text = if (qa and !qb) try css_utils.decodePrivateUseEscapes(alloc, sb) else sb;
+        defer if (sb_text.ptr != sb.ptr) alloc.free(sb_text);
+        const merged = try std.fmt.allocPrint(alloc, "{s}{s}", .{ sa, sb_text });
         defer alloc.free(merged);
         const id = try internGeneratedString(pool, merged);
         const keep_rhs_quote = qb and !qa and isUnquotedCalcLikeString(pool, lhs);
@@ -12501,7 +12536,11 @@ fn endsWithCssHexEscape(text: []const u8) bool {
         count += 1;
     }
     if (count == 0 or i == 0) return false;
-    return text[i - 1] == '\\';
+    // An odd run of backslashes ends in one that starts the escape; in an
+    // even run every backslash is itself escaped (`a\\b`).
+    var backslashes: usize = 0;
+    while (i > 0 and text[i - 1] == '\\') : (i -= 1) backslashes += 1;
+    return backslashes % 2 == 1;
 }
 
 fn cssEscapeWhitespace(c: u8) bool {

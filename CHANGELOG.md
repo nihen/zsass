@@ -9,7 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Tracks Dart Sass 1.108.2. The vendored `sass-spec` pin moves to
 `acbdcd391`.
 
+### Added
+- `--fatal-deprecation` accepts `-<id>` to exclude a deprecation that a
+  version would include, in any order and across repeated flags, and the
+  `dart-sass-2` group (Dart Sass 1.107.0). Excluding an id that was not
+  included is a usage error.
+- The three deprecation flags accept every deprecation id of the official
+  CLI, including the ones zsass does not report, so
+  `--silence-deprecation=global-builtin` no longer fails.
+
 ### Changed
+- A stylesheet that is not valid UTF-8 is an error ("Invalid UTF-8.")
+  instead of being copied into the output.
+- Escapes in selectors have one canonical spelling: `.\61` is `.a`, also
+  for `@extend`, `&`, and `sass:selector` functions, while `.\31 0` and
+  `.sm\:w-1\/2` keep the escapes they need. An attribute value is decoded
+  and written back as an identifier or a string, so `[a="\62"]` is `[a=b]`.
+- String functions, `==`, and map or list lookups use the text of a string
+  as it is. `string.length("\\61")` is 3 and `"\\61" == "a"` is false;
+  earlier releases decoded the backslash a second time.
+- `--fatal-deprecation=<version>` no longer includes obsolete deprecations
+  and accepts versions up to 1.108.2. A deprecation that is both silenced
+  and fatal stays fatal.
 - CSS escapes for U+0000, surrogates, and values past U+10FFFF become
   U+FFFD in expressions and selectors instead of an error or an escaped
   spelling (Dart Sass 1.106.0). An identifier that is exactly `\0` is still
@@ -52,6 +73,33 @@ Tracks Dart Sass 1.108.2. The vendored `sass-spec` pin moves to
   `@if \61 == a` is true. A module configured with such a literal
   (`@use "m" with ($a: "\61")`) receives its decoded value.
 - `-\41` is the identifier `-A` rather than a negated `\41`.
+- `meta.load-css()` works inside `@media`, `@supports`, and other at-rule
+  blocks; it failed with a compile error. Nested in a style rule or an
+  at-rule, the loaded rules are no longer separated by blank lines,
+  comments get a rule of their own, and keyframe selectors are left alone.
+  A chain of more than 200 modules that load one another is an error
+  instead of a crash.
+- Compressed output removes an empty rule without the block around it.
+  `@media print { a { /* x */ } b { c: d } }` lost its `@media`.
+- A module loaded through `@forward ... with ($a: 1 !default)` takes the
+  value the using module configured when a top-level `@if` is evaluated,
+  and an outer `@forward` default takes precedence over an inner one. A
+  prefixed name (`@forward "m" as p-*`) reaches the forwarded module the
+  same way.
+- `url(a/.5.png)` keeps its path instead of becoming `url(a/0.5.png)`.
+- A private-use character in a quoted string is followed by a space when a
+  hex digit or a space comes next, so `"\f00c Done"` is no longer printed
+  as `"\f00cDone"`. `"#{\f00c}"` and `string.quote(\f00c)` hold the
+  character rather than its escape.
+- `min(a-b)` and other math functions keep the hyphen of an identifier
+  instead of printing a subtraction, and keep space-separated operands such
+  as `min(var(--a) var(--b))` instead of adding them.
+- An attribute selector value with an escape, such as
+  `a[href^="http\3a //"]`, is no longer printed with a doubled backslash.
+- A selector name with an escaped comma or bracket, such as
+  `.grid-cols-\[1fr\2c 2fr\]`, compiles.
+- An escape followed by an interpolation in a function name, such as
+  `a\62#{1}(2)`, no longer produces a different character.
 
 ## 0.4.1 (2026-10-21)
 

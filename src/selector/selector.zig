@@ -1,4 +1,5 @@
 const std = @import("std");
+const css_utils = @import("../runtime/css_utils.zig");
 
 // ============================================================================
 // Types
@@ -337,8 +338,22 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8) ParseError!Selecto
     var paren_depth: u32 = 0;
     var bracket_depth: u32 = 0;
     var leading_separator_has_newline = false;
-    for (trimmed, 0..) |ch, i| {
+    var in_string: u8 = 0;
+    var i: usize = 0;
+    while (i < trimmed.len) : (i += 1) {
+        const ch = trimmed[i];
+        // An escaped character and the content of a string are never
+        // punctuation (`.a\,b`, `[a="b,c"]`).
+        if (ch == '\\') {
+            i += 1;
+            continue;
+        }
+        if (in_string != 0) {
+            if (ch == in_string) in_string = 0;
+            continue;
+        }
         switch (ch) {
+            '"', '\'' => in_string = ch,
             '(' => paren_depth += 1,
             ')' => {
                 if (paren_depth > 0) paren_depth -= 1;
@@ -630,7 +645,9 @@ fn parseCompoundSelector(allocator: std.mem.Allocator, input: []const u8, pos: *
                         // Just *| with nothing after - treat as universal
                         compound.simple_selectors.append(allocator, .{ .universal = {} }) catch return ParseError.OutOfMemory;
                     } else {
-                        const full = std.mem.concat(allocator, u8, &.{ "*|", name }) catch return ParseError.OutOfMemory;
+                        const normalized_type = try normalizeIdentifierEscapesForParse(allocator, name);
+                        defer allocator.free(normalized_type);
+                        const full = std.mem.concat(allocator, u8, &.{ "*|", normalized_type }) catch return ParseError.OutOfMemory;
                         compound.simple_selectors.append(allocator, .{ .type_selector = full }) catch return ParseError.OutOfMemory;
                     }
                 }
@@ -706,7 +723,7 @@ fn parseAttributeSelector(allocator: std.mem.Allocator, input: []const u8, pos: 
     }
     const name = input[name_start..pos.*];
     if (name.len == 0) return ParseError.InvalidSelector;
-    const owned_name = allocator.dupe(u8, name) catch return ParseError.OutOfMemory;
+    const owned_name = try normalizeAttributeNameForParse(allocator, name);
 
     // Skip whitespace
     while (pos.* < input.len and isWhitespace(input[pos.*])) pos.* += 1;
@@ -733,7 +750,8 @@ fn parseAttributeSelector(allocator: std.mem.Allocator, input: []const u8, pos: 
     if (pos.* >= input.len) return ParseError.UnexpectedEnd;
     // SAFETY: initialized before first read in this scope.
     var value: []const u8 = undefined;
-    if (input[pos.*] == '"' or input[pos.*] == '\'') {
+    const value_quoted = input[pos.*] == '"' or input[pos.*] == '\'';
+    if (value_quoted) {
         const quote = input[pos.*];
         pos.* += 1;
         const val_start = pos.*;
@@ -749,10 +767,14 @@ fn parseAttributeSelector(allocator: std.mem.Allocator, input: []const u8, pos: 
         if (pos.* < input.len) pos.* += 1; // skip closing quote
     } else {
         const val_start = pos.*;
-        while (pos.* < input.len and input[pos.*] != ']' and !isWhitespace(input[pos.*])) pos.* += 1;
-        value = input[val_start..pos.*];
+        while (pos.* < input.len and input[pos.*] != ']' and !isWhitespace(input[pos.*])) {
+            // An escape may hide a space or a bracket (`b\ c`, `\31 b`).
+            const esc_len = cssEscapeSequenceLen(input, pos.*);
+            pos.* += if (esc_len != 0) esc_len else 1;
+        }
+        value = input[val_start..@min(pos.*, input.len)];
     }
-    const owned_value = try normalizeAttributeValueEscapesForParse(allocator, value);
+    const owned_value = try decodeAttributeValueForParse(allocator, value, value_quoted);
 
     // Skip whitespace
     while (pos.* < input.len and isWhitespace(input[pos.*])) pos.* += 1;
@@ -843,48 +865,6 @@ fn isSelectorEscapeHexOnly(ch: u8) bool {
     return ch == ' ' or ch < 0x20 or ch == 0x7f;
 }
 
-fn normalizeAttributeValueEscapesForParse(
-    allocator: std.mem.Allocator,
-    value: []const u8,
-) ParseError![]const u8 {
-    if (std.mem.findScalar(u8, value, '\\') == null) return dupeForParse(allocator, value);
-
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    var i: usize = 0;
-    while (i < value.len) {
-        if (value[i] != '\\' or i + 1 >= value.len) {
-            try buf.append(allocator, value[i]);
-            i += 1;
-            continue;
-        }
-
-        const next = value[i + 1];
-        if (next == '\n' or next == '\r') {
-            try buf.append(allocator, value[i]);
-            i += 1;
-            continue;
-        }
-        if (next == '\"' or next == '\\') {
-            try buf.append(allocator, value[i]);
-            try buf.append(allocator, next);
-            i += 2;
-            continue;
-        }
-        if (std.ascii.isHex(next)) {
-            try buf.append(allocator, value[i]);
-            i += 1;
-            continue;
-        }
-
-        try buf.append(allocator, next);
-        i += 2;
-    }
-
-    return buf.toOwnedSlice(allocator) catch return ParseError.OutOfMemory;
-}
-
 fn normalizeIdentifierEscapesForParse(
     allocator: std.mem.Allocator,
     ident: []const u8,
@@ -892,83 +872,62 @@ fn normalizeIdentifierEscapesForParse(
     if (std.mem.findScalar(u8, ident, '\\') == null) {
         return dupeForParse(allocator, ident);
     }
-
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-
-    var i: usize = 0;
-    while (i < ident.len) {
-        const esc_len = cssEscapeSequenceLen(ident, i);
-        if (esc_len == 0) {
-            try buf.append(allocator, ident[i]);
-            i += 1;
-            continue;
-        }
-
-        if (i + 1 < ident.len and std.ascii.isHex(ident[i + 1])) {
-            var hex_end = i + 1;
-            var hex_count: usize = 0;
-            while (hex_end < ident.len and hex_count < 6 and std.ascii.isHex(ident[hex_end])) : (hex_end += 1) {
-                hex_count += 1;
-            }
-
-            var after_hex = hex_end;
-            if (after_hex < ident.len and isWhitespace(ident[after_hex])) after_hex += 1;
-
-            const raw_code_point = std.fmt.parseInt(u32, ident[i + 1 .. hex_end], 16) catch {
-                try buf.append(allocator, ident[i]);
-                i += 1;
-                continue;
-            };
-            // Escapes for U+0000, surrogates, and out-of-range values denote U+FFFD.
-            const code_point: u21 = if (isInvalidEscapeCodePoint(raw_code_point)) 0xFFFD else @intCast(raw_code_point);
-
-            const prev_is_ident = buf.items.len > 0 and isIdentChar(buf.items[buf.items.len - 1]);
-            if (code_point < 0x80) {
-                const ch: u8 = @intCast(code_point);
-                if (isSelectorEscapeHexOnly(ch)) {
-                    try appendSelectorHexEscapeForIdentifier(&buf, allocator, code_point);
-                } else if (isIdentChar(ch)) {
-                    if (prev_is_ident) {
-                        try buf.append(allocator, ch);
-                    } else {
-                        try appendSelectorHexEscapeForIdentifier(&buf, allocator, code_point);
-                    }
-                } else {
-                    try buf.append(allocator, '\\');
-                    try buf.append(allocator, ch);
-                }
-            } else {
-                var utf8_buf: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(code_point, &utf8_buf) catch {
-                    try buf.append(allocator, ident[i]);
-                    i += 1;
-                    continue;
-                };
-                try buf.appendSlice(allocator, utf8_buf[0..len]);
-            }
-
-            i = after_hex;
-            continue;
-        }
-
-        const next = ident[i + 1];
-        if (isIdentChar(next)) {
-            const prev_is_ident = buf.items.len > 0 and isIdentChar(buf.items[buf.items.len - 1]);
-            if (next == '-' and !prev_is_ident) {
-                try buf.append(allocator, '\\');
-                try buf.append(allocator, next);
-            } else {
-                try buf.append(allocator, next);
-            }
-        } else {
-            try buf.append(allocator, '\\');
-            try buf.append(allocator, next);
-        }
-        i += 2;
+    // A selector name is an identifier: every spelling of it has one
+    // canonical text (`\61` is `a`, `\31 a` stays escaped).
+    const canonical = css_utils.unescapeSassIdentifier(allocator, ident) catch return ParseError.OutOfMemory;
+    if (canonical.ptr == ident.ptr) return dupeForParse(allocator, ident);
+    // A value that is exactly `\0` keeps its escape; a selector name does not.
+    if (std.mem.eql(u8, canonical, "\\0 ")) {
+        allocator.free(canonical);
+        return dupeForParse(allocator, "\u{FFFD}");
     }
+    // A lone hyphen is not an identifier and has to stay escaped. It is
+    // written `\-` rather than as a hex escape: the space that ends a hex
+    // escape is not yet kept apart from a following descendant combinator.
+    if (std.mem.eql(u8, canonical, "-")) {
+        allocator.free(canonical);
+        return dupeForParse(allocator, "\\-");
+    }
+    return canonical;
+}
 
-    return buf.toOwnedSlice(allocator) catch return ParseError.OutOfMemory;
+/// Canonicalize an attribute name, which may carry a namespace prefix
+/// (`ns|attr`, `*|attr`, `|attr`).
+fn normalizeAttributeNameForParse(allocator: std.mem.Allocator, name: []const u8) ParseError![]const u8 {
+    if (std.mem.findScalar(u8, name, '\\') == null) return dupeForParse(allocator, name);
+    // Find the namespace separator, skipping escaped characters.
+    var bar: ?usize = null;
+    var i: usize = 0;
+    while (i < name.len) : (i += 1) {
+        if (name[i] == '\\') {
+            i += 1;
+        } else if (name[i] == '|') {
+            bar = i;
+            break;
+        }
+    }
+    const split = bar orelse return normalizeIdentifierEscapesForParse(allocator, name);
+    const prefix = name[0..split];
+    const namespace = if (prefix.len == 0 or std.mem.eql(u8, prefix, "*"))
+        try dupeForParse(allocator, prefix)
+    else
+        try normalizeIdentifierEscapesForParse(allocator, prefix);
+    defer allocator.free(namespace);
+    const local = try normalizeIdentifierEscapesForParse(allocator, name[split + 1 ..]);
+    defer allocator.free(local);
+    return std.mem.concat(allocator, u8, &.{ namespace, "|", local }) catch return ParseError.OutOfMemory;
+}
+
+/// The text an attribute value denotes: every escape decoded, whether the
+/// value was written as a string or as an identifier.
+fn decodeAttributeValueForParse(allocator: std.mem.Allocator, value: []const u8, quoted: bool) ParseError![]const u8 {
+    if (std.mem.findScalar(u8, value, '\\') == null) return dupeForParse(allocator, value);
+    const decoded = (if (quoted)
+        css_utils.unescapeSassString(allocator, value)
+    else
+        css_utils.decodeSassIdentifier(allocator, value)) catch return ParseError.OutOfMemory;
+    if (decoded.ptr == value.ptr) return dupeForParse(allocator, value);
+    return decoded;
 }
 
 fn readIdentifier(input: []const u8, pos: *usize) []const u8 {
@@ -1423,7 +1382,7 @@ fn estimateCompoundSelectorCssLen(compound: *const CompoundSelector) usize {
                 if (a.op) |op| {
                     e += op.toCss().len;
                     if (a.value) |v| {
-                        e += if (isCssIdentifier(v)) v.len else 2 + v.len;
+                        e += if (attributeValueIsBareIdentifier(v)) v.len else 2 + v.len;
                     }
                 }
                 if (a.modifier) |_| e += 2;
@@ -1450,7 +1409,17 @@ fn exactCompoundSelectorCssLenFast(compound: *const CompoundSelector) ?usize {
                 var n: usize = 1 + a.name.len + 1;
                 if (a.op) |op| {
                     n += op.toCss().len;
-                    if (a.value) |v| n += if (isCssIdentifier(v)) v.len else 2 + v.len;
+                    if (a.value) |v| {
+                        if (attributeValueIsBareIdentifier(v)) {
+                            n += v.len;
+                        } else {
+                            // Escapes make the written length differ from the text length.
+                            for (v) |c| {
+                                if (c == '\\' or c == '"' or c == '\'' or c < 0x20 or c >= 0x7F) return null;
+                            }
+                            n += 2 + v.len;
+                        }
+                    }
                 }
                 if (a.modifier) |_| n += 2;
                 break :blk n;
@@ -1566,7 +1535,7 @@ fn writeSimpleSelector(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, ss
             if (attr.op) |op| {
                 try buf.appendSlice(allocator, op.toCss());
                 if (attr.value) |val| {
-                    if (isCssIdentifier(val)) {
+                    if (attributeValueIsBareIdentifier(val)) {
                         try buf.appendSlice(allocator, val);
                     } else {
                         const quote: u8 = if (std.mem.findScalar(u8, val, '"') != null and
@@ -1653,18 +1622,50 @@ fn writeSimpleSelector(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, ss
     }
 }
 
+/// Whether a character of a string value is written as a hex escape.
+fn stringCodePointNeedsHexEscape(code_point: u21) bool {
+    if (code_point < 0x20) return code_point != '\t';
+    return code_point == 0x7F or css_utils.isPrivateUseCodePoint(code_point);
+}
+
+/// Whether an attribute value can be written bare, as an identifier.
+fn attributeValueIsBareIdentifier(value: []const u8) bool {
+    if (!isCssIdentifier(value)) return false;
+    var i: usize = 0;
+    while (i < value.len) {
+        const len = std.unicode.utf8ByteSequenceLength(value[i]) catch return false;
+        if (i + len > value.len) return false;
+        const code_point = std.unicode.utf8Decode(value[i .. i + len]) catch return false;
+        if (stringCodePointNeedsHexEscape(code_point)) return false;
+        i += len;
+    }
+    return true;
+}
+
+/// Write the decoded text `value` as the content of a string quoted by
+/// `quote`.
 fn appendCssStringContentQuoted(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8, quote: u8) std.mem.Allocator.Error!void {
     var i: usize = 0;
-    while (i < value.len) : (i += 1) {
+    while (i < value.len) {
         const c = value[i];
-        if (c == '\\' and i + 1 < value.len and (value[i + 1] == '\\' or value[i + 1] == quote)) {
-            try buf.append(allocator, '\\');
-            try buf.append(allocator, value[i + 1]);
-            i += 1;
+        const len = std.unicode.utf8ByteSequenceLength(c) catch 1;
+        const end = @min(i + len, value.len);
+        const code_point: ?u21 = std.unicode.utf8Decode(value[i..end]) catch null;
+        if (code_point != null and stringCodePointNeedsHexEscape(code_point.?)) {
+            var hex_buf: [8]u8 = undefined;
+            const hex = std.fmt.bufPrint(&hex_buf, "\\{x}", .{code_point.?}) catch unreachable;
+            try buf.appendSlice(allocator, hex);
+            // A hex digit or whitespace right after would be read as part
+            // of the escape.
+            if (end < value.len and (std.ascii.isHex(value[end]) or value[end] == ' ' or value[end] == '\t')) {
+                try buf.append(allocator, ' ');
+            }
+            i = end;
             continue;
         }
         if (c == quote or c == '\\') try buf.append(allocator, '\\');
-        try buf.append(allocator, c);
+        try buf.appendSlice(allocator, value[i..end]);
+        i = end;
     }
 }
 

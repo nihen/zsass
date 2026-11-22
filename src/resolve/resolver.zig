@@ -3441,7 +3441,12 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
     if (ns_id == .none) {
         const raw_name = ctx.pool.get(name_id);
         if (std.mem.indexOf(u8, raw_name, "#{") != null) {
-            const name_expr = try resolveInterpolatedTextExpr(ctx, raw_name, span, false);
+            // Canonicalize the literal text first: once the interpolation is
+            // evaluated, an escape could swallow the text it produced.
+            const canonical_name = try css_utils.canonicalizeSassIdentifierOutsideInterpolation(ctx.a, raw_name);
+            defer if (canonical_name.ptr != raw_name.ptr) ctx.a.free(canonical_name);
+            if (canonical_name.ptr != raw_name.ptr) name_id = try ctx.pool.intern(canonical_name);
+            const name_expr = try resolveInterpolatedTextExpr(ctx, ctx.pool.get(name_id), span, false);
             if (try tryFoldLiteralStringExpr(ctx, name_expr)) |folded_name_id| {
                 name_id = folded_name_id;
             }
@@ -3612,9 +3617,8 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
             defer parts.deinit(ctx.a);
             try parts.ensureTotalCapacity(ctx.a, 3 + 2 * arg_buf.items.len);
 
-            const printed_name = try css_utils.decodeSassIdentifierOutsideInterpolation(ctx.a, raw_name_for_if);
-            defer if (printed_name.ptr != raw_name_for_if.ptr) ctx.a.free(printed_name);
-            parts.appendAssumeCapacity(try resolveInterpolatedTextExpr(ctx, printed_name, span, false));
+            // The literal text was canonicalized above.
+            parts.appendAssumeCapacity(try resolveInterpolatedTextExpr(ctx, raw_name_for_if, span, false));
             const open_id = try ctx.pool.intern("(");
             parts.appendAssumeCapacity(try appendStringLiteralExpr(ctx.prog, ctx.a, open_id, span));
             for (arg_buf.items, 0..) |arg_expr, idx| {
@@ -4670,6 +4674,7 @@ fn parseSubExpr(ctx: *Ctx, inner: []const u8, _: Span) ResolveError!ExprIndex {
     var sub_ast = ast_flat.Ast.init(ctx.a, inner, .none);
     defer sub_ast.deinit();
     var lexer = lexer_mod.Lexer.init(ctx.a, inner);
+    lexer.source_is_fragment = true;
     defer lexer.deinit();
     const tokens = lexer.tokenize() catch return error.SassError;
     var parser = parser_mod.Parser.init(ctx.a, ctx.pool, tokens, inner);
@@ -8951,6 +8956,7 @@ fn resolveExprFromSourceText(ctx: *Ctx, raw_src: []const u8) ResolveError!ExprIn
     var sub_ast = ast_flat.Ast.init(ctx.a, raw_src, .none);
     defer sub_ast.deinit();
     var lexer = lexer_mod.Lexer.init(ctx.a, raw_src);
+    lexer.source_is_fragment = true;
     defer lexer.deinit();
     const tokens = lexer.tokenize() catch return error.SassError;
     var parser = parser_mod.Parser.init(ctx.a, ctx.pool, tokens, raw_src);
@@ -9010,6 +9016,7 @@ fn resolveIncludeArgsFromSource(ctx: *Ctx, inner_src: []const u8) ResolveError!R
     var sub_ast = ast_flat.Ast.init(ctx.a, fake_call_src, .none);
     defer sub_ast.deinit();
     var lexer = lexer_mod.Lexer.init(ctx.a, fake_call_src);
+    lexer.source_is_fragment = true;
     defer lexer.deinit();
     const tokens = lexer.tokenize() catch return error.SassError;
     var parser = parser_mod.Parser.init(ctx.a, ctx.pool, tokens, fake_call_src);

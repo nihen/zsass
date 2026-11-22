@@ -182,6 +182,30 @@ fn hasMathFunctionCallCandidate(input: []const u8) bool {
     return false;
 }
 
+/// When an unquoted `url(` token starts at `start`, returns the index just
+/// past its closing parenthesis. Returns null for `url("...")`, for a name that
+/// merely ends in `url`, and for an unterminated token.
+fn unquotedUrlTokenEnd(input: []const u8, start: usize) ?usize {
+    if (start + 4 > input.len) return null;
+    if (!std.ascii.eqlIgnoreCase(input[start .. start + 3], "url") or input[start + 3] != '(') return null;
+    if (start > 0) {
+        const prev = input[start - 1];
+        if (std.ascii.isAlphanumeric(prev) or prev == '-' or prev == '_' or prev == '\\' or prev >= 0x80) return null;
+    }
+    var i = start + 4;
+    while (i < input.len and (input[i] == ' ' or input[i] == '\t' or input[i] == '\n' or input[i] == '\r')) : (i += 1) {}
+    if (i < input.len and (input[i] == '"' or input[i] == '\'')) return null;
+    while (i < input.len) : (i += 1) {
+        switch (input[i]) {
+            '\\' => i += 1,
+            ')' => return i + 1,
+            '(', '"', '\'' => return null,
+            else => {},
+        }
+    }
+    return null;
+}
+
 /// Fill in leading zero in token units of CSS value. `.5`  ->  `0.5`, `-.5`  ->  `-0.5`,
 /// Normalize the decimal shorthand in decl value to be compatible with official Sass CLI, like `all .2s`  ->  `all 0.2s`.
 /// Do not touch the contents of quoted string (`content: "foo .5"`). Parts of identifier (`.foo`, `a.5`) are also not touched.
@@ -229,6 +253,14 @@ pub fn normalizeLeadingZeros(alloc: std.mem.Allocator, input: []const u8) std.me
             try out.append(alloc, c);
             i += 1;
             continue;
+        }
+        // The contents of an unquoted `url(...)` are one token, not numbers.
+        if (c == 'u' or c == 'U') {
+            if (unquotedUrlTokenEnd(input, i)) |end| {
+                try out.appendSlice(alloc, input[i..end]);
+                i = end;
+                continue;
+            }
         }
         if (c == '.' and i + 1 < input.len and isDigitByte(input[i + 1])) {
             const prev: u8 = if (i == 0) 0 else input[i - 1];
@@ -803,4 +835,21 @@ test "expandHexAlphaColors: mid-token hex expansion" {
     const s = try expandHexAlphaColors(alloc, "0 6px 30px #0000001a");
     defer alloc.free(s);
     try std.testing.expectEqualStrings("0 6px 30px rgba(0, 0, 0, 0.1019607843)", s);
+}
+
+test "normalizeLeadingZeros leaves an unquoted url token alone" {
+    const cases = [_][2][]const u8{
+        .{ "url(a/.5.png)", "url(a/.5.png)" },
+        .{ ".5s url(a/.5.png) .5s", "0.5s url(a/.5.png) 0.5s" },
+        .{ "URL( .5 )", "URL( .5 )" },
+        .{ "url(a\\).5.png) .5", "url(a\\).5.png) 0.5" },
+        .{ "image-set(url(.5.png) .5x)", "image-set(url(.5.png) 0.5x)" },
+        .{ "my-url(.5)", "my-url(0.5)" },
+        .{ "url(.5", "url(0.5" },
+    };
+    for (cases) |case| {
+        const out = try normalizeLeadingZeros(std.testing.allocator, case[0]);
+        defer std.testing.allocator.free(out);
+        try std.testing.expectEqualStrings(case[1], out);
+    }
 }

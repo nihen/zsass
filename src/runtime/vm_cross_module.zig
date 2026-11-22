@@ -579,19 +579,48 @@ pub fn wrapRuleIrTopLevelAmpRulesWithParent(self: anytype, start_idx: usize, par
     }
 }
 
+/// `keyframes` or a vendor-prefixed spelling such as `-webkit-keyframes`: one
+/// prefix word between two hyphens, matched case-sensitively.
+fn isKeyframesAtRuleName(name: []const u8) bool {
+    const raw = if (name.len > 0 and name[0] == '@') name[1..] else name;
+    if (std.mem.eql(u8, raw, "keyframes")) return true;
+    const suffix = "-keyframes";
+    if (raw.len <= suffix.len + 1 or raw[0] != '-') return false;
+    if (!std.mem.eql(u8, raw[raw.len - suffix.len ..], suffix)) return false;
+    return std.mem.findScalar(u8, raw[1 .. raw.len - suffix.len], '-') == null;
+}
+
+/// At-rules whose block holds style rules, so that a comment directly inside
+/// one is wrapped like a top-level comment.
+fn isStyleRuleGroupAtRuleName(name: []const u8) bool {
+    const raw = if (name.len > 0 and name[0] == '@') name[1..] else name;
+    return std.ascii.eqlIgnoreCase(raw, "media") or std.ascii.eqlIgnoreCase(raw, "supports");
+}
+
+/// Nest the statements a `meta.load-css()` call appended from `start_idx` on
+/// under `parent_selector`: an outermost style rule gets the parent selector
+/// prepended, and a comment at the top level or directly inside `@media` /
+/// `@supports` is wrapped in a rule of its own. Keyframe selectors are not
+/// style rules and stay as written.
 pub fn prefixRuleIrRangeTopLevelRules(self: anytype, start_idx: usize, parent_selector: InternId) !void {
     if (start_idx >= self.rule_ir.nodes.items.len) return;
     const parent_raw = self.intern_pool.get(parent_selector);
     if (std.mem.trim(u8, parent_raw, " \t\r\n").len == 0) return;
 
+    const AtRuleKind = enum { style_group, keyframes, other };
+    var at_rule_stack: std.ArrayListUnmanaged(AtRuleKind) = .empty;
+    defer at_rule_stack.deinit(self.allocator);
+    // Open `@keyframes` blocks.
+    var keyframes_depth: usize = 0;
+    var wrapped_comments: usize = 0;
+
     var rule_depth: usize = 0;
-    var at_rule_depth: usize = 0;
     var i = start_idx;
     while (i < self.rule_ir.nodes.items.len) : (i += 1) {
         const node = self.rule_ir.nodes.items[i];
         switch (node.kind) {
             .rule_begin => {
-                if (rule_depth == 0) {
+                if (rule_depth == 0 and keyframes_depth == 0) {
                     const selector_u = self.rule_ir.extra.items[node.payload];
                     const selector_id: InternId = @enumFromInt(selector_u);
                     const selector_raw = self.intern_pool.get(selector_id);
@@ -605,19 +634,195 @@ pub fn prefixRuleIrRangeTopLevelRules(self: anytype, start_idx: usize, parent_se
             .rule_end => {
                 if (rule_depth > 0) rule_depth -= 1;
             },
-            .at_rule_begin => at_rule_depth += 1,
+            .at_rule_begin => {
+                const name_id: InternId = @enumFromInt(self.rule_ir.extra.items[node.payload]);
+                const name = self.intern_pool.get(name_id);
+                const kind: AtRuleKind = if (isKeyframesAtRuleName(name))
+                    .keyframes
+                else if (isStyleRuleGroupAtRuleName(name))
+                    .style_group
+                else
+                    .other;
+                try at_rule_stack.append(self.allocator, kind);
+                if (kind == .keyframes) keyframes_depth += 1;
+            },
             .at_rule_end => {
-                if (at_rule_depth > 0) at_rule_depth -= 1;
+                if (at_rule_stack.pop()) |kind| {
+                    if (kind == .keyframes) keyframes_depth -= 1;
+                }
+            },
+            .comment => {
+                // The nearest enclosing at-rule decides.
+                const stack = at_rule_stack.items;
+                if (rule_depth == 0 and (stack.len == 0 or stack[stack.len - 1] == .style_group)) wrapped_comments += 1;
             },
             .decl,
             .decl_raw,
             .at_rule_simple,
-            .comment,
             .stmt_gap,
             .group_boundary,
             .sourcemap_gap,
             .stream_chunk,
             => {},
+        }
+    }
+    if (wrapped_comments == 0) return;
+
+    // Rebuild the tail of both node buffers in one pass; inserting two nodes
+    // per comment in place would move the rest of the buffer every time.
+    const Node = @TypeOf(self.rule_ir.nodes.items[0]);
+    const old_nodes = try self.allocator.dupe(Node, self.rule_ir.nodes.items[start_idx..]);
+    defer self.allocator.free(old_nodes);
+    const old_files = try self.allocator.dupe(u32, self.rule_ir.node_source_files.items[start_idx..]);
+    defer self.allocator.free(old_files);
+    try self.rule_ir.nodes.ensureTotalCapacity(self.allocator, start_idx + old_nodes.len + 2 * wrapped_comments);
+    try self.rule_ir.node_source_files.ensureTotalCapacity(self.allocator, start_idx + old_nodes.len + 2 * wrapped_comments);
+    try self.rule_ir.extra.ensureUnusedCapacity(self.allocator, 4 * wrapped_comments);
+    self.rule_ir.nodes.items.len = start_idx;
+    self.rule_ir.node_source_files.items.len = start_idx;
+
+    at_rule_stack.clearRetainingCapacity();
+    rule_depth = 0;
+    const extend_snapshot: u32 = @intCast(self.rule_ir.extend_edges.items.len);
+    // Consecutive comments share one wrapping rule.
+    var open_wrap: ?struct { node: Node, file_id: u32 } = null;
+    for (old_nodes, old_files) |node, file_id| {
+        var wrap = false;
+        switch (node.kind) {
+            .rule_begin => rule_depth += 1,
+            .rule_end => {
+                if (rule_depth > 0) rule_depth -= 1;
+            },
+            .at_rule_begin => {
+                const name_id: InternId = @enumFromInt(self.rule_ir.extra.items[node.payload]);
+                const kind: AtRuleKind = if (isStyleRuleGroupAtRuleName(self.intern_pool.get(name_id))) .style_group else .other;
+                at_rule_stack.appendAssumeCapacity(kind);
+            },
+            .at_rule_end => _ = at_rule_stack.pop(),
+            .comment => {
+                const stack = at_rule_stack.items;
+                wrap = rule_depth == 0 and (stack.len == 0 or stack[stack.len - 1] == .style_group);
+            },
+            .stmt_gap, .group_boundary, .sourcemap_gap => {
+                // A gap between two wrapped comments is inside the rule.
+                if (open_wrap != null) continue;
+            },
+            else => {},
+        }
+        if (!wrap) {
+            if (open_wrap) |last| {
+                self.rule_ir.nodes.appendAssumeCapacity(.{
+                    .kind = .rule_end,
+                    .payload = 0,
+                    .source_start = last.node.source_start,
+                    .source_end = last.node.source_end,
+                });
+                self.rule_ir.node_source_files.appendAssumeCapacity(last.file_id);
+                open_wrap = null;
+            }
+            self.rule_ir.nodes.appendAssumeCapacity(node);
+            self.rule_ir.node_source_files.appendAssumeCapacity(file_id);
+            continue;
+        }
+        const starts_wrap = open_wrap == null;
+        if (starts_wrap) {
+            const extra_off: u32 = @intCast(self.rule_ir.extra.items.len);
+            self.rule_ir.extra.appendSliceAssumeCapacity(&[_]u32{ @intFromEnum(parent_selector), 1, 0, extend_snapshot });
+            self.rule_ir.nodes.appendAssumeCapacity(.{
+                .kind = .rule_begin,
+                .payload = extra_off,
+                .source_start = node.source_start,
+                .source_end = node.source_end,
+            });
+            self.rule_ir.node_source_files.appendAssumeCapacity(file_id);
+        }
+        self.rule_ir.nodes.appendAssumeCapacity(node);
+        self.rule_ir.node_source_files.appendAssumeCapacity(file_id);
+        // The first comment is now the first line of the rule's body, not
+        // the tail of the line it followed in the source.
+        if (starts_wrap) self.rule_ir.clearCommentLeadingSameLineAt(self.rule_ir.nodes.items.len - 1);
+        open_wrap = .{ .node = node, .file_id = file_id };
+    }
+    if (open_wrap) |last| {
+        self.rule_ir.nodes.appendAssumeCapacity(.{
+            .kind = .rule_end,
+            .payload = 0,
+            .source_start = last.node.source_start,
+            .source_end = last.node.source_end,
+        });
+        self.rule_ir.node_source_files.appendAssumeCapacity(last.file_id);
+    }
+}
+
+/// Mark the rules and at-rules a nested `meta.load-css()` appended from
+/// `start_idx` on as nested statements, which are not separated by blank
+/// lines the way top-level statements are.
+fn markRuleIrRangeAsNested(self: anytype, start_idx: usize) void {
+    var depth: usize = 0;
+    // The outermost at-rule block the range ends with, if it ends with one.
+    var trailing_at_rule: ?usize = null;
+    var i = start_idx;
+    while (i < self.rule_ir.nodes.items.len) : (i += 1) {
+        const node = self.rule_ir.nodes.items[i];
+        switch (node.kind) {
+            .rule_begin => {
+                if (depth == 0) {
+                    trailing_at_rule = null;
+                    if (self.rule_ir.extra.items[node.payload + 1] == 0) self.rule_ir.extra.items[node.payload + 1] = 1;
+                }
+                depth += 1;
+            },
+            .at_rule_begin => {
+                if (depth == 0) {
+                    trailing_at_rule = i;
+                    if (self.rule_ir.extra.items[node.payload + 2] == 0) self.rule_ir.extra.items[node.payload + 2] = 1;
+                }
+                depth += 1;
+            },
+            .rule_end, .at_rule_end => {
+                if (depth > 0) depth -= 1;
+            },
+            .decl, .decl_raw, .at_rule_simple, .comment, .stream_chunk => {
+                if (depth == 0) trailing_at_rule = null;
+            },
+            .stmt_gap, .group_boundary, .sourcemap_gap => {},
+        }
+    }
+    // An at-rule block that bubbles out of a style rule to the top level is
+    // followed by a blank line like any other top-level block.
+    if (trailing_at_rule) |idx| {
+        if (self.open_block_depth == self.open_rule_depth) self.rule_ir.setPreserveAtRuleBlockFollowingBlankAt(idx, true);
+    }
+}
+
+/// Mark the outermost rules and at-rules a top-level `meta.load-css()`
+/// appended from `start_idx` on as top-level statements. The official CLI
+/// separates all of them by a blank line, including a rule that was nested in
+/// the loaded stylesheet (`a { b { ... } }` prints `a` and `a b` apart).
+fn markRuleIrRangeAsTopLevel(self: anytype, start_idx: usize) void {
+    var depth: usize = 0;
+    var i = start_idx;
+    while (i < self.rule_ir.nodes.items.len) : (i += 1) {
+        const node = self.rule_ir.nodes.items[i];
+        switch (node.kind) {
+            .rule_begin => {
+                if (depth == 0) {
+                    self.rule_ir.extra.items[node.payload + 1] = 0;
+                    self.rule_ir.setSuppressLeadingBlankAt(i, false);
+                }
+                depth += 1;
+            },
+            .at_rule_begin => {
+                if (depth == 0) {
+                    self.rule_ir.extra.items[node.payload + 2] = 0;
+                    self.rule_ir.setSuppressLeadingBlankAt(i, false);
+                }
+                depth += 1;
+            },
+            .rule_end, .at_rule_end => {
+                if (depth > 0) depth -= 1;
+            },
+            else => {},
         }
     }
 }
@@ -716,8 +921,19 @@ pub fn runLoadCssModule(self: anytype, resolved_path: []const u8, config: LoadCs
     } else {
         try child_vm.runTopWithSelectorPrefix(&.{});
     }
+    if (child_vm.nested_in_parent_block) {
+        markRuleIrRangeAsNested(self, start_node_idx);
+    } else {
+        markRuleIrRangeAsTopLevel(self, start_node_idx);
+    }
     if (opts.sync_state) try self.syncLoadCssChildStates(&child_vm);
 }
+
+/// Limit on the `meta.load-css()` stack, which gains two entries per nested
+/// load: 200 modules that load one another. Each level runs a child VM on
+/// the native stack, so the limit has to hold on a small stack too; the
+/// official CLI itself runs out of stack between 100 and 500 levels.
+const max_load_css_depth = 400;
 
 pub fn invokeMetaLoadCss(self: anytype, args: []const Value, arg_names: []const InternId) !void {
     if (self.pending_content_chunk != content_none_sentinel) return error.BuiltinUnsupported;
@@ -769,6 +985,9 @@ pub fn invokeMetaLoadCss(self: anytype, args: []const Value, arg_names: []const 
     for (stack.items) |p| {
         if (std.mem.eql(u8, p, resolved_path)) return error.SassError;
     }
+    // Each nested load runs a child VM on the native stack; fail cleanly
+    // before a long chain of modules overflows it.
+    if (stack.items.len >= max_load_css_depth) return error.SassError;
     try stack.append(self.allocator, resolved_path);
     defer _ = stack.pop();
 

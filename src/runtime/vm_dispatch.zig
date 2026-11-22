@@ -109,15 +109,6 @@ pub fn dispatchBuiltinArgs(self: anytype, builtin_id: u32, args: []const Value, 
     const out = builtin_mod.dispatch(&bctx, builtin_id, args, arg_names) catch |e| {
         return reportBuiltinDispatchFailure(self, builtin_id, e);
     };
-    if (builtin_id == 29 and // string.quote
-        args.len >= 1 and
-        args[0].kind() == .string and
-        !args[0].stringQuoted(self.string_flags_pool.items) and
-        out.kind() == .string and
-        out.stringQuoted(self.string_flags_pool.items))
-    {
-        return normalizeQuotedDispatchResult(self, out);
-    }
     if (builtinPreservesSlashLists(builtin_id)) {
         try self.markSlashListPreserve(out);
     }
@@ -175,14 +166,6 @@ noinline fn reportBuiltinDispatchFailure(self: anytype, builtin_id: u32, e: buil
         }
     }
     return e;
-}
-
-noinline fn normalizeQuotedDispatchResult(self: anytype, out: Value) !Value {
-    const quoted_raw = self.stripCalcArgMarkerForDispatch(self.intern_pool.get(out.stringIntern()));
-    const normalized = try self.serializeUnquotedDeclStringForDispatch(quoted_raw);
-    defer self.allocator.free(normalized);
-    const normalized_id = try self.intern_pool.intern(normalized);
-    return Value.string(normalized_id, true);
 }
 
 fn shouldSerializeIndirectBuiltinAsRgb(name: []const u8) bool {

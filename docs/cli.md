@@ -252,8 +252,17 @@ zsass --fatal-deprecation=1.55.0,import input.scss
 - `--silence-deprecation` and `--future-deprecation` accept comma-separated
   deprecation IDs and may be repeated.
 - `--fatal-deprecation` accepts the same IDs plus full Sass versions like
-  `1.55.0`. A version expands to every supported deprecation that was already
-  active in or before that Dart Sass release.
+  `1.55.0`. A version expands to every deprecation that was already active in
+  or before that Dart Sass release, up to 1.108.2; obsolete deprecations are
+  not included.
+- `--fatal-deprecation=-<id>` excludes a deprecation that a version or an
+  explicit ID included, wherever it appears among the flags, for example
+  `--fatal-deprecation=1.80.0,-import`. Excluding an ID that was not included
+  is an error.
+- `--fatal-deprecation=dart-sass-2` includes the deprecations whose behavior
+  Dart Sass 2.0.0 removes.
+- Every deprecation ID of the official CLI is accepted, including the ones
+  zsass does not report (such as `global-builtin`).
 - Unknown values are treated as errors instead of being ignored.
 
 ## Shell Completions

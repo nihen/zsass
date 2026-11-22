@@ -638,10 +638,48 @@ fn unwrapOuterParensForCssMathArg(ctx: *BuiltinContext, text: []const u8) Builti
     return ctx.allocator.dupe(u8, text);
 }
 
+/// Tracks, during one forward pass over calculation text, where the run of
+/// identifier characters that ends just before the cursor began. Looking
+/// back from every hyphen instead would be quadratic for `a-a-a-...`.
+const IdentRunTracker = struct {
+    /// Everything before this index has been scanned.
+    scanned: usize = 0,
+    /// Start of the identifier-character run ending at `scanned`.
+    run_start: usize = 0,
+    /// First character of that run that is not a hyphen, if it has one.
+    first_non_hyphen: ?usize = null,
+
+    fn advanceTo(self: *IdentRunTracker, text: []const u8, index: usize) void {
+        while (self.scanned < index) : (self.scanned += 1) {
+            const c = text[self.scanned];
+            if (!isCssIdentCharByte(c)) {
+                self.run_start = self.scanned + 1;
+                self.first_non_hyphen = null;
+            } else if (c != '-' and self.first_non_hyphen == null) {
+                self.first_non_hyphen = self.scanned;
+            }
+        }
+    }
+
+    /// Whether the hyphen at `index` directly follows an identifier, as
+    /// opposed to a number (with or without a unit) or anything else.
+    fn hyphenContinuesIdentifier(self: *IdentRunTracker, text: []const u8, index: usize) bool {
+        self.advanceTo(text, index);
+        const start = self.run_start;
+        if (start >= index) return false;
+        // Only hyphens so far: `--` starts a custom identifier.
+        const first = self.first_non_hyphen orelse return true;
+        if (std.ascii.isDigit(text[first])) return false;
+        // `.5px-a`: the token after a decimal point is still a number.
+        return !(start > 0 and text[start - 1] == '.');
+    }
+};
+
 fn normalizeCssMathArgText(ctx: *BuiltinContext, text: []const u8) BuiltinError![]u8 {
     var stage1: std.ArrayListUnmanaged(u8) = .empty;
     defer stage1.deinit(ctx.allocator);
 
+    var ident_runs: IdentRunTracker = .{};
     var i: usize = 0;
     while (i < text.len) {
         if (cssVarOrEnvCallEnd(text, i)) |end_i| {
@@ -651,6 +689,30 @@ fn normalizeCssMathArgText(ctx: *BuiltinContext, text: []const u8) BuiltinError!
         }
 
         const c = text[i];
+        if (c == '\\' and i + 1 < text.len) {
+            try stage1.appendSlice(ctx.allocator, text[i .. i + 2]);
+            i += 2;
+            continue;
+        }
+        // A hyphen inside an identifier (`a-b`, `a- b`) is never an operator.
+        // After a number it still is one: a number minus a string evaluates
+        // to compact text such as `48px-var(--x)`.
+        if (c == '-' and ident_runs.hyphenContinuesIdentifier(text, i)) {
+            try stage1.append(ctx.allocator, c);
+            i += 1;
+            continue;
+        }
+        // A sign glued to the following operand is not a binary operator
+        // either (`a -b` is two space-separated operands).
+        if (c == '-' and i + 1 < text.len and !std.ascii.isWhitespace(text[i + 1]) and
+            (i == 0 or std.ascii.isWhitespace(text[i - 1]) or text[i - 1] == ')' or text[i - 1] == '%') and
+            (isCssIdentCharByte(text[i + 1]) or text[i + 1] == '.'))
+        {
+            if (i > 0 and !std.ascii.isWhitespace(text[i - 1])) try stage1.append(ctx.allocator, ' ');
+            try stage1.append(ctx.allocator, c);
+            i += 1;
+            continue;
+        }
         if (c == '+' or c == '-') {
             const prev_i = previousNonWhitespaceIndex(text, i);
             var next_i = i + 1;
@@ -691,15 +753,15 @@ fn normalizeCssMathArgText(ctx: *BuiltinContext, text: []const u8) BuiltinError!
             std.ascii.eqlIgnoreCase(stage1.items[i .. i + 3], "var") and
             stage1.items[i + 3] == '(')
         {
-            const prev = previousNonWhitespaceIndex(stage1.items, i);
-            if (prev) |p| {
-                const pc = stage1.items[p];
-                const needs_plus = !(isMathBinaryOperator(pc) or pc == '(');
-                if (needs_plus) {
-                    if (out.items.len != 0 and out.items[out.items.len - 1] != ' ') {
-                        try out.append(ctx.allocator, ' ');
-                    }
-                    try out.appendSlice(ctx.allocator, "+ ");
+            // A number plus a string evaluates to compact text such as
+            // `2pxvar(--c)`, which is the sum `2px + var(--c)`. Operands
+            // separated by whitespace are a space-separated list and stay.
+            if (i > 0) {
+                const pc = stage1.items[i - 1];
+                if (pc == ')') {
+                    try out.append(ctx.allocator, ' ');
+                } else if (!std.ascii.isWhitespace(pc) and !isMathBinaryOperator(pc) and pc != '(') {
+                    try out.appendSlice(ctx.allocator, " + ");
                 }
             }
             try out.appendSlice(ctx.allocator, stage1.items[i .. i + 4]);
@@ -3080,6 +3142,32 @@ test "math.exp preserves unresolved calculation as css function" {
     try testing.expectEqualStrings("exp(3px - var(--c))", ctx.intern_pool.get(result.stringIntern()));
 }
 
+test "css math argument text keeps identifier hyphens and glued signs" {
+    var harness = try MathTestHarness.init(testing.allocator);
+    defer harness.deinit();
+
+    var ctx = harness.context();
+    const cases = [_][2][]const u8{
+        .{ "a-b", "a-b" },
+        .{ "a-b - c-d", "a-b - c-d" },
+        .{ "a -b", "a -b" },
+        .{ "a- b", "a- b" },
+        .{ "var(--x)-b", "var(--x) -b" },
+        .{ "1% -b", "1% -b" },
+        .{ "a\\+b", "a\\+b" },
+        .{ "1px - a", "1px - a" },
+        .{ "48px-var(--x)", "48px - var(--x)" },
+        .{ "-1.5px-var(--x)", "-1.5px - var(--x)" },
+        .{ "--a-b", "--a-b" },
+        .{ "-a-b", "-a-b" },
+    };
+    for (cases) |case| {
+        const rendered = try normalizeCssMathArgText(&ctx, case[0]);
+        defer ctx.allocator.free(rendered);
+        try testing.expectEqualStrings(case[1], rendered);
+    }
+}
+
 test "math.exp normalizes compact subtraction in css fallback" {
     var harness = try MathTestHarness.init(testing.allocator);
     defer harness.deinit();
@@ -3196,7 +3284,19 @@ test "math.cos preserves unresolved calculation as css function" {
     try testing.expectEqualStrings("cos(2px + var(--c))", ctx.intern_pool.get(result.stringIntern()));
 }
 
-test "math.cos normalizes compact var adjacency in css fallback" {
+test "math.cos keeps space-separated operands in css fallback" {
+    var harness = try MathTestHarness.init(testing.allocator);
+    defer harness.deinit();
+
+    var ctx = harness.context();
+    const expr_id = try internString(&ctx, "2px var(--c)");
+    const args = [_]Value{Value.string(expr_id, false)};
+    const result = try math_cos(&ctx, &args);
+    try testing.expectEqual(.string, result.kind());
+    try testing.expectEqualStrings("cos(2px var(--c))", ctx.intern_pool.get(result.stringIntern()));
+}
+
+test "math.cos reads compact number-var text as a sum in css fallback" {
     var harness = try MathTestHarness.init(testing.allocator);
     defer harness.deinit();
 

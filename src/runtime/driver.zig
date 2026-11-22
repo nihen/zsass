@@ -67,7 +67,8 @@ const USAGE =
     \\  --[no-]verbose                         Show all warnings including duplicates
     \\  --silence-deprecation <id>[,...]       Suppress specific deprecation warnings (repeatable)
     \\  --future-deprecation <id>[,...]        Opt in to future deprecation warnings (repeatable)
-    \\  --fatal-deprecation <id|version>[,...] Treat specific deprecations as errors (repeatable)
+    \\  --fatal-deprecation <id|version>[,...] Treat specific deprecations as errors (repeatable);
+    \\                                         -<id> excludes one a version would include
     \\  -c, --[no-]color                       Force / disable ANSI color in diagnostics
     \\  --[no-]unicode                         Use / disable Unicode glyphs in diagnostics
     \\  --[no-]trace                           Print full call stack on @error
@@ -1340,6 +1341,9 @@ pub fn main(init: std.process.Init) !void {
     }
     opts.load_paths = load_paths.items;
     opts.update_mode = update_mode;
+    deprecation_mod.finalizeDeprecationOpts(&opts.deprecation) catch {
+        std.process.exit(64);
+    };
 
     // Push the parsed `--indented` / `--no-indented` / `--scss` /
     // `--plain-css` choice into the shared override slot so the parser /

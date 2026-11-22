@@ -171,6 +171,12 @@ pub fn normalizeAttributeSelectors(allocator: std.mem.Allocator, text: []const u
             i += 1;
             continue;
         }
+        // An escaped bracket is part of a name (`.grid-cols-\[1fr\]`).
+        if (text[i] == '\\' and i + 1 < text.len) {
+            try buf.appendSlice(allocator, text[i .. i + 2]);
+            i += 2;
+            continue;
+        }
         if (text[i] == '[') {
             var bend: ?usize = null;
             var depth: u32 = 1;
@@ -183,6 +189,8 @@ pub fn normalizeAttributeSelectors(allocator: std.mem.Allocator, text: []const u
                     } else if (text[j] == bq) {
                         bq = 0;
                     }
+                } else if (text[j] == '\\' and j + 1 < text.len) {
+                    j += 1;
                 } else {
                     if (text[j] == '"' or text[j] == '\'') bq = text[j];
                     if (text[j] == '[') depth += 1;
@@ -776,7 +784,11 @@ pub fn unescapeSassString(allocator: std.mem.Allocator, text: []const u8) ![]con
                 }
                 // Optional trailing whitespace
                 var after_hex = hex_end;
-                if (after_hex < text.len and (text[after_hex] == ' ' or text[after_hex] == '\t')) {
+                // One whitespace character ends a hex escape, a newline or
+                // form feed included.
+                if (after_hex < text.len and (text[after_hex] == ' ' or text[after_hex] == '\t' or
+                    text[after_hex] == '\n' or text[after_hex] == '\x0c'))
+                {
                     after_hex += 1;
                 }
                 const hex_str = text[hex_start..hex_end];
@@ -944,7 +956,24 @@ pub fn decodeSassIdentifier(allocator: std.mem.Allocator, text: []const u8) ![]c
 /// SassScript source, evaluated later, and is copied as written. Returns
 /// `text` itself when nothing changes.
 pub fn decodeSassIdentifierOutsideInterpolation(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
-    if (std.mem.find(u8, text, "#{") == null) return decodeSassIdentifier(allocator, text);
+    return mapIdentifierOutsideInterpolation(allocator, text, decodeSassIdentifier);
+}
+
+/// `unescapeSassIdentifier` for a name that may contain `#{...}`: the literal
+/// text around an interpolation gets its canonical spelling, so an escape can
+/// no longer run into the text an interpolation produces (`a\62#{1}` is `ab`
+/// followed by `1`, not the escape `\621`). Returns `text` itself when nothing
+/// changes.
+pub fn canonicalizeSassIdentifierOutsideInterpolation(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    return mapIdentifierOutsideInterpolation(allocator, text, unescapeSassIdentifier);
+}
+
+fn mapIdentifierOutsideInterpolation(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    comptime mapLiteral: anytype,
+) ![]const u8 {
+    if (std.mem.find(u8, text, "#{") == null) return mapLiteral(allocator, text);
     if (std.mem.findScalar(u8, text, '\\') == null) return text;
 
     var buf: std.ArrayList(u8) = .empty;
@@ -954,7 +983,7 @@ pub fn decodeSassIdentifierOutsideInterpolation(allocator: std.mem.Allocator, te
         const open = std.mem.findPos(u8, text, i, "#{") orelse text.len;
         // An escaped `\#{` is not an interpolation; it stays in the literal part.
         const literal = text[i..open];
-        const decoded = try decodeSassIdentifier(allocator, literal);
+        const decoded = try mapLiteral(allocator, literal);
         defer if (decoded.ptr != literal.ptr) allocator.free(decoded);
         try buf.appendSlice(allocator, decoded);
         if (open >= text.len) break;
@@ -1249,32 +1278,13 @@ pub fn normalizeCssCallLiteralEscapes(allocator: std.mem.Allocator, text: []cons
 }
 
 /// Canonicalize the escapes in the text of a calculation argument, whose
-/// identifiers are ordinary values. An argument with an escaped hyphen stays
-/// as written: decoded, the calculation formatter would read the hyphen as a
-/// subtraction. Returns `arg` itself when nothing changes.
+/// identifiers are ordinary values. Returns `arg` itself when nothing changes.
 pub fn canonicalizeCalcArgEscapes(allocator: std.mem.Allocator, arg: []const u8) ![]const u8 {
-    if (std.mem.findScalar(u8, arg, '\\') == null or calcArgHasEscapedHyphen(arg)) return arg;
+    if (std.mem.findScalar(u8, arg, '\\') == null) return arg;
     return normalizeCssValueEscapes(allocator, arg) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => arg,
     };
-}
-
-fn calcArgHasEscapedHyphen(arg: []const u8) bool {
-    var i: usize = 0;
-    while (i + 1 < arg.len) : (i += 1) {
-        if (arg[i] != '\\') continue;
-        if (arg[i + 1] == '-') return true;
-        var j = i + 1;
-        var value: u32 = 0;
-        while (j < arg.len and j - (i + 1) < 6 and isHexDigit(arg[j])) : (j += 1) {
-            value = value * 16 + hexDigitValue(arg[j]);
-        }
-        if (j > i + 1 and value == '-') return true;
-        // Skip the escaped character so `\\-` is not taken for `\-`.
-        i += 1;
-    }
-    return false;
 }
 
 pub fn hexDigitValue(c: u8) u21 {
@@ -1482,6 +1492,131 @@ pub fn normalizeCssValueEscapes(allocator: std.mem.Allocator, text: []const u8) 
 
     return try buf.toOwnedSlice(allocator);
 }
+/// Replace each hex escape of a private-use character (`\\f00c`, with its
+/// optional delimiter space) by the character itself. Other escapes stay as
+/// written. Returns `text` itself when nothing changes.
+pub fn decodePrivateUseEscapes(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    if (std.mem.findScalar(u8, text, '\\') == null) return text;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var changed = false;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] != '\\' or i + 1 >= text.len) {
+            try out.append(allocator, text[i]);
+            i += 1;
+            continue;
+        }
+        var j = i + 1;
+        var value: u32 = 0;
+        while (j < text.len and j - (i + 1) < 6 and isHexDigit(text[j])) : (j += 1) {
+            value = value * 16 + hexDigitValue(text[j]);
+        }
+        if (j > i + 1 and value <= 0x10FFFF and isPrivateUseCodePoint(@intCast(value))) {
+            var utf8_buf: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(@intCast(value), &utf8_buf) catch unreachable;
+            try out.appendSlice(allocator, utf8_buf[0..len]);
+            if (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
+            changed = true;
+            i = j;
+            continue;
+        }
+        // Copy the backslash together with the character it escapes.
+        const end = if (j > i + 1) j else i + 2;
+        try out.appendSlice(allocator, text[i..end]);
+        i = end;
+    }
+    if (!changed) {
+        out.deinit(allocator);
+        return text;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+/// Write every private-use character of rendered CSS text as a hex escape,
+/// the way expanded output prints them. Returns `text` itself when it has none.
+pub fn escapePrivateUseCodePoints(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    var needs_change = false;
+    var scan: usize = 0;
+    while (scan < text.len) {
+        const b = text[scan];
+        if (b < 0x80) {
+            scan += 1;
+            continue;
+        }
+        const seq_len = std.unicode.utf8ByteSequenceLength(b) catch {
+            scan += 1;
+            continue;
+        };
+        if (scan + seq_len > text.len) break;
+        const slice = text[scan .. scan + seq_len];
+        if (!std.unicode.utf8ValidateSlice(slice)) {
+            scan += 1;
+            continue;
+        }
+        const code_point = std.unicode.utf8Decode(slice) catch {
+            scan += seq_len;
+            continue;
+        };
+        if (isPrivateUseCodePoint(code_point)) {
+            needs_change = true;
+            break;
+        }
+        scan += seq_len;
+    }
+    if (!needs_change) return text;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, text.len);
+    var i: usize = 0;
+    while (i < text.len) {
+        const b = text[i];
+        if (b < 0x80) {
+            try out.append(allocator, b);
+            i += 1;
+            continue;
+        }
+        const seq_len = std.unicode.utf8ByteSequenceLength(b) catch {
+            try out.append(allocator, b);
+            i += 1;
+            continue;
+        };
+        if (i + seq_len > text.len) {
+            try out.appendSlice(allocator, text[i..]);
+            break;
+        }
+        const slice = text[i .. i + seq_len];
+        if (!std.unicode.utf8ValidateSlice(slice)) {
+            try out.append(allocator, b);
+            i += 1;
+            continue;
+        }
+        const code_point = std.unicode.utf8Decode(slice) catch {
+            try out.appendSlice(allocator, slice);
+            i += seq_len;
+            continue;
+        };
+        if (isPrivateUseCodePoint(code_point)) {
+            var buf: [16]u8 = undefined;
+            const escaped = std.fmt.bufPrint(&buf, "\\{x}", .{code_point}) catch unreachable;
+            try out.appendSlice(allocator, escaped);
+            // A hex digit or whitespace right after the escape would be read
+            // as part of it, so a separator space is required.
+            const next_i = i + seq_len;
+            if (next_i < text.len and
+                (std.ascii.isHex(text[next_i]) or text[next_i] == ' ' or text[next_i] == '\t'))
+            {
+                try out.append(allocator, ' ');
+            }
+        } else {
+            try out.appendSlice(allocator, slice);
+        }
+        i += seq_len;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
 pub fn isPrivateUseCodePoint(code_point: u21) bool {
     return (code_point >= 0xE000 and code_point <= 0xF8FF) or
         (code_point >= 0xF0000 and code_point <= 0x10FFFF);
@@ -1675,7 +1810,7 @@ pub fn trimRightPreservingHexEscape(text: []const u8) []const u8 {
             if (hex_j == 0) break;
             hex_j -= 1;
         }
-        if (hex_count > 0 and text[hex_j] == '\\') {
+        if (hex_count > 0 and text[hex_j] == '\\' and !expr_scan.isEscapedCharacter(text, hex_j)) {
             // Trailing space is a hex escape delimiter; preserve one space
             return text[0 .. end + 1];
         }
@@ -1953,4 +2088,53 @@ test "normalizeCssCallLiteralEscapes canonicalizes url() names and contents" {
     }
     const untouched = "url(\"\\41\")";
     try std.testing.expect((try normalizeCssCallLiteralEscapes(alloc, untouched)).ptr == untouched.ptr);
+}
+
+test "escapePrivateUseCodePoints separates the escape from a hex digit or space" {
+    const cases = [_][2][]const u8{
+        .{ "\"\u{f00c}Done\"", "\"\\f00c Done\"" },
+        .{ "\"\u{f00c} x\"", "\"\\f00c  x\"" },
+        .{ "\"\u{f00c}\tx\"", "\"\\f00c \tx\"" },
+        .{ "\"\u{f00c}y\"", "\"\\f00cy\"" },
+        .{ "\"\u{f00c}\"", "\"\\f00c\"" },
+        .{ "\"\u{10fffd}a\"", "\"\\10fffd a\"" },
+        .{ "plain", "plain" },
+    };
+    for (cases) |case| {
+        const out = try escapePrivateUseCodePoints(std.testing.allocator, case[0]);
+        defer if (out.ptr != case[0].ptr) std.testing.allocator.free(out);
+        try std.testing.expectEqualStrings(case[1], out);
+    }
+}
+
+test "decodePrivateUseEscapes decodes only private-use escapes" {
+    const cases = [_][2][]const u8{
+        .{ "\\f00c", "\u{f00c}" },
+        .{ "\\f00c Done", "\u{f00c}Done" },
+        .{ "a\\e000 b", "a\u{e000}b" },
+        .{ "\\31 a", "\\31 a" },
+        .{ "a\\.b", "a\\.b" },
+        .{ "\\\\f00c", "\\\\f00c" },
+        .{ "plain", "plain" },
+    };
+    for (cases) |case| {
+        const out = try decodePrivateUseEscapes(std.testing.allocator, case[0]);
+        defer if (out.ptr != case[0].ptr) std.testing.allocator.free(out);
+        try std.testing.expectEqualStrings(case[1], out);
+    }
+}
+
+test "unescapeSassString ends a hex escape at a newline or form feed" {
+    const cases = [_][2][]const u8{
+        .{ "\\62\nc", "bc" },
+        .{ "\\62\x0cc", "bc" },
+        .{ "\\62 c", "bc" },
+        .{ "\\62\tc", "bc" },
+        .{ "\\62  c", "b c" },
+    };
+    for (cases) |case| {
+        const out = try unescapeSassString(std.testing.allocator, case[0]);
+        defer if (out.ptr != case[0].ptr) std.testing.allocator.free(out);
+        try std.testing.expectEqualStrings(case[1], out);
+    }
 }

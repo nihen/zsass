@@ -2687,6 +2687,7 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
             }
             var make_sel_flags: u32 = makeSelectorInterpFlags(ip) | opcode_mod.make_selector_flag_interpolation_context;
             if (apply_preserve_empty_seps) make_sel_flags |= opcode_mod.make_selector_flag_preserve_empty_separators;
+            if (ip.preserve_quote) make_sel_flags |= opcode_mod.make_selector_flag_quoted_result;
             try ctx.cb.emit(.make_selector, try checkedU16(ip.part_count, "interp part count"), make_sel_flags);
             if (ip.preserve_quote) {
                 try ctx.cb.emit(.add, 0, 0);

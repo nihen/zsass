@@ -391,81 +391,7 @@ fn renderedDeclValueNeedsCharset(text: []const u8, output_style: OutputStyle) bo
     };
 }
 
-fn escapeExpandedDeclPrivateUseCodePoints(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
-    var needs_change = false;
-    var scan: usize = 0;
-    while (scan < text.len) {
-        const b = text[scan];
-        if (b < 0x80) {
-            scan += 1;
-            continue;
-        }
-        const seq_len = std.unicode.utf8ByteSequenceLength(b) catch {
-            scan += 1;
-            continue;
-        };
-        if (scan + seq_len > text.len) break;
-        const slice = text[scan .. scan + seq_len];
-        if (!std.unicode.utf8ValidateSlice(slice)) {
-            scan += 1;
-            continue;
-        }
-        const code_point = std.unicode.utf8Decode(slice) catch {
-            scan += seq_len;
-            continue;
-        };
-        if (isPrivateUseCodePoint(code_point)) {
-            needs_change = true;
-            break;
-        }
-        scan += seq_len;
-    }
-    if (!needs_change) return text;
-
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.ensureTotalCapacity(allocator, text.len);
-    var i: usize = 0;
-    while (i < text.len) {
-        const b = text[i];
-        if (b < 0x80) {
-            try out.append(allocator, b);
-            i += 1;
-            continue;
-        }
-        const seq_len = std.unicode.utf8ByteSequenceLength(b) catch {
-            try out.append(allocator, b);
-            i += 1;
-            continue;
-        };
-        if (i + seq_len > text.len) {
-            try out.appendSlice(allocator, text[i..]);
-            break;
-        }
-        const slice = text[i .. i + seq_len];
-        if (!std.unicode.utf8ValidateSlice(slice)) {
-            try out.append(allocator, b);
-            i += 1;
-            continue;
-        }
-        const code_point = std.unicode.utf8Decode(slice) catch {
-            try out.appendSlice(allocator, slice);
-            i += seq_len;
-            continue;
-        };
-        if (isPrivateUseCodePoint(code_point)) {
-            var buf: [16]u8 = undefined;
-            const escaped = std.fmt.bufPrint(&buf, "\\{x}", .{code_point}) catch |err| {
-                std.debug.panic("private-use escape formatting failed: {s}", .{@errorName(err)});
-            };
-            try out.appendSlice(allocator, escaped);
-        } else {
-            try out.appendSlice(allocator, slice);
-        }
-        i += seq_len;
-    }
-    return try out.toOwnedSlice(allocator);
-}
+const escapeExpandedDeclPrivateUseCodePoints = css_utils.escapePrivateUseCodePoints;
 
 fn isConditionalAtRuleName(name: []const u8) bool {
     const raw = if (name.len > 0 and name[0] == '@') name[1..] else name;
@@ -2338,6 +2264,45 @@ pub const RuleIR = struct {
         normalized.kept = .{};
         normalized.after.deinit(allocator);
         normalized.after = .{};
+    }
+
+    /// `normalizeAtRootBubblesRuleIR` for the nodes from `start_idx` on,
+    /// which must be a balanced range. Used for the statements a
+    /// `meta.load-css()` child appended while the nodes before them still
+    /// have open blocks: an `@at-root` of the loaded module is resolved
+    /// within the module and cannot leave the block it was loaded into.
+    pub fn normalizeAtRootBubblesFrom(
+        self: *RuleIR,
+        allocator: std.mem.Allocator,
+        pool: *const InternPool,
+        start_idx: usize,
+    ) error{ OutOfMemory, SassError }!void {
+        if (start_idx >= self.nodes.items.len) return;
+
+        var normalized = try self.normalizeAtRootBubbleDirectRange(allocator, pool, start_idx, self.nodes.items.len, null);
+        defer normalized.deinit(allocator);
+
+        const tail_len = normalized.kept.nodes.items.len + normalized.after.nodes.items.len;
+        try self.nodes.ensureTotalCapacity(allocator, start_idx + tail_len);
+        try self.node_source_files.ensureTotalCapacity(allocator, start_idx + tail_len);
+        self.nodes.items.len = start_idx;
+        self.node_source_files.items.len = start_idx;
+        self.nodes.appendSliceAssumeCapacity(normalized.kept.nodes.items);
+        self.node_source_files.appendSliceAssumeCapacity(normalized.kept.files.items);
+        self.nodes.appendSliceAssumeCapacity(normalized.after.nodes.items);
+        self.node_source_files.appendSliceAssumeCapacity(normalized.after.files.items);
+        // What still wants to bubble has reached the root of the loaded
+        // module; it must not bubble out of the block around the load.
+        for (self.nodes.items[start_idx..]) |node| self.clearBubbleMaskForNode(node, 0xFF);
+    }
+
+    /// Print the comment at `node_idx` on a line of its own, even when it
+    /// followed other text on its source line.
+    pub fn clearCommentLeadingSameLineAt(self: *RuleIR, node_idx: usize) void {
+        const node = self.nodes.items[node_idx];
+        if (node.kind != .comment) return;
+        const slot = node.payload + 2;
+        if (slot < self.extra.items.len) self.extra.items[slot] = 0;
     }
 
     fn directRangeHasVisibleOutputInNodes(nodes: []const Node) bool {
@@ -5180,6 +5145,13 @@ pub const RuleIR = struct {
         var calc_func_depth: u32 = 0;
         var preserve_calc_ops = false;
         var in_custom_decl = false;
+        // Where the statement being written starts in `out`, and for every
+        // open block where its prelude starts. An empty block is removed
+        // from there; searching backwards for a brace or semicolon would
+        // stop inside a string such as `a[x=";"]`.
+        var statement_start: usize = 0;
+        var block_prelude_starts: std.ArrayList(usize) = .empty;
+        defer block_prelude_starts.deinit(allocator);
         i = 0;
         while (i < first.items.len) : (i += 1) {
             if (std.mem.startsWith(u8, first.items[i..], interp_decl_marker)) {
@@ -5210,13 +5182,22 @@ pub const RuleIR = struct {
                 try out.append(allocator, c);
                 continue;
             }
+            // An escaped character is never punctuation (`.a\;b`, `.a\{b`).
+            if (c == '\\' and i + 1 < first.items.len) {
+                try out.appendSlice(allocator, first.items[i .. i + 2]);
+                i += 1;
+                continue;
+            }
 
             if (c == ';' or c == '}') {
                 preserve_decl_zero = false;
                 preserve_calc_ops = false;
                 in_custom_decl = false;
             }
-            if (try appendCompressedImport(&out, allocator, first.items, &i)) continue;
+            if (try appendCompressedImport(&out, allocator, first.items, &i)) {
+                statement_start = out.items.len;
+                continue;
+            }
             const value_context = out.items.len != 0 and (out.items[out.items.len - 1] == ':' or out.items[out.items.len - 1] == ',' or out.items[out.items.len - 1] == ' ' or out.items[out.items.len - 1] == '(');
             if (!in_custom_decl and paren_depth == 0 and value_context and try appendCompressedTopLevelRgb(&out, allocator, first.items, &i)) continue;
             if (!in_custom_decl and paren_depth == 0 and value_context and try appendCompressedTopLevelRgba(&out, allocator, first.items, &i)) continue;
@@ -5315,17 +5296,25 @@ pub const RuleIR = struct {
                 while (out.items.len != 0 and out.items[out.items.len - 1] == ';') out.items.len -= 1;
             }
 
-            if (c == '}' and out.items.len != 0 and out.items[out.items.len - 1] == '{') {
-                var start_empty = out.items.len - 1;
-                while (start_empty > 0 and out.items[start_empty - 1] != '}') : (start_empty -= 1) {}
-                out.items.len = start_empty;
-                preserve_decl_zero = false;
-                preserve_calc_ops = false;
-                in_custom_decl = false;
-                continue;
+            // Inside parentheses these characters are part of a value, such
+            // as an unquoted `url(a;b)`.
+            const structural = paren_depth == 0;
+            if (c == '}' and structural) {
+                const block_start = block_prelude_starts.pop();
+                if (out.items.len != 0 and out.items[out.items.len - 1] == '{') {
+                    // Drop the empty block together with its prelude.
+                    out.items.len = block_start orelse 0;
+                    statement_start = out.items.len;
+                    preserve_decl_zero = false;
+                    preserve_calc_ops = false;
+                    in_custom_decl = false;
+                    continue;
+                }
             }
 
+            if (c == '{' and structural) try block_prelude_starts.append(allocator, statement_start);
             try out.append(allocator, c);
+            if (structural and (c == '{' or c == '}' or c == ';')) statement_start = out.items.len;
         }
         first.deinit(allocator);
         return try out.toOwnedSlice(allocator);

@@ -20,6 +20,7 @@ pub const Lexer = struct {
         unterminated_string,
         unterminated_block_comment,
         trailing_dot_number,
+        invalid_utf8,
     };
 
     const ErrorDetail = struct {
@@ -40,6 +41,10 @@ pub const Lexer = struct {
     allocator: std.mem.Allocator,
     source_name: ?[]const u8 = null,
     last_error_detail: ?ErrorDetail = null,
+    /// Set when `source` is a piece of an already lexed stylesheet. Such a
+    /// piece was validated as UTF-8 with its stylesheet and is not checked
+    /// again; re-lexing can happen once per statement.
+    source_is_fragment: bool = false,
     /// True when lexing indented-syntax `.sass` input.
     is_indented_syntax: bool = false,
     allow_silent_comments: bool = true,
@@ -79,6 +84,17 @@ pub const Lexer = struct {
     /// Tokenize the entire source
     pub fn tokenize(self: *Lexer) ![]const Token {
         self.last_error_detail = null;
+        // A stylesheet must be valid UTF-8; anything else would be copied
+        // into the output as broken text.
+        if (!self.source_is_fragment) {
+            if (firstInvalidUtf8Offset(self.source)) |offset| {
+                self.last_error_detail = .{
+                    .span = .{ .start = offset, .end = offset + 1 },
+                    .reason = .invalid_utf8,
+                };
+                return error.SyntaxError;
+            }
+        }
         // Heuristic: ~1 token per 4 bytes reduces ArrayList reallocations on large inputs.
         try self.tokens.ensureTotalCapacity(self.allocator, self.source.len / 4 + 8);
         // Skip UTF-8 BOM (EF BB BF) at start of file
@@ -962,12 +978,26 @@ fn isUrlFuncName(name: []const u8) bool {
     return false;
 }
 
+/// Byte offset of the first byte that is not part of a valid UTF-8 sequence.
+fn firstInvalidUtf8Offset(source: []const u8) ?u32 {
+    if (std.unicode.utf8ValidateSlice(source)) return null;
+    var i: usize = 0;
+    while (i < source.len) {
+        const len = std.unicode.utf8ByteSequenceLength(source[i]) catch return @intCast(i);
+        if (i + len > source.len) return @intCast(i);
+        _ = std.unicode.utf8Decode(source[i .. i + len]) catch return @intCast(i);
+        i += len;
+    }
+    return null;
+}
+
 fn reasonText(reason: Lexer.ErrorReason) []const u8 {
     return switch (reason) {
         .invalid_token => "invalid token",
         .unterminated_string => "unterminated string",
         .unterminated_block_comment => "unterminated block comment",
         .trailing_dot_number => "number cannot end with '.'",
+        .invalid_utf8 => "Invalid UTF-8.",
     };
 }
 
@@ -1175,4 +1205,25 @@ test "signed decimal still lexes as number" {
     }
     try std.testing.expect(saw_pos);
     try std.testing.expect(saw_neg);
+}
+
+test "lexer rejects a source that is not valid UTF-8" {
+    const cases = [_]struct { source: []const u8, offset: u32 }{
+        .{ .source = "a {b: \"\xff\"}", .offset = 7 },
+        .{ .source = "/* \xc3 */", .offset = 3 },
+        .{ .source = "a {b: \"\xed\xa0\x80\"}", .offset = 7 },
+        .{ .source = "a {b: c}\n\xc0\x80", .offset = 9 },
+    };
+    for (cases) |case| {
+        var lexer = Lexer.init(std.testing.allocator, case.source);
+        defer lexer.deinit();
+        try std.testing.expectError(error.SyntaxError, lexer.tokenize());
+        const detail = lexer.last_error_detail orelse return error.TestExpectedEqual;
+        try std.testing.expectEqual(Lexer.ErrorReason.invalid_utf8, detail.reason);
+        try std.testing.expectEqual(case.offset, detail.span.start);
+    }
+
+    var valid = Lexer.init(std.testing.allocator, "\xef\xbb\xbfa {b: \"\u{e9}\u{1f600}\"}");
+    defer valid.deinit();
+    _ = try valid.tokenize();
 }
