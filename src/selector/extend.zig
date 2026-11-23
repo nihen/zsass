@@ -3669,10 +3669,6 @@ pub const ApplyState = struct {
             // Some combination was left out, so the second pass still has
             // these extensions to apply.
             var repeated_target_incomplete = false;
-            // The limit was reached. The second pass then leaves all of
-            // these extensions alone on what the first pass produced, or it
-            // would bring back, without a limit, what the limit cut off.
-            var repeated_target_capped = false;
 
             // Collect compound positions
             var compound_positions: [64]usize = undefined;
@@ -3774,11 +3770,22 @@ pub const ApplyState = struct {
                             for (repeated_target_exts.items) |repeated_ext_i| {
                                 try related_exts.append(self.allocator, &self.extensions.items[repeated_ext_i]);
                             }
-                            try generated.append(self.allocator, .{
-                                .selector = try complex.clone(self.allocator),
-                                .applied = try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, self.extensions.items.len),
-                            });
-                            for (repeated_target_exts.items) |repeated_ext_i| {
+                            try generated.ensureUnusedCapacity(self.allocator, 1);
+                            {
+                                var first = try complex.clone(self.allocator);
+                                errdefer first.deinit();
+                                generated.appendAssumeCapacity(.{
+                                    .selector = first,
+                                    .applied = try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, self.extensions.items.len),
+                                });
+                            }
+                            // Weaving can make more selectors than the
+                            // estimate counted. Past the limit everything
+                            // made here is dropped and the selector takes
+                            // the ordinary path, as it does when the
+                            // estimate itself is past the limit.
+                            var abandoned = false;
+                            product_loop: for (repeated_target_exts.items) |repeated_ext_i| {
                                 const repeated_ext = &self.extensions.items[repeated_ext_i];
                                 for (generated.items, 0..) |*base, base_idx| {
                                     var product: std.ArrayList(ComplexSelector) = .empty;
@@ -3794,22 +3801,19 @@ pub const ApplyState = struct {
                                     const carried = expanded.items.len + (generated.items.len - base_idx);
                                     const room = repeated_target_max_results -| carried;
                                     var skipped_combination = false;
-                                    if (room != 0 and
-                                        !try appendRepeatedTargetProduct(frame, self.allocator, &base.selector, repeated_ext, related_exts.items, frame.config.replace_mode, room, &skipped_combination, &product))
+                                    var over_limit = room == 0;
+                                    if (!over_limit and
+                                        !try appendRepeatedTargetProduct(frame, self.allocator, &base.selector, repeated_ext, related_exts.items, frame.config.replace_mode, room, &skipped_combination, &over_limit, &product) and
+                                        !over_limit)
                                     {
                                         try appendSingleTargetReplacements(frame, self.allocator, &base.selector, repeated_ext, related_exts.items, &product);
                                     }
-                                    if (room == 0) repeated_target_capped = true;
-                                    if (product.items.len > room) {
-                                        for (product.items) |*g| g.deinit();
-                                        product.clearRetainingCapacity();
-                                        repeated_target_capped = true;
+                                    if (over_limit or product.items.len > room) {
+                                        abandoned = true;
+                                        break :product_loop;
                                     }
-                                    // Only a combination left out for its
-                                    // weave goes back to the second pass.
-                                    // What the limit cut off stays cut off:
-                                    // the second pass would bring it back
-                                    // without any limit.
+                                    // A combination left out for its weave
+                                    // goes back to the second pass.
                                     if (skipped_combination) repeated_target_incomplete = true;
                                     try expanded.ensureUnusedCapacity(self.allocator, 1 + product.items.len);
                                     const moved = base.*;
@@ -3831,8 +3835,16 @@ pub const ApplyState = struct {
                                 std.mem.swap(std.ArrayList(Generated), &generated, &expanded);
                             }
 
+                            if (abandoned) {
+                                repeated_target_exts.clearRetainingCapacity();
+                                fully_applied_exts.clearRetainingCapacity();
+                                repeated_target_incomplete = false;
+                            }
+                            // With the room reserved, handing a selector
+                            // over below cannot fail half way.
+                            if (!abandoned) try first_pass.ensureDirectCapacity(self.allocator, first_pass.selectors.items.len + generated.items.len);
                             // The first entry is the selector itself.
-                            for (generated.items[1..]) |*g| {
+                            if (!abandoned) for (generated.items[1..]) |*g| {
                                 for (g.selector.components.items) |*component| {
                                     if (component.* != .compound) continue;
                                     normalizeGeneratedCompound(&component.compound, self.extensions.items, self.sort_extension_hints.items);
@@ -3856,8 +3868,8 @@ pub const ApplyState = struct {
                                     .target_is_placeholder = ext_is_placeholder[newest_ext_i],
                                     .applied = applied,
                                 });
-                            }
-                            continue;
+                            };
+                            if (!abandoned) continue;
                         }
 
                         const batch_start = first_pass.selectors.items.len;
@@ -4166,9 +4178,9 @@ pub const ApplyState = struct {
                             // left to do on what they produced, or on what
                             // this pass made of it, except inside a
                             // pseudo-class argument.
-                            if ((!repeated_target_incomplete or repeated_target_capped) and
+                            if (!repeated_target_incomplete and
                                 first_pass.simple_indices.items[first_pass.direct_id.items[fi]] == repeated_target_simple_idx and
-                                std.mem.indexOfScalar(usize, if (repeated_target_capped) repeated_target_exts.items else fully_applied_exts.items, ext_i) != null and
+                                std.mem.indexOfScalar(usize, fully_applied_exts.items, ext_i) != null and
                                 !try complexContainsTargetInPseudos(&first_pass.selectors.items[fi], &ext.target))
                             {
                                 continue;
@@ -7010,7 +7022,8 @@ fn collectUncoveredExtenders(
     const original = specificity.complexSpecificity(complex);
     var target_complex = ComplexSelector.init(allocator);
     defer target_complex.deinit();
-    try target_complex.components.append(allocator, .{ .compound = try ext.target.clone(allocator) });
+    try target_complex.components.ensureUnusedCapacity(allocator, 1);
+    target_complex.components.appendAssumeCapacity(.{ .compound = try ext.target.clone(allocator) });
     const target = specificity.complexSpecificity(&target_complex);
 
     for (ext.extender.selectors.items, 0..) |*candidate, candidate_idx| {
@@ -7201,8 +7214,8 @@ const repeated_target_max_results = 1024;
 /// extenders, and the results are listed with the first compound varying
 /// fastest: `.a .a` extended by `.f` gives `.f .a`, `.a .f`, `.f .f`.
 /// With `replace_every_target` only the results that keep no compound are
-/// listed. Returns false, leaving `results` untouched, when the target
-/// appears at most once or the product would be unreasonably large.
+/// listed. Returns false when the target appears at most once, no extender
+/// is worth applying, or the limit is passed (`over_limit`).
 fn appendRepeatedTargetProduct(
     frame: *ApplyFrame,
     allocator: std.mem.Allocator,
@@ -7217,14 +7230,21 @@ fn appendRepeatedTargetProduct(
     max_results: usize,
     /// Set when a combination was left out.
     skipped_combination: *bool,
+    /// Set, with false returned, when there would be more than `max_results`
+    /// selectors. `results` may then hold some of them.
+    over_limit: *bool,
     results: *std.ArrayList(ComplexSelector),
 ) error{OutOfMemory}!bool {
     var positions: [repeated_target_max_positions]usize = undefined;
     var position_count: usize = 0;
+    var too_many_positions = false;
     for (complex.components.items, 0..) |comp, comp_idx| {
         if (comp != .compound) continue;
         if (!compoundContainsTarget(&comp.compound, &ext.target)) continue;
-        if (position_count == positions.len) return false;
+        if (position_count == positions.len) {
+            too_many_positions = true;
+            break;
+        }
         positions[position_count] = comp_idx;
         position_count += 1;
     }
@@ -7234,11 +7254,20 @@ fn appendRepeatedTargetProduct(
     defer extenders.deinit(allocator);
     try collectUncoveredExtenders(allocator, complex, ext, related, &extenders);
     if (extenders.items.len == 0) return false;
+    // A selector an earlier extension made can hold the target in more
+    // compounds than the one the estimate counted.
+    if (too_many_positions) {
+        over_limit.* = true;
+        return false;
+    }
     const radix = extenders.items.len + 1;
     var combination_count: usize = 1;
     for (0..position_count) |_| {
         combination_count = saturatingMulUsize(combination_count, radix);
-        if (combination_count - 1 > max_results) return false;
+        if (combination_count - 1 > max_results) {
+            over_limit.* = true;
+            return false;
+        }
     }
 
     const Partial = struct {
@@ -7277,7 +7306,8 @@ fn appendRepeatedTargetProduct(
         }
         for (current.items) |*partial| partial.selector.deinit();
         current.clearRetainingCapacity();
-        try current.append(allocator, .{ .selector = try complex.clone(allocator), .shift = 0 });
+        try current.ensureUnusedCapacity(allocator, 1);
+        current.appendAssumeCapacity(.{ .selector = try complex.clone(allocator), .shift = 0 });
 
         // Replace from the first compound on. An extender with several
         // compounds lengthens the selector in front of the replaced one, so
@@ -7354,6 +7384,11 @@ fn appendRepeatedTargetProduct(
             for (current.items) |*partial| partial.selector.deinit();
             current.clearRetainingCapacity();
             std.mem.swap(std.ArrayList(Partial), &current, &next);
+            // One combination alone can weave into more than the limit.
+            if (current.items.len > max_results) {
+                over_limit.* = true;
+                return false;
+            }
         }
 
         for (current.items) |*partial| {
@@ -7369,6 +7404,10 @@ fn appendRepeatedTargetProduct(
                 }
             }
             if (duplicate) continue;
+            if (results.items.len - first_result == max_results) {
+                over_limit.* = true;
+                return false;
+            }
             try results.append(allocator, partial.selector);
             partial.selector = ComplexSelector.init(allocator);
         }

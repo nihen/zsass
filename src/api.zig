@@ -1330,3 +1330,18 @@ test "api: a repeated @extend target leaves out covered extenders and keeps sibl
         \\
     , css);
 }
+
+test "api: a repeated @extend target past the limit is still extended" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // Weaving `.x .f` into ten compounds makes more selectors than the
+    // combined path allows, so the selector takes the ordinary path.
+    const source =
+        \\.p0 .a .p1 .a .p2 .a .p3 .a .p4 .a .p5 .a .p6 .a .p7 .a .p8 .a .p9 .a { x: y; }
+        \\.x .f { @extend .a; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    try std.testing.expect(std.mem.indexOf(u8, css, ".x .f") != null);
+}
