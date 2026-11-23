@@ -1358,10 +1358,11 @@ test "api: compressed output follows the official CLI" {
             \\  b: #{$v};
             \\  c: #{white};
             \\  d: #{/* } */ 0.5em};
+            \\  e: #{url(http://a/b), white};
             \\}
             \\
             ,
-            .css = "a{b:1px, 2px;c:white;d:0.5em}\n",
+            .css = "a{b:1px, 2px;c:white;d:0.5em;e:url(http://a/b), white}\n",
         },
         // Comments on one line, and a comment in a custom property whose
         // name came from interpolation.
