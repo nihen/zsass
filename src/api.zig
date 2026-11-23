@@ -182,6 +182,9 @@ pub const CompileCssWithSourceMapResult = struct {
 };
 
 /// SCSS source  ->  expanded CSS. The return value comes from `alloc` and caller `alloc.free`.
+/// The compile itself runs in an arena on top of `alloc`, which is returned
+/// when the call ends; only the result is copied out. An `alloc` that cannot
+/// give memory back, such as another arena, keeps both until it is reset.
 /// The error set returned is a union of parser / resolver / compiler / VM / writer.
 /// If you need to grep them individually, use a separate wrapper.
 ///
@@ -201,6 +204,9 @@ pub fn compileSourceToCss(
     // as the lists built-in functions return, have no other owner.
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
+    // Declared after the arena so it runs first: the message may point into
+    // memory the compile allocated. It also covers the copy below.
+    errdefer |err| reportFinalErrorDiagnostic(err, file_path, opts);
     const css = try compileSourceToCssInArena(arena.allocator(), source, file_path, load_paths, opts);
     return try alloc.dupe(u8, css);
 }
@@ -215,7 +221,6 @@ fn compileSourceToCssInArena(
     error_format_mod.clearContextMessage();
     const prev_diag = pushDiagnosticSink(opts);
     defer restoreDiagnosticSink(prev_diag);
-    errdefer |err| reportFinalErrorDiagnostic(err, file_path, opts);
     var r = try compiler_mod.parseResolveCompileWithPath(alloc, source, file_path, load_paths);
     defer r.pool.deinit(alloc);
     defer r.color_pool.deinit(alloc);
@@ -262,6 +267,7 @@ pub fn compileSourceToCssWithSourceMap(
 ) anyerror!CompileCssWithSourceMapResult {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
+    errdefer |err| reportFinalErrorDiagnostic(err, file_path, opts);
     const result = try compileSourceToCssWithSourceMapInArena(arena.allocator(), source, file_path, load_paths, source_map_output_css_path, opts);
     const css = try alloc.dupe(u8, result.css);
     errdefer alloc.free(css);
@@ -279,7 +285,6 @@ fn compileSourceToCssWithSourceMapInArena(
     error_format_mod.clearContextMessage();
     const prev_diag = pushDiagnosticSink(opts);
     defer restoreDiagnosticSink(prev_diag);
-    errdefer |err| reportFinalErrorDiagnostic(err, file_path, opts);
     var r = try compiler_mod.parseResolveCompileWithPath(alloc, source, file_path, load_paths);
     defer r.pool.deinit(alloc);
     defer r.color_pool.deinit(alloc);
@@ -1274,8 +1279,6 @@ test "api: a lone escaped hyphen stays escaped in a selector" {
 }
 
 test "api: the space that ends a hex escape is kept apart from what follows" {
-    // Lists a built-in function returns live until the allocator is torn
-    // down, so these compiles run in an arena.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1376,8 +1379,6 @@ test "api: compressed output leaves string contents alone and resets after an em
 }
 
 test "api: a hex escape gets its space only where a selector name ends" {
-    // Lists a built-in function returns live until the allocator is torn
-    // down, so this compile runs in an arena.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1391,8 +1392,6 @@ test "api: a hex escape gets its space only where a selector name ends" {
 }
 
 test "api: selector.nest returns a selector list" {
-    // Lists a built-in function returns live until the allocator is torn
-    // down, so these compiles run in an arena.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1451,11 +1450,53 @@ test "api: lists made by built-in functions are freed" {
     const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
     defer alloc.free(css);
     try std.testing.expect(std.mem.indexOf(u8, css, "b: 1 2 3;") != null);
+
+    var mapped = try compileSourceToCssWithSourceMap(alloc, source, "", &.{}, null, .{});
+    defer mapped.deinit(alloc);
+    try std.testing.expectEqualStrings(css, mapped.css);
+}
+
+test "api: a failed copy of the result is reported as an error diagnostic" {
+    const Counter = struct {
+        fn sink(diag: *const Diagnostic, ctx: ?*anyopaque) void {
+            const errors: *usize = @ptrCast(@alignCast(ctx.?));
+            if (diag.level == .err) errors.* += 1;
+        }
+    };
+    const source = "a { b: c; }\n";
+
+    // The copy handed back to the caller is the last allocation of a
+    // compile, so failing that one leaves the compile itself intact.
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const css = try compileSourceToCss(counting.allocator(), source, "", &.{}, .{});
+    counting.allocator().free(css);
+    const map_start = counting.alloc_index;
+    const mapped = try compileSourceToCssWithSourceMap(counting.allocator(), source, "", &.{}, null, .{});
+    const map_allocs = counting.alloc_index - map_start;
+    counting.allocator().free(mapped.css);
+    counting.allocator().free(mapped.source_map_json);
+
+    var errors: usize = 0;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = map_start - 1 });
+    try std.testing.expectError(error.OutOfMemory, compileSourceToCss(failing.allocator(), source, "", &.{}, .{
+        .diagnostic_sink = Counter.sink,
+        .diagnostic_ctx = &errors,
+    }));
+    try std.testing.expectEqual(@as(usize, 1), errors);
+
+    // The CSS copy and the source map copy are the last two allocations.
+    for ([_]usize{ map_allocs - 2, map_allocs - 1 }) |fail_index| {
+        errors = 0;
+        var failing_map = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, compileSourceToCssWithSourceMap(failing_map.allocator(), source, "", &.{}, null, .{
+            .diagnostic_sink = Counter.sink,
+            .diagnostic_ctx = &errors,
+        }));
+        try std.testing.expectEqual(@as(usize, 1), errors);
+    }
 }
 
 test "api: @extend covers every combination of a repeated target" {
-    // Lists a built-in function returns live until the allocator is torn
-    // down, so this compile runs in an arena.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
