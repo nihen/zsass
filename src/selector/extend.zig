@@ -7103,7 +7103,8 @@ fn complexIsPlainDescendantChain(sel: *const ComplexSelector) bool {
                     .pseudo_element, .universal => return false,
                     // `*|div` and `ns|*` are written as type selectors.
                     .type_selector => |name| if (std.mem.indexOfScalar(u8, name, '*') != null) return false,
-                    .pseudo_class => |pseudo| if (pseudo.selector != null) return false,
+                    // `:before` is a pseudo-element written the old way.
+                    .pseudo_class => |pseudo| if (pseudo.selector != null or isCss2PseudoElementName(pseudo.name)) return false,
                     else => {},
                 }
             },
