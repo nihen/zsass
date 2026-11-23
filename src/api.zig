@@ -1349,6 +1349,20 @@ test "api: compressed output follows the official CLI" {
             ,
             .css = "a{b:white;b-c:1px;d:calc(0.5px + 1%)}\n",
         },
+        // A value that is one interpolation stays as written whatever it
+        // holds, and a brace in a comment does not end the interpolation.
+        .{
+            .source =
+            \\$v: 1px, 2px;
+            \\a {
+            \\  b: #{$v};
+            \\  c: #{white};
+            \\  d: #{/* } */ 0.5em};
+            \\}
+            \\
+            ,
+            .css = "a{b:1px, 2px;c:white;d:0.5em}\n",
+        },
         // Comments on one line, and a comment in a custom property whose
         // name came from interpolation.
         .{

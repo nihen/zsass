@@ -268,6 +268,9 @@ pub const emit_raw_decl_flag_custom_property_leading_space: u16 = 1 << 1;
 /// For emit_raw_decl, the value came from interpolation and compressed
 /// minification must preserve its decimal surface text.
 pub const emit_raw_decl_flag_value_has_interp: u16 = 1 << 2;
+/// For emit_raw_decl, the whole value is one interpolation (`#{$value}`),
+/// which compressed output writes as it is.
+pub const emit_raw_decl_flag_value_single_interp: u16 = 1 << 3;
 /// resolver -> compiler For internal transmission. emit_decl ignores it, emit_raw_decl
 /// Copy to `emit_raw_decl_flag_custom_property_leading_space`.
 pub const emit_decl_flag_custom_property_leading_space: u16 = 1 << 5;

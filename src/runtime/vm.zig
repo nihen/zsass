@@ -4507,7 +4507,13 @@ pub const VM = struct {
                 }
                 if (!is_custom_property and self.intern_pool.get(out_id).len == 0) return .continue_exec;
                 try self.rule_ir.appendDeclRaw(self.allocator, @intFromEnum(prop_id), self.intern_pool.get(out_id), self.currentSourceSpan());
-                if (!is_custom_property and self.currentSourceUsesPlainCss()) self.rule_ir.hintLastDecl(rule_ir_mod.decl_hint_plain_css);
+                if (!is_custom_property) {
+                    if (self.currentSourceUsesPlainCss()) {
+                        self.rule_ir.hintLastDecl(rule_ir_mod.decl_hint_plain_css);
+                    } else if (inst.opcode() == .emit_raw_decl and (inst.arg_a & opcode_mod.emit_raw_decl_flag_value_single_interp) != 0) {
+                        self.rule_ir.hintLastDecl(rule_ir_mod.decl_hint_string_value);
+                    }
+                }
             },
             .emit_at_rule_simple => {
                 try self.closeOpenMaybeCurrentRuleBeforeBoundary();

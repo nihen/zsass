@@ -3129,6 +3129,9 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                         if ((d.emit_decl_flags & opcode_mod.emit_decl_flag_custom_property_leading_space) != 0) {
                             flag |= opcode_mod.emit_raw_decl_flag_custom_property_leading_space;
                         }
+                        if (raw_info.has_interp and (d.emit_decl_flags & opcode_mod.emit_decl_flag_value_single_interp) != 0) {
+                            flag |= opcode_mod.emit_raw_decl_flag_value_single_interp;
+                        }
                         try ctx.cb.emit(.emit_raw_decl, flag, @intFromEnum(d.prop_intern));
                         return;
                     }

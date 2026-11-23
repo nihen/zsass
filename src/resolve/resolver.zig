@@ -4457,7 +4457,7 @@ fn valueSourceMixesInterpolation(value_source: []const u8) bool {
 }
 
 /// The index of the `}` that closes the interpolation whose content starts
-/// at `start`. A brace in a string inside it is text.
+/// at `start`. A brace in a string or a comment inside it is text.
 fn interpolationEnd(source: []const u8, start: usize) ?usize {
     var depth: usize = 1;
     var in_string: u8 = 0;
@@ -4474,6 +4474,11 @@ fn interpolationEnd(source: []const u8, start: usize) ?usize {
         }
         switch (c) {
             '"', '\'' => in_string = c,
+            '/' => if (i + 1 < source.len and source[i + 1] == '*') {
+                i = (std.mem.indexOfPos(u8, source, i + 2, "*/") orelse return null) + 1;
+            } else if (i + 1 < source.len and source[i + 1] == '/') {
+                i = std.mem.indexOfScalarPos(u8, source, i, '\n') orelse return null;
+            },
             '{' => depth += 1,
             '}' => {
                 depth -= 1;
