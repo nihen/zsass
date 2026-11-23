@@ -4408,6 +4408,131 @@ fn leadingIndentColumns(line: []const u8) usize {
     return cols;
 }
 
+/// How a declaration value is written when it is a single dynamic term:
+/// `$x` or `ns.$x`, `#{...}`, or `name(...)`.
+fn valueSourceSingleDynamicKind(value_source: []const u8) enum { none, interpolation, other } {
+    const trimmed = std.mem.trim(u8, value_source, " \t\r\n");
+    if (trimmed.len == 0) return .none;
+    if (std.mem.startsWith(u8, trimmed, "#{")) {
+        return if (valueSourceMixesInterpolation(trimmed)) .none else .interpolation;
+    }
+    var i: usize = 0;
+    while (i < trimmed.len and (std.ascii.isAlphanumeric(trimmed[i]) or trimmed[i] == '-' or trimmed[i] == '_' or trimmed[i] == '.' or trimmed[i] == '$')) i += 1;
+    if (i == trimmed.len) return if (std.mem.indexOfScalar(u8, trimmed, '$') != null) .other else .none;
+    if (i == 0 or trimmed[i] != '(') return .none;
+    // The call's closing parenthesis has to end the value.
+    var depth: usize = 0;
+    var in_string: u8 = 0;
+    while (i < trimmed.len) : (i += 1) {
+        const c = trimmed[i];
+        if (c == '\\') {
+            i += 1;
+            continue;
+        }
+        if (in_string != 0) {
+            if (c == in_string) in_string = 0;
+            continue;
+        }
+        switch (c) {
+            '"', '\'' => in_string = c,
+            '(' => depth += 1,
+            ')' => {
+                depth -|= 1;
+                if (depth == 0) return if (i + 1 == trimmed.len) .other else .none;
+            },
+            else => {},
+        }
+    }
+    return .none;
+}
+
+/// Whether a declaration value has an interpolation and something else
+/// beside it. A value that is one interpolation (`#{$value}`) does not.
+fn valueSourceMixesInterpolation(value_source: []const u8) bool {
+    const trimmed = std.mem.trim(u8, value_source, " \t\r\n");
+    const first = std.mem.indexOf(u8, trimmed, "#{") orelse return false;
+    if (first != 0) return true;
+    var depth: usize = 0;
+    var i: usize = 0;
+    while (i < trimmed.len) : (i += 1) {
+        switch (trimmed[i]) {
+            '\\' => i += 1,
+            '{' => depth += 1,
+            '}' => {
+                depth -|= 1;
+                if (depth == 0) return i + 1 != trimmed.len;
+            },
+            else => {},
+        }
+    }
+    return true;
+}
+
+/// Whether a number such as `0.5` is written outside every `#{...}` and
+/// outside strings and function arguments.
+fn valueSourceHasZeroDecimalOutsideInterpolation(value_source: []const u8) bool {
+    var interp_depth: usize = 0;
+    // The depth inside functions other than calculations; a number there
+    // is not shortened.
+    var paren_depth: usize = 0;
+    var calc_depth: usize = 0;
+    var in_string: u8 = 0;
+    var i: usize = 0;
+    while (i < value_source.len) : (i += 1) {
+        const c = value_source[i];
+        if (c == '\\') {
+            i += 1;
+            continue;
+        }
+        if (interp_depth != 0) {
+            if (c == '{') interp_depth += 1;
+            if (c == '}') interp_depth -= 1;
+            continue;
+        }
+        if (c == '#' and i + 1 < value_source.len and value_source[i + 1] == '{') {
+            interp_depth = 1;
+            i += 1;
+            continue;
+        }
+        if (in_string != 0) {
+            if (c == in_string) in_string = 0;
+            continue;
+        }
+        switch (c) {
+            '"', '\'' => in_string = c,
+            '(' => {
+                var name_start = i;
+                while (name_start > 0 and (std.ascii.isAlphanumeric(value_source[name_start - 1]) or value_source[name_start - 1] == '-')) name_start -= 1;
+                const name = value_source[name_start..i];
+                if (paren_depth == 0 and (css_utils.isCalculationFunctionName(name) or (name.len == 0 and calc_depth != 0))) {
+                    calc_depth += 1;
+                } else {
+                    paren_depth += 1;
+                }
+            },
+            ')' => if (paren_depth != 0) {
+                paren_depth -= 1;
+            } else {
+                calc_depth -|= 1;
+            },
+            '0' => if (paren_depth == 0 and i + 2 < value_source.len and value_source[i + 1] == '.' and
+                std.ascii.isDigit(value_source[i + 2]) and
+                (i == 0 or !(std.ascii.isAlphanumeric(value_source[i - 1]) or value_source[i - 1] == '.' or value_source[i - 1] == '_' or value_source[i - 1] == '-')))
+            {
+                return true;
+            },
+            // `.5` is written `0.5` in expanded output.
+            '.' => if (paren_depth == 0 and i + 1 < value_source.len and std.ascii.isDigit(value_source[i + 1]) and
+                (i == 0 or !(std.ascii.isAlphanumeric(value_source[i - 1]) or value_source[i - 1] == '_' or value_source[i - 1] == '-')))
+            {
+                return true;
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
 fn sourceSliceHasTopLevelComma(text: []const u8) bool {
     var paren_depth: u32 = 0;
     var bracket_depth: u32 = 0;
@@ -8146,6 +8271,20 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
         declarationSourceHasHorizontalWhitespaceAfterColon(ctx.ast.source, span);
     if ((prop_source_is_custom or pd.prop_kind == .dynamic) and custom_source_has_leading_space) {
         emit_decl_flags |= opcode_mod.emit_decl_flag_custom_property_leading_space;
+    }
+    if (pd.prop_kind == .dynamic and !prop_source_is_custom) {
+        emit_decl_flags |= opcode_mod.emit_decl_flag_prop_source_not_custom;
+    }
+    switch (valueSourceSingleDynamicKind(value_source)) {
+        .none => {},
+        .interpolation => emit_decl_flags |= opcode_mod.emit_decl_flag_value_single_dynamic | opcode_mod.emit_decl_flag_value_single_interp,
+        .other => emit_decl_flags |= opcode_mod.emit_decl_flag_value_single_dynamic,
+    }
+    if (valueSourceMixesInterpolation(value_source)) {
+        emit_decl_flags |= opcode_mod.emit_decl_flag_value_mixes_interp;
+        if (valueSourceHasZeroDecimalOutsideInterpolation(value_source)) {
+            emit_decl_flags |= opcode_mod.emit_decl_flag_zero_decimal_outside_interp;
+        }
     }
     const raw_value_source_intern: InternId = if (prop_source_is_custom and
         std.mem.indexOfAny(u8, value_source, "\n\r") != null and

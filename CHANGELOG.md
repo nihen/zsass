@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+- Compressed output keeps `/*!` comments, and a stylesheet does not end
+  with a semicolon.
+- Compressed output leaves the prelude of an at-rule as it is, apart from
+  a media query list: `@layer a, b`, `@supports (a: b) or (c: d)`, and
+  `@container` keep their spaces. `@import` has no space before its URL,
+  and `(width >= 64rem)` keeps the spaces around `>=`.
+- Compressed output writes a color in the shorter of `rgb()` and `hsl()`
+  whichever form it had, as the official CLI does: `hsl(40, 70%, 30%)` is
+  `rgb(51%,37%,9%)`, and `rgba(204, 204, 204, 0.5)` is
+  `hsla(0,0%,80%,.5)`.
+- Compressed output keeps the arguments of a function as they are
+  (`linear-gradient(to right, white, transparent 0.5%)`), except in
+  `calc()` and the other calculations, where numbers lose their leading
+  zero and commas their space. `:nth-child(2n + 1)` keeps its spaces.
+- Compressed output leaves a value that is one unquoted string as it is,
+  shortens a number beside an interpolation, treats a custom property whose
+  name comes from an interpolation (`#{$name}: $value`) as an ordinary
+  declaration, and in plain CSS keeps color names and `rgb()` calls.
+
 ## 0.4.2 (2026-11-23)
 
 Tracks Dart Sass 1.108.2. The vendored `sass-spec` pin moves to

@@ -4138,6 +4138,7 @@ pub const VM = struct {
                 vid = try normalizeUnicodeRangeDeclValue(self, vid, is_custom_property);
                 if (!is_custom_property and self.intern_pool.get(vid).len == 0) return .continue_exec;
                 try self.rule_ir.appendDecl(self.allocator, @intFromEnum(prop_id), @intFromEnum(vid), self.currentSourceSpan());
+                if (!is_custom_property) self.rule_ir.hintLastDecl(self.declStringValueHint(opcode_mod.emit_decl_flag_value_single_dynamic, val));
             },
             .emit_decl => {
                 const prop: u32 = inst.arg_b;
@@ -4323,6 +4324,9 @@ pub const VM = struct {
                 }
                 if (!is_custom_property and self.intern_pool.get(vid).len == 0) return .continue_exec;
                 try self.rule_ir.appendDecl(self.allocator, @intFromEnum(prop_id), @intFromEnum(vid), self.currentSourceSpan());
+                if (!is_custom_property) {
+                    self.rule_ir.hintLastDecl(if (is_plain_css_decl) rule_ir_mod.decl_hint_plain_css else self.declStringValueHint(emit_decl_flags, val));
+                }
             },
             .emit_decl_raw, .emit_raw_decl => {
                 const prop: u32 = inst.arg_b;
@@ -4500,6 +4504,7 @@ pub const VM = struct {
                 }
                 if (!is_custom_property and self.intern_pool.get(out_id).len == 0) return .continue_exec;
                 try self.rule_ir.appendDeclRaw(self.allocator, @intFromEnum(prop_id), self.intern_pool.get(out_id), self.currentSourceSpan());
+                if (!is_custom_property and self.currentSourceUsesPlainCss()) self.rule_ir.hintLastDecl(rule_ir_mod.decl_hint_plain_css);
             },
             .emit_at_rule_simple => {
                 try self.closeOpenMaybeCurrentRuleBeforeBoundary();
@@ -4887,6 +4892,7 @@ pub const VM = struct {
                         const unmarked = try calc_utils.stripCalcInterpolationPreserveMarkers(self.allocator, normalized);
                         defer if (unmarked.ptr != normalized.ptr) self.allocator.free(unmarked);
                         try self.rule_ir.appendDeclRaw(self.allocator, prop_u, unmarked, self.currentSourceSpan());
+                        self.rule_ir.hintLastDecl(self.scriptCustomPropertyHints(inst.arg_a, val));
                         return .continue_exec;
                     }
                 }
@@ -4938,6 +4944,7 @@ pub const VM = struct {
                         const unmarked = try calc_utils.stripCalcInterpolationPreserveMarkers(self.allocator, raw_out);
                         defer if (unmarked.ptr != raw_out.ptr) self.allocator.free(unmarked);
                         try self.rule_ir.appendDeclRaw(self.allocator, prop_u, unmarked, self.currentSourceSpan());
+                        self.rule_ir.hintLastDecl(self.scriptCustomPropertyHints(inst.arg_a, val));
                         return .continue_exec;
                     }
                     const raw = calc_utils.stripCalcArgMarker(self.intern_pool.get(vid));
@@ -4969,9 +4976,11 @@ pub const VM = struct {
                         value_text;
                     defer if (raw_out.ptr != value_text.ptr) self.allocator.free(@constCast(raw_out));
                     try self.rule_ir.appendDeclRaw(self.allocator, prop_u, raw_out, self.currentSourceSpan());
+                    self.rule_ir.hintLastDecl(self.scriptCustomPropertyHints(inst.arg_a, val));
                     return .continue_exec;
                 }
                 try self.rule_ir.appendDecl(self.allocator, prop_u, @intFromEnum(vid), self.currentSourceSpan());
+                self.rule_ir.hintLastDecl(self.declStringValueHint(inst.arg_a, val));
             },
             .push_prop_namespace => {
                 const prefix_v = try self.maybeResolveParentSelectorValue(try self.pop());
@@ -5528,6 +5537,28 @@ pub const VM = struct {
         if (file_id >= self.program.modules.len) return false;
         const path = self.program.modules[file_id].module_path;
         return std.mem.endsWith(u8, path, ".sass");
+    }
+
+    /// The hint for a declaration whose whole value is an unquoted string,
+    /// which compressed output writes as it is.
+    fn declStringValueHint(self: *const VM, emit_decl_flags: u16, val: Value) u8 {
+        if ((emit_decl_flags & opcode_mod.emit_decl_flag_value_single_dynamic) == 0) return 0;
+        if (val.kind() != .string or val.stringQuoted(self.string_flags_pool.items)) return 0;
+        const text = std.mem.trim(u8, calc_utils.stripCalcArgMarker(self.intern_pool.get(val.stringIntern())), " \t\r\n");
+        // A calculation is stored as a string, and so is a color written
+        // by name. What one interpolation produced is a string for certain.
+        if ((emit_decl_flags & opcode_mod.emit_decl_flag_value_single_interp) == 0) {
+            if (color_mod.lookupNamedColor(text) != null) return 0;
+            if (startsWithCalculationCall(text)) return 0;
+        }
+        return rule_ir_mod.decl_hint_string_value;
+    }
+
+    /// The hints for a custom property whose name comes from an
+    /// interpolation that does not start with `--`.
+    fn scriptCustomPropertyHints(self: *const VM, emit_decl_flags: u16, val: Value) u8 {
+        if ((emit_decl_flags & opcode_mod.emit_decl_flag_prop_source_not_custom) == 0) return 0;
+        return rule_ir_mod.decl_hint_script_custom_property | self.declStringValueHint(emit_decl_flags, val);
     }
 
     fn currentSourceUsesPlainCss(self: *const VM) bool {
@@ -8479,6 +8510,13 @@ fn shouldMarkCalcString(pool: *InternPool, v: Value) bool {
 fn shouldMarkCalcInterpString(pool: *InternPool, v: Value) bool {
     if (v.kind() != .string or v.stringQuoted(value_mod.empty_string_flags_pool)) return false;
     return std.mem.startsWith(u8, pool.get(v.stringIntern()), calc_interp_marker);
+}
+
+/// Whether a declaration value that is an unquoted string starts with a
+/// calculation. Those are shortened like calculations.
+fn startsWithCalculationCall(text: []const u8) bool {
+    const open = std.mem.indexOfScalar(u8, text, '(') orelse return false;
+    return css_utils.isCalculationFunctionName(text[0..open]);
 }
 
 fn internWithLeadingMarker(pool: *InternPool, alloc: std.mem.Allocator, marker: []const u8, id: InternId) VMError!InternId {

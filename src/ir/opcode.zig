@@ -277,6 +277,26 @@ pub const emit_decl_flag_value_source_multiline: u16 = 1 << 6;
 /// For emit_decl, the value subtree contains Sass interpolation. The writer
 /// preserves decimal surface text through compressed minification.
 pub const emit_decl_flag_value_has_interp: u16 = 1 << 7;
+/// For emit_decl_dynamic. The property name is written with interpolation
+/// and does not start with `--` in the source (`#{$name}: $value`). When it
+/// turns out to be a custom property, its value is still an ordinary
+/// SassScript value, which compressed output shortens.
+pub const emit_decl_flag_prop_source_not_custom: u16 = 1 << 8;
+/// The value mixes interpolation with other text (`#{$a} 0.5em`). It is
+/// evaluated to one string here, but its other parts are still numbers and
+/// colors, so compressed output must not copy it as a string.
+pub const emit_decl_flag_value_mixes_interp: u16 = 1 << 9;
+/// The value has a number written with a leading zero (`0.5em`) outside its
+/// interpolations. That number is shortened in compressed output, so the
+/// declaration is not marked as text an interpolation produced.
+pub const emit_decl_flag_zero_decimal_outside_interp: u16 = 1 << 10;
+/// The value is written as one variable, one interpolation, or one function
+/// call. Only then can the whole value be a string in the official CLI; a
+/// value of several tokens is a list, whatever it is stored as here.
+pub const emit_decl_flag_value_single_dynamic: u16 = 1 << 11;
+/// The value is written as one interpolation, so it is a string even when
+/// it reads as a color name.
+pub const emit_decl_flag_value_single_interp: u16 = 1 << 12;
 
 /// Internal marker prepended to raw multiline custom-property values by the
 /// resolver. It carries the declaration line's source column, which remains

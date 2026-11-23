@@ -1307,6 +1307,97 @@ test "api: compressed output reads strings and parentheses when it looks for a s
     try std.testing.expectEqualStrings("@supports selector([x=\";\"]:is(.a, .b)){a{x:y}}[x=\";\"]:is(.a,.b){--c: \"d;e\" f g}\n", css);
 }
 
+test "api: compressed output follows the official CLI" {
+    const cases = [_]struct { source: []const u8, css: []const u8 }{
+        // A `/*!` comment stays, without the indentation of its block.
+        .{
+            .source =
+            \\/*! a
+            \\ * b */
+            \\.x { b: c; /*! d */ }
+            \\/* gone */
+            \\@media screen { /*! e */ .y { f: g; } }
+            \\
+            ,
+            .css = "/*! a\n * b */.x{b:c;/*! d */}@media screen{/*! e */.y{f:g}}\n",
+        },
+        // Only a media query list is shortened among at-rule preludes.
+        .{
+            .source =
+            \\@import "b.css" screen and (min-width: 10px);
+            \\@layer a, b;
+            \\@media (width >= 64rem) and (height < 3px), print { a { b: c; } }
+            \\@supports (a: b) or (c: d) { a { b: c; } }
+            \\@container sidebar (min-width: 400px) and (max-width: 700px) { a { b: c; } }
+            \\a:nth-of-type(10n + 1) > b { c: d; }
+            \\@font-face { font-family: x; }
+            \\
+            ,
+            .css = "@import\"b.css\"screen and (min-width: 10px);@layer a, b;@media(width >= 64rem)and (height < 3px),print{a{b:c}}@supports(a: b) or (c: d){a{b:c}}@container sidebar (min-width: 400px) and (max-width: 700px){a{b:c}}a:nth-of-type(10n + 1)>b{c:d}@font-face{font-family:x}\n",
+        },
+        // A color is written in the shorter of its forms, whichever it had.
+        .{
+            .source =
+            \\@use "sass:color";
+            \\a {
+            \\  b: hsl(40, 70%, 30%);
+            \\  c: rgb(15%, 15%, 15%);
+            \\  d: color.adjust(#abc, $lightness: -7%);
+            \\  e: rgba(204, 204, 204, 0.5);
+            \\  f: rgba(255, 255, 255, 0.2);
+            \\  g: hsl(0, 0%, 100%);
+            \\  h: hsla(24, 20%, 50%, 0.08);
+            \\  i: 1px solid white;
+            \\}
+            \\
+            ,
+            .css = "a{b:rgb(51%,37%,9%);c:hsl(0,0%,15%);d:hsl(210,25%,66.3333333333%);e:hsla(0,0%,80%,.5);f:rgba(255,255,255,.2);g:#fff;h:rgba(60%,48%,40%,.08);i:1px solid #fff}\n",
+        },
+        // The arguments of a function stay as they are, except in a
+        // calculation.
+        .{
+            .source =
+            \\$w: white;
+            \\a {
+            \\  b: linear-gradient(to right, $w, transparent 0.5%);
+            \\  c: translate3d(calc(var(--x) * -2), 0, 0.5px);
+            \\  d: calc(0.375em - var(--w, 0.5em) * 2);
+            \\  e: clamp(0.5px, 0.5vw + 1px, 2px);
+            \\  f: rgb(var(--x), 0.1);
+            \\  g: max(0.5px, 0.25px, var(--x));
+            \\}
+            \\
+            ,
+            .css = "a{b:linear-gradient(to right, white, transparent 0.5%);c:translate3d(calc(var(--x) * -2), 0, 0.5px);d:calc(.375em - var(--w, 0.5em)*2);e:clamp(.5px,.5vw + 1px,2px);f:rgb(var(--x), 0.1);g:max(.5px,.25px,var(--x))}\n",
+        },
+        // A value that is a string stays as it is, and a custom property
+        // whose name comes from an interpolation is an ordinary declaration.
+        .{
+            .source =
+            \\@use "sass:string";
+            \\@function s($v) { @return string.unquote("#{$v}"); }
+            \\@mixin v($name, $value) { #{"--" + $name}: #{$value}; }
+            \\a {
+            \\  b: s(0.875rem);
+            \\  d: url(#{"x"}) 0.5em;
+            \\  @include v(e, var(--f));
+            \\  @include v(g, 0.5em transparent);
+            \\  --h: 0.5em;
+            \\  #{"--i"}: 0.5em, white;
+            \\}
+            \\
+            ,
+            .css = "a{b:0.875rem;d:url(x) .5em;--e:var(--f);--g:0.5em transparent;--h: 0.5em;--i:.5em,#fff}\n",
+        },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const css = try compileSourceToCss(arena.allocator(), case.source, "", &.{}, .{ .output_style = .compressed });
+        try std.testing.expectEqualStrings(case.css, css);
+    }
+}
+
 test "api: compressed output keeps a comment that is text" {
     const alloc = std.testing.allocator;
     const source =

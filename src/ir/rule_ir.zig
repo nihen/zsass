@@ -234,7 +234,31 @@ pub const WriteToWithSourceMapOpts = struct {
     emit_charset: bool = true,
     /// Absolute path of the directory containing the emitted CSS (used for `sources` when mode is relative).
     source_map_output_dir_abs: ?[]const u8 = null,
+    /// Write the markers `compressCss` reads although the style is
+    /// expanded. A range rendered ahead of time needs them, because the
+    /// final style is not known yet.
+    emit_compress_markers: bool = false,
 };
+
+/// Write text rendered with `emit_compress_markers` without the markers.
+fn writeWithoutCompressMarkers(emit: anytype, text: []const u8) !void {
+    var rest = text;
+    while (std.mem.indexOfAny(u8, rest, "\x01\x02")) |at| {
+        try emit.writeAll(rest[0..at]);
+        rest = rest[at..];
+        if (rest[0] == decl_hint_marker) {
+            rest = rest[@min(2, rest.len)..];
+        } else if (std.mem.startsWith(u8, rest, interp_decl_marker)) {
+            rest = rest[interp_decl_marker.len..];
+        } else if (std.mem.startsWith(u8, rest, literal_decl_marker)) {
+            rest = rest[literal_decl_marker.len..];
+        } else {
+            try emit.writeAll(rest[0..1]);
+            rest = rest[1..];
+        }
+    }
+    try emit.writeAll(rest);
+}
 
 fn sourcePathForSourceMap(
     arena: std.mem.Allocator,
@@ -308,8 +332,20 @@ pub const NodeKind = enum(u8) {
     stream_chunk,
 };
 
+/// What the VM knows about a declaration that its text no longer shows.
+/// Compressed output needs it; expanded output is the same either way.
+pub const decl_hint_string_value: u8 = 1 << 0;
+pub const decl_hint_plain_css: u8 = 1 << 1;
+pub const decl_hint_script_custom_property: u8 = 1 << 2;
+
+/// Written in front of a declaration for `compressCss`, followed by one
+/// byte holding the hints above plus '0'.
+const decl_hint_marker: u8 = 0x02;
+
 pub const Node = struct {
     kind: NodeKind,
+    /// `decl_hint_*` bits; only declarations use them.
+    decl_hints: u8 = 0,
     payload: u32, // offset into `extra`
     source_start: u32,
     source_end: u32,
@@ -985,6 +1021,13 @@ pub const RuleIR = struct {
         });
         try self.node_source_files.append(allocator, span.file_id);
         self.last_visible_emit_node_count = self.nodes.items.len;
+    }
+
+    /// Add hints to the declaration appended last.
+    pub fn hintLastDecl(self: *RuleIR, hints: u8) void {
+        if (hints == 0 or self.nodes.items.len == 0) return;
+        const node = &self.nodes.items[self.nodes.items.len - 1];
+        if (node.kind == .decl or node.kind == .decl_raw) node.decl_hints |= hints;
     }
 
     pub fn appendDeclRaw(self: *RuleIR, allocator: std.mem.Allocator, prop_intern: u32, rendered_value: []const u8, span: Span) !void {
@@ -3862,7 +3905,7 @@ pub const RuleIR = struct {
         errdefer buf.deinit(allocator);
         {
             var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &buf);
-            try subset.writeToWithSourceMap(&aw.writer, intern_pool, null, source_locations, .expanded, .{});
+            try subset.writeToWithSourceMap(&aw.writer, intern_pool, null, source_locations, .expanded, .{ .emit_compress_markers = true });
             buf = aw.toArrayList();
         }
 
@@ -4934,35 +4977,49 @@ pub const RuleIR = struct {
         return true;
     }
 
+    /// Write `@import` with its URL as the official CLI does: no space
+    /// before the URL, `url(a)` as `"a"`, and no space before what follows.
     fn appendCompressedImport(out: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []const u8, i: *usize) error{OutOfMemory}!bool {
-        const prefix = "@import url(";
+        const prefix = "@import ";
         if (!std.mem.startsWith(u8, text[i.*..], prefix)) return false;
         var j = i.* + prefix.len;
-        var quote: u8 = 0;
-        if (j < text.len and (text[j] == '"' or text[j] == '\'')) {
-            quote = text[j];
-            j += 1;
+        const in_url = std.mem.startsWith(u8, text[j..], "url(");
+        if (in_url) {
+            j += "url(".len;
+            while (j < text.len and text[j] == ' ') j += 1;
         }
-        const url_start = j;
-        if (quote != 0) {
-            while (j < text.len and text[j] != quote) : (j += 1) {}
-            if (j >= text.len) return false;
-            const url = text[url_start..j];
-            j += 1;
-            if (j >= text.len or text[j] != ')') return false;
-            try out.appendSlice(allocator, "@import\"");
-            try out.appendSlice(allocator, url);
-            try out.append(allocator, '"');
-            i.* = j;
-            return true;
-        }
-        while (j < text.len and text[j] != ')') : (j += 1) {}
         if (j >= text.len) return false;
-        const url = text[url_start..j];
-        try out.appendSlice(allocator, "@import\"");
+        var url: []const u8 = undefined;
+        var quote: u8 = '"';
+        if (text[j] == '"' or text[j] == '\'') {
+            quote = text[j];
+            const url_start = j + 1;
+            j = url_start;
+            while (j < text.len and text[j] != quote) : (j += 1) {
+                if (text[j] == '\\') j += 1;
+            }
+            if (j >= text.len) return false;
+            url = text[url_start..j];
+            j += 1;
+            if (in_url) {
+                while (j < text.len and text[j] == ' ') j += 1;
+                if (j >= text.len or text[j] != ')') return false;
+                j += 1;
+            }
+        } else {
+            if (!in_url) return false;
+            const url_start = j;
+            while (j < text.len and text[j] != ')') : (j += 1) {}
+            if (j >= text.len) return false;
+            url = std.mem.trimEnd(u8, text[url_start..j], " ");
+            j += 1;
+        }
+        try out.appendSlice(allocator, "@import");
+        try out.append(allocator, quote);
         try out.appendSlice(allocator, url);
-        try out.append(allocator, '"');
-        i.* = j;
+        try out.append(allocator, quote);
+        while (j < text.len and text[j] == ' ') j += 1;
+        i.* = j - 1;
         return true;
     }
 
@@ -4994,81 +5051,216 @@ pub const RuleIR = struct {
         return true;
     }
 
-    fn parseRgbComponent(text: []const u8, pos: *usize) ?u8 {
-        while (pos.* < text.len and text[pos.*] == ' ') : (pos.* += 1) {}
-        var value: u16 = 0;
+    /// `value` is the number as written; `exact` is what it most likely
+    /// was before it was rounded to ten decimals.
+    const ColorNumber = struct { value: f64, exact: f64, unit: enum { none, percent, deg } };
+
+    fn parseColorNumber(text: []const u8, pos: *usize) ?ColorNumber {
+        while (pos.* < text.len and text[pos.*] == ' ') pos.* += 1;
         const start = pos.*;
-        while (pos.* < text.len and text[pos.*] >= '0' and text[pos.*] <= '9') : (pos.* += 1) {
-            value = value * 10 + (text[pos.*] - '0');
-            if (value > 255) return null;
+        if (pos.* < text.len and text[pos.*] == '-') pos.* += 1;
+        const digits_start = pos.*;
+        while (pos.* < text.len and std.ascii.isDigit(text[pos.*])) pos.* += 1;
+        if (pos.* < text.len and text[pos.*] == '.') {
+            pos.* += 1;
+            while (pos.* < text.len and std.ascii.isDigit(text[pos.*])) pos.* += 1;
         }
-        if (pos.* == start) return null;
-        while (pos.* < text.len and text[pos.*] == ' ') : (pos.* += 1) {}
-        return @intCast(value);
+        if (pos.* == digits_start) return null;
+        const number_text = text[start..pos.*];
+        const value = std.fmt.parseFloat(f64, number_text) catch return null;
+        var result: ColorNumber = .{ .value = value, .exact = value, .unit = .none };
+        // Ten decimals mean the number was rounded when it was written.
+        if (std.mem.indexOfScalar(u8, number_text, '.')) |dot| {
+            if (number_text.len - dot - 1 == 10) result.exact = unroundedNumber(value);
+        }
+        if (pos.* < text.len and text[pos.*] == '%') {
+            result.unit = .percent;
+            pos.* += 1;
+        } else if (std.mem.startsWith(u8, text[pos.*..], "deg")) {
+            result.unit = .deg;
+            pos.* += 3;
+        }
+        while (pos.* < text.len and text[pos.*] == ' ') pos.* += 1;
+        return result;
     }
 
-    fn appendAlphaCompressed(out: *std.ArrayList(u8), allocator: std.mem.Allocator, alpha: []const u8) error{OutOfMemory}!void {
-        const trimmed = std.mem.trim(u8, alpha, " ");
-        if (std.mem.startsWith(u8, trimmed, "0.")) {
-            try out.appendSlice(allocator, trimmed[1..]);
+    /// The simplest fraction that a number written with ten decimals can
+    /// stand for, such as 695/12 for 57.9166666667. Converting a color
+    /// between `rgb()` and `hsl()` from the rounded digits would be off in
+    /// the last digit; channels are mostly such fractions.
+    fn unroundedNumber(written: f64) f64 {
+        if (!(written > 0) or written > 1000.0) return written;
+        const half_step = 5e-11;
+        var lo = written - half_step;
+        var hi = written + half_step;
+        // Continued fraction terms of the simplest fraction in [lo, hi].
+        var terms: [16]f64 = undefined;
+        var count: usize = 0;
+        while (count < terms.len) {
+            const whole = @floor(lo);
+            if (lo == whole or whole + 1.0 <= hi) {
+                terms[count] = @ceil(lo);
+                count += 1;
+                break;
+            }
+            terms[count] = whole;
+            count += 1;
+            const next_lo = 1.0 / (hi - whole);
+            const next_hi = 1.0 / (lo - whole);
+            lo = next_lo;
+            hi = next_hi;
+        } else return written;
+        var numerator: f64 = terms[count - 1];
+        var denominator: f64 = 1.0;
+        var k = count - 1;
+        while (k > 0) {
+            k -= 1;
+            const new_numerator = terms[k] * numerator + denominator;
+            denominator = numerator;
+            numerator = new_numerator;
+        }
+        // A random number is this close to some fraction with a denominator
+        // near 100000; a much smaller one is no coincidence.
+        if (denominator > 3000.0) return written;
+        return numerator / denominator;
+    }
+
+    fn hslToRgb255(h_in: f64, s_pct: f64, l_pct: f64) [3]f64 {
+        const h = @mod(h_in, 360.0) / 360.0;
+        const sat = s_pct / 100.0;
+        const l = l_pct / 100.0;
+        const q = if (l <= 0.5) l * (sat + 1.0) else l + sat - l * sat;
+        const p2 = l * 2.0 - q;
+        return .{
+            color_mod.hueToRgb(p2, q, h + 1.0 / 3.0) * 255.0,
+            color_mod.hueToRgb(p2, q, h) * 255.0,
+            color_mod.hueToRgb(p2, q, h - 1.0 / 3.0) * 255.0,
+        };
+    }
+
+    /// Write the `rgb()`, `rgba()`, `hsl()`, or `hsla()` color with numeric
+    /// arguments at `i` the way compressed output spells it, whichever form
+    /// it had: a hex code or a name when the channels are whole numbers,
+    /// and otherwise `rgb()` with percentages or `hsl()`. The official CLI
+    /// takes `rgb()` unless it is three or more characters longer.
+    /// Anything else in such a function (`rgb(var(--x), 0.5)`) is not a
+    /// color value and is left to the caller.
+    fn appendCompressedLegacyColor(out: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []const u8, i: *usize) error{OutOfMemory}!bool {
+        if (i.* > 0 and isIdentLike(text[i.* - 1])) return false;
+        const rest = text[i.*..];
+        const is_hsl = std.mem.startsWith(u8, rest, "hsl");
+        if (!is_hsl and !std.mem.startsWith(u8, rest, "rgb")) return false;
+        var pos = i.* + 3;
+        if (pos < text.len and text[pos] == 'a') pos += 1;
+        if (pos >= text.len or text[pos] != '(') return false;
+        pos += 1;
+        var args: [4]ColorNumber = undefined;
+        var arg_count: usize = 0;
+        while (true) {
+            if (arg_count == args.len) return false;
+            args[arg_count] = parseColorNumber(text, &pos) orelse return false;
+            arg_count += 1;
+            if (pos >= text.len) return false;
+            if (text[pos] == ')') break;
+            if (text[pos] != ',') return false;
+            pos += 1;
+        }
+        if (arg_count < 3) return false;
+
+        // Whether the channels are whole numbers is decided on the numbers
+        // as written: a color that expanded output writes with ten
+        // decimals was not whole. The conversion uses the exact ones.
+        var written: [3]f64 = undefined;
+        var rgb: [3]f64 = undefined;
+        if (is_hsl) {
+            if (args[0].unit == .percent or args[1].unit != .percent or args[2].unit != .percent) return false;
+            if (args[1].value < 0 or args[1].value > 100 or args[2].value < 0 or args[2].value > 100) return false;
+            written = hslToRgb255(args[0].value, args[1].value, args[2].value);
+            rgb = hslToRgb255(args[0].exact, args[1].exact, args[2].exact);
         } else {
-            try out.appendSlice(allocator, trimmed);
-        }
-    }
-
-    fn appendCompressedTopLevelRgb(out: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []const u8, i: *usize) error{OutOfMemory}!bool {
-        if (!std.mem.startsWith(u8, text[i.*..], "rgb(")) return false;
-        var pos = i.* + "rgb(".len;
-        const r = parseRgbComponent(text, &pos) orelse return false;
-        if (pos >= text.len or text[pos] != ',') return false;
-        pos += 1;
-        const g = parseRgbComponent(text, &pos) orelse return false;
-        if (pos >= text.len or text[pos] != ',') return false;
-        pos += 1;
-        const b = parseRgbComponent(text, &pos) orelse return false;
-        if (pos >= text.len or text[pos] != ')') return false;
-        try appendPreferredCompressedColor(out, allocator, r, g, b);
-        i.* = pos;
-        return true;
-    }
-
-    fn appendCompressedTopLevelRgba(out: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []const u8, i: *usize) error{OutOfMemory}!bool {
-        if (!std.mem.startsWith(u8, text[i.*..], "rgba(")) return false;
-        var pos = i.* + "rgba(".len;
-        const r = parseRgbComponent(text, &pos) orelse return false;
-        if (pos >= text.len or text[pos] != ',') return false;
-        pos += 1;
-        const g = parseRgbComponent(text, &pos) orelse return false;
-        if (pos >= text.len or text[pos] != ',') return false;
-        pos += 1;
-        const b = parseRgbComponent(text, &pos) orelse return false;
-        if (pos >= text.len or text[pos] != ',') return false;
-        pos += 1;
-        while (pos < text.len and text[pos] == ' ') : (pos += 1) {}
-        const alpha_start = pos;
-        while (pos < text.len and text[pos] != ')') : (pos += 1) {}
-        if (pos >= text.len) return false;
-        const alpha = std.mem.trim(u8, text[alpha_start..pos], " ");
-        if (r == g and g == b and r != 0 and (@as(u16, r) * 100) % 255 == 0) {
-            const lightness = @divExact(@as(u16, r) * 100, 255);
-            var rgba_buf: [64]u8 = undefined;
-            const rgba = std.fmt.bufPrint(&rgba_buf, "rgba({d},{d},{d},", .{ r, g, b }) catch return false;
-            const rgba_len = rgba.len + (if (std.mem.startsWith(u8, alpha, "0.")) alpha.len - 1 else alpha.len) + 1;
-            var hsla_buf: [64]u8 = undefined;
-            const hsla = std.fmt.bufPrint(&hsla_buf, "hsla(0,0%,{d}%,", .{lightness}) catch return false;
-            const hsla_len = hsla.len + (if (std.mem.startsWith(u8, alpha, "0.")) alpha.len - 1 else alpha.len) + 1;
-            if (hsla_len < rgba_len) {
-                try out.appendSlice(allocator, hsla);
-                try appendAlphaCompressed(out, allocator, alpha);
-                try out.append(allocator, ')');
-                i.* = pos;
-                return true;
+            const unit = args[0].unit;
+            if (unit == .deg or args[1].unit != unit or args[2].unit != unit) return false;
+            for (args[0..3], 0..) |arg, channel| {
+                written[channel] = if (unit == .percent) arg.value * 255.0 / 100.0 else arg.value;
+                rgb[channel] = if (unit == .percent) arg.exact * 255.0 / 100.0 else arg.exact;
             }
         }
-        const prefix = try std.fmt.allocPrint(allocator, "rgba({d},{d},{d},", .{ r, g, b });
-        defer allocator.free(prefix);
-        try out.appendSlice(allocator, prefix);
-        try appendAlphaCompressed(out, allocator, alpha);
+        var alpha: f64 = 1.0;
+        if (arg_count == 4) {
+            if (args[3].unit == .deg) return false;
+            alpha = if (args[3].unit == .percent) args[3].value / 100.0 else args[3].value;
+            if (alpha < 0 or alpha > 1) return false;
+        }
+        var whole = true;
+        for (written) |channel| {
+            if (!(channel >= -1e-11 and channel <= 255.0 + 1e-11)) return false;
+            if (@abs(channel - @round(channel)) >= 1e-11) whole = false;
+        }
+
+        var alpha_text: []const u8 = "";
+        defer allocator.free(alpha_text);
+        if (alpha != 1.0) {
+            const formatted = try value_format.formatNumberCore(allocator, alpha);
+            defer allocator.free(formatted);
+            alpha_text = try allocator.dupe(u8, if (std.mem.startsWith(u8, formatted, "0.")) formatted[1..] else formatted);
+        }
+
+        if (whole and alpha == 1.0) {
+            try appendPreferredCompressedColor(
+                out,
+                allocator,
+                @intFromFloat(@round(written[0])),
+                @intFromFloat(@round(written[1])),
+                @intFromFloat(@round(written[2])),
+            );
+            i.* = pos;
+            return true;
+        }
+
+        // `rgb()` holds whole channels as they are and others as
+        // percentages. With an alpha there is no hex code, so whole
+        // channels compete with `hsl()` as well.
+        const hsl = if (whole)
+            color_mod.rgb255ToHsl(@round(written[0]), @round(written[1]), @round(written[2]))
+        else
+            color_mod.rgb255ToHsl(rgb[0], rgb[1], rgb[2]);
+        var rgb_text: [3][]u8 = undefined;
+        var hsl_text: [3][]u8 = undefined;
+        var made: usize = 0;
+        defer for (0..made) |k| {
+            if (k < 3) allocator.free(rgb_text[k]) else allocator.free(hsl_text[k - 3]);
+        };
+        var rgb_len: usize = 0;
+        var hsl_len: usize = 0;
+        for (0..3) |k| {
+            rgb_text[k] = try value_format.formatNumberCore(allocator, if (whole) @round(written[k]) else rgb[k] * 100.0 / 255.0);
+            made += 1;
+            rgb_len += rgb_text[k].len + @intFromBool(!whole);
+        }
+        for (0..3) |k| {
+            hsl_text[k] = try value_format.formatNumberCore(allocator, hsl[k]);
+            made += 1;
+            hsl_len += hsl_text[k].len + @intFromBool(k != 0);
+        }
+        const use_rgb = rgb_len < hsl_len + 3;
+        try out.appendSlice(allocator, if (use_rgb) "rgb" else "hsl");
+        if (alpha != 1.0) try out.append(allocator, 'a');
+        try out.append(allocator, '(');
+        for (0..3) |k| {
+            if (k != 0) try out.append(allocator, ',');
+            const channel_text = if (use_rgb) rgb_text[k] else hsl_text[k];
+            const channel_value = if (use_rgb) (if (whole) @round(written[k]) else rgb[k] * 100.0 / 255.0) else hsl[k];
+            // The zero before the point goes when the number was rounded
+            // to be written, and stays when it has ten decimals as it is.
+            const drop_zero = std.mem.startsWith(u8, channel_text, "0.") and
+                (channel_text.len - 2 < 10 or (std.fmt.parseFloat(f64, channel_text) catch channel_value) != channel_value);
+            try out.appendSlice(allocator, if (drop_zero) channel_text[1..] else channel_text);
+            if (if (use_rgb) !whole else k != 0) try out.append(allocator, '%');
+        }
+        if (alpha != 1.0) {
+            try out.append(allocator, ',');
+            try out.appendSlice(allocator, alpha_text);
+        }
         try out.append(allocator, ')');
         i.* = pos;
         return true;
@@ -5130,6 +5322,19 @@ pub const RuleIR = struct {
         return backslashes % 2 == 1;
     }
 
+    /// The indentation of the `/*!` comment at `pos` when it is a statement
+    /// of its own rather than part of a value.
+    fn loudCommentIndent(expanded: []const u8, pos: usize, statement_so_far: []const u8, paren_depth: usize) ?usize {
+        if (paren_depth != 0) return null;
+        if (pos + 2 >= expanded.len or expanded[pos + 2] != '!') return null;
+        if (std.mem.trimStart(u8, statement_so_far, " ").len != 0) return null;
+        // After a statement on the same line there is no indentation.
+        var line_start = pos;
+        while (line_start > 0 and expanded[line_start - 1] == ' ') line_start -= 1;
+        if (line_start != 0 and expanded[line_start - 1] != '\n') return 0;
+        return pos - line_start;
+    }
+
     fn compressCss(allocator: std.mem.Allocator, expanded: []const u8) error{OutOfMemory}![]const u8 {
         var first: std.ArrayList(u8) = .empty;
         errdefer first.deinit(allocator);
@@ -5153,6 +5358,23 @@ pub const RuleIR = struct {
                 if (comment_end == null) first_no_comment_end = true;
                 const kept = std.mem.startsWith(u8, std.mem.trimStart(u8, first.items[first_statement_start..], " "), "--");
                 if (!kept) {
+                    // A `/*!` comment that is a statement of its own stays.
+                    // Its later lines lose the indentation the comment
+                    // itself has in the expanded text.
+                    if (comment_end) |end| {
+                        if (loudCommentIndent(expanded, i, first.items[first_statement_start..], first_paren_depth)) |indent| {
+                            var k = i;
+                            while (k < end + 2) : (k += 1) {
+                                try first.append(allocator, expanded[k]);
+                                if (expanded[k] != '\n') continue;
+                                var skipped: usize = 0;
+                                while (skipped < indent and k + 1 < end and expanded[k + 1] == ' ') : (skipped += 1) k += 1;
+                            }
+                            first_statement_start = first.items.len;
+                            i = end + 1;
+                            continue;
+                        }
+                    }
                     i = if (comment_end) |end| end + 1 else expanded.len - 1;
                     continue;
                 }
@@ -5234,10 +5456,17 @@ pub const RuleIR = struct {
         var preserve_decl_zero = false;
         var in_string: u8 = 0;
         var paren_depth: u32 = 0;
-        var color_func_depth: u32 = 0;
+        // Inside a declaration value, the depth of the outermost function
+        // that is not a calculation. Everything in it is copied as it is.
+        var verbatim_depth: u32 = 0;
+        var in_decl_value = false;
         var calc_func_depth: u32 = 0;
         var preserve_calc_ops = false;
         var in_custom_decl = false;
+        var raw_prelude = false;
+        var in_media_prelude = false;
+        // The `decl_hint_*` bits of the declaration being written.
+        var stmt_hints: u8 = 0;
         // Where the statement being written starts in `out`, and for every
         // open block where its prelude starts. An empty block is removed
         // from there; searching backwards for a brace or semicolon would
@@ -5259,15 +5488,24 @@ pub const RuleIR = struct {
         var no_comment_end = false;
         i = 0;
         while (i < first.items.len) : (i += 1) {
+            if (first.items[i] == decl_hint_marker and i + 1 < first.items.len and out.items.len == statement_start) {
+                stmt_hints = first.items[i + 1] -% '0';
+                i += 1;
+                continue;
+            }
+            // In plain CSS a number is still a number.
+            const literal_text = (stmt_hints & decl_hint_plain_css) == 0;
             if (std.mem.startsWith(u8, first.items[i..], interp_decl_marker)) {
                 i += interp_decl_marker.len - 1;
-                preserve_decl_zero = true;
+                if (literal_text) preserve_decl_zero = true;
                 continue;
             }
             if (std.mem.startsWith(u8, first.items[i..], literal_decl_marker)) {
                 i += literal_decl_marker.len - 1;
-                preserve_decl_zero = true;
-                preserve_calc_ops = true;
+                if (literal_text) {
+                    preserve_decl_zero = true;
+                    preserve_calc_ops = true;
+                }
                 continue;
             }
 
@@ -5308,38 +5546,100 @@ pub const RuleIR = struct {
                 no_comment_end = true;
             }
 
+            // A `/*!` comment the first pass kept stands where a statement
+            // starts and is copied whole.
+            if (c == '/' and paren_depth == 0 and out.items.len == statement_start and
+                std.mem.startsWith(u8, first.items[i..], "/*!"))
+            {
+                if (std.mem.indexOfPos(u8, first.items, i + 3, "*/")) |end| {
+                    try out.appendSlice(allocator, first.items[i .. end + 2]);
+                    statement_start = out.items.len;
+                    input_statement_start = end + 2;
+                    statement_is_style_rule = null;
+                    i = end + 1;
+                    continue;
+                }
+            }
+
+            if (verbatim_depth != 0 and c != '(' and c != ')') {
+                try out.append(allocator, c);
+                continue;
+            }
+            // A value that is one unquoted string is written as it is.
+            if (in_decl_value and (stmt_hints & decl_hint_string_value) != 0 and c != '(' and c != ')' and
+                !(paren_depth == 0 and (c == ';' or c == '}')))
+            {
+                try out.append(allocator, c);
+                continue;
+            }
+            if (c == ';' or c == '}' or c == '{') {
+                if (paren_depth == 0) {
+                    raw_prelude = false;
+                    in_media_prelude = false;
+                    in_decl_value = false;
+                    stmt_hints = 0;
+                }
+            }
             if (c == ';' or c == '}') {
                 preserve_decl_zero = false;
                 preserve_calc_ops = false;
                 // Inside parentheses these do not end a custom property.
                 if (paren_depth == 0) in_custom_decl = false;
             }
-            if (try appendCompressedImport(&out, allocator, first.items, &i)) {
-                statement_start = out.items.len;
-                continue;
+            // The prelude of an at-rule is written as it is. Only a media
+            // query list is shortened, and there only outside parentheses.
+            if (c == '@' and paren_depth == 0 and out.items.len == statement_start) {
+                var name_end = i + 1;
+                while (name_end < first.items.len and (std.ascii.isAlphanumeric(first.items[name_end]) or first.items[name_end] == '-')) name_end += 1;
+                const at_name = first.items[i + 1 .. name_end];
+                in_media_prelude = std.ascii.eqlIgnoreCase(at_name, "media");
+                raw_prelude = !in_media_prelude;
+                if (try appendCompressedImport(&out, allocator, first.items, &i)) continue;
             }
+            if (c == ':' and paren_depth == 0) {
+                in_custom_decl = (stmt_hints & decl_hint_script_custom_property) == 0 and
+                    std.mem.startsWith(u8, std.mem.trim(u8, out.items[statement_start..], " "), "--");
+            }
+            const raw = in_custom_decl or raw_prelude or (in_media_prelude and paren_depth != 0);
+            if (c == ':' and paren_depth == 0 and !raw and !in_media_prelude and !in_decl_value) {
+                if (statement_is_style_rule == null) {
+                    statement_is_style_rule = statementIsStyleRule(first.items, input_statement_start);
+                }
+                in_decl_value = !statement_is_style_rule.?;
+            }
+            const shortened = paren_depth == 0 or (in_decl_value and calc_func_depth != 0);
+            // Inside parentheses only a selector list has combinators;
+            // `:nth-child(2n + 1)` keeps its spaces.
+            const combinators_shortened = paren_depth == 0 or
+                (selector_argument_parens.items.len != 0 and selector_argument_parens.items[selector_argument_parens.items.len - 1]);
             const value_context = out.items.len != 0 and (out.items[out.items.len - 1] == ':' or out.items[out.items.len - 1] == ',' or out.items[out.items.len - 1] == ' ' or out.items[out.items.len - 1] == '(');
-            if (!in_custom_decl and paren_depth == 0 and value_context and try appendCompressedTopLevelRgb(&out, allocator, first.items, &i)) continue;
-            if (!in_custom_decl and paren_depth == 0 and value_context and try appendCompressedTopLevelRgba(&out, allocator, first.items, &i)) continue;
-            if (!in_custom_decl and value_context and try appendCompressedTransparent(&out, allocator, first.items, &i)) continue;
-            if (!in_custom_decl and value_context and try appendCompressedNamedColor(&out, allocator, first.items, &i)) continue;
-            if (!in_custom_decl and paren_depth == 0 and try appendCompressedHex(&out, allocator, first.items, &i)) continue;
+            if (!raw and in_decl_value and paren_depth == 0 and c != ':') {
+                // In plain CSS a color name is a word and `rgb()` a function.
+                const colors_parsed = (stmt_hints & decl_hint_plain_css) == 0;
+                if (colors_parsed and value_context and try appendCompressedLegacyColor(&out, allocator, first.items, &i)) continue;
+                if (colors_parsed and value_context and try appendCompressedTransparent(&out, allocator, first.items, &i)) continue;
+                if (colors_parsed and value_context and try appendCompressedNamedColor(&out, allocator, first.items, &i)) continue;
+                if (try appendCompressedHex(&out, allocator, first.items, &i)) continue;
+            }
 
             if (c == '(') {
                 var name_start = out.items.len;
-                while (name_start > 0 and (std.ascii.isAlphabetic(out.items[name_start - 1]) or out.items[name_start - 1] == '-')) : (name_start -= 1) {}
+                while (name_start > 0 and (std.ascii.isAlphanumeric(out.items[name_start - 1]) or out.items[name_start - 1] == '-' or out.items[name_start - 1] == '_')) : (name_start -= 1) {}
                 const name = out.items[name_start..];
                 paren_depth += 1;
-                if (paren_depth == 1 and
-                    (std.ascii.eqlIgnoreCase(name, "rgb") or
-                        std.ascii.eqlIgnoreCase(name, "rgba") or
-                        std.ascii.eqlIgnoreCase(name, "hsl") or
-                        std.ascii.eqlIgnoreCase(name, "hsla")))
-                {
-                    color_func_depth = paren_depth;
+                if (in_decl_value and !raw and verbatim_depth == 0) {
+                    // A `calc()` written inside a calculation was put there
+                    // as text; a real one would have been merged into it.
+                    const nested_calc_text = calc_func_depth != 0 and std.ascii.eqlIgnoreCase(name, "calc");
+                    if (!nested_calc_text and (css_utils.isCalculationFunctionName(name) or (name.len == 0 and calc_func_depth != 0))) {
+                        if (calc_func_depth == 0) calc_func_depth = paren_depth;
+                    } else {
+                        verbatim_depth = paren_depth;
+                    }
+                } else if (std.ascii.eqlIgnoreCase(name, "calc") and calc_func_depth == 0) {
+                    calc_func_depth = paren_depth;
                 }
-                if (std.ascii.eqlIgnoreCase(name, "calc")) calc_func_depth = paren_depth;
-                const holds_selectors = !in_custom_decl and name_start > 0 and out.items[name_start - 1] == ':' and
+                const holds_selectors = !raw and name_start > 0 and out.items[name_start - 1] == ':' and
                     selector_mod.isSelectorPseudo(name) and blk: {
                     if (statement_is_style_rule == null) {
                         statement_is_style_rule = statementIsStyleRule(first.items, input_statement_start);
@@ -5353,7 +5653,7 @@ pub const RuleIR = struct {
             if (c == ')') {
                 _ = selector_argument_parens.pop();
                 if (paren_depth != 0) {
-                    if (color_func_depth == paren_depth) color_func_depth = 0;
+                    if (verbatim_depth == paren_depth) verbatim_depth = 0;
                     if (calc_func_depth == paren_depth) calc_func_depth = 0;
                     paren_depth -= 1;
                 }
@@ -5361,16 +5661,13 @@ pub const RuleIR = struct {
                 continue;
             }
 
-            if (c == ':' and paren_depth == 0) {
-                in_custom_decl = std.mem.startsWith(u8, std.mem.trim(u8, out.items[statement_start..], " "), "--");
-            }
-            if (!in_custom_decl and c == ':' and i + 1 < first.items.len and first.items[i + 1] == ' ' and paren_depth == 0) {
+            if (!raw and c == ':' and i + 1 < first.items.len and first.items[i + 1] == ' ' and paren_depth == 0) {
                 try out.append(allocator, ':');
                 i += 1;
                 continue;
             }
-            if (!in_custom_decl and c == ',' and i + 1 < first.items.len and first.items[i + 1] == ' ' and
-                (paren_depth == 0 or color_func_depth != 0 or
+            if (!raw and c == ',' and i + 1 < first.items.len and first.items[i + 1] == ' ' and
+                (shortened or
                     (selector_argument_parens.items.len != 0 and selector_argument_parens.items[selector_argument_parens.items.len - 1])))
             {
                 try out.append(allocator, ',');
@@ -5379,7 +5676,11 @@ pub const RuleIR = struct {
             }
 
             if (c == ' ') {
-                if (in_custom_decl) {
+                if (next_is_supports_paren: {
+                    break :next_is_supports_paren raw_prelude and i + 1 < first.items.len and first.items[i + 1] == '(' and
+                        std.mem.endsWith(u8, out.items, "@supports") and out.items.len - "@supports".len == statement_start;
+                }) continue;
+                if (raw) {
                     try out.append(allocator, c);
                     continue;
                 }
@@ -5398,26 +5699,26 @@ pub const RuleIR = struct {
                 if (prev == '}' or prev == '{' or prev == ';' or next == '{' or next == '}') continue;
                 if (calc_func_depth != 0 and !preserve_calc_ops and (prev == '/' or prev == '*' or next == '/' or next == '*')) continue;
                 if (prev == ')' and std.mem.startsWith(u8, first.items[i + 1 ..], "and ")) continue;
-                if ((next == '+' or next == '>' or next == '~') and isCompressedSelectorContext(first.items, i)) continue;
+                if (!in_media_prelude and combinators_shortened and (next == '+' or next == '>' or next == '~') and isCompressedSelectorContext(first.items, i)) continue;
                 if (next == '(' and std.mem.endsWith(u8, out.items, "@media")) continue;
                 if (next == '(' and std.mem.endsWith(u8, out.items, "@supports")) continue;
             }
 
-            if (calc_func_depth != 0 and !preserve_calc_ops and (c == '/' or c == '*')) {
+            if (!raw and calc_func_depth != 0 and !preserve_calc_ops and (c == '/' or c == '*')) {
                 if (out.items.len != 0 and out.items[out.items.len - 1] == ' ') out.items.len -= 1;
                 try out.append(allocator, c);
                 if (i + 1 < first.items.len and first.items[i + 1] == ' ') i += 1;
                 continue;
             }
 
-            if (calc_func_depth != 0 and c == '+') {
+            if (!raw and calc_func_depth != 0 and c == '+') {
                 if (out.items.len != 0 and out.items[out.items.len - 1] == ' ') out.items.len -= 1;
                 try out.appendSlice(allocator, " + ");
                 if (i + 1 < first.items.len and first.items[i + 1] == ' ') i += 1;
                 continue;
             }
 
-            if (!in_custom_decl and (c == '+' or c == '>' or c == '~') and isCompressedSelectorContext(first.items, i)) {
+            if (!raw and !in_media_prelude and combinators_shortened and (c == '+' or c == '>' or c == '~') and isCompressedSelectorContext(first.items, i)) {
                 if (out.items.len != 0 and out.items[out.items.len - 1] == ' ' and
                     !css_utils.endsWithHexEscape(out.items[0 .. out.items.len - 1])) out.items.len -= 1;
                 try out.append(allocator, c);
@@ -5425,7 +5726,7 @@ pub const RuleIR = struct {
                 continue;
             }
 
-            if (!in_custom_decl and !preserve_decl_zero and (paren_depth == 0 or color_func_depth != 0) and c == '0' and i + 1 < first.items.len and first.items[i + 1] == '.') {
+            if (!raw and !preserve_decl_zero and shortened and c == '0' and i + 1 < first.items.len and first.items[i + 1] == '.') {
                 const prev = if (out.items.len != 0) out.items[out.items.len - 1] else 0;
                 if (prev != '-' and !std.ascii.isAlphanumeric(prev) and prev != '_' and prev != '.') continue;
             }
@@ -5461,6 +5762,8 @@ pub const RuleIR = struct {
             }
         }
         first.deinit(allocator);
+        // The last statement of the stylesheet has no semicolon either.
+        if (out.items.len != 0 and out.items[out.items.len - 1] == ';' and !endsWithEscapedCharacter(out.items)) out.items.len -= 1;
         return try out.toOwnedSlice(allocator);
     }
 
@@ -9860,6 +10163,10 @@ pub const RuleIR = struct {
                     return;
                 }
                 try writeCurrentIndent(emit_ctx, state.indent_level);
+                if (emit_ctx.compressed and node.decl_hints != 0) {
+                    try emit_ctx.writeByte(decl_hint_marker);
+                    try emit_ctx.writeByte('0' + node.decl_hints);
+                }
                 try emit_ctx.writeAll(prop_str);
                 try emit_ctx.writeAll(": ");
                 var value_text = val_str;
@@ -10054,6 +10361,10 @@ pub const RuleIR = struct {
                     return;
                 }
                 try writeCurrentIndent(emit_ctx, state.indent_level);
+                if (emit_ctx.compressed and node.decl_hints != 0) {
+                    try emit_ctx.writeByte(decl_hint_marker);
+                    try emit_ctx.writeByte('0' + node.decl_hints);
+                }
                 try emit_ctx.writeAll(prop_str);
                 if (is_custom_property) {
                     const source_decl_col: ?usize = blk: {
@@ -10332,7 +10643,7 @@ pub const RuleIR = struct {
             .path_arena = temp,
             .urls_mode = opts.source_map_urls_mode,
             .source_map_output_dir_abs = opts.source_map_output_dir_abs,
-            .compressed = output_style == .compressed,
+            .compressed = output_style == .compressed or opts.emit_compress_markers,
         };
 
         var emit_state: EmitLoopState = .{};
@@ -10397,7 +10708,11 @@ pub const RuleIR = struct {
                     emit_state.pending_blank = false;
                     emit_state.pending_leading_blank = false;
                     emit_state.pending_trailing_sourcemap_blank = false;
-                    try emit.writeAll(chunk.css);
+                    if (emit.compressed) {
+                        try emit.writeAll(chunk.css);
+                    } else {
+                        try writeWithoutCompressMarkers(&emit, chunk.css);
+                    }
                     emit_state.has_output = true;
                     // If chunk contains up to inline trailing comment then visible
                     // Suppress the previous blank (treated as "trailing comment" like legacy official Sass CLI,
