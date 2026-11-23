@@ -1390,3 +1390,100 @@ test "api: compressed output drops an empty rule without its enclosing block" {
     defer alloc.free(css);
     try std.testing.expectEqualStrings("@media print{.w a{b:c}}@media print{a{b:c}}e{f:g}k{l:url(a;b);n:o}\n", css);
 }
+
+test "api: @extend covers every combination of a repeated target" {
+    // Lists a built-in function returns live until the allocator is torn
+    // down, so this compile runs in an arena.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const source =
+        \\@use "sass:selector";
+        \\.a + .a { x: y; }
+        \\.b .c .b { x: y; }
+        \\%p > %p { x: y; }
+        \\.f { @extend .a; }
+        \\.g { @extend .b; }
+        \\.h { @extend .c; }
+        \\.i, .j { @extend %p; }
+        \\k {
+        \\  l: selector.extend(".m .m", ".m", ".n .o");
+        \\  p: selector.replace(".m .m", ".m", ".n");
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    try std.testing.expectEqualStrings(
+        \\.a + .a, .f + .a, .a + .f, .f + .f {
+        \\  x: y;
+        \\}
+        \\
+        \\.b .c .b, .b .h .b, .g .c .b, .g .h .b, .b .c .g, .b .h .g, .g .c .g, .g .h .g {
+        \\  x: y;
+        \\}
+        \\
+        \\.i > .i, .j > .i, .i > .j, .j > .j {
+        \\  x: y;
+        \\}
+        \\
+        \\k {
+        \\  l: .m .m, .n .o .m, .m .n .o, .n .m .o, .n .o .o;
+        \\  p: .n .n;
+        \\}
+        \\
+    , css);
+}
+
+test "api: a repeated @extend target leaves out covered extenders and keeps sibling combinators" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\.a .a { x: y; }
+        \\.b .b { x: y; }
+        \\.c .c { x: y; }
+        \\.q .f, .f { @extend .a; }
+        \\.g + .h { @extend .b; }
+        \\.i, #j.i { @extend .c; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.a .a, .f .a, .a .f, .f .f {
+        \\  x: y;
+        \\}
+        \\
+        \\.b .b, .g + .h .b, .b .g + .h, .g + .h .g + .h {
+        \\  x: y;
+        \\}
+        \\
+        \\.c .c, .i .c, #j.i .c, .c .i, .i .i, #j.i .i, .c #j.i, .i #j.i {
+        \\  x: y;
+        \\}
+        \\
+    , css);
+}
+
+test "api: a repeated @extend target past the limit is still extended" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // Weaving `.x .f` into ten compounds makes more selectors than the
+    // combined path allows, so the selector takes the ordinary path.
+    const source =
+        \\.p0 .a .p1 .a .p2 .a .p3 .a .p4 .a .p5 .a .p6 .a .p7 .a .p8 .a .p9 .a { x: y; }
+        \\.x .f { @extend .a; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    // One compound at a time: the original and, for each of the ten
+    // compounds, the two ways of weaving `.x` in.
+    const selector_list = css[0..std.mem.indexOfScalar(u8, css, '{').?];
+    try std.testing.expectEqual(@as(usize, 21), std.mem.count(u8, selector_list, ", ") + 1);
+    for (0..10) |i| {
+        var buf: [32]u8 = undefined;
+        const direct = try std.fmt.bufPrint(&buf, ".p{d} .x .f", .{i});
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, selector_list, direct));
+        const woven = try std.fmt.bufPrint(&buf, ".p{d} .f", .{i});
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, selector_list, woven));
+    }
+}

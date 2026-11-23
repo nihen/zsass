@@ -3655,6 +3655,20 @@ pub const ApplyState = struct {
             // the first hit for an extension index is its rightmost match.
             @memset(ext_seen_generation, 0);
             var compound_generation: u32 = 0;
+            // Extensions whose target is in several compounds of this
+            // selector and that were applied to all of them at once.
+            var repeated_target_exts: std.ArrayList(usize) = .empty;
+            defer repeated_target_exts.deinit(self.allocator);
+            // The ones whose own target is repeated. They are applied to
+            // every compound at once and are done after the first pass; the
+            // others still meet the second pass.
+            var fully_applied_exts: std.ArrayList(usize) = .empty;
+            defer fully_applied_exts.deinit(self.allocator);
+            var repeated_target_scanned = false;
+            var repeated_target_emitted = false;
+            // Some combination was left out, so the second pass still has
+            // these extensions to apply.
+            var repeated_target_incomplete = false;
 
             // Collect compound positions
             var compound_positions: [64]usize = undefined;
@@ -3717,6 +3731,146 @@ pub const ApplyState = struct {
                         const ext_target_is_placeholder = ext_is_placeholder[ext_i];
                         if (!compoundContainsTarget(&compound, &ext.target)) continue;
                         if (hasBogusMultipleCombinators(&complex)) continue;
+                        if (!repeated_target_scanned) {
+                            repeated_target_scanned = true;
+
+                            try collectRepeatedTargetExtensions(
+                                self.allocator,
+                                &complex,
+                                self.extensions.items,
+                                ext_index,
+                                &repeated_target_exts,
+                                &fully_applied_exts,
+                            );
+                        }
+                        if (std.mem.indexOfScalar(usize, repeated_target_exts.items, ext_i) != null) {
+                            if (repeated_target_emitted) continue;
+                            repeated_target_emitted = true;
+
+                            // Apply the extensions one after another, oldest
+                            // first: each one extends every selector the
+                            // earlier ones produced, right after it.
+                            const Generated = struct { selector: ComplexSelector, applied: std.DynamicBitSetUnmanaged };
+                            var generated: std.ArrayList(Generated) = .empty;
+                            var expanded: std.ArrayList(Generated) = .empty;
+                            defer {
+                                for (generated.items) |*g| {
+                                    g.selector.deinit();
+                                    g.applied.deinit(self.allocator);
+                                }
+                                generated.deinit(self.allocator);
+                                for (expanded.items) |*g| {
+                                    g.selector.deinit();
+                                    g.applied.deinit(self.allocator);
+                                }
+                                expanded.deinit(self.allocator);
+                            }
+                            var related_exts: std.ArrayList(*const Extension) = .empty;
+                            defer related_exts.deinit(self.allocator);
+                            for (repeated_target_exts.items) |repeated_ext_i| {
+                                try related_exts.append(self.allocator, &self.extensions.items[repeated_ext_i]);
+                            }
+                            try generated.ensureUnusedCapacity(self.allocator, 1);
+                            {
+                                var first = try complex.clone(self.allocator);
+                                errdefer first.deinit();
+                                generated.appendAssumeCapacity(.{
+                                    .selector = first,
+                                    .applied = try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, self.extensions.items.len),
+                                });
+                            }
+                            // Weaving can make more selectors than the
+                            // estimate counted. Past the limit everything
+                            // made here is dropped and the selector takes
+                            // the ordinary path, as it does when the
+                            // estimate itself is past the limit.
+                            var abandoned = false;
+                            product_loop: for (repeated_target_exts.items) |repeated_ext_i| {
+                                const repeated_ext = &self.extensions.items[repeated_ext_i];
+                                for (generated.items, 0..) |*base, base_idx| {
+                                    var product: std.ArrayList(ComplexSelector) = .empty;
+                                    defer {
+                                        for (product.items) |*g| g.deinit();
+                                        product.deinit(self.allocator);
+                                    }
+                                    // The limit holds for everything the
+                                    // extensions produce together. What is
+                                    // left of it, after the selectors still
+                                    // to be carried over, is all this one
+                                    // may add.
+                                    const carried = expanded.items.len + (generated.items.len - base_idx);
+                                    const room = repeated_target_max_results -| carried;
+                                    var skipped_combination = false;
+                                    var over_limit = room == 0;
+                                    if (!over_limit and
+                                        !try appendRepeatedTargetProduct(frame, self.allocator, &base.selector, repeated_ext, related_exts.items, frame.config.replace_mode, room, &skipped_combination, &over_limit, &product) and
+                                        !over_limit)
+                                    {
+                                        try appendSingleTargetReplacements(frame, self.allocator, &base.selector, repeated_ext, related_exts.items, &product);
+                                    }
+                                    if (over_limit or product.items.len > room) {
+                                        abandoned = true;
+                                        break :product_loop;
+                                    }
+                                    // A combination left out for its weave
+                                    // goes back to the second pass.
+                                    if (skipped_combination) repeated_target_incomplete = true;
+                                    try expanded.ensureUnusedCapacity(self.allocator, 1 + product.items.len);
+                                    const moved = base.*;
+                                    base.* = .{ .selector = ComplexSelector.init(self.allocator), .applied = .{} };
+                                    expanded.appendAssumeCapacity(moved);
+                                    for (product.items) |*selector| {
+                                        var applied = try moved.applied.clone(self.allocator);
+                                        errdefer applied.deinit(self.allocator);
+                                        applied.set(repeated_ext_i);
+                                        expanded.appendAssumeCapacity(.{ .selector = selector.*, .applied = applied });
+                                        selector.* = ComplexSelector.init(self.allocator);
+                                    }
+                                }
+                                for (generated.items) |*g| {
+                                    g.selector.deinit();
+                                    g.applied.deinit(self.allocator);
+                                }
+                                generated.clearRetainingCapacity();
+                                std.mem.swap(std.ArrayList(Generated), &generated, &expanded);
+                            }
+
+                            if (abandoned) {
+                                repeated_target_exts.clearRetainingCapacity();
+                                fully_applied_exts.clearRetainingCapacity();
+                                repeated_target_incomplete = false;
+                            }
+                            // With the room reserved, handing a selector
+                            // over below cannot fail half way.
+                            if (!abandoned) try first_pass.ensureDirectCapacity(self.allocator, first_pass.selectors.items.len + generated.items.len);
+                            // The first entry is the selector itself.
+                            if (!abandoned) for (generated.items[1..]) |*g| {
+                                for (g.selector.components.items) |*component| {
+                                    if (component.* != .compound) continue;
+                                    normalizeGeneratedCompound(&component.compound, self.extensions.items, self.sort_extension_hints.items);
+                                }
+                                if (hasBogusMultipleCombinators(&g.selector)) continue;
+                                // One key for the whole batch keeps the order
+                                // built above through the later sorting.
+                                const newest_ext_i = repeated_target_exts.items[repeated_target_exts.items.len - 1];
+                                const newest_ext = &self.extensions.items[newest_ext_i];
+                                const selector = g.selector;
+                                const applied = g.applied;
+                                g.selector = ComplexSelector.init(self.allocator);
+                                g.applied = .{};
+                                try first_pass.appendDirect(self.allocator, .{
+                                    .selector = selector,
+                                    .eval_order = newest_ext.eval_order,
+                                    .module_group_start = newest_ext.module_group_start_order,
+                                    .statement_branch_index = newest_ext.statement_branch_index,
+                                    .comp_idx = comp_idx,
+                                    .simple_idx = repeated_target_simple_idx,
+                                    .target_is_placeholder = ext_is_placeholder[newest_ext_i],
+                                    .applied = applied,
+                                });
+                            };
+                            if (!abandoned) continue;
+                        }
 
                         const batch_start = first_pass.selectors.items.len;
                         for (ext.extender.selectors.items) |extender_complex| {
@@ -4019,6 +4173,18 @@ pub const ApplyState = struct {
                         for (sorted_indices) |ext_i| {
                             if (!nested_ext_candidates[ext_i]) continue;
                             const ext = self.extensions.items[ext_i];
+                            // The extensions applied together to a
+                            // selector with a repeated target have nothing
+                            // left to do on what they produced, or on what
+                            // this pass made of it, except inside a
+                            // pseudo-class argument.
+                            if (!repeated_target_incomplete and
+                                first_pass.simple_indices.items[first_pass.direct_id.items[fi]] == repeated_target_simple_idx and
+                                std.mem.indexOfScalar(usize, fully_applied_exts.items, ext_i) != null and
+                                !try complexContainsTargetInPseudos(&first_pass.selectors.items[fi], &ext.target))
+                            {
+                                continue;
+                            }
                             if (first_pass.applied_exts.items[fi].isSet(ext_i)) {
                                 if (!compoundContainsTargetInComplex(&first_pass.selectors.items[fi], &ext.target)) {
                                     continue;
@@ -6746,6 +6912,508 @@ fn applyExtensionToComplex(
     }
 
     return results.toOwnedSlice(allocator);
+}
+
+/// When some extension's target is in more than one compound of `complex`,
+/// list every extension whose target is in the selector, oldest first.
+/// Such a selector is extended by applying them in that order.
+fn collectRepeatedTargetExtensions(
+    allocator: std.mem.Allocator,
+    complex: *const ComplexSelector,
+    extensions: []const Extension,
+    ext_index: anytype,
+    out: *std.ArrayList(usize),
+    /// The ones among them whose own target is in more than one compound.
+    repeated: *std.ArrayList(usize),
+) error{OutOfMemory}!void {
+    const Seen = struct { ext_i: usize, compound_idx: usize, count: usize };
+    var seen: std.ArrayList(Seen) = .empty;
+    defer seen.deinit(allocator);
+    var compound_count: usize = 0;
+    for (complex.components.items, 0..) |comp, comp_idx| {
+        if (comp != .compound) continue;
+        compound_count += 1;
+        for (comp.compound.simple_selectors.items) |ss| {
+            const matching = if (ext_index.get(ssKeyFromSimple(ss))) |list| list.items else continue;
+            next_ext: for (matching) |ext_i| {
+                for (seen.items) |*entry| {
+                    if (entry.ext_i != ext_i) continue;
+                    if (entry.compound_idx == comp_idx) continue :next_ext;
+                    if (!compoundContainsTarget(&comp.compound, &extensions[ext_i].target)) continue :next_ext;
+                    entry.compound_idx = comp_idx;
+                    entry.count += 1;
+                    continue :next_ext;
+                }
+                if (!compoundContainsTarget(&comp.compound, &extensions[ext_i].target)) continue;
+                try seen.append(allocator, .{ .ext_i = ext_i, .compound_idx = comp_idx, .count = 1 });
+            }
+        }
+    }
+    if (compound_count < 2) return;
+    var any_repeated = false;
+    for (seen.items) |entry| {
+        if (entry.count >= 2) any_repeated = true;
+    }
+    if (!any_repeated) return;
+    // Applying them together multiplies the selector by every choice at
+    // every compound. Past the limit the selector is left to the ordinary
+    // path as a whole; stopping part of the way would lose selectors that
+    // path writes.
+    var total: usize = 1;
+    for (seen.items) |entry| {
+        if (entry.count > repeated_target_max_positions) return;
+        const radix = extensions[entry.ext_i].extender.selectors.items.len + 1;
+        for (0..entry.count) |_| {
+            total = saturatingMulUsize(total, radix);
+            if (total > repeated_target_max_results) return;
+        }
+    }
+    for (seen.items) |entry| {
+        try out.append(allocator, entry.ext_i);
+        if (entry.count >= 2) try repeated.append(allocator, entry.ext_i);
+    }
+    const Context = struct {
+        extensions: []const Extension,
+        fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+            return ctx.extensions[a].eval_order < ctx.extensions[b].eval_order;
+        }
+    };
+    std.mem.sort(usize, out.items, Context{ .extensions = extensions }, Context.lessThan);
+}
+
+/// The specificity of the first extender, among the extensions applied to
+/// a selector, that holds the simple selector `needle`.
+fn firstExtenderSpecificityWith(
+    ext: *const Extension,
+    related: []const *const Extension,
+    needle: SimpleSelector,
+) ?specificity.Specificity {
+    const only_self = [_]*const Extension{ext};
+    const extensions: []const *const Extension = if (related.len != 0) related else &only_self;
+    for (extensions) |candidate_ext| {
+        for (candidate_ext.extender.selectors.items) |*complex| {
+            for (complex.components.items) |component| {
+                if (component != .compound) continue;
+                for (component.compound.simple_selectors.items) |ss| {
+                    if (simpleSelectorEql(ss, needle)) return specificity.complexSpecificity(complex);
+                }
+            }
+        }
+    }
+    return null;
+}
+
+fn specificityMax(a: specificity.Specificity, b: specificity.Specificity) specificity.Specificity {
+    return if (specificity.specificityGte(a, b)) a else b;
+}
+
+/// List the extenders of `ext` worth putting into `complex`. An extender
+/// that another one covers (`.x .f` next to `.f`, in the same extension or
+/// in one of `related` with the same target) is left out when the selector
+/// made with the covering one is at least as specific as everything the
+/// covered one came from. `#x.f` next to `.f` stays: it raises specificity.
+fn collectUncoveredExtenders(
+    allocator: std.mem.Allocator,
+    complex: *const ComplexSelector,
+    ext: *const Extension,
+    related: []const *const Extension,
+    out: *std.ArrayList(*const ComplexSelector),
+) error{OutOfMemory}!void {
+    const original = specificity.complexSpecificity(complex);
+    var target_complex = ComplexSelector.init(allocator);
+    defer target_complex.deinit();
+    try target_complex.components.ensureUnusedCapacity(allocator, 1);
+    target_complex.components.appendAssumeCapacity(.{ .compound = try ext.target.clone(allocator) });
+    const target = specificity.complexSpecificity(&target_complex);
+
+    for (ext.extender.selectors.items, 0..) |*candidate, candidate_idx| {
+        // Everything the candidate's simple selectors came from.
+        var source = original;
+        for (candidate.components.items) |component| {
+            if (component != .compound) continue;
+            for (component.compound.simple_selectors.items) |ss| {
+                if (firstExtenderSpecificityWith(ext, related, ss)) |first| source = specificityMax(source, first);
+            }
+        }
+
+        var covered = false;
+        for (ext.extender.selectors.items, 0..) |*other, other_idx| {
+            if (other_idx == candidate_idx) continue;
+            if (!selector_mod.complexIsSuperSelector(other, candidate)) continue;
+            // Of two extenders that cover each other the first one stays.
+            if (other_idx > candidate_idx and selector_mod.complexIsSuperSelector(candidate, other)) continue;
+            if (!coveringExtenderIsSpecificEnough(original, target, other, source)) continue;
+            covered = true;
+            break;
+        }
+        for (related) |other_ext| {
+            if (covered) break;
+            if (other_ext == ext) continue;
+            if (!compoundContainsTarget(&other_ext.target, &ext.target) or
+                !compoundContainsTarget(&ext.target, &other_ext.target)) continue;
+            for (other_ext.extender.selectors.items) |*other| {
+                if (!selector_mod.complexIsSuperSelector(other, candidate)) continue;
+                // The same extender written in two extensions is kept in both.
+                if (selector_mod.complexIsSuperSelector(candidate, other)) continue;
+                if (!coveringExtenderIsSpecificEnough(original, target, other, source)) continue;
+                covered = true;
+                break;
+            }
+        }
+        if (!covered) try out.append(allocator, candidate);
+    }
+}
+
+/// Whether the selector made by putting `covering` in place of the target
+/// is at least as specific as `source`.
+fn coveringExtenderIsSpecificEnough(
+    original: specificity.Specificity,
+    target: specificity.Specificity,
+    covering: *const ComplexSelector,
+    source: specificity.Specificity,
+) bool {
+    const extender = specificity.complexSpecificity(covering);
+    const made = specificity.Specificity{
+        .a = original.a -| target.a +| extender.a,
+        .b = original.b -| target.b +| extender.b,
+        .c = original.c -| target.c +| extender.c,
+    };
+    return specificity.specificityGte(made, source);
+}
+
+/// Replace the target in each compound that holds it, one compound at a
+/// time. Used where the full product is not built.
+fn appendSingleTargetReplacements(
+    frame: *ApplyFrame,
+    allocator: std.mem.Allocator,
+    complex: *const ComplexSelector,
+    ext: *const Extension,
+    related: []const *const Extension,
+    results: *std.ArrayList(ComplexSelector),
+) error{OutOfMemory}!void {
+    var extenders: std.ArrayList(*const ComplexSelector) = .empty;
+    defer extenders.deinit(allocator);
+    try collectUncoveredExtenders(allocator, complex, ext, related, &extenders);
+    for (complex.components.items, 0..) |comp, comp_idx| {
+        if (comp != .compound) continue;
+        if (!compoundContainsTarget(&comp.compound, &ext.target)) continue;
+        for (extenders.items) |extender_complex| {
+            // An extender with a sibling combinator is not woven into a
+            // selector that already has one before this compound.
+            if (complexHasSiblingCombinator(extender_complex) and prefixHasSiblingCombinator(complex.components.items[0..comp_idx])) {
+                if (try joinExtenderAfterDescendant(allocator, complex, comp_idx, &ext.target, extender_complex)) |joined| {
+                    errdefer {
+                        var doomed = joined;
+                        doomed.deinit();
+                    }
+                    try results.append(allocator, joined);
+                    continue;
+                }
+            }
+            var extra: std.ArrayList(ComplexSelector) = .empty;
+            defer {
+                for (extra.items) |*e| e.deinit();
+                extra.deinit(allocator);
+            }
+            const replaced = try generateExtendedSelector(
+                allocator,
+                complex,
+                comp_idx,
+                &comp.compound,
+                &ext.target,
+                extender_complex,
+                &extra,
+                frame.config.function_mode,
+            );
+            if (replaced) |selector| {
+                errdefer {
+                    var doomed = selector;
+                    doomed.deinit();
+                }
+                try results.append(allocator, selector);
+            }
+            try results.ensureUnusedCapacity(allocator, extra.items.len);
+            for (extra.items) |*selector| {
+                results.appendAssumeCapacity(selector.*);
+                selector.* = ComplexSelector.init(allocator);
+            }
+        }
+    }
+}
+
+/// Put `extender` in place of the compound at `comp_idx`, keeping everything
+/// before it as it is, where a descendant combinator comes before that
+/// compound: `.f + .g .a` and `.f + .h` give `.f + .g .f + .h`. Returns
+/// null where that does not apply or the compounds do not unify.
+fn joinExtenderAfterDescendant(
+    allocator: std.mem.Allocator,
+    selector: *const ComplexSelector,
+    comp_idx: usize,
+    target: *const CompoundSelector,
+    extender: *const ComplexSelector,
+) error{OutOfMemory}!?ComplexSelector {
+    const items = selector.components.items;
+    const extender_items = extender.components.items;
+    if (extender_items.len == 0 or comp_idx == 0 or comp_idx >= items.len) return null;
+    if (items[comp_idx] != .compound) return null;
+    if (items[comp_idx - 1] != .combinator or items[comp_idx - 1].combinator != .descendant) return null;
+    const extender_last = extender_items[extender_items.len - 1];
+    if (extender_last != .compound) return null;
+    // An extender with ancestors of its own (`.x .f + .g`) shares them with
+    // what is already there; that takes a weave.
+    for (extender_items) |component| {
+        if (component != .combinator) continue;
+        if (component.combinator != .next_sibling and component.combinator != .general_sibling) return null;
+    }
+
+    var joined = ComplexSelector.init(allocator);
+    errdefer joined.deinit();
+    try joined.components.ensureTotalCapacity(allocator, items.len + extender_items.len - 1);
+    for (items[0..comp_idx]) |component| joined.components.appendAssumeCapacity(switch (component) {
+        .compound => |c| .{ .compound = try c.clone(allocator) },
+        .combinator => |c| .{ .combinator = c },
+    });
+    for (extender_items[0 .. extender_items.len - 1]) |component| joined.components.appendAssumeCapacity(switch (component) {
+        .compound => |c| .{ .compound = try c.clone(allocator) },
+        .combinator => |c| .{ .combinator = c },
+    });
+    const unified = (try unifyCompound(allocator, &items[comp_idx].compound, target, &extender_last.compound)) orelse {
+        joined.deinit();
+        return null;
+    };
+    joined.components.appendAssumeCapacity(.{ .compound = unified });
+    for (items[comp_idx + 1 ..]) |component| joined.components.appendAssumeCapacity(switch (component) {
+        .compound => |c| .{ .compound = try c.clone(allocator) },
+        .combinator => |c| .{ .combinator = c },
+    });
+    return joined;
+}
+
+fn prefixHasSiblingCombinator(components: []const ComplexSelectorComponent) bool {
+    for (components) |component| {
+        if (component != .combinator) continue;
+        if (component.combinator == .next_sibling or component.combinator == .general_sibling) return true;
+    }
+    return false;
+}
+
+fn complexHasSiblingCombinator(complex: *const ComplexSelector) bool {
+    return prefixHasSiblingCombinator(complex.components.items);
+}
+
+/// Marks, in place of the index of a simple selector, a first-pass entry
+/// made by applying extensions to a selector with a repeated target.
+const repeated_target_simple_idx = std.math.maxInt(usize) - 1;
+const repeated_target_max_positions = 10;
+/// Later passes compare the results with one another, so the time grows
+/// with the square of this.
+const repeated_target_max_results = 1024;
+
+/// Extend a complex selector whose compounds contain the target more than
+/// once. Each such compound is either kept or replaced by one of the
+/// extenders, and the results are listed with the first compound varying
+/// fastest: `.a .a` extended by `.f` gives `.f .a`, `.a .f`, `.f .f`.
+/// With `replace_every_target` only the results that keep no compound are
+/// listed. Returns false when the target appears at most once, no extender
+/// is worth applying, or the limit is passed (`over_limit`).
+fn appendRepeatedTargetProduct(
+    frame: *ApplyFrame,
+    allocator: std.mem.Allocator,
+    complex: *const ComplexSelector,
+    ext: *const Extension,
+    /// Extensions applied to the same selector, `ext` among them. An
+    /// extender of `ext` that one of their extenders for the same target
+    /// covers is left out.
+    related: []const *const Extension,
+    replace_every_target: bool,
+    /// The most selectors this call may add.
+    max_results: usize,
+    /// Set when a combination was left out.
+    skipped_combination: *bool,
+    /// Set, with false returned, when there would be more than `max_results`
+    /// selectors. `results` may then hold some of them.
+    over_limit: *bool,
+    results: *std.ArrayList(ComplexSelector),
+) error{OutOfMemory}!bool {
+    var positions: [repeated_target_max_positions]usize = undefined;
+    var position_count: usize = 0;
+    var too_many_positions = false;
+    for (complex.components.items, 0..) |comp, comp_idx| {
+        if (comp != .compound) continue;
+        if (!compoundContainsTarget(&comp.compound, &ext.target)) continue;
+        if (position_count == positions.len) {
+            too_many_positions = true;
+            break;
+        }
+        positions[position_count] = comp_idx;
+        position_count += 1;
+    }
+    if (position_count < 2) return false;
+
+    var extenders: std.ArrayList(*const ComplexSelector) = .empty;
+    defer extenders.deinit(allocator);
+    try collectUncoveredExtenders(allocator, complex, ext, related, &extenders);
+    if (extenders.items.len == 0) return false;
+    // A selector an earlier extension made can hold the target in more
+    // compounds than the one the estimate counted.
+    if (too_many_positions) {
+        over_limit.* = true;
+        return false;
+    }
+    const radix = extenders.items.len + 1;
+    var combination_count: usize = 1;
+    for (0..position_count) |_| {
+        combination_count = saturatingMulUsize(combination_count, radix);
+        if (combination_count - 1 > max_results) {
+            over_limit.* = true;
+            return false;
+        }
+    }
+
+    const Partial = struct {
+        selector: ComplexSelector,
+        shift: usize,
+        /// An extender with `+` or `~` has been put into the selector.
+        has_combinator_extender: bool = false,
+    };
+    var current: std.ArrayList(Partial) = .empty;
+    var next: std.ArrayList(Partial) = .empty;
+    defer {
+        for (current.items) |*partial| partial.selector.deinit();
+        current.deinit(allocator);
+        for (next.items) |*partial| partial.selector.deinit();
+        next.deinit(allocator);
+    }
+
+    var may_repeat = false;
+    for (extenders.items) |extender_complex| {
+        if (extender_complex.components.items.len > 1) may_repeat = true;
+    }
+
+    const first_result = results.items.len;
+    // Combination 0 keeps every compound, which is the original selector.
+    var combination: usize = 1;
+    while (combination < combination_count) : (combination += 1) {
+        if (replace_every_target) {
+            // `selector.replace()` keeps no compound as it was.
+            var rest = combination;
+            var keeps_one = false;
+            for (0..position_count) |_| {
+                if (rest % radix == 0) keeps_one = true;
+                rest /= radix;
+            }
+            if (keeps_one) continue;
+        }
+        for (current.items) |*partial| partial.selector.deinit();
+        current.clearRetainingCapacity();
+        try current.ensureUnusedCapacity(allocator, 1);
+        current.appendAssumeCapacity(.{ .selector = try complex.clone(allocator), .shift = 0 });
+
+        // Replace from the first compound on. An extender with several
+        // compounds lengthens the selector in front of the replaced one, so
+        // later positions move by the same amount.
+        var digits = combination;
+        for (positions[0..position_count]) |position| {
+            const choice = digits % radix;
+            digits /= radix;
+            if (choice == 0) continue;
+            const extender_complex = extenders.items[choice - 1];
+            const extender_has_combinator = complexHasSiblingCombinator(extender_complex);
+
+            for (current.items) |*partial| {
+                const comp_idx = position + partial.shift;
+                const before_len = partial.selector.components.items.len;
+                const compound = partial.selector.components.items[comp_idx].compound;
+                // Weaving a second extender into a selector that already
+                // holds one with a sibling combinator is not reliable. After
+                // a descendant combinator the extender simply follows what
+                // is there (`.f + .g .f + .g`); elsewhere the combination is
+                // left out rather than written wrongly.
+                if (partial.has_combinator_extender and extender_complex.components.items.len > 1) {
+                    const joined = (try joinExtenderAfterDescendant(allocator, &partial.selector, comp_idx, &ext.target, extender_complex)) orelse {
+                        skipped_combination.* = true;
+                        continue;
+                    };
+                    errdefer {
+                        var doomed = joined;
+                        doomed.deinit();
+                    }
+                    try next.append(allocator, .{
+                        .selector = joined,
+                        .shift = partial.shift + joined.components.items.len - before_len,
+                        .has_combinator_extender = true,
+                    });
+                    continue;
+                }
+                var extra: std.ArrayList(ComplexSelector) = .empty;
+                defer {
+                    for (extra.items) |*e| e.deinit();
+                    extra.deinit(allocator);
+                }
+                const replaced = try generateExtendedSelector(
+                    allocator,
+                    &partial.selector,
+                    comp_idx,
+                    &compound,
+                    &ext.target,
+                    extender_complex,
+                    &extra,
+                    frame.config.function_mode,
+                );
+                if (replaced) |selector| {
+                    errdefer {
+                        var doomed = selector;
+                        doomed.deinit();
+                    }
+                    try next.append(allocator, .{
+                        .selector = selector,
+                        .shift = partial.shift + selector.components.items.len - before_len,
+                        .has_combinator_extender = partial.has_combinator_extender or extender_has_combinator,
+                    });
+                }
+                try next.ensureUnusedCapacity(allocator, extra.items.len);
+                for (extra.items) |*selector| {
+                    next.appendAssumeCapacity(.{
+                        .selector = selector.*,
+                        .shift = partial.shift + selector.components.items.len - before_len,
+                        .has_combinator_extender = partial.has_combinator_extender or extender_has_combinator,
+                    });
+                    selector.* = ComplexSelector.init(allocator);
+                }
+            }
+            for (current.items) |*partial| partial.selector.deinit();
+            current.clearRetainingCapacity();
+            std.mem.swap(std.ArrayList(Partial), &current, &next);
+            // One combination alone can weave into more than the limit.
+            if (current.items.len > max_results) {
+                over_limit.* = true;
+                return false;
+            }
+        }
+
+        for (current.items) |*partial| {
+            // Only weaving an extender of several compounds into the
+            // selector can give the same result twice.
+            var duplicate = false;
+            if (may_repeat) {
+                for (results.items[first_result..]) |*existing| {
+                    if (complexSelectorEql(existing, &partial.selector)) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+            }
+            if (duplicate) continue;
+            if (results.items.len - first_result == max_results) {
+                over_limit.* = true;
+                return false;
+            }
+            try results.append(allocator, partial.selector);
+            partial.selector = ComplexSelector.init(allocator);
+        }
+    }
+    // With nothing made, the caller's one-compound path gets its turn.
+    return results.items.len != first_result;
 }
 
 /// Returns true if this pseudo name accepts a selector list argument and should
