@@ -282,10 +282,6 @@ pub const emit_decl_flag_value_has_interp: u16 = 1 << 7;
 /// turns out to be a custom property, its value is still an ordinary
 /// SassScript value, which compressed output shortens.
 pub const emit_decl_flag_prop_source_not_custom: u16 = 1 << 8;
-/// The value mixes interpolation with other text (`#{$a} 0.5em`). It is
-/// evaluated to one string here, but its other parts are still numbers and
-/// colors, so compressed output must not copy it as a string.
-pub const emit_decl_flag_value_mixes_interp: u16 = 1 << 9;
 /// The value has a number written with a leading zero (`0.5em`) outside its
 /// interpolations. That number is shortened in compressed output, so the
 /// declaration is not marked as text an interpolation produced.

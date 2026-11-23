@@ -1335,6 +1335,21 @@ test "api: compressed output follows the official CLI" {
             ,
             .css = "@import\"b.css\"screen and (min-width: 10px);@layer a, b;@media(width >= 64rem)and (height < 3px),print{a{b:c}}@supports(a: b) or (c: d){a{b:c}}@container sidebar (min-width: 400px) and (max-width: 700px){a{b:c}}a:nth-of-type(10n + 1)>b{c:d}@font-face{font-family:x}\n",
         },
+        // Comments on one line, and a comment in a custom property whose
+        // name came from interpolation.
+        .{
+            .source =
+            \\@use "sass:string";
+            \\@function s($v) { @return string.unquote("#{$v}"); }
+            \\x {
+            \\  /*! c */ /*! d */
+            \\  y: s(0.5rem);
+            \\}
+            \\a { #{"--x"}: #{"a/*keep*/b"}; }
+            \\
+            ,
+            .css = "x{/*! c *//*! d */y:0.5rem}a{--x:a/*keep*/b}\n",
+        },
         // A color is written in the shorter of its forms, whichever it had.
         .{
             .source =

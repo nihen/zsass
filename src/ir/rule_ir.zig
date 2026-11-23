@@ -243,11 +243,11 @@ pub const WriteToWithSourceMapOpts = struct {
 /// Write text rendered with `emit_compress_markers` without the markers.
 fn writeWithoutCompressMarkers(emit: anytype, text: []const u8) !void {
     var rest = text;
-    while (std.mem.indexOfAny(u8, rest, "\x01\x02")) |at| {
+    while (std.mem.indexOfScalar(u8, rest, 0x01)) |at| {
         try emit.writeAll(rest[0..at]);
         rest = rest[at..];
-        if (rest[0] == decl_hint_marker) {
-            rest = rest[@min(2, rest.len)..];
+        if (std.mem.startsWith(u8, rest, decl_hint_marker) and rest.len > decl_hint_marker.len) {
+            rest = rest[decl_hint_marker.len + 1 ..];
         } else if (std.mem.startsWith(u8, rest, interp_decl_marker)) {
             rest = rest[interp_decl_marker.len..];
         } else if (std.mem.startsWith(u8, rest, literal_decl_marker)) {
@@ -340,7 +340,16 @@ pub const decl_hint_script_custom_property: u8 = 1 << 2;
 
 /// Written in front of a declaration for `compressCss`, followed by one
 /// byte holding the hints above plus '0'.
-const decl_hint_marker: u8 = 0x02;
+const decl_hint_marker = "\x01zsass-decl-hint:";
+
+/// `statement` without the indentation and the hint marker in front of it.
+fn statementWithoutDeclHint(statement: []const u8) []const u8 {
+    const text = std.mem.trimStart(u8, statement, " ");
+    if (std.mem.startsWith(u8, text, decl_hint_marker) and text.len > decl_hint_marker.len) {
+        return text[decl_hint_marker.len + 1 ..];
+    }
+    return text;
+}
 
 pub const Node = struct {
     kind: NodeKind,
@@ -5356,7 +5365,7 @@ pub const RuleIR = struct {
                 // Once a search finds no end, no later one will.
                 const comment_end = if (first_no_comment_end) null else std.mem.indexOfPos(u8, expanded, i + 2, "*/");
                 if (comment_end == null) first_no_comment_end = true;
-                const kept = std.mem.startsWith(u8, std.mem.trimStart(u8, first.items[first_statement_start..], " "), "--");
+                const kept = std.mem.startsWith(u8, statementWithoutDeclHint(first.items[first_statement_start..]), "--");
                 if (!kept) {
                     // A `/*!` comment that is a statement of its own stays.
                     // Its later lines lose the indentation the comment
@@ -5409,7 +5418,7 @@ pub const RuleIR = struct {
                     const last = first.items[first.items.len - 1];
                     const separated = last == ' ' and !css_utils.endsWithEscapeWhitespace(first.items);
                     if (!separated and
-                        std.mem.startsWith(u8, std.mem.trimStart(u8, first.items[first_statement_start..], " "), "--"))
+                        std.mem.startsWith(u8, statementWithoutDeclHint(first.items[first_statement_start..]), "--"))
                     {
                         try first.append(allocator, ' ');
                     }
@@ -5488,9 +5497,14 @@ pub const RuleIR = struct {
         var no_comment_end = false;
         i = 0;
         while (i < first.items.len) : (i += 1) {
-            if (first.items[i] == decl_hint_marker and i + 1 < first.items.len and out.items.len == statement_start) {
-                stmt_hints = first.items[i + 1] -% '0';
-                i += 1;
+            // The marker is not text, wherever the statement it leads is
+            // taken to start.
+            if (first.items[i] == decl_hint_marker[0] and
+                std.mem.startsWith(u8, first.items[i..], decl_hint_marker) and
+                i + decl_hint_marker.len < first.items.len)
+            {
+                stmt_hints = first.items[i + decl_hint_marker.len] -% '0';
+                i += decl_hint_marker.len;
                 continue;
             }
             // In plain CSS a number is still a number.
@@ -5554,9 +5568,13 @@ pub const RuleIR = struct {
                 if (std.mem.indexOfPos(u8, first.items, i + 3, "*/")) |end| {
                     try out.appendSlice(allocator, first.items[i .. end + 2]);
                     statement_start = out.items.len;
-                    input_statement_start = end + 2;
+                    // Nothing separates the comment from what follows,
+                    // another comment on the same line included.
+                    var next = end + 2;
+                    while (next < first.items.len and (first.items[next] == ' ' or first.items[next] == '\n')) next += 1;
+                    input_statement_start = next;
                     statement_is_style_rule = null;
-                    i = end + 1;
+                    i = next - 1;
                     continue;
                 }
             }
@@ -10164,7 +10182,7 @@ pub const RuleIR = struct {
                 }
                 try writeCurrentIndent(emit_ctx, state.indent_level);
                 if (emit_ctx.compressed and node.decl_hints != 0) {
-                    try emit_ctx.writeByte(decl_hint_marker);
+                    try emit_ctx.writeAll(decl_hint_marker);
                     try emit_ctx.writeByte('0' + node.decl_hints);
                 }
                 try emit_ctx.writeAll(prop_str);
@@ -10362,7 +10380,7 @@ pub const RuleIR = struct {
                 }
                 try writeCurrentIndent(emit_ctx, state.indent_level);
                 if (emit_ctx.compressed and node.decl_hints != 0) {
-                    try emit_ctx.writeByte(decl_hint_marker);
+                    try emit_ctx.writeAll(decl_hint_marker);
                     try emit_ctx.writeByte('0' + node.decl_hints);
                 }
                 try emit_ctx.writeAll(prop_str);

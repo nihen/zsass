@@ -8281,7 +8281,6 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
         .other => emit_decl_flags |= opcode_mod.emit_decl_flag_value_single_dynamic,
     }
     if (valueSourceMixesInterpolation(value_source)) {
-        emit_decl_flags |= opcode_mod.emit_decl_flag_value_mixes_interp;
         if (valueSourceHasZeroDecimalOutsideInterpolation(value_source)) {
             emit_decl_flags |= opcode_mod.emit_decl_flag_zero_decimal_outside_interp;
         }
