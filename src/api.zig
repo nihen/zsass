@@ -1343,5 +1343,15 @@ test "api: a repeated @extend target past the limit is still extended" {
         \\
     ;
     const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
-    try std.testing.expect(std.mem.indexOf(u8, css, ".x .f") != null);
+    // One compound at a time: the original and, for each of the ten
+    // compounds, the two ways of weaving `.x` in.
+    const selector_list = css[0..std.mem.indexOfScalar(u8, css, '{').?];
+    try std.testing.expectEqual(@as(usize, 21), std.mem.count(u8, selector_list, ", ") + 1);
+    for (0..10) |i| {
+        var buf: [32]u8 = undefined;
+        const direct = try std.fmt.bufPrint(&buf, ".p{d} .x .f", .{i});
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, selector_list, direct));
+        const woven = try std.fmt.bufPrint(&buf, ".p{d} .f", .{i});
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, selector_list, woven));
+    }
 }
