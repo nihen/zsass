@@ -1557,6 +1557,10 @@ test "api: a covered @extend result stays where covering is not a plain match" {
         .{ .source = ".a.f .a.g { x: y; }\n.f .g { @extend .a; }\n", .kept = ", .f .f.g .a.g," },
         // The ancestor `.f` of one extender is what another one ends with.
         .{ .source = ".a .a .a { x: y; }\n.f :hover, .f, .g.h, .f.k { @extend .a; }\n", .kept = ", .a .a .f :hover," },
+        // The ancestors `.g` and `.f.g.k` of two extenders cover each other.
+        .{ .source = ".a .a { x: y; }\n.f.g.k .h, .g .h, .x .h { @extend .a; }\n", .kept = ", .x .h .f.g.k .h," },
+        // With three places not every combination is made.
+        .{ .source = ".a .a .a { x: y; }\nspan, .k :hover, .d span { @extend .a; }\n", .kept = ", .d .k :hover span .a," },
         // `:where()` adds no specificity.
         .{ .source = ".a .a { x: y; }\n.f:hover, .g :where(.f) { @extend .a; }\n", .kept = ", .g :where(.f) .f:hover," },
     };
@@ -1572,6 +1576,13 @@ test "api: an ancestor the extender's last compound matches is not shared" {
     const css = try compileSourceToCss(alloc, ".a .a { x: y; }\ndiv .f + div { @extend .a; }\n", "", &.{}, .{});
     defer alloc.free(css);
     try std.testing.expect(std.mem.indexOf(u8, css, ", div .f + div .f + div") == null);
+}
+
+test "api: an extender's ancestors are not shared past a sibling combinator" {
+    const alloc = std.testing.allocator;
+    const css = try compileSourceToCss(alloc, ".p + .a .a { x: y; }\n.x .f + .g ~ .h { @extend .a; }\n", "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".x .f .g ~ .p + .h .f + .g ~ .h") == null);
 }
 
 test "api: an extender's ancestors are shared only when it is the sole extender" {
