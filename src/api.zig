@@ -1481,18 +1481,19 @@ test "api: a repeated @extend target leaves out results another result covers" {
     , css);
 }
 
-test "api: a covered @extend result is judged by the extenders it carries" {
+test "api: a covered @extend result is judged by the extensions applied to it" {
     const alloc = std.testing.allocator;
-    // `#q` is no part of `.g .f .f:hover`, so it does not keep it.
+    // `#q` comes with a later rule, so it does not keep `.g .f .f:hover`.
     const source =
         \\.a .a { x: y; }
-        \\.f:hover, .g .f, #q { @extend .a; }
+        \\.f:hover, .g .f { @extend .a; }
+        \\#q { @extend .a; }
         \\
     ;
     const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
     defer alloc.free(css);
     try std.testing.expectEqualStrings(
-        \\.a .a, .f:hover .a, .g .f .a, #q .a, .a .f:hover, .f:hover .f:hover, #q .f:hover, .a .g .f, .g .a .f, .f:hover .g .f, .g .f .f, #q .g .f, .g #q .f, .a #q, .f:hover #q, .g .f #q, #q #q {
+        \\.a .a, #q .a, .a #q, #q #q, .f:hover .a, .f:hover #q, .g .f .a, .g .f #q, .a .f:hover, #q .f:hover, .f:hover .f:hover, .a .g .f, #q .g .f, .g .a .f, .g #q .f, .f:hover .g .f, .g .f .f {
         \\  x: y;
         \\}
         \\
@@ -1551,6 +1552,7 @@ test "api: a covered @extend result stays where covering is not a plain match" {
         .{ .source = ".a .a { x: y; }\n.k .f > a, .f { @extend .a; }\n", .kept = ", .k .f > a .f > a," },
         // `*` leaves no trace in what it is unified with.
         .{ .source = ".a.b .a.b { x: y; }\n.f:hover, #x *.f:hover { @extend .a; }\n", .kept = ", #x .b.f:hover .b.f:hover," },
+        .{ .source = "div.a div.a { x: y; }\n.f:hover, #x *|div.f:hover { @extend .a; }\n", .kept = ", #x div.f:hover div.f:hover," },
         // `:where()` adds no specificity.
         .{ .source = ".a .a { x: y; }\n.f:hover, .g :where(.f) { @extend .a; }\n", .kept = ", .g :where(.f) .f:hover," },
     };
@@ -1566,6 +1568,13 @@ test "api: an ancestor the extender's last compound matches is not shared" {
     const css = try compileSourceToCss(alloc, ".a .a { x: y; }\ndiv .f + div { @extend .a; }\n", "", &.{}, .{});
     defer alloc.free(css);
     try std.testing.expect(std.mem.indexOf(u8, css, ", div .f + div .f + div") == null);
+}
+
+test "api: an extender's ancestors are shared only when it is the sole extender" {
+    const alloc = std.testing.allocator;
+    const css = try compileSourceToCss(alloc, ".a .a { x: y; }\n.g { @extend .a; }\n.x .f + .g { @extend .a; }\n", "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".x .f + .g .f + .g") == null);
 }
 
 test "api: an extender with ancestors and a sibling joins a repeated @extend target" {
