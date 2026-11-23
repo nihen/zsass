@@ -1365,6 +1365,11 @@ test "api: compressed output follows the official CLI" {
             ,
             .css = "a{b:1px, 2px;c:white;d:0.5em;e:url(http://a/b), white;f:0.5em}\n",
         },
+        // The space that ends an escape stays in an import URL.
+        .{
+            .source = "@import url(a\\ );\n@import url(  b.css  );\n",
+            .css = "@import\"a\\ \";@import\"b.css\"\n",
+        },
         // Comments on one line, and a comment in a custom property whose
         // name came from interpolation.
         .{

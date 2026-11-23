@@ -7427,11 +7427,11 @@ fn parsePropertyNamespaceSelector(
         .prefix = prefix_intern,
         .prefix_expr = prefix_expr,
         .value_expr = value_expr,
-        .value_flags = switch (valueSourceSingleDynamicKind(value_text)) {
-            .none => 0,
+        .value_flags = (switch (valueSourceSingleDynamicKind(value_text)) {
+            .none => @as(u16, 0),
             .interpolation => opcode_mod.emit_decl_flag_value_single_dynamic | opcode_mod.emit_decl_flag_value_single_interp,
             .other => opcode_mod.emit_decl_flag_value_single_dynamic,
-        },
+        }) | (if (has_interp and !std.mem.startsWith(u8, prefix_text, "--")) opcode_mod.emit_decl_flag_prop_source_not_custom else @as(u16, 0)),
     };
 }
 

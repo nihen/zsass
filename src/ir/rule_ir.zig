@@ -5020,7 +5020,8 @@ pub const RuleIR = struct {
             const url_start = j;
             while (j < text.len and text[j] != ')') : (j += 1) {}
             if (j >= text.len) return false;
-            url = std.mem.trimEnd(u8, text[url_start..j], " ");
+            // The space that ends an escape (`a\ `) is part of the URL.
+            url = css_utils.trimRightPreservingHexEscape(text[url_start..j]);
             j += 1;
         }
         try out.appendSlice(allocator, "@import");
