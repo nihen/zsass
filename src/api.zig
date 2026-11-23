@@ -1481,6 +1481,86 @@ test "api: a repeated @extend target leaves out results another result covers" {
     , css);
 }
 
+test "api: a covered @extend result is judged by the extenders it carries" {
+    const alloc = std.testing.allocator;
+    // `#q` is no part of `.g .f .f:hover`, so it does not keep it.
+    const source =
+        \\.a .a { x: y; }
+        \\.f:hover, .g .f, #q { @extend .a; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.a .a, .f:hover .a, .g .f .a, #q .a, .a .f:hover, .f:hover .f:hover, #q .f:hover, .a .g .f, .g .a .f, .f:hover .g .f, .g .f .f, #q .g .f, .g #q .f, .a #q, .f:hover #q, .g .f #q, #q #q {
+        \\  x: y;
+        \\}
+        \\
+    , css);
+}
+
+test "api: covered @extend results are left out after each extension" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { source: []const u8, selectors: usize, covered_kept: bool }{
+        // One extension, 109 results: too many to compare.
+        .{
+            .source =
+            \\.a .a { x: y; }
+            \\.f:hover, .g .f, .h1, .h2, .h3, .h4, .h5, .h6, .h7 { @extend .a; }
+            \\
+            ,
+            .selectors = 109,
+            .covered_kept = true,
+        },
+        // The first extension makes 9 results and loses two of them.
+        .{
+            .source =
+            \\.a .a { x: y; }
+            \\.f:hover, .g .f { @extend .a; }
+            \\.h1, .h2, .h3, .h4, .h5, .h6, .h7 { @extend .a; }
+            \\
+            ,
+            .selectors = 107,
+            .covered_kept = false,
+        },
+        // The second extension brings the list to 109 results.
+        .{
+            .source =
+            \\.a .a { x: y; }
+            \\.h1, .h2, .h3, .h4, .h5, .h6, .h7 { @extend .a; }
+            \\.f:hover, .g .f { @extend .a; }
+            \\
+            ,
+            .selectors = 109,
+            .covered_kept = true,
+        },
+    };
+    for (cases) |case| {
+        const css = try compileSourceToCss(alloc, case.source, "", &.{}, .{});
+        defer alloc.free(css);
+        const prelude = css[0 .. std.mem.indexOf(u8, css, " {") orelse return error.TestUnexpectedResult];
+        try std.testing.expectEqual(case.selectors, std.mem.count(u8, prelude, ", ") + 1);
+        try std.testing.expectEqual(case.covered_kept, std.mem.indexOf(u8, prelude, ", .g .f .f:hover,") != null);
+    }
+}
+
+test "api: an extender with ancestors and a sibling joins a repeated @extend target" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\.x .p .a .a { x: y; }
+        \\.x .f + .g { @extend .a; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.x .p .a .a, .x .p .f + .g .a, .x .p .a .f + .g, .x .p .f + .g .f + .g {
+        \\  x: y;
+        \\}
+        \\
+    , css);
+}
+
 test "api: a repeated @extend target past the limit is still extended" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

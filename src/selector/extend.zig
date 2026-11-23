@@ -3833,6 +3833,42 @@ pub const ApplyState = struct {
                                 }
                                 generated.clearRetainingCapacity();
                                 std.mem.swap(std.ArrayList(Generated), &generated, &expanded);
+
+                                // After each extension, a result that
+                                // another one covers is left out when the
+                                // covering one is at least as specific as
+                                // what the result came from: `.g .f .f:hover`
+                                // next to `.g .f .f`. Later extensions do
+                                // not see it. A long list is kept whole.
+                                if (generated.items.len <= repeated_target_trim_max) {
+                                    var redundant = try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, generated.items.len);
+                                    defer redundant.deinit(self.allocator);
+                                    for (generated.items[1..], 1..) |*candidate, candidate_idx| {
+                                        if (complexHasSelectorPseudo(&candidate.selector)) continue;
+                                        const source_specificity = repeatedTargetSourceSpecificity(&complex, &candidate.selector, candidate.applied, self.extensions.items);
+                                        for (generated.items[1..], 1..) |*other, other_idx| {
+                                            if (other_idx == candidate_idx or redundant.isSet(other_idx)) continue;
+                                            if (complexHasSelectorPseudo(&other.selector)) continue;
+                                            if (!selector_mod.complexIsSuperSelector(&other.selector, &candidate.selector)) continue;
+                                            // Of two that cover each other the first stays.
+                                            if (other_idx > candidate_idx and selector_mod.complexIsSuperSelector(&candidate.selector, &other.selector)) continue;
+                                            if (!specificity.specificityGte(specificity.complexSpecificity(&other.selector), source_specificity)) continue;
+                                            redundant.set(candidate_idx);
+                                            break;
+                                        }
+                                    }
+                                    var kept: usize = 0;
+                                    for (generated.items, 0..) |*g, generated_idx| {
+                                        if (redundant.isSet(generated_idx)) {
+                                            g.selector.deinit();
+                                            g.applied.deinit(self.allocator);
+                                            continue;
+                                        }
+                                        generated.items[kept] = g.*;
+                                        kept += 1;
+                                    }
+                                    generated.shrinkRetainingCapacity(kept);
+                                }
                             }
 
                             if (abandoned) {
@@ -3843,35 +3879,8 @@ pub const ApplyState = struct {
                             // With the room reserved, handing a selector
                             // over below cannot fail half way.
                             if (!abandoned) try first_pass.ensureDirectCapacity(self.allocator, first_pass.selectors.items.len + generated.items.len);
-                            // A result that another one covers is left
-                            // out when the covering one is at least as
-                            // specific as anything the results came from:
-                            // `.g .f .f:hover` next to `.g .f .f`.
-                            var redundant: std.DynamicBitSetUnmanaged = .{};
-                            defer redundant.deinit(self.allocator);
-                            if (!abandoned and generated.items.len <= repeated_target_trim_max) {
-                                redundant = try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, generated.items.len);
-                                var source_specificity = specificity.complexSpecificity(&complex);
-                                for (related_exts.items) |related_ext| {
-                                    for (related_ext.extender.selectors.items) |*extender_complex| {
-                                        source_specificity = specificityMax(source_specificity, specificity.complexSpecificity(extender_complex));
-                                    }
-                                }
-                                for (generated.items[1..], 1..) |*candidate, candidate_idx| {
-                                    for (generated.items[1..], 1..) |*other, other_idx| {
-                                        if (other_idx == candidate_idx or redundant.isSet(other_idx)) continue;
-                                        if (!selector_mod.complexIsSuperSelector(&other.selector, &candidate.selector)) continue;
-                                        // Of two that cover each other the first stays.
-                                        if (other_idx > candidate_idx and selector_mod.complexIsSuperSelector(&candidate.selector, &other.selector)) continue;
-                                        if (!specificity.specificityGte(specificity.complexSpecificity(&other.selector), source_specificity)) continue;
-                                        redundant.set(candidate_idx);
-                                        break;
-                                    }
-                                }
-                            }
                             // The first entry is the selector itself.
-                            if (!abandoned) for (generated.items[1..], 1..) |*g, generated_idx| {
-                                if (redundant.bit_length != 0 and redundant.isSet(generated_idx)) continue;
+                            if (!abandoned) for (generated.items[1..]) |*g| {
                                 for (g.selector.components.items) |*component| {
                                     if (component.* != .compound) continue;
                                     normalizeGeneratedCompound(&component.compound, self.extensions.items, self.sort_extension_hints.items);
@@ -7030,6 +7039,76 @@ fn firstExtenderSpecificityWith(
     return null;
 }
 
+/// Whether a compound of `sel` has a pseudo-class that matches any one of
+/// several selectors, such as `:is()` or `:where()`. What such a selector
+/// covers, and how specific it is, is not compared here.
+fn complexHasSelectorPseudo(sel: *const ComplexSelector) bool {
+    for (sel.components.items) |*component| {
+        if (component.* != .compound) continue;
+        for (component.compound.simple_selectors.items) |simple| {
+            const pseudo = switch (simple) {
+                .pseudo_class => |pseudo| pseudo,
+                else => continue,
+            };
+            if (pseudo.selector == null) continue;
+            const base = selector_mod.pseudoBaseName(pseudo.name);
+            if (std.ascii.eqlIgnoreCase(base, "is") or
+                std.ascii.eqlIgnoreCase(base, "where") or
+                std.ascii.eqlIgnoreCase(base, "matches") or
+                std.ascii.eqlIgnoreCase(base, "any")) return true;
+        }
+    }
+    return false;
+}
+
+/// Whether the last compound of `extender` is part of a compound of `sel`.
+fn complexCarriesExtender(sel: *const ComplexSelector, extender: *const ComplexSelector) bool {
+    var last: ?*const CompoundSelector = null;
+    for (extender.components.items) |*component| {
+        if (component.* == .compound) last = &component.compound;
+    }
+    const extender_compound = last orelse return false;
+    for (sel.components.items) |*component| {
+        if (component.* != .compound) continue;
+        var all = true;
+        for (extender_compound.simple_selectors.items) |wanted| {
+            var found = false;
+            for (component.compound.simple_selectors.items) |have| {
+                if (specificity.simpleSelectorEql(wanted, have)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                all = false;
+                break;
+            }
+        }
+        if (all) return true;
+    }
+    return false;
+}
+
+/// The highest specificity among what `result` came from: the selector
+/// that was extended and the extenders `result` carries.
+fn repeatedTargetSourceSpecificity(
+    original: *const ComplexSelector,
+    result: *const ComplexSelector,
+    applied: std.DynamicBitSetUnmanaged,
+    extensions: []const Extension,
+) specificity.Specificity {
+    var source = specificity.complexSpecificity(original);
+    var it = applied.iterator(.{});
+    while (it.next()) |ext_i| {
+        if (ext_i >= extensions.len) continue;
+        for (extensions[ext_i].extender.selectors.items) |*extender_complex| {
+            if (!complexCarriesExtender(result, extender_complex)) continue;
+            source = specificityMax(source, specificity.complexSpecificity(extender_complex));
+        }
+    }
+    return source;
+}
+
 fn specificityMax(a: specificity.Specificity, b: specificity.Specificity) specificity.Specificity {
     return if (specificity.specificityGte(a, b)) a else b;
 }
@@ -7249,9 +7328,9 @@ const repeated_target_max_positions = 10;
 /// Later passes compare the results with one another, so the time grows
 /// with the square of this.
 const repeated_target_max_results = 1024;
-/// Every result is compared with every other one to leave out the covered
-/// ones, so this is done for short lists only.
-const repeated_target_trim_max = 128;
+/// The longest list whose covered results are left out. The official CLI
+/// leaves them out of a list of 97 and keeps them in one of 105.
+const repeated_target_trim_max = 100;
 
 /// Extend a complex selector whose compounds contain the target more than
 /// once. Each such compound is either kept or replaced by one of the
