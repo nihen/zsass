@@ -100,6 +100,20 @@ Tracks Dart Sass 1.108.2. The vendored `sass-spec` pin moves to
   `.grid-cols-\[1fr\2c 2fr\]`, compiles.
 - An escape followed by an interpolation in a function name, such as
   `a\62#{1}(2)`, no longer produces a different character.
+- The space that ends a hex escape is kept apart from the whitespace after
+  it: `.\31  .b` stays a descendant selector instead of becoming the
+  compound `.\31 .b`, and `\31  x` stays two values. The same holds across
+  a comment, in custom properties, after `@extend`, and in compressed
+  output, which printed `.\31 +.b` as `.\31+.b`. A lone escaped hyphen is
+  written `\2d ` and a hyphen before a digit as `-\31 `.
+- `selector.nest()` returns a selector list rather than a string.
+- Compressed output writes the selectors given to `:is()`, `:not()`, and
+  the other selector pseudo-classes without a space after the comma, and
+  turns a line break inside a custom property value into a space instead
+  of joining the two tokens. A `/* */` inside a string or a custom
+  property value is kept; it was removed as if it were a comment. A
+  string keeps a space before `{` and a `;` before `}`, and an escaped
+  `;` or one inside `url()` is no longer dropped before a closing brace.
 
 ## 0.4.1 (2026-10-21)
 

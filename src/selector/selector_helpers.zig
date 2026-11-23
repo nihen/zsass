@@ -56,7 +56,7 @@ pub fn stripSelectorComments(allocator: std.mem.Allocator, text: []const u8) ![]
         if (c == '/' and i + 1 < text.len) {
             if (text[i + 1] == '*') {
                 var saw_newline = false;
-                while (buf.items.len > 0 and
+                while (buf.items.len > 0 and !css_utils.endsWithEscapeWhitespace(buf.items) and
                     (buf.items[buf.items.len - 1] == ' ' or
                         buf.items[buf.items.len - 1] == '\t' or
                         buf.items[buf.items.len - 1] == '\n' or
@@ -66,6 +66,8 @@ pub fn stripSelectorComments(allocator: std.mem.Allocator, text: []const u8) ![]
                     if (last == '\n' or last == '\r') saw_newline = true;
                     _ = buf.pop();
                 }
+                // A comment ends a hex escape the way whitespace does.
+                if (css_utils.endsWithHexEscape(buf.items)) try buf.append(allocator, ' ');
                 i += 2;
                 while (i + 1 < text.len) {
                     if (text[i] == '\n' or text[i] == '\r') saw_newline = true;
@@ -91,7 +93,7 @@ pub fn stripSelectorComments(allocator: std.mem.Allocator, text: []const u8) ![]
                 continue;
             } else if (text[i + 1] == '/') {
                 var saw_newline = false;
-                while (buf.items.len > 0 and
+                while (buf.items.len > 0 and !css_utils.endsWithEscapeWhitespace(buf.items) and
                     (buf.items[buf.items.len - 1] == ' ' or
                         buf.items[buf.items.len - 1] == '\t' or
                         buf.items[buf.items.len - 1] == '\n' or
@@ -101,6 +103,8 @@ pub fn stripSelectorComments(allocator: std.mem.Allocator, text: []const u8) ![]
                     if (last == '\n' or last == '\r') saw_newline = true;
                     _ = buf.pop();
                 }
+                // A comment ends a hex escape the way whitespace does.
+                if (css_utils.endsWithHexEscape(buf.items)) try buf.append(allocator, ' ');
                 i += 2;
                 while (i < text.len and text[i] != '\n' and text[i] != '\r') {
                     i += 1;

@@ -1236,10 +1236,142 @@ test "api: meta.load-css() keeps @at-root and at-rule comments in place" {
 
 test "api: a lone escaped hyphen stays escaped in a selector" {
     const alloc = std.testing.allocator;
-    const css = try compileSourceToCss(alloc, ".\\-, .\\-a, .\\- .b { x: y; }\n", "", &.{}, .{});
+    const css = try compileSourceToCss(alloc, ".\\-, .\\-a, .\\- .b, .\\-1 { x: y; }\n", "", &.{}, .{});
     defer alloc.free(css);
-    // The official CLI spells the lone hyphen `\2d `; `\-` names the same class.
-    try std.testing.expectEqualStrings(".\\-, .-a, .\\- .b {\n  x: y;\n}\n", css);
+    try std.testing.expectEqualStrings(".\\2d , .-a, .\\2d  .b, .-\\31  {\n  x: y;\n}\n", css);
+}
+
+test "api: the space that ends a hex escape is kept apart from what follows" {
+    // Lists a built-in function returns live until the allocator is torn
+    // down, so these compiles run in an arena.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const source =
+        \\@use "sass:selector";
+        \\.\31  .b, .\31 .c, .\31  > .d, .\31 /* x */ .e { x: y; }
+        \\.\32  { & + & { x: y; } }
+        \\.f { @extend .\31 ; }
+        \\a {
+        \\  b: \31  x;
+        \\  --c: \31  x;
+        \\  d: selector.append(".\\-", "a");
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    try std.testing.expectEqualStrings(
+        \\.\31  .b, .f .b, .\31 .c, .c.f, .\31  > .d, .f > .d, .\31  .e, .f .e {
+        \\  x: y;
+        \\}
+        \\
+        \\.\32  + .\32  {
+        \\  x: y;
+        \\}
+        \\
+        \\a {
+        \\  b: \31  x;
+        \\  --c: \31  x;
+        \\  d: .-a;
+        \\}
+        \\
+    , css);
+
+    const compressed = try compileSourceToCss(alloc, ".\\31  .b, .\\31  + .c, .\\31  { x: y; }\n", "", &.{}, .{ .output_style = .compressed });
+    try std.testing.expectEqualStrings(".\\31  .b,.\\31 +.c,.\\31 {x:y}\n", compressed);
+}
+
+test "api: compressed output keeps selector pseudo-class arguments and custom property lines apart" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\:is(.a, .b):not(.c, [d="e, f"]) :lang(en, fr) { g: h(i, j); }
+        \\k { --l: m
+        \\  n; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .output_style = .compressed });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(":is(.a,.b):not(.c,[d=\"e, f\"]) :lang(en, fr){g:h(i, j)}k{--l: m n}\n", css);
+}
+
+test "api: compressed output reads strings and parentheses when it looks for a statement" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\@supports selector([x=";"]:is(.a, .b)) { a { x: y; } }
+        \\[x=";"]:is(.a, .b) { --c: "d;e" f
+        \\  g; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .output_style = .compressed });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings("@supports selector([x=\";\"]:is(.a, .b)){a{x:y}}[x=\";\"]:is(.a,.b){--c: \"d;e\" f g}\n", css);
+}
+
+test "api: compressed output keeps a comment that is text" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\a {
+        \\  --b: c
+        \\    /*d*/e;
+        \\  f: "g /* h */ i" /* j */ k;
+        \\  --o: p /*{};("*/ white, q;
+        \\  --r: url(s;t) /* {u}
+        \\    v */ w\/*x;
+        \\  --y: z\;
+        \\    1 /*{*/ + 2;
+        \\}
+        \\l { m: url(#{"n;o"}) 0.5em; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .output_style = .compressed });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings("a{--b: c /*d*/e;f:\"g /* h */ i\" k;--o: p /*{};(\"*/ white, q;--r: url(s;t) /* {u} v */ w\\/*x;--y: z\\; 1 /*{*/ + 2}l{m:url(n;o) .5em}\n", css);
+}
+
+test "api: compressed output leaves string contents alone and resets after an empty rule" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\a { b: "c {" "d ;}" ";}"; }
+        \\e { /* f */ }
+        \\:is(.g, .h) { i: j; }
+        \\k { l: m\; }
+        \\n { o: url(p;}) }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .output_style = .compressed });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings("a{b:\"c {\" \"d ;}\" \";}\"}:is(.g,.h){i:j}k{l:m\\;}n{o:url(p;})}\n", css);
+}
+
+test "api: a hex escape gets its space only where a selector name ends" {
+    // Lists a built-in function returns live until the allocator is torn
+    // down, so this compile runs in an arena.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const source =
+        \\@use "sass:selector";
+        \\:lang(\31), :not(.\31 ), :is(:lang(\32), .\33 ) { x: selector.append(".a\\20 "); }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    try std.testing.expectEqualStrings(":lang(\\31), :not(.\\31 ), :is(:lang(\\32), .\\33 ) {\n  x: .a\\ ;\n}\n", css);
+}
+
+test "api: selector.nest returns a selector list" {
+    // Lists a built-in function returns live until the allocator is torn
+    // down, so these compiles run in an arena.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const source =
+        \\@use "sass:selector";
+        \\@use "sass:meta";
+        \\a { b: meta.type-of(selector.nest(".c", ".d")); e: meta.inspect(selector.nest(".c", ".d")); }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    try std.testing.expectEqualStrings("a {\n  b: list;\n  e: (.c .d,);\n}\n", css);
 }
 
 test "api: compressed output drops an empty rule without its enclosing block" {

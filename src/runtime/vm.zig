@@ -12677,7 +12677,10 @@ fn appendSerializedDeclStringImpl(
                     const cj = raw[j];
                     if (cj != ' ' and cj != '\t' and cj != '\n' and cj != '\r' and cj != '\x0c') break;
                 }
-                const last_is_space = acc.items.len > 0 and acc.items[acc.items.len - 1] == ' ';
+                // The space that ends a hex escape belongs to the escape, so
+                // a separator that follows it is still written.
+                const last_is_space = acc.items.len > 0 and acc.items[acc.items.len - 1] == ' ' and
+                    !endsWithCssHexEscape(acc.items[0 .. acc.items.len - 1]);
                 if (acc.items.len != 0 and !last_is_space) {
                     try acc.append(alloc, ' ');
                 }

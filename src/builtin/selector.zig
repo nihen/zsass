@@ -169,15 +169,7 @@ pub fn selector_nest(ctx: *BuiltinContext, args: []const Value) BuiltinError!Val
     }
     defer current.deinit();
 
-    if (args.len == 1 and selector_mod.hasParentReference(&current)) {
-        // Keep a bare parent selector as selector list value so declaration emission
-        // doesn't eagerly resolve `&` to the current rule selector.
-        return selectorListToValue(ctx, &current);
-    }
-
-    const result_css = try selector_mod.toCss(ctx.allocator, &current);
-    defer ctx.allocator.free(result_css);
-    return makeUnquotedStringValue(ctx, result_css);
+    return selectorListToValue(ctx, &current);
 }
 
 pub fn selector_append(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
@@ -204,6 +196,22 @@ pub fn selector_append(ctx: *BuiltinContext, args: []const Value) BuiltinError!V
         current.deinit();
         current = appended;
         if (current.selectors.items.len == 0) return error.SassError;
+    }
+
+    // A suffix joined to an escaped name makes one name, which has its own
+    // canonical spelling (`\\2d ` and `a` are `-a`).
+    const appended_css = try selector_mod.toCss(ctx.allocator, &current);
+    defer ctx.allocator.free(appended_css);
+    if (std.mem.indexOfScalar(u8, appended_css, '\\') != null) {
+        // A name the parser does not read back, such as one that ends in
+        // an escaped space, stays as it was joined.
+        if (selector_mod.parse(ctx.allocator, appended_css)) |reparsed| {
+            current.deinit();
+            current = reparsed;
+        } else |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {},
+        }
     }
 
     return selectorListToValue(ctx, &current);
@@ -2721,7 +2729,11 @@ test "selector.nest resolves parent when second argument exists" {
         try testStringValue(&ctx, "&"),
     };
     const out = try selector_nest(&ctx, &args);
-    try std.testing.expect(out.kind() == .string);
-    const out_text = ctx.intern_pool.get(out.stringIntern());
-    try std.testing.expectEqualStrings("c", out_text);
+    // The result is a selector value: a comma list of space lists.
+    try std.testing.expect(out.kind() == .list);
+    const outer_items = ctx.list_pool.items[out.listHandle()];
+    try std.testing.expectEqual(@as(usize, 1), outer_items.len);
+    const inner_items = ctx.list_pool.items[outer_items[0].listHandle()];
+    try std.testing.expectEqual(@as(usize, 1), inner_items.len);
+    try std.testing.expectEqualStrings("c", ctx.intern_pool.get(inner_items[0].stringIntern()));
 }

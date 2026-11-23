@@ -768,7 +768,7 @@ fn stripSelectorCommentsForMatching(allocator: std.mem.Allocator, text: []const 
         if (c == '/' and i + 1 < text.len) {
             if (text[i + 1] == '*') {
                 var saw_newline = false;
-                while (buf.items.len > 0 and
+                while (buf.items.len > 0 and !css_utils.endsWithEscapeWhitespace(buf.items) and
                     (buf.items[buf.items.len - 1] == ' ' or
                         buf.items[buf.items.len - 1] == '\t' or
                         buf.items[buf.items.len - 1] == '\n' or
@@ -778,6 +778,8 @@ fn stripSelectorCommentsForMatching(allocator: std.mem.Allocator, text: []const 
                     if (last == '\n' or last == '\r') saw_newline = true;
                     _ = buf.pop();
                 }
+                // A comment ends a hex escape the way whitespace does.
+                if (css_utils.endsWithHexEscape(buf.items)) try buf.append(allocator, ' ');
 
                 i += 2;
                 while (i + 1 < text.len) {
@@ -808,7 +810,7 @@ fn stripSelectorCommentsForMatching(allocator: std.mem.Allocator, text: []const 
 
             if (text[i + 1] == '/') {
                 var saw_newline = false;
-                while (buf.items.len > 0 and
+                while (buf.items.len > 0 and !css_utils.endsWithEscapeWhitespace(buf.items) and
                     (buf.items[buf.items.len - 1] == ' ' or
                         buf.items[buf.items.len - 1] == '\t' or
                         buf.items[buf.items.len - 1] == '\n' or
@@ -818,6 +820,8 @@ fn stripSelectorCommentsForMatching(allocator: std.mem.Allocator, text: []const 
                     if (last == '\n' or last == '\r') saw_newline = true;
                     _ = buf.pop();
                 }
+                // A comment ends a hex escape the way whitespace does.
+                if (css_utils.endsWithHexEscape(buf.items)) try buf.append(allocator, ' ');
 
                 i += 2;
                 while (i < text.len and text[i] != '\n' and text[i] != '\r') i += 1;
@@ -5083,56 +5087,145 @@ pub const RuleIR = struct {
         return true;
     }
 
+    /// Whether the statement that starts at `start` is a style rule: it is
+    /// not an at-rule, and a block follows its prelude.
+    fn statementIsStyleRule(text: []const u8, start: usize) bool {
+        var i = start;
+        while (i < text.len and (text[i] == ' ' or text[i] == '\n')) i += 1;
+        if (i >= text.len or text[i] == '@') return false;
+        var in_string: u8 = 0;
+        var depth: usize = 0;
+        while (i < text.len) : (i += 1) {
+            const c = text[i];
+            if (c == '\\') {
+                i += 1;
+                continue;
+            }
+            if (in_string != 0) {
+                if (c == in_string) in_string = 0;
+                continue;
+            }
+            switch (c) {
+                '"', '\'' => in_string = c,
+                '(' => depth += 1,
+                ')' => depth -|= 1,
+                '{' => if (depth == 0) return true,
+                '}', ';' => if (depth == 0) return false,
+                else => {},
+            }
+        }
+        return false;
+    }
+
     fn previousLooksLikeIeHack(out: []const u8) bool {
         return out.len >= 2 and out[out.len - 2] == '\\' and (out[out.len - 1] == '0' or out[out.len - 1] == '9');
     }
 
-    fn currentDeclPropertyIsCustom(out: []const u8) bool {
-        var start = out.len;
-        while (start > 0) {
-            const prev = out[start - 1];
-            if (prev == '{' or prev == ';' or prev == '}') break;
-            start -= 1;
-        }
-        const prop = std.mem.trim(u8, out[start..], " ");
-        return std.mem.startsWith(u8, prop, "--");
+    /// Whether the last character of `text` is escaped by a backslash.
+    fn endsWithEscapedCharacter(text: []const u8) bool {
+        if (text.len < 2) return false;
+        var backslashes: usize = 0;
+        var i = text.len - 1;
+        while (i > 0 and text[i - 1] == '\\') : (i -= 1) backslashes += 1;
+        return backslashes % 2 == 1;
     }
 
     fn compressCss(allocator: std.mem.Allocator, expanded: []const u8) error{OutOfMemory}![]const u8 {
         var first: std.ArrayList(u8) = .empty;
         errdefer first.deinit(allocator);
+        // Where the statement being copied starts in `first`. A brace or
+        // semicolon inside a string or parentheses does not end a statement.
+        var first_statement_start: usize = 0;
+        var first_in_string: u8 = 0;
+        var first_escaped = false;
+        var first_paren_depth: usize = 0;
+        var first_no_comment_end = false;
 
         var i: usize = 0;
         while (i < expanded.len) : (i += 1) {
             const c = expanded[i];
 
-            if (c == '/' and i + 1 < expanded.len and expanded[i + 1] == '*') {
-                i += 2;
-                while (i + 1 < expanded.len) : (i += 1) {
-                    if (expanded[i] == '*' and expanded[i + 1] == '/') {
-                        i += 1;
-                        break;
+            // A comment is dropped, except where it is text: inside a string
+            // or in the value of a custom property.
+            if (c == '/' and i + 1 < expanded.len and expanded[i + 1] == '*' and first_in_string == 0 and !first_escaped) {
+                // Once a search finds no end, no later one will.
+                const comment_end = if (first_no_comment_end) null else std.mem.indexOfPos(u8, expanded, i + 2, "*/");
+                if (comment_end == null) first_no_comment_end = true;
+                const kept = std.mem.startsWith(u8, std.mem.trimStart(u8, first.items[first_statement_start..], " "), "--");
+                if (!kept) {
+                    i = if (comment_end) |end| end + 1 else expanded.len - 1;
+                    continue;
+                }
+                // A kept comment is copied whole: nothing in it is a quote,
+                // a parenthesis, or the end of a statement. A line break in
+                // it becomes a space, as elsewhere in the value. Without an
+                // end it is not a comment and is read as ordinary text.
+                if (comment_end) |end| {
+                    while (i < end + 2) : (i += 1) {
+                        if (expanded[i] != '\n') {
+                            try first.append(allocator, expanded[i]);
+                            continue;
+                        }
+                        while (i + 1 < end and (expanded[i + 1] == ' ' or expanded[i + 1] == '\t' or expanded[i + 1] == '\n')) i += 1;
+                        try first.append(allocator, ' ');
+                    }
+                    i = end + 1;
+                    continue;
+                }
+            }
+
+            if (c == '\n') {
+                // A string ends at a line break, so a lone quote written by
+                // an interpolation does not hold the rest of the text.
+                if (!first_escaped) first_in_string = 0;
+                while (i + 1 < expanded.len and (expanded[i + 1] == ' ' or expanded[i + 1] == '\t' or expanded[i + 1] == '\n')) {
+                    i += 1;
+                }
+                // A line break inside a custom property value separates two
+                // tokens, so it becomes a space rather than nothing.
+                if (first.items.len != 0) {
+                    const last = first.items[first.items.len - 1];
+                    const separated = last == ' ' and !css_utils.endsWithEscapeWhitespace(first.items);
+                    if (!separated and
+                        std.mem.startsWith(u8, std.mem.trimStart(u8, first.items[first_statement_start..], " "), "--"))
+                    {
+                        try first.append(allocator, ' ');
                     }
                 }
                 continue;
             }
 
-            if (c == '\n') {
-                while (i + 1 < expanded.len and (expanded[i + 1] == ' ' or expanded[i + 1] == '\t' or expanded[i + 1] == '\n')) {
-                    i += 1;
-                }
-                continue;
-            }
-
-            if (c == ' ' and i + 1 < expanded.len and expanded[i + 1] == '{') continue;
-            if (c == ';' and i + 1 < expanded.len and expanded[i + 1] == '}') continue;
+            // Inside a string or parentheses, or after a backslash, these
+            // characters are text.
+            const first_structural = first_in_string == 0 and !first_escaped and first_paren_depth == 0;
+            if (first_structural and c == ' ' and i + 1 < expanded.len and expanded[i + 1] == '{' and !css_utils.endsWithHexEscape(first.items)) continue;
+            if (first_structural and c == ';' and i + 1 < expanded.len and expanded[i + 1] == '}') continue;
 
             try first.append(allocator, c);
-            if (c == '}') {
-                while (first.items.len >= 2 and first.items[first.items.len - 2] == ';') {
+            if (first_escaped) {
+                first_escaped = false;
+            } else if (c == '\\') {
+                first_escaped = true;
+            } else if (first_in_string != 0) {
+                if (c == first_in_string) first_in_string = 0;
+            } else switch (c) {
+                '"', '\'' => first_in_string = c,
+                '(' => first_paren_depth += 1,
+                ')' => first_paren_depth -|= 1,
+                '{', '}', ';' => if (first_paren_depth == 0) {
+                    first_statement_start = first.items.len;
+                },
+                else => {},
+            }
+            if (c == '}' and first_structural) {
+                while (first.items.len >= 2 and first.items[first.items.len - 2] == ';' and
+                    !endsWithEscapedCharacter(first.items[0 .. first.items.len - 1]))
+                {
                     first.items[first.items.len - 2] = '}';
                     first.items.len -= 1;
                 }
+                // Dropping the semicolons moved the end of the text.
+                first_statement_start = @min(first_statement_start, first.items.len);
             }
         }
 
@@ -5152,6 +5245,18 @@ pub const RuleIR = struct {
         var statement_start: usize = 0;
         var block_prelude_starts: std.ArrayList(usize) = .empty;
         defer block_prelude_starts.deinit(allocator);
+        // For every open parenthesis, whether it holds the selectors given
+        // to a pseudo-class such as `:is()` in a style rule's selector.
+        // Those lists are written without a space after the comma; other
+        // arguments (`:lang(en, fr)`, a function in a value, an at-rule
+        // prelude) keep it.
+        var selector_argument_parens: std.ArrayList(bool) = .empty;
+        defer selector_argument_parens.deinit(allocator);
+        // Where the statement being read starts in `first`, and whether it
+        // is a style rule, worked out once per statement when first needed.
+        var input_statement_start: usize = 0;
+        var statement_is_style_rule: ?bool = null;
+        var no_comment_end = false;
         i = 0;
         while (i < first.items.len) : (i += 1) {
             if (std.mem.startsWith(u8, first.items[i..], interp_decl_marker)) {
@@ -5188,11 +5293,26 @@ pub const RuleIR = struct {
                 i += 1;
                 continue;
             }
+            // A comment the first pass kept, in a custom property, is copied
+            // whole. The test is the one the first pass made.
+            if (c == '/' and i + 1 < first.items.len and first.items[i + 1] == '*' and
+                std.mem.startsWith(u8, std.mem.trimStart(u8, out.items[statement_start..], " "), "--"))
+            {
+                const comment_end = if (no_comment_end) null else std.mem.indexOfPos(u8, first.items, i + 2, "*/");
+                if (comment_end) |end| {
+                    try out.appendSlice(allocator, first.items[i .. end + 2]);
+                    i = end + 1;
+                    continue;
+                }
+                // Once a search finds no end, no later one will.
+                no_comment_end = true;
+            }
 
             if (c == ';' or c == '}') {
                 preserve_decl_zero = false;
                 preserve_calc_ops = false;
-                in_custom_decl = false;
+                // Inside parentheses these do not end a custom property.
+                if (paren_depth == 0) in_custom_decl = false;
             }
             if (try appendCompressedImport(&out, allocator, first.items, &i)) {
                 statement_start = out.items.len;
@@ -5219,10 +5339,19 @@ pub const RuleIR = struct {
                     color_func_depth = paren_depth;
                 }
                 if (std.ascii.eqlIgnoreCase(name, "calc")) calc_func_depth = paren_depth;
+                const holds_selectors = !in_custom_decl and name_start > 0 and out.items[name_start - 1] == ':' and
+                    selector_mod.isSelectorPseudo(name) and blk: {
+                    if (statement_is_style_rule == null) {
+                        statement_is_style_rule = statementIsStyleRule(first.items, input_statement_start);
+                    }
+                    break :blk statement_is_style_rule.?;
+                };
+                try selector_argument_parens.append(allocator, holds_selectors);
                 try out.append(allocator, c);
                 continue;
             }
             if (c == ')') {
+                _ = selector_argument_parens.pop();
                 if (paren_depth != 0) {
                     if (color_func_depth == paren_depth) color_func_depth = 0;
                     if (calc_func_depth == paren_depth) calc_func_depth = 0;
@@ -5233,14 +5362,17 @@ pub const RuleIR = struct {
             }
 
             if (c == ':' and paren_depth == 0) {
-                in_custom_decl = currentDeclPropertyIsCustom(out.items);
+                in_custom_decl = std.mem.startsWith(u8, std.mem.trim(u8, out.items[statement_start..], " "), "--");
             }
             if (!in_custom_decl and c == ':' and i + 1 < first.items.len and first.items[i + 1] == ' ' and paren_depth == 0) {
                 try out.append(allocator, ':');
                 i += 1;
                 continue;
             }
-            if (!in_custom_decl and c == ',' and i + 1 < first.items.len and first.items[i + 1] == ' ' and (paren_depth == 0 or color_func_depth != 0)) {
+            if (!in_custom_decl and c == ',' and i + 1 < first.items.len and first.items[i + 1] == ' ' and
+                (paren_depth == 0 or color_func_depth != 0 or
+                    (selector_argument_parens.items.len != 0 and selector_argument_parens.items[selector_argument_parens.items.len - 1])))
+            {
                 try out.append(allocator, ',');
                 i += 1;
                 continue;
@@ -5252,6 +5384,11 @@ pub const RuleIR = struct {
                     continue;
                 }
                 if (out.items.len == 0) continue;
+                // The space that ends a hex escape is part of the escape.
+                if (css_utils.endsWithHexEscape(out.items)) {
+                    try out.append(allocator, c);
+                    continue;
+                }
                 const prev = out.items[out.items.len - 1];
                 const next = if (i + 1 < first.items.len) first.items[i + 1] else 0;
                 if (previousLooksLikeIeHack(out.items) and (next == ';' or next == '}')) {
@@ -5280,8 +5417,9 @@ pub const RuleIR = struct {
                 continue;
             }
 
-            if ((c == '+' or c == '>' or c == '~') and isCompressedSelectorContext(first.items, i)) {
-                if (out.items.len != 0 and out.items[out.items.len - 1] == ' ') out.items.len -= 1;
+            if (!in_custom_decl and (c == '+' or c == '>' or c == '~') and isCompressedSelectorContext(first.items, i)) {
+                if (out.items.len != 0 and out.items[out.items.len - 1] == ' ' and
+                    !css_utils.endsWithHexEscape(out.items[0 .. out.items.len - 1])) out.items.len -= 1;
                 try out.append(allocator, c);
                 if (i + 1 < first.items.len and first.items[i + 1] == ' ') i += 1;
                 continue;
@@ -5292,8 +5430,8 @@ pub const RuleIR = struct {
                 if (prev != '-' and !std.ascii.isAlphanumeric(prev) and prev != '_' and prev != '.') continue;
             }
 
-            if (c == '}' and out.items.len != 0 and out.items[out.items.len - 1] == ';') {
-                while (out.items.len != 0 and out.items[out.items.len - 1] == ';') out.items.len -= 1;
+            if (c == '}' and paren_depth == 0) {
+                while (out.items.len != 0 and out.items[out.items.len - 1] == ';' and !endsWithEscapedCharacter(out.items)) out.items.len -= 1;
             }
 
             // Inside parentheses these characters are part of a value, such
@@ -5305,6 +5443,8 @@ pub const RuleIR = struct {
                     // Drop the empty block together with its prelude.
                     out.items.len = block_start orelse 0;
                     statement_start = out.items.len;
+                    input_statement_start = i + 1;
+                    statement_is_style_rule = null;
                     preserve_decl_zero = false;
                     preserve_calc_ops = false;
                     in_custom_decl = false;
@@ -5314,7 +5454,11 @@ pub const RuleIR = struct {
 
             if (c == '{' and structural) try block_prelude_starts.append(allocator, statement_start);
             try out.append(allocator, c);
-            if (structural and (c == '{' or c == '}' or c == ';')) statement_start = out.items.len;
+            if (structural and (c == '{' or c == '}' or c == ';')) {
+                statement_start = out.items.len;
+                input_statement_start = i + 1;
+                statement_is_style_rule = null;
+            }
         }
         first.deinit(allocator);
         return try out.toOwnedSlice(allocator);
@@ -6248,6 +6392,7 @@ pub const RuleIR = struct {
                 has_ws: bool = false,
                 has_newline: bool = false,
                 has_combinator_candidate: bool = false,
+                has_backslash: bool = false,
             };
 
             fn scanSelectorEmitHints(text: []const u8) SelectorEmitHints {
@@ -6263,6 +6408,7 @@ pub const RuleIR = struct {
                             hints.has_newline = true;
                         },
                         '>', '+', '~', '|' => hints.has_combinator_candidate = true,
+                        '\\' => hints.has_backslash = true,
                         else => {},
                     }
                 }
@@ -6303,7 +6449,7 @@ pub const RuleIR = struct {
                     if (c == '/' and i + 1 < text.len) {
                         if (text[i + 1] == '*') {
                             var saw_newline = false;
-                            while (buf.items.len > 0 and
+                            while (buf.items.len > 0 and !css_utils.endsWithEscapeWhitespace(buf.items) and
                                 (buf.items[buf.items.len - 1] == ' ' or
                                     buf.items[buf.items.len - 1] == '\t' or
                                     buf.items[buf.items.len - 1] == '\n' or
@@ -6313,6 +6459,8 @@ pub const RuleIR = struct {
                                 if (last == '\n' or last == '\r') saw_newline = true;
                                 _ = buf.pop();
                             }
+                            // A comment ends a hex escape the way whitespace does.
+                            if (css_utils.endsWithHexEscape(buf.items)) try buf.append(allocator, ' ');
 
                             i += 2;
                             while (i + 1 < text.len) {
@@ -6343,7 +6491,7 @@ pub const RuleIR = struct {
 
                         if (text[i + 1] == '/') {
                             var saw_newline = false;
-                            while (buf.items.len > 0 and
+                            while (buf.items.len > 0 and !css_utils.endsWithEscapeWhitespace(buf.items) and
                                 (buf.items[buf.items.len - 1] == ' ' or
                                     buf.items[buf.items.len - 1] == '\t' or
                                     buf.items[buf.items.len - 1] == '\n' or
@@ -6353,6 +6501,8 @@ pub const RuleIR = struct {
                                 if (last == '\n' or last == '\r') saw_newline = true;
                                 _ = buf.pop();
                             }
+                            // A comment ends a hex escape the way whitespace does.
+                            if (css_utils.endsWithHexEscape(buf.items)) try buf.append(allocator, ' ');
 
                             i += 2;
                             while (i < text.len and text[i] != '\n' and text[i] != '\r') i += 1;
@@ -6924,8 +7074,11 @@ pub const RuleIR = struct {
                                 }
                             }
                         } else if (ws_count != 0) {
+                            // The first space ends the escape; a second one
+                            // is the separator before the next value.
                             try out.append(allocator, ' ');
-                            if (ws_count > 1) changed = true;
+                            if (ws_count > 1) try out.append(allocator, ' ');
+                            if (ws_count > 2) changed = true;
                         }
                         i = k;
                         continue;
@@ -7548,6 +7701,71 @@ pub const RuleIR = struct {
                 return std.fmt.allocPrint(allocator, "{s} ", .{text});
             }
 
+            /// A hex escape in a selector name is always written with the
+            /// space that ends it. The whitespace passes above drop that space
+            /// before a comma and at the end of the selector; this puts it
+            /// back there.
+            fn ensureSelectorHexEscapeDelimiters(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+                var out: std.ArrayListUnmanaged(u8) = .empty;
+                errdefer out.deinit(allocator);
+                var copied: usize = 0;
+                var in_string: u8 = 0;
+                // One bit per open parenthesis, set while it holds selectors
+                // (`:not(...)`) and clear for other arguments (`:lang(...)`),
+                // whose text is not made of selector names.
+                var selector_parens: u64 = 0;
+                var paren_depth: usize = 0;
+                var i: usize = 0;
+                while (i < text.len) {
+                    const c = text[i];
+                    if (c != '\\') {
+                        if (in_string != 0) {
+                            if (c == in_string) in_string = 0;
+                        } else if (c == '"' or c == '\'') {
+                            in_string = c;
+                        } else if (c == '(') {
+                            var name_start = i;
+                            while (name_start > 0 and (std.ascii.isAlphanumeric(text[name_start - 1]) or
+                                text[name_start - 1] == '-' or text[name_start - 1] == '_')) name_start -= 1;
+                            const holds_selectors = name_start > 0 and text[name_start - 1] == ':' and
+                                selector_mod.isSelectorPseudo(text[name_start..i]) and
+                                (paren_depth == 0 or (paren_depth <= 64 and selector_parens & (@as(u64, 1) << @intCast(paren_depth - 1)) != 0));
+                            if (paren_depth < 64) {
+                                const bit = @as(u64, 1) << @intCast(paren_depth);
+                                selector_parens = if (holds_selectors) selector_parens | bit else selector_parens & ~bit;
+                            }
+                            paren_depth += 1;
+                        } else if (c == ')') {
+                            paren_depth -|= 1;
+                        }
+                        i += 1;
+                        continue;
+                    }
+                    if (i + 1 >= text.len) break;
+                    if (in_string != 0 or !std.ascii.isHex(text[i + 1])) {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    var digits: usize = 0;
+                    while (i < text.len and digits < 6 and std.ascii.isHex(text[i])) : (digits += 1) i += 1;
+                    if (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n' or text[i] == '\r' or text[i] == '\x0c')) {
+                        i += 1;
+                        continue;
+                    }
+                    // Elsewhere the text is as it was built.
+                    if (i < text.len and text[i] != ',' and text[i] != ')') continue;
+                    if (paren_depth != 0 and
+                        (paren_depth > 64 or selector_parens & (@as(u64, 1) << @intCast(paren_depth - 1)) == 0)) continue;
+                    try out.appendSlice(allocator, text[copied..i]);
+                    try out.append(allocator, ' ');
+                    copied = i;
+                }
+                if (out.items.len == 0) return text;
+                try out.appendSlice(allocator, text[copied..]);
+                return out.toOwnedSlice(allocator);
+            }
+
             /// Whitespace (space/tab/newline) in one compound selector to single space
             /// collapses. The newline of top-level comma (`.a, .b`) is preserved, so
             /// Split with comma and normalize only the inside of each segment. string / `(` `[`
@@ -7739,7 +7957,12 @@ pub const RuleIR = struct {
                         // skip any further ws
                         var k = j + 1;
                         while (k < end and (seg[k] == ' ' or seg[k] == '\t' or seg[k] == '\n' or seg[k] == '\r')) : (k += 1) {}
-                        if (j > start and seg[j - 1] == '\\' and k > j + 1) {
+                        // An escaped space, or the space that ends a hex
+                        // escape, is part of the name before it; whitespace
+                        // after it is still a combinator.
+                        const ends_escape = j > start and
+                            css_utils.endsWithEscapeWhitespace(seg[start .. j + 1]);
+                        if (ends_escape and k > j + 1) {
                             try out.appendSlice(allocator, "  ");
                         } else {
                             try out.append(allocator, ' ');
@@ -8656,6 +8879,24 @@ pub const RuleIR = struct {
 
                     try out.append(allocator, c);
                     i += 1;
+                    if (c != '\\' or i >= value.len) continue;
+                    // An escape keeps the character it escapes, and a hex
+                    // escape keeps the space that ends it: neither is
+                    // merged with the whitespace that follows.
+                    if (!std.ascii.isHex(value[i])) {
+                        try out.append(allocator, value[i]);
+                        i += 1;
+                        continue;
+                    }
+                    var digits: usize = 0;
+                    while (i < value.len and digits < 6 and std.ascii.isHex(value[i])) : (digits += 1) {
+                        try out.append(allocator, value[i]);
+                        i += 1;
+                    }
+                    if (i < value.len and (value[i] == ' ' or value[i] == '\t')) {
+                        try out.append(allocator, value[i]);
+                        i += 1;
+                    }
                 }
                 if (pending_ws) |ws| try out.append(allocator, ws);
 
@@ -10198,11 +10439,6 @@ pub const RuleIR = struct {
                             sel_owned = nth_normalized_sel;
                         }
                     }
-                    const escaped_sel = try WriterHelpers.ensureTrailingControlHexEscapeSpace(temp, sel_str);
-                    if (!(escaped_sel.ptr == sel_str.ptr and escaped_sel.len == sel_str.len)) {
-                        sel_str = escaped_sel;
-                        sel_owned = escaped_sel;
-                    }
                     if (selector_hints.has_paren and selector_hints.has_ws) {
                         const paren_normalized_sel = try WriterHelpers.collapseSelectorParenEdgeWhitespace(temp, sel_str);
                         if (!(paren_normalized_sel.ptr == sel_str.ptr and paren_normalized_sel.len == sel_str.len)) {
@@ -10240,6 +10476,13 @@ pub const RuleIR = struct {
                         if (try normalizeNestedNotHasExtendSelector(temp, sel_str)) |nested_not_has_sel| {
                             sel_str = nested_not_has_sel;
                             sel_owned = nested_not_has_sel;
+                        }
+                    }
+                    if (selector_hints.has_backslash) {
+                        const escaped_sel = try WriterHelpers.ensureSelectorHexEscapeDelimiters(temp, sel_str);
+                        if (!(escaped_sel.ptr == sel_str.ptr and escaped_sel.len == sel_str.len)) {
+                            sel_str = escaped_sel;
+                            sel_owned = escaped_sel;
                         }
                     }
                     if (std.mem.trim(u8, sel_str, " \t\r\n").len == 0) continue;
