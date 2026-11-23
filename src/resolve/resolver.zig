@@ -4452,26 +4452,42 @@ fn valueSourceMixesInterpolation(value_source: []const u8) bool {
     const trimmed = std.mem.trim(u8, value_source, " \t\r\n");
     const first = std.mem.indexOf(u8, trimmed, "#{") orelse return false;
     if (first != 0) return true;
-    var depth: usize = 0;
-    var i: usize = 0;
-    while (i < trimmed.len) : (i += 1) {
-        switch (trimmed[i]) {
-            '\\' => i += 1,
+    const end = interpolationEnd(trimmed, 2) orelse return true;
+    return end + 1 != trimmed.len;
+}
+
+/// The index of the `}` that closes the interpolation whose content starts
+/// at `start`. A brace in a string inside it is text.
+fn interpolationEnd(source: []const u8, start: usize) ?usize {
+    var depth: usize = 1;
+    var in_string: u8 = 0;
+    var i = start;
+    while (i < source.len) : (i += 1) {
+        const c = source[i];
+        if (c == '\\') {
+            i += 1;
+            continue;
+        }
+        if (in_string != 0) {
+            if (c == in_string) in_string = 0;
+            continue;
+        }
+        switch (c) {
+            '"', '\'' => in_string = c,
             '{' => depth += 1,
             '}' => {
-                depth -|= 1;
-                if (depth == 0) return i + 1 != trimmed.len;
+                depth -= 1;
+                if (depth == 0) return i;
             },
             else => {},
         }
     }
-    return true;
+    return null;
 }
 
 /// Whether a number such as `0.5` is written outside every `#{...}` and
 /// outside strings and function arguments.
 fn valueSourceHasZeroDecimalOutsideInterpolation(value_source: []const u8) bool {
-    var interp_depth: usize = 0;
     // The depth inside functions other than calculations; a number there
     // is not shortened.
     var paren_depth: usize = 0;
@@ -4484,14 +4500,8 @@ fn valueSourceHasZeroDecimalOutsideInterpolation(value_source: []const u8) bool 
             i += 1;
             continue;
         }
-        if (interp_depth != 0) {
-            if (c == '{') interp_depth += 1;
-            if (c == '}') interp_depth -= 1;
-            continue;
-        }
         if (c == '#' and i + 1 < value_source.len and value_source[i + 1] == '{') {
-            interp_depth = 1;
-            i += 1;
+            i = interpolationEnd(value_source, i + 2) orelse return false;
             continue;
         }
         if (in_string != 0) {
@@ -7330,7 +7340,7 @@ fn parsePropertyNamespaceSelector(
     ctx: *Ctx,
     selector_text: []const u8,
     span: Span,
-) ?struct { prefix: InternId, prefix_expr: ExprIndex, value_expr: ?ExprIndex } {
+) ?struct { prefix: InternId, prefix_expr: ExprIndex, value_expr: ?ExprIndex, value_flags: u16 } {
     const trimmed = std.mem.trim(u8, selector_text, " \t\r\n");
     if (trimmed.len == 0) return null;
 
@@ -7380,6 +7390,11 @@ fn parsePropertyNamespaceSelector(
         .prefix = prefix_intern,
         .prefix_expr = prefix_expr,
         .value_expr = value_expr,
+        .value_flags = switch (valueSourceSingleDynamicKind(value_text)) {
+            .none => 0,
+            .interpolation => opcode_mod.emit_decl_flag_value_single_dynamic | opcode_mod.emit_decl_flag_value_single_interp,
+            .other => opcode_mod.emit_decl_flag_value_single_dynamic,
+        },
     };
 }
 
@@ -7588,6 +7603,7 @@ fn resolveSelectorRuleData(ctx: *Ctx, sel_node: NodeIndex, span: Span) ResolveEr
             .prop_namespace_prefix = if (prop_ns) |v| v.prefix else .none,
             .prop_namespace_prefix_expr = if (prop_ns) |v| v.prefix_expr else null,
             .prop_namespace_value_expr = if (prop_ns) |v| v.value_expr else null,
+            .prop_namespace_value_flags = if (prop_ns) |v| v.value_flags else 0,
             .dynamic_parts_start = 0,
             .dynamic_parts_count = 0,
             .body_direct = &.{},
@@ -7616,6 +7632,7 @@ fn resolveSelectorRuleData(ctx: *Ctx, sel_node: NodeIndex, span: Span) ResolveEr
             .prop_namespace_prefix = if (prop_ns) |v| v.prefix else .none,
             .prop_namespace_prefix_expr = if (prop_ns) |v| v.prefix_expr else null,
             .prop_namespace_value_expr = if (prop_ns) |v| v.value_expr else null,
+            .prop_namespace_value_flags = if (prop_ns) |v| v.value_flags else 0,
             .dynamic_parts_start = 0,
             .dynamic_parts_count = 0,
             .body_direct = &.{},
@@ -7633,6 +7650,7 @@ fn resolveSelectorRuleData(ctx: *Ctx, sel_node: NodeIndex, span: Span) ResolveEr
         .prop_namespace_prefix = if (prop_ns) |v| v.prefix else .none,
         .prop_namespace_prefix_expr = if (prop_ns) |v| v.prefix_expr else null,
         .prop_namespace_value_expr = if (prop_ns) |v| v.value_expr else null,
+        .prop_namespace_value_flags = if (prop_ns) |v| v.value_flags else 0,
         .dynamic_parts_start = stored.start,
         .dynamic_parts_count = stored.count,
         .body_direct = &.{},

@@ -3019,7 +3019,7 @@ fn compilePropertyNamespaceRule(ctx: CompileCtx, si: StmtIndex) CompileError!voi
     if (rule.prop_namespace_value_expr) |base_expr| {
         try compileExpr(ctx, prefix_expr);
         try compileExpr(ctx, base_expr);
-        try ctx.cb.emit(.emit_decl_dynamic, 0, 0);
+        try ctx.cb.emit(.emit_decl_dynamic, rule.prop_namespace_value_flags, 0);
     }
 
     try compileExpr(ctx, prefix_expr);

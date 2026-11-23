@@ -4237,6 +4237,7 @@ pub const VM = struct {
                     const unmarked_literal = try stripLiteralDeclMarkersVm(self.allocator, raw_literal);
                     defer if (unmarked_literal.ptr != raw_literal.ptr) self.allocator.free(unmarked_literal);
                     try self.rule_ir.appendDeclRaw(self.allocator, @intFromEnum(prop_id), unmarked_literal, self.currentSourceSpan());
+                    self.rule_ir.hintLastDecl(if (is_plain_css_decl) rule_ir_mod.decl_hint_plain_css else self.declStringValueHint(emit_decl_flags, val));
                     return .continue_exec;
                 }
                 if (!is_custom_property) {
@@ -4245,6 +4246,7 @@ pub const VM = struct {
                         css_utils.containsCalcFunction(vid_raw))
                     {
                         try self.rule_ir.appendDeclRaw(self.allocator, @intFromEnum(prop_id), vid_raw, self.currentSourceSpan());
+                        self.rule_ir.hintLastDecl(if (is_plain_css_decl) rule_ir_mod.decl_hint_plain_css else self.declStringValueHint(emit_decl_flags, val));
                         return .continue_exec;
                     }
                 }
@@ -4255,6 +4257,7 @@ pub const VM = struct {
                         css_utils.containsCalcFunction(marked_raw))
                     {
                         try self.rule_ir.appendDeclRaw(self.allocator, @intFromEnum(prop_id), marked_value, self.currentSourceSpan());
+                        self.rule_ir.hintLastDecl(if (is_plain_css_decl) rule_ir_mod.decl_hint_plain_css else self.declStringValueHint(emit_decl_flags, val));
                         return .continue_exec;
                     }
                 }
@@ -4905,6 +4908,7 @@ pub const VM = struct {
                         css_utils.containsCalcFunction(marked_raw))
                     {
                         try self.rule_ir.appendDeclRaw(self.allocator, prop_u, marked_value, self.currentSourceSpan());
+                        self.rule_ir.hintLastDecl(self.declStringValueHint(inst.arg_a, val));
                         return .continue_exec;
                     }
                 }

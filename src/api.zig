@@ -1335,6 +1335,20 @@ test "api: compressed output follows the official CLI" {
             ,
             .css = "@import\"b.css\"screen and (min-width: 10px);@layer a, b;@media(width >= 64rem)and (height < 3px),print{a{b:c}}@supports(a: b) or (c: d){a{b:c}}@container sidebar (min-width: 400px) and (max-width: 700px){a{b:c}}a:nth-of-type(10n + 1)>b{c:d}@font-face{font-family:x}\n",
         },
+        // A value that is one interpolation stays as written in front of
+        // nested properties and after a name made by interpolation.
+        .{
+            .source =
+            \\$color: white;
+            \\$v: calc(0.5px + 1%);
+            \\a {
+            \\  b: #{$color} { c: 1px; }
+            \\  #{"d"}: #{$v};
+            \\}
+            \\
+            ,
+            .css = "a{b:white;b-c:1px;d:calc(0.5px + 1%)}\n",
+        },
         // Comments on one line, and a comment in a custom property whose
         // name came from interpolation.
         .{
