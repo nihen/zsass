@@ -4411,7 +4411,11 @@ fn leadingIndentColumns(line: []const u8) usize {
 /// How a declaration value is written when it is a single dynamic term:
 /// `$x` or `ns.$x`, `#{...}`, or `name(...)`.
 fn valueSourceSingleDynamicKind(value_source: []const u8) enum { none, interpolation, other } {
-    const trimmed = std.mem.trim(u8, value_source, " \t\r\n");
+    var trimmed = std.mem.trim(u8, value_source, " \t\r\n");
+    // Parentheses around the whole value group it and change nothing.
+    while (trimmed.len >= 2 and trimmed[0] == '(' and matchingParenthesis(trimmed) == trimmed.len - 1) {
+        trimmed = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], " \t\r\n");
+    }
     if (trimmed.len == 0) return .none;
     if (std.mem.startsWith(u8, trimmed, "#{")) {
         return if (valueSourceMixesInterpolation(trimmed)) .none else .interpolation;
@@ -4444,6 +4448,34 @@ fn valueSourceSingleDynamicKind(value_source: []const u8) enum { none, interpola
         }
     }
     return .none;
+}
+
+/// The index of the `)` that closes the `(` `text` starts with.
+fn matchingParenthesis(text: []const u8) ?usize {
+    var depth: usize = 0;
+    var in_string: u8 = 0;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (c == '\\') {
+            i += 1;
+            continue;
+        }
+        if (in_string != 0) {
+            if (c == in_string) in_string = 0;
+            continue;
+        }
+        switch (c) {
+            '"', '\'' => in_string = c,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            else => {},
+        }
+    }
+    return null;
 }
 
 /// Whether a declaration value has an interpolation and something else
