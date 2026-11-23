@@ -2662,7 +2662,7 @@ fn combinatorPathMatches(super_comb: Combinator, sub_parts: *const DecomposedCom
     }
 }
 
-fn compoundIsSuperSelector(super_sel: CompoundSelector, sub: CompoundSelector) bool {
+pub fn compoundIsSuperSelector(super_sel: CompoundSelector, sub: CompoundSelector) bool {
     const super_pseudo = compoundPseudoElementInfo(super_sel);
     const sub_pseudo = compoundPseudoElementInfo(sub);
 

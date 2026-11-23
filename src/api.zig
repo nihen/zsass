@@ -1544,6 +1544,30 @@ test "api: covered @extend results are left out after each extension" {
     }
 }
 
+test "api: a covered @extend result stays where covering is not a plain match" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { source: []const u8, kept: []const u8 }{
+        // A child combinator.
+        .{ .source = ".a .a { x: y; }\n.k .f > a, .f { @extend .a; }\n", .kept = ", .k .f > a .f > a," },
+        // `*` leaves no trace in what it is unified with.
+        .{ .source = ".a.b .a.b { x: y; }\n.f:hover, #x *.f:hover { @extend .a; }\n", .kept = ", #x .b.f:hover .b.f:hover," },
+        // `:where()` adds no specificity.
+        .{ .source = ".a .a { x: y; }\n.f:hover, .g :where(.f) { @extend .a; }\n", .kept = ", .g :where(.f) .f:hover," },
+    };
+    for (cases) |case| {
+        const css = try compileSourceToCss(alloc, case.source, "", &.{}, .{});
+        defer alloc.free(css);
+        try std.testing.expect(std.mem.indexOf(u8, css, case.kept) != null);
+    }
+}
+
+test "api: an ancestor the extender's last compound matches is not shared" {
+    const alloc = std.testing.allocator;
+    const css = try compileSourceToCss(alloc, ".a .a { x: y; }\ndiv .f + div { @extend .a; }\n", "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expect(std.mem.indexOf(u8, css, ", div .f + div .f + div") == null);
+}
+
 test "api: an extender with ancestors and a sibling joins a repeated @extend target" {
     const alloc = std.testing.allocator;
     const source =
