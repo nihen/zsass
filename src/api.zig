@@ -1553,6 +1553,10 @@ test "api: a covered @extend result stays where covering is not a plain match" {
         // `*` leaves no trace in what it is unified with.
         .{ .source = ".a.b .a.b { x: y; }\n.f:hover, #x *.f:hover { @extend .a; }\n", .kept = ", #x .b.f:hover .b.f:hover," },
         .{ .source = "div.a div.a { x: y; }\n.f:hover, #x *|div.f:hover { @extend .a; }\n", .kept = ", #x div.f:hover div.f:hover," },
+        // Unifying with `.a.f` and `.a.g` makes compounds that cover others.
+        .{ .source = ".a.f .a.g { x: y; }\n.f .g { @extend .a; }\n", .kept = ", .f .f.g .a.g," },
+        // The ancestor `.f` of one extender is what another one ends with.
+        .{ .source = ".a .a .a { x: y; }\n.f :hover, .f, .g.h, .f.k { @extend .a; }\n", .kept = ", .a .a .f :hover," },
         // `:where()` adds no specificity.
         .{ .source = ".a .a { x: y; }\n.f:hover, .g :where(.f) { @extend .a; }\n", .kept = ", .g :where(.f) .f:hover," },
     };

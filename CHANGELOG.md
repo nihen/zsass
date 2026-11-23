@@ -10,10 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `@extend` with the target repeated in a selector leaves out a result
   that another result covers (`.g .f .f:hover` next to `.g .f .f`), as the
   official CLI does after each `@extend` rule for a list of up to 100
-  selectors. This is done where the selector and its extenders are plain
-  chains of descendants. A single extender that has both an ancestor and
-  a sibling combinator is also combined with itself
-  (`.x .f + .g .f + .g`).
+  selectors. This is done where the selector is a chain of single simple
+  selectors and its extenders are plain chains of descendants. A single
+  extender that has both an ancestor and a sibling combinator is also
+  combined with itself (`.x .f + .g .f + .g`).
 
 ## 0.4.2 (2026-11-23)
 
