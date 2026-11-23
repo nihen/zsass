@@ -3843,8 +3843,35 @@ pub const ApplyState = struct {
                             // With the room reserved, handing a selector
                             // over below cannot fail half way.
                             if (!abandoned) try first_pass.ensureDirectCapacity(self.allocator, first_pass.selectors.items.len + generated.items.len);
+                            // A result that another one covers is left
+                            // out when the covering one is at least as
+                            // specific as anything the results came from:
+                            // `.g .f .f:hover` next to `.g .f .f`.
+                            var redundant: std.DynamicBitSetUnmanaged = .{};
+                            defer redundant.deinit(self.allocator);
+                            if (!abandoned and generated.items.len <= repeated_target_trim_max) {
+                                redundant = try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, generated.items.len);
+                                var source_specificity = specificity.complexSpecificity(&complex);
+                                for (related_exts.items) |related_ext| {
+                                    for (related_ext.extender.selectors.items) |*extender_complex| {
+                                        source_specificity = specificityMax(source_specificity, specificity.complexSpecificity(extender_complex));
+                                    }
+                                }
+                                for (generated.items[1..], 1..) |*candidate, candidate_idx| {
+                                    for (generated.items[1..], 1..) |*other, other_idx| {
+                                        if (other_idx == candidate_idx or redundant.isSet(other_idx)) continue;
+                                        if (!selector_mod.complexIsSuperSelector(&other.selector, &candidate.selector)) continue;
+                                        // Of two that cover each other the first stays.
+                                        if (other_idx > candidate_idx and selector_mod.complexIsSuperSelector(&candidate.selector, &other.selector)) continue;
+                                        if (!specificity.specificityGte(specificity.complexSpecificity(&other.selector), source_specificity)) continue;
+                                        redundant.set(candidate_idx);
+                                        break;
+                                    }
+                                }
+                            }
                             // The first entry is the selector itself.
-                            if (!abandoned) for (generated.items[1..]) |*g| {
+                            if (!abandoned) for (generated.items[1..], 1..) |*g, generated_idx| {
+                                if (redundant.bit_length != 0 and redundant.isSet(generated_idx)) continue;
                                 for (g.selector.components.items) |*component| {
                                     if (component.* != .compound) continue;
                                     normalizeGeneratedCompound(&component.compound, self.extensions.items, self.sort_extension_hints.items);
@@ -7159,11 +7186,25 @@ fn joinExtenderAfterDescendant(
     if (items[comp_idx - 1] != .combinator or items[comp_idx - 1].combinator != .descendant) return null;
     const extender_last = extender_items[extender_items.len - 1];
     if (extender_last != .compound) return null;
-    // An extender with ancestors of its own (`.x .f + .g`) shares them with
-    // what is already there; that takes a weave.
-    for (extender_items) |component| {
+    // The extender's own ancestors (`.x` in `.x .f + .g`) are shared with
+    // what is already there when the selector starts with the same ones;
+    // only the part joined by sibling combinators is put in. Any other
+    // ancestors take a weave.
+    var group_start: usize = 0;
+    for (extender_items, 0..) |component, idx| {
         if (component != .combinator) continue;
-        if (component.combinator != .next_sibling and component.combinator != .general_sibling) return null;
+        switch (component.combinator) {
+            .next_sibling, .general_sibling => {},
+            .descendant => group_start = idx + 1,
+            else => return null,
+        }
+    }
+    if (group_start > comp_idx) return null;
+    for (extender_items[0..group_start], items[0..group_start]) |extender_component, component| {
+        switch (extender_component) {
+            .combinator => |c| if (component != .combinator or component.combinator != c) return null,
+            .compound => |*c| if (component != .compound or !specificity.compoundSelectorEql(c, &component.compound)) return null,
+        }
     }
 
     var joined = ComplexSelector.init(allocator);
@@ -7173,7 +7214,7 @@ fn joinExtenderAfterDescendant(
         .compound => |c| .{ .compound = try c.clone(allocator) },
         .combinator => |c| .{ .combinator = c },
     });
-    for (extender_items[0 .. extender_items.len - 1]) |component| joined.components.appendAssumeCapacity(switch (component) {
+    for (extender_items[group_start .. extender_items.len - 1]) |component| joined.components.appendAssumeCapacity(switch (component) {
         .compound => |c| .{ .compound = try c.clone(allocator) },
         .combinator => |c| .{ .combinator = c },
     });
@@ -7208,6 +7249,9 @@ const repeated_target_max_positions = 10;
 /// Later passes compare the results with one another, so the time grows
 /// with the square of this.
 const repeated_target_max_results = 1024;
+/// Every result is compared with every other one to leave out the covered
+/// ones, so this is done for short lists only.
+const repeated_target_trim_max = 128;
 
 /// Extend a complex selector whose compounds contain the target more than
 /// once. Each such compound is either kept or replaced by one of the

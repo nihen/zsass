@@ -1463,6 +1463,24 @@ test "api: a repeated @extend target leaves out covered extenders and keeps sibl
     , css);
 }
 
+test "api: a repeated @extend target leaves out results another result covers" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\.a .a { x: y; }
+        \\.f:hover, .g .f { @extend .a; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    defer alloc.free(css);
+    // `.g .f .f:hover` and `.g .f:hover .f` are covered by `.g .f .f`.
+    try std.testing.expectEqualStrings(
+        \\.a .a, .f:hover .a, .g .f .a, .a .f:hover, .f:hover .f:hover, .a .g .f, .g .a .f, .f:hover .g .f, .g .f .f {
+        \\  x: y;
+        \\}
+        \\
+    , css);
+}
+
 test "api: a repeated @extend target past the limit is still extended" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

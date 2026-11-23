@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+- `@extend` with the target repeated in a selector leaves out a result
+  that another result covers (`.g .f .f:hover` next to `.g .f .f`), and
+  writes the combination of an extender that has both an ancestor and a
+  sibling combinator (`.x .f + .g .f + .g`).
+
 ## 0.4.2 (2026-11-23)
 
 Tracks Dart Sass 1.108.2. The vendored `sass-spec` pin moves to
