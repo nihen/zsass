@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`.a .a`) and its extenders are plain chains of descendants. A single
   extender that has both an ancestor and a sibling combinator is also
   combined with itself (`.x .f + .g .f + .g`).
+- `compileSourceToCss` and `compileSourceToCssWithSourceMap` no longer
+  leak with an allocator that is not an arena. Lists returned by built-in
+  functions (`list.append()`, `map.merge()`, `selector.nest()`, ...) were
+  never freed. Each compile now runs in an arena of its own on top of the
+  given allocator, as the CLI does, and only the result is allocated with
+  the allocator itself.
 
 ## 0.4.2 (2026-11-23)
 
