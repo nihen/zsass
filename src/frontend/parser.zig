@@ -83,6 +83,8 @@ pub const Parser = struct {
     /// Default is SCSS (`false`) so existing parser unit tests keep their
     /// behavior unless they explicitly opt in.
     is_indented_syntax: bool = false,
+    /// True for a plain CSS file, where some syntax errors have another message.
+    is_plain_css: bool = false,
 
     /// Set by the caller when the token stream is known to contain zero
     /// `hash_lbrace` (`#{`) tokens -- i.e. there's no Sass interpolation in
@@ -142,6 +144,7 @@ pub const Parser = struct {
         sub.in_css_custom_function = self.in_css_custom_function;
         sub.call_arg_depth = self.call_arg_depth;
         sub.is_indented_syntax = self.is_indented_syntax;
+        sub.is_plain_css = self.is_plain_css;
         sub.in_interpolation_body = self.in_interpolation_body;
         return sub;
     }
@@ -1406,6 +1409,19 @@ pub const Parser = struct {
             if (tok.span.start >= raw_end) break;
             if (tok.tag == .invalid and !self.in_css_custom_function and !allow_invalid_tokens) return error.SyntaxError;
         }
+        // A CSS custom function keeps the text of `result` as written.
+        const empty_comma = if (self.in_css_custom_function) null else rawDeclarationValueEmptyCommaOperand(raw_text);
+        if (empty_comma) |hit| {
+            const hit_byte = value_start_byte + @as(u32, @intCast(hit.offset));
+            var hit_pos = saved_pos;
+            while (hit_pos < self.tokens.len and self.tokens[hit_pos].span.start < hit_byte) : (hit_pos += 1) {}
+            self.pos = hit_pos;
+            // Verified with the official CLI: a plain CSS file reports
+            // `Expected expression.` inside parentheses as well.
+            const wants_close_paren = hit.in_paren and !self.is_plain_css;
+            error_format.setContextMessage(if (wants_close_paren) "expected \")\"." else "Expected expression.");
+            return error.SyntaxError;
+        }
         if (rawDeclarationValueHasMalformedSassArglist(raw_text)) return error.SyntaxError;
         if (rawDeclarationValueHasFatalCalcSyntax(raw_text)) return error.SyntaxError;
 
@@ -2048,6 +2064,187 @@ pub const Parser = struct {
         }
 
         return false;
+    }
+
+    const EmptyCommaOperand = struct {
+        offset: usize,
+        in_paren: bool,
+    };
+
+    /// Whether a function keeps its argument text as written, so that a comma
+    /// with nothing before it is allowed inside.
+    fn rawFunctionKeepsArgumentText(name: []const u8, after_open: []const u8) bool {
+        if (std.mem.findScalar(u8, name, ':')) |colon| {
+            return std.ascii.eqlIgnoreCase(cssFunctionBaseName(name[0..colon]), "progid");
+        }
+        if (std.ascii.eqlIgnoreCase(name, "type") or std.ascii.eqlIgnoreCase(name, "if")) return true;
+        const base = cssFunctionBaseName(name);
+        if (std.ascii.eqlIgnoreCase(base, "expression") or std.ascii.eqlIgnoreCase(base, "element")) return true;
+        if (std.ascii.eqlIgnoreCase(base, "calc")) return base.len != name.len;
+        if (std.ascii.eqlIgnoreCase(base, "url")) {
+            const inner = std.mem.trimStart(u8, after_open, " \t\r\n");
+            return inner.len == 0 or (inner[0] != '"' and inner[0] != '\'');
+        }
+        return false;
+    }
+
+    /// Index of the `)` that closes the `(` at `open_idx`, for a call whose
+    /// argument text is kept as written. Null when the end is not clear:
+    /// `//` is a comment in some of these calls and text in others.
+    fn skipKeptArgumentText(text: []const u8, open_idx: usize) ?usize {
+        var depth: usize = 0;
+        var i = open_idx;
+        while (i < text.len) : (i += 1) {
+            switch (text[i]) {
+                '\\' => i += 1,
+                '"', '\'' => {
+                    const quote = text[i];
+                    i += 1;
+                    while (i < text.len and text[i] != quote) : (i += 1) {
+                        if (text[i] == '\\') i += 1;
+                    }
+                },
+                '/' => if (i + 1 < text.len) {
+                    if (text[i + 1] == '/') return null;
+                    if (text[i + 1] == '*') {
+                        const end = std.mem.findPos(u8, text, i + 2, "*/") orelse return null;
+                        i = end + 1;
+                    }
+                },
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if (depth == 0) return i;
+                },
+                else => {},
+            }
+        }
+        return null;
+    }
+
+    /// Find a comma that has no value before it in a comma-separated list:
+    /// `a(,)`, `a(1,,2)`, `(,)`, `[,1]`, `1,,2`. A trailing comma (`a(1,)`) is
+    /// not one. Returns null when the text has a shape this scan does not
+    /// follow, so that the caller keeps its other checks.
+    fn rawDeclarationValueEmptyCommaOperand(text: []const u8) ?EmptyCommaOperand {
+        const Context = struct {
+            close: u8,
+            expect_value: bool = true,
+        };
+
+        var stack: [64]Context = undefined;
+        stack[0] = .{ .close = 0 };
+        var len: usize = 1;
+        // An escape in the name before `(` may spell a function that keeps
+        // its argument text (`pr\6fgid:y(,)`), so that call is not judged.
+        var name_has_escape = false;
+        var i: usize = 0;
+
+        while (i < text.len) : (i += 1) {
+            const c = text[i];
+            const ctx = &stack[len - 1];
+            const continues_name = std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or
+                c == ':' or c == '.' or c == '\\' or c == '(' or c >= 0x80;
+            if (!continues_name) name_has_escape = false;
+            switch (c) {
+                ' ', '\t', '\n', '\r' => {},
+                '\\' => {
+                    i += 1;
+                    if (i < text.len and std.ascii.isHex(text[i])) {
+                        var digits: usize = 1;
+                        while (digits < 6 and i + 1 < text.len and std.ascii.isHex(text[i + 1])) : (digits += 1) i += 1;
+                        if (i + 1 < text.len) switch (text[i + 1]) {
+                            ' ', '\t', '\n', '\r', 0x0c => i += 1,
+                            else => {},
+                        };
+                    }
+                    name_has_escape = true;
+                    ctx.expect_value = false;
+                },
+                '"', '\'' => {
+                    i += 1;
+                    while (i < text.len and text[i] != c) : (i += 1) {
+                        if (text[i] == '\\') i += 1;
+                    }
+                    if (i >= text.len) return null;
+                    ctx.expect_value = false;
+                },
+                '/' => {
+                    if (i + 1 < text.len and text[i + 1] == '*') {
+                        const end = std.mem.findPos(u8, text, i + 2, "*/") orelse return null;
+                        i = end + 1;
+                    } else if (i + 1 < text.len and text[i + 1] == '/') {
+                        i = std.mem.findScalarPos(u8, text, i, '\n') orelse return null;
+                    } else {
+                        ctx.expect_value = false;
+                    }
+                },
+                '#' => {
+                    ctx.expect_value = false;
+                    if (i + 1 < text.len and text[i + 1] == '{') {
+                        var depth: usize = 0;
+                        var j = i + 1;
+                        while (j < text.len) : (j += 1) {
+                            switch (text[j]) {
+                                '{' => depth += 1,
+                                '}' => {
+                                    depth -= 1;
+                                    if (depth == 0) break;
+                                },
+                                '"', '\'' => {
+                                    const quote = text[j];
+                                    j += 1;
+                                    while (j < text.len and text[j] != quote) : (j += 1) {
+                                        if (text[j] == '\\') j += 1;
+                                    }
+                                },
+                                else => {},
+                            }
+                        }
+                        if (j >= text.len) return null;
+                        i = j;
+                    }
+                },
+                '{', '}' => return null,
+                '(' => {
+                    ctx.expect_value = false;
+                    if (name_has_escape) {
+                        name_has_escape = false;
+                        i = skipKeptArgumentText(text, i) orelse return null;
+                        continue;
+                    }
+                    var name_start = i;
+                    while (name_start > 0) : (name_start -= 1) {
+                        const p = text[name_start - 1];
+                        if (!std.ascii.isAlphanumeric(p) and p != '-' and p != '_' and p != ':' and p != '.') break;
+                    }
+                    if (rawFunctionKeepsArgumentText(text[name_start..i], text[i + 1 ..])) {
+                        i = skipKeptArgumentText(text, i) orelse return null;
+                        continue;
+                    }
+                    if (len == stack.len) return null;
+                    stack[len] = .{ .close = ')' };
+                    len += 1;
+                },
+                '[' => {
+                    ctx.expect_value = false;
+                    if (len == stack.len) return null;
+                    stack[len] = .{ .close = ']' };
+                    len += 1;
+                },
+                ')', ']' => {
+                    if (len == 1 or ctx.close != c) return null;
+                    len -= 1;
+                },
+                ',' => {
+                    if (ctx.expect_value) return .{ .offset = i, .in_paren = ctx.close == ')' };
+                    ctx.expect_value = true;
+                },
+                else => ctx.expect_value = false,
+            }
+        }
+
+        return null;
     }
 
     fn findMatchingParenInRaw(text: []const u8, open_idx: usize) ?usize {
@@ -5387,6 +5584,7 @@ pub const Parser = struct {
             sub.in_css_custom_function = self.in_css_custom_function;
             sub.call_arg_depth = self.call_arg_depth;
             sub.is_indented_syntax = self.is_indented_syntax;
+            sub.is_plain_css = self.is_plain_css;
             defer sub.deinit();
 
             const node = try sub.parseExpression(ast);
@@ -7026,6 +7224,7 @@ pub const Parser = struct {
 
         var sub = Parser.init(self.allocator, self.intern_pool, sub_tokens, expr_source);
         sub.is_indented_syntax = self.is_indented_syntax;
+        sub.is_plain_css = self.is_plain_css;
         sub.in_interpolation_body = true;
         defer sub.deinit();
 
@@ -12792,4 +12991,90 @@ test "parse: id selector `#foo { ... }` still parses as a style rule" {
     const sr = readStyleRule(&result.ast, stmt);
     const sel_id: InternId = @enumFromInt(result.ast.getNode(sr.selector_node).payload);
     try std.testing.expectEqualStrings("#foo", pool.get(sel_id));
+}
+
+test "rawDeclarationValueEmptyCommaOperand: a comma with no value before it" {
+    const find = Parser.rawDeclarationValueEmptyCommaOperand;
+
+    // Verified with the official CLI: each of these is `expected ")".`
+    // (inside parentheses) or `Expected expression.` at the given comma.
+    const rejected = [_]struct { text: []const u8, offset: usize, in_paren: bool }{
+        .{ .text = "a( , )", .offset = 3, .in_paren = true },
+        .{ .text = "a(1,,2)", .offset = 4, .in_paren = true },
+        .{ .text = "a(,1)", .offset = 2, .in_paren = true },
+        .{ .text = "(,)", .offset = 1, .in_paren = true },
+        .{ .text = "foo(/**/,)", .offset = 8, .in_paren = true },
+        .{ .text = "foo(#{1},,)", .offset = 9, .in_paren = true },
+        .{ .text = "foo(var(--a,),,)", .offset = 14, .in_paren = true },
+        .{ .text = "foo(url(,),,)", .offset = 11, .in_paren = true },
+        .{ .text = "-x-type(,)", .offset = 8, .in_paren = true },
+        .{ .text = "calc(1px,,2px)", .offset = 9, .in_paren = true },
+        .{ .text = "xprogid:y(,)", .offset = 10, .in_paren = true },
+        .{ .text = "\\66oo(1) bar(,)", .offset = 13, .in_paren = true },
+        .{ .text = "foo-progid:bar(,)", .offset = 15, .in_paren = true },
+        .{ .text = "[1,,2]", .offset = 3, .in_paren = false },
+        .{ .text = "foo([,])", .offset = 5, .in_paren = false },
+        .{ .text = "1,,2", .offset = 2, .in_paren = false },
+        .{ .text = ",1", .offset = 0, .in_paren = false },
+    };
+    for (rejected) |case| {
+        const hit = find(case.text) orelse return error.TestExpectedEqual;
+        try std.testing.expectEqual(case.offset, hit.offset);
+        try std.testing.expectEqual(case.in_paren, hit.in_paren);
+    }
+
+    // Verified with the official CLI: each of these compiles.
+    const accepted = [_][]const u8{
+        "a(1,)",
+        "(1,)",
+        "[1,]",
+        "1,",
+        "foo(\",\",)",
+        "foo(\\,,)",
+        "var(--a,)",
+        "foo(var(--a,),)",
+        "url(a,,b)",
+        "URL(,)",
+        "url(#{a},,)",
+        "expression(a(,),,)",
+        "-ms-expression(,)",
+        "element(,)",
+        "-moz-element(,)",
+        "type(,)",
+        "-webkit-calc(,)",
+        "a progid:foo(,)",
+        "a PROGID:a.b.c(,)",
+        "a -ms-progid:foo(,)",
+        "pr\\6fgid:y(,)",
+        "-x-pr\\6fgid:y(,)",
+        "\\75 rl(,)",
+        "expr\\65ssion(,)",
+        "pr\\6f\rgid:y(,)",
+        "pr\\6f\x0cgid:y(,)",
+        "pr\\6fgid:y(\\),,)",
+        "expression(\\),,)",
+        "expression(\")\",,) a",
+        "expression(/*)*/,,)",
+    };
+    for (accepted) |text| {
+        try std.testing.expect(find(text) == null);
+    }
+}
+
+test "parse: a CSS custom function keeps a comma with no value before it in `result`" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var pool = try InternPool.init(alloc);
+    defer pool.deinit(alloc);
+
+    // Verified with the official CLI: both compile and keep the text.
+    for ([_][]const u8{
+        "@function --f() { result: foo(,); }",
+        "@function --f() { result: ,; }",
+    }) |source| {
+        var result = try parseFullSource(alloc, &pool, source);
+        result.ast.deinit();
+    }
 }

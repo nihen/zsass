@@ -873,6 +873,7 @@ pub fn runLoadCssModule(self: anytype, resolved_path: []const u8, config: LoadCs
 
     var parser = parser_mod.Parser.init(sa, self.intern_pool, tokens, source);
     parser.is_indented_syntax = is_sass_source;
+    parser.is_plain_css = is_plain_css_source;
     defer parser.deinit();
     var ast = parser.parse() catch return error.SassError;
     ast.is_indented_syntax = is_sass_source;
