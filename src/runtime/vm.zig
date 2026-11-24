@@ -5605,9 +5605,13 @@ pub const VM = struct {
         var short: std.ArrayListUnmanaged(u8) = .empty;
         defer short.deinit(self.allocator);
         try short.ensureTotalCapacity(self.allocator, text.len);
-        var dropped = false;
         var span: usize = 0;
         var at: usize = 0;
+        // As in compressed output, a string and the arguments of a
+        // function that is not a calculation are left alone.
+        var quote: u8 = 0;
+        var depth: usize = 0;
+        var text_depth: usize = 0;
         while (at < text.len) : (at += 1) {
             while (span < value_spans.len and value_spans[span][1] <= at) span += 1;
             const in_value = span < value_spans.len and value_spans[span][0] <= at;
@@ -5617,16 +5621,38 @@ pub const VM = struct {
             }
             const ch = text[at];
             if (ch == calc_interp_preserve_end[0]) continue;
-            if (!in_value and ch == '0' and at + 1 < text.len and text[at + 1] == '.') {
+            if (quote != 0) {
+                if (ch == '\\' and at + 1 < text.len) {
+                    short.appendAssumeCapacity(ch);
+                    at += 1;
+                } else if (ch == quote) {
+                    quote = 0;
+                }
+                short.appendAssumeCapacity(text[at]);
+                continue;
+            }
+            switch (ch) {
+                '"', '\'' => quote = ch,
+                '(' => {
+                    depth += 1;
+                    var name_start = short.items.len;
+                    while (name_start > 0 and (std.ascii.isAlphanumeric(short.items[name_start - 1]) or short.items[name_start - 1] == '-' or short.items[name_start - 1] == '_')) name_start -= 1;
+                    const name = short.items[name_start..];
+                    if (text_depth == 0 and name.len != 0 and !css_utils.isCalculationFunctionName(name)) text_depth = depth;
+                },
+                ')' => {
+                    if (text_depth == depth) text_depth = 0;
+                    depth -|= 1;
+                },
+                else => {},
+            }
+            if (!in_value and text_depth == 0 and ch == '0' and at + 1 < text.len and text[at + 1] == '.') {
                 const prev = if (short.items.len != 0) short.items[short.items.len - 1] else 0;
                 // Ten decimals as they are keep the zero, as elsewhere.
                 var decimals: usize = 0;
                 while (at + 2 + decimals < text.len and std.ascii.isDigit(text[at + 2 + decimals])) decimals += 1;
                 const ten_decimals = decimals == 10 and text[at + 11] != '0';
-                if (!ten_decimals and prev != '-' and !std.ascii.isAlphanumeric(prev) and prev != '_' and prev != '.') {
-                    dropped = true;
-                    continue;
-                }
+                if (!ten_decimals and prev != '-' and !std.ascii.isAlphanumeric(prev) and prev != '_' and prev != '.') continue;
             }
             short.appendAssumeCapacity(ch);
         }

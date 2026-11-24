@@ -5435,7 +5435,7 @@ pub const RuleIR = struct {
     fn endsDeclToken(text: []const u8, at: usize) bool {
         if (at >= text.len) return true;
         return switch (text[at]) {
-            ' ', ',', ';', '}', '/', ')' => true,
+            ' ', ',', ';', '}', '/', ')', ']' => true,
             else => false,
         };
     }
@@ -5477,8 +5477,14 @@ pub const RuleIR = struct {
         }
         if (pos == digits_start or !std.ascii.isDigit(text[pos - 1])) return false;
         if (pos < text.len and text[pos] == '%') return pos + 1 == text.len;
-        for (text[pos..]) |ch| {
-            if (!std.ascii.isAlphanumeric(ch) and ch != '-' and ch != '_' and ch < 0x80) return false;
+        while (pos < text.len) : (pos += 1) {
+            const ch = text[pos];
+            if (ch == '\\') {
+                // An escaped character is part of the unit.
+                pos += 1;
+            } else if (!std.ascii.isAlphanumeric(ch) and ch != '-' and ch != '_' and ch < 0x80) {
+                return false;
+            }
         }
         return true;
     }
@@ -5875,20 +5881,24 @@ pub const RuleIR = struct {
             const combinators_shortened = paren_depth == 0 or
                 (selector_argument_parens.items.len != 0 and selector_argument_parens.items[selector_argument_parens.items.len - 1]);
             const value_context = out.items.len != 0 and (out.items[out.items.len - 1] == ':' or out.items[out.items.len - 1] == ',' or out.items[out.items.len - 1] == ' ' or out.items[out.items.len - 1] == '(');
-            if (!raw and in_decl_value and paren_depth == 0 and c != ':' and value_context) {
-                const taken = takeDeclTokenOverride(&stmt_tokens, first.items[i..]);
-                const as_usual = if (taken) |override| std.mem.eql(u8, override.replacement, decl_token_as_usual) else false;
-                if (!as_usual) if (taken) |override| {
-                    if (!std.mem.startsWith(u8, override.replacement, decl_token_keeps_zeros)) {
-                        try out.appendSlice(allocator, override.replacement);
-                        i += override.len - 1;
-                        continue;
+            // An item of a list also starts after a bracket or a slash.
+            const token_context = value_context or (out.items.len != 0 and (out.items[out.items.len - 1] == '[' or out.items[out.items.len - 1] == '/'));
+            if (!raw and in_decl_value and paren_depth == 0 and c != ':' and token_context and stmt_tokens.len != 0) {
+                if (takeDeclTokenOverride(&stmt_tokens, first.items[i..])) |override| {
+                    if (!std.mem.eql(u8, override.replacement, decl_token_as_usual)) {
+                        if (!std.mem.startsWith(u8, override.replacement, decl_token_keeps_zeros)) {
+                            try out.appendSlice(allocator, override.replacement);
+                            i += override.len - 1;
+                            continue;
+                        }
+                        zeros_kept_until = i + override.len;
+                        // The character the token starts with is being written.
+                        zero_form = override.replacement[decl_token_keeps_zeros.len..];
+                        zero_form = if (zero_form.len != 0 and zero_form[0] == c) zero_form[1..] else "";
                     }
-                    zeros_kept_until = i + override.len;
-                    // The character the token starts with is being written.
-                    zero_form = override.replacement[decl_token_keeps_zeros.len..];
-                    zero_form = if (zero_form.len != 0 and zero_form[0] == c) zero_form[1..] else "";
-                };
+                }
+            }
+            if (!raw and in_decl_value and paren_depth == 0 and c != ':' and value_context) {
                 const operand_len = textSlashOperandsLen(first.items[i..]);
                 if (operand_len != 0) {
                     try out.appendSlice(allocator, first.items[i .. i + operand_len]);

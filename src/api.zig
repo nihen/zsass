@@ -1506,6 +1506,20 @@ test "api: compressed output writes a token the way its value says" {
             ,
             .css = "a{b:calc(0.375rem + var(--w));c:calc(0.375rem + 0.5px) .5em;d:calc(0.375rem - 1px - var(--w)*.25) .75rem;e:calc(var(--w)*.75);e2:calc(var(--x)*.5) calc(0.1234567891px + 0.5);f:var(--x, \"/\") /* rtl: var(--y) */;g:/* x */;--h:0.5em .5em,.5em}\n",
         },
+        // A string and the arguments of a function that is not a
+        // calculation are left alone inside one. An item in brackets is
+        // told apart from a string that reads the same.
+        .{
+            .source =
+            \\$c: calc(#{"var(--w)"} * 0.5 + var(--x, "0.5", 0.5px));
+            \\a {
+            \\  b: $c;
+            \\  c: [0.5 0.3] unquote("0.5"), 0.5em/1\26;
+            \\}
+            \\
+            ,
+            .css = "a{b:calc(var(--w)*.5 + var(--x, \"0.5\", 0.5px));c:[.5 .3] 0.5,.5em/1\\&}\n",
+        },
         // In plain CSS a hex color with an alpha channel is a color, an
         // `rgba()` of the stylesheet is not, and a number with ten
         // decimals keeps its zero.
