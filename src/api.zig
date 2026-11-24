@@ -2189,3 +2189,42 @@ test "api: @extend is not applied again to what it produced" {
         \\
     , css);
 }
+
+test "api: @extend leaves out a result its original covers" {
+    const alloc = std.testing.allocator;
+    // An extender that has the target itself only adds to the compound.
+    // The result is left out when the original is at least as specific
+    // as the extender; `selector.replace()` has no original to keep.
+    const source =
+        \\@use "sass:selector";
+        \\:focus.c {x: 1}
+        \\b.c {@extend .c}
+        \\.e {y: 2}
+        \\b.e {@extend .e}
+        \\:focus.f {z: 3}
+        \\.g .h .f {@extend .f}
+        \\.i .f {@extend .f}
+        \\a {r: selector.replace("foo.bar", "foo", "foo[baz]")}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\:focus.c {
+        \\  x: 1;
+        \\}
+        \\
+        \\.e, b.e {
+        \\  y: 2;
+        \\}
+        \\
+        \\:focus.f, .g .h .f:focus {
+        \\  z: 3;
+        \\}
+        \\
+        \\a {
+        \\  r: foo.bar[baz];
+        \\}
+        \\
+    , css);
+}

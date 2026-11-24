@@ -69,6 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the target left in it is the extender's own: with `.c + .g {@extend .c}`
   and another extension on the same rule, `.a .c + .g + .g` is no longer
   written.
+- `@extend` leaves out a result that its original selector covers when the
+  extender has the target itself and is no more specific than the original:
+  `b.c {@extend .c}` adds nothing to `:focus.c`.
 
 ## 0.4.2 (2026-11-23)
 

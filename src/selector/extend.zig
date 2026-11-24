@@ -3963,6 +3963,10 @@ pub const ApplyState = struct {
 
                         const batch_start = first_pass.selectors.items.len;
                         for (ext.extender.selectors.items) |extender_complex| {
+                            // `selector.replace()` does not keep the original.
+                            const may_be_covered = !frame.config.replace_mode and
+                                extenderOnlyAddsToTarget(&complex, &ext.target, &extender_complex) and
+                                extenderIsNotExtendedItself(self.extensions.items, ext_i, &extender_complex);
                             var extra: std.ArrayList(ComplexSelector) = .empty;
                             defer {
                                 for (extra.items) |*e| e.deinit();
@@ -3984,7 +3988,12 @@ pub const ApplyState = struct {
                                     if (component.* != .compound) continue;
                                     normalizeGeneratedCompound(&component.compound, self.extensions.items, self.sort_extension_hints.items);
                                 }
-                                if (!hasBogusMultipleCombinators(&nc)) {
+                                if (may_be_covered and selector_mod.complexIsSuperSelector(&complex, &normalized)) {
+                                    // The original covers it and is at
+                                    // least as specific as all it came from.
+                                    var covered = normalized;
+                                    covered.deinit();
+                                } else if (!hasBogusMultipleCombinators(&nc)) {
                                     var applied = try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, self.extensions.items.len);
                                     applied.set(ext_i);
                                     try first_pass.appendDirect(self.allocator, .{
@@ -9834,6 +9843,44 @@ fn extendNotPseudoShallow(
 }
 
 /// Check if a complex selector has any compound that contains the target.
+/// Whether putting `extender` into `original` in place of `target` can
+/// only make a selector the original covers and that is therefore left
+/// out. An extender whose last compound has the target itself adds to the
+/// compound without taking anything away; the result is left out when the
+/// original covers it and is at least as specific as the extender, which
+/// is all the result came from. `b.c {@extend .c}` adds nothing to
+/// `:focus.c` and does add `b.c` to `.c`.
+fn extenderOnlyAddsToTarget(
+    original: *const ComplexSelector,
+    target: *const CompoundSelector,
+    extender: *const ComplexSelector,
+) bool {
+    if (complexContainsPlaceholder(original) or complexContainsPlaceholder(extender)) return false;
+    const last = lastCompound(extender) orelse return false;
+    if (!compoundContainsTarget(last, target)) return false;
+    return specificity.specificityGte(specificity.complexSpecificity(original), specificity.complexSpecificity(extender));
+}
+
+/// Whether no extension changes `extender`, an extender of extension
+/// `ext_i`. What a changed extender makes of a selector is found from what
+/// the unchanged one makes of it, so that one has to stay then.
+fn extenderIsNotExtendedItself(exts: []const Extension, ext_i: usize, extender: *const ComplexSelector) bool {
+    for (exts, 0..) |*other, other_i| {
+        var compounds_with_target: usize = 0;
+        for (extender.components.items) |component| {
+            if (component == .compound and compoundContainsTarget(&component.compound, &other.target)) compounds_with_target += 1;
+        }
+        if (compounds_with_target == 0) continue;
+        // Its own target in its last compound is what puts it here, and
+        // another extension of that target adds to the same compound.
+        const same_target = other_i == ext_i or
+            (compoundContainsTarget(&other.target, &exts[ext_i].target) and compoundContainsTarget(&exts[ext_i].target, &other.target));
+        if (same_target and compounds_with_target == 1 and other.extender.selectors.items.len == 1) continue;
+        return false;
+    }
+    return true;
+}
+
 /// Whether the target of extension `ext_i`, where a selector made from
 /// `original` with the extensions in `applied` still has it, can only be
 /// the one its own extender brought: the original had it in one compound,
