@@ -1614,6 +1614,16 @@ fn resolveCalcArgInterpPart(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex
     return resolveExpr(ast, ctx, node);
 }
 
+/// Whether `node` is literal numbers with a slash between them: `1/2/3`.
+fn nodeIsLiteralNumberSlashRun(ast: *const ast_flat.Ast, node: NodeIndex) bool {
+    const n = ast.getNode(node);
+    if (n.tag != .expr_slash_expr) return false;
+    const off: ExtraIndex = n.payload;
+    const lhs: NodeIndex = @enumFromInt(ast.getExtraU32(off));
+    const rhs: NodeIndex = @enumFromInt(ast.getExtraU32(off + 1));
+    return isLiteralNumberNode(ast, rhs) and (isLiteralNumberNode(ast, lhs) or nodeIsLiteralNumberSlashRun(ast, lhs));
+}
+
 fn nodeIsSlashLiteralOperand(ast: *const ast_flat.Ast, node: NodeIndex) bool {
     const n = ast.getNode(node);
     return switch (n.tag) {
@@ -3310,7 +3320,9 @@ fn resolveExprSlashExpr(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: S
         }
     }
 
-    const lhs_written_slash = outside_parens and isSlashListExpr(ctx.prog, li) and
+    // A variable of another module resolves to such a list as well; the
+    // numbers have to be written here.
+    const lhs_written_slash = outside_parens and nodeIsLiteralNumberSlashRun(ast, lhs) and isSlashListExpr(ctx.prog, li) and
         ctx.prog.list_exprs.items[ctx.prog.exprs.items[li].payload].slash_coercible;
     const bidx: u32 = @intCast(ctx.prog.binary_exprs.items.len);
     try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = .div, .lhs_written_slash = lhs_written_slash });
