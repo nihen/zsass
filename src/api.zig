@@ -1571,6 +1571,28 @@ test "api: compressed output writes a token the way its value says" {
             ,
             .css = "a{b:/* ( */;c:.5em rgba(0,0,0,.5) rgba(0, 0, 0, 0.5);c2:#fff white rgba(0,0,0,0) transparent;d:calc(0.5px + var(--x, \"a  b\")*.25)}\n",
         },
+        // A string given to a calculation function is written as it is,
+        // and so is what an interpolation put into a calculation written
+        // in the declaration itself, whatever parentheses and spaces the
+        // declaration ends up with.
+        .{
+            .source =
+            \\$a: 0.375rem;
+            \\$s: #{0.875}rem;
+            \\@mixin c($w) {
+            \\  left: calc(50% - (#{$w} * 0.5));
+            \\}
+            \\a {
+            \\  b: clamp(13px, $s, 22px) min($s, 0.5px);
+            \\  c: calc(#{$a}*2 + 0.5px);
+            \\  d: calc(0.5px + #{$a}) 0.5em;
+            \\  e: clamp(0.5px, 0.5vw + 1px, 2px);
+            \\  @include c(1em);
+            \\}
+            \\
+            ,
+            .css = "a{b:clamp(13px,0.875rem,22px) min(0.875rem,.5px);c:calc(0.375rem*2 + .5px);d:calc(.5px + 0.375rem) .5em;e:clamp(.5px,.5vw + 1px,2px);left:calc(50% - 1em*.5)}\n",
+        },
         // In plain CSS a hex color with an alpha channel is a color, an
         // `rgba()` of the stylesheet is not, and a number with ten
         // decimals keeps its zero.

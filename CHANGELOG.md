@@ -43,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   channels of a color before they are rounded, so the last digit matches.
 - In plain CSS, compressed output shortens the `rgba()` a hex color with an
   alpha channel becomes.
+- Compressed output writes a string given to `clamp()`, `min()`, or
+  `max()` as it is (`clamp(13px,0.875rem,22px)`), and keeps the zero of a
+  number an interpolation put into a calculation that is written in the
+  declaration itself.
 - `@extend` with the target repeated in a selector leaves out a result
   that another result covers (`.g .f .f:hover` next to `.g .f .f`), as the
   official CLI does after each `@extend` rule for a list of up to 100

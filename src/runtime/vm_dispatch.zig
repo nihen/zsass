@@ -104,6 +104,7 @@ pub fn dispatchBuiltinArgs(self: anytype, builtin_id: u32, args: []const Value, 
         .list_index_cache = &self.list_index_cache,
         .slash_list_preserve = &self.slash_list_preserve,
         .list_parent_sel_none_hook = @TypeOf(self.*).builtinListSidecarHook,
+        .calc_text_args_hook = @TypeOf(self.*).builtinCalcTextArgsHook,
         .deprecation_opts = &self.deprecation_opts,
     };
     const out = builtin_mod.dispatch(&bctx, builtin_id, args, arg_names) catch |e| {
