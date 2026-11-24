@@ -4274,7 +4274,16 @@ pub const ApplyState = struct {
                             {
                                 continue;
                             }
+                            // An extension is not applied to what it
+                            // produced itself: `.a .c` extended by
+                            // `.c + .g` is `.a .c + .g`, whose `.c` is the
+                            // extender's own.
                             if (first_pass.applied_exts.items[fi].isSet(ext_i)) {
+                                if (targetLeftIsExtendersOwn(&complex, &first_pass.applied_exts.items[fi], self.extensions.items, ext_i) and
+                                    !try complexContainsTargetInPseudos(&first_pass.selectors.items[fi], &ext.target))
+                                {
+                                    continue;
+                                }
                                 if (!compoundContainsTargetInComplex(&first_pass.selectors.items[fi], &ext.target)) {
                                     continue;
                                 }
@@ -9825,6 +9834,41 @@ fn extendNotPseudoShallow(
 }
 
 /// Check if a complex selector has any compound that contains the target.
+/// Whether the target of extension `ext_i`, where a selector made from
+/// `original` with the extensions in `applied` still has it, can only be
+/// the one its own extender brought: the original had it in one compound,
+/// which the extension replaced, and no other applied extension has it in
+/// an extender.
+fn targetLeftIsExtendersOwn(
+    original: *const ComplexSelector,
+    applied: *const std.DynamicBitSetUnmanaged,
+    exts: []const Extension,
+    ext_i: usize,
+) bool {
+    const target = &exts[ext_i].target;
+    // Another extender of the same extension is still to be combined with
+    // this one.
+    if (exts[ext_i].extender.selectors.items.len != 1) return false;
+    var in_original: usize = 0;
+    for (original.components.items) |component| {
+        if (component == .compound and compoundContainsTarget(&component.compound, target)) in_original += 1;
+    }
+    if (in_original > 1) return false;
+    var it = applied.iterator(.{});
+    while (it.next()) |other_i| {
+        if (other_i == ext_i or other_i >= exts.len) continue;
+        for (exts[other_i].extender.selectors.items) |*extender| {
+            if (compoundContainsTargetInComplex(extender, target)) return false;
+        }
+    }
+    // So is the extender of another extension with the same target.
+    for (exts, 0..) |*other, other_i| {
+        if (other_i == ext_i) continue;
+        if (compoundContainsTarget(&other.target, target) and compoundContainsTarget(target, &other.target)) return false;
+    }
+    return true;
+}
+
 fn compoundContainsTargetInComplex(complex: *const ComplexSelector, target: *const CompoundSelector) bool {
     for (complex.components.items) |comp| {
         switch (comp) {

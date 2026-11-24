@@ -65,6 +65,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   text, `(1/2/x a)` and `(foo(1/2/x))` divide.
 - A signed number right after a word is added to it: `x+1` is `x1`, as in
   the official CLI, where it was left as `x+1`.
+- `@extend` is not applied a second time to a selector it produced when
+  the target left in it is the extender's own: with `.c + .g {@extend .c}`
+  and another extension on the same rule, `.a .c + .g + .g` is no longer
+  written.
 
 ## 0.4.2 (2026-11-23)
 
