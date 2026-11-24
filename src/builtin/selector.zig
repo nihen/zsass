@@ -18,8 +18,6 @@ const bindNamedOrPositionalArgsStrict = shared.bindNamedOrPositionalArgsStrict;
 const valueToCssString = shared.valueToCssString;
 const reportMissingArgument = shared.reportMissingArgument;
 
-const ApplyState = extend_mod.ApplyState;
-
 const simpleSelectorEql = extend_specificity.simpleSelectorEql;
 
 const SelectorList = selector_mod.SelectorList;
@@ -363,59 +361,6 @@ pub fn selector_simple_selectors(ctx: *BuiltinContext, args: []const Value, arg_
     return pushCommaList(ctx, items.items);
 }
 
-fn trimSuperselectedResults(result: *SelectorList, originals: *const SelectorList, consider_originals: bool) void {
-    var i: usize = 0;
-    while (i < result.selectors.items.len) {
-        if (isOriginalSelector(&result.selectors.items[i], originals)) {
-            i += 1;
-            continue;
-        }
-        var has_superselector = false;
-        for (result.selectors.items, 0..) |*other, j| {
-            if (i == j) continue;
-            if (!consider_originals and isOriginalSelector(other, originals)) continue;
-            if (selector_mod.complexIsSuperSelector(other, &result.selectors.items[i])) {
-                has_superselector = true;
-                break;
-            }
-        }
-        if (has_superselector) {
-            var removed = result.selectors.orderedRemove(i);
-            removed.deinit();
-        } else {
-            i += 1;
-        }
-    }
-}
-
-fn isOriginalSelector(sel: *const ComplexSelector, originals: *const SelectorList) bool {
-    for (originals.selectors.items) |*orig| {
-        if (complexSelectorCssEql(sel, orig)) return true;
-    }
-    return false;
-}
-
-fn complexSelectorCssEql(a: *const ComplexSelector, b: *const ComplexSelector) bool {
-    if (a.components.items.len != b.components.items.len) return false;
-    for (a.components.items, b.components.items) |ac, bc| {
-        switch (ac) {
-            .combinator => |ca| {
-                if (bc != .combinator) return false;
-                if (ca != bc.combinator) return false;
-            },
-            .compound => |ca| {
-                if (bc != .compound) return false;
-                const cb = bc.compound;
-                if (ca.simple_selectors.items.len != cb.simple_selectors.items.len) return false;
-                for (ca.simple_selectors.items, cb.simple_selectors.items) |sa, sb| {
-                    if (!simpleSelectorEql(sa, sb)) return false;
-                }
-            },
-        }
-    }
-    return true;
-}
-
 fn compoundCountInComplex(complex: *const ComplexSelector) usize {
     var n: usize = 0;
     for (complex.components.items) |comp| {
@@ -524,11 +469,8 @@ fn selectorExtendCore(
         &sel,
         &extendee,
         &extender,
-        addSelectorExtensionTargets,
     );
     defer result.deinit();
-
-    trimSuperselectedResults(&result, &sel, true);
 
     return selectorListToValue(ctx, &result);
 }
@@ -578,11 +520,8 @@ fn selectorReplaceCore(
             &single,
             &original,
             &replacement,
-            addSelectorExtensionTargets,
         );
         defer extended_single.deinit();
-
-        trimSuperselectedResults(&extended_single, &single, false);
 
         if (extended_single.selectors.items.len == 0) {
             try result.selectors.append(ctx.allocator, try sel_complex.clone(ctx.allocator));
@@ -972,71 +911,6 @@ fn getLastCompoundIdxStatic(complex: *const ComplexSelector) ?usize {
         if (comp == .compound) last_idx = idx;
     }
     return last_idx;
-}
-
-fn combinedExtendeeTarget(allocator: std.mem.Allocator, extendee: *const SelectorList) !?CompoundSelector {
-    if (extendee.selectors.items.len <= 1) return null;
-
-    var combined: ?CompoundSelector = null;
-    errdefer if (combined) |*compound| compound.deinit();
-
-    for (extendee.selectors.items) |extendee_complex| {
-        var target_compound: ?CompoundSelector = null;
-        for (extendee_complex.components.items) |comp| {
-            if (comp == .compound) target_compound = comp.compound;
-        }
-        if (target_compound == null) return null;
-
-        if (combined == null) {
-            combined = try target_compound.?.clone(allocator);
-            continue;
-        }
-
-        const merged = try unifyCompounds(allocator, combined.?, target_compound.?);
-        if (merged == null) return null;
-
-        combined.?.deinit();
-        combined = merged.?;
-    }
-
-    return combined;
-}
-
-fn addSelectorExtensionTargets(
-    allocator: std.mem.Allocator,
-    store: *ApplyState,
-    extendee: *const SelectorList,
-    extender: *const SelectorList,
-) !void {
-    for (extendee.selectors.items) |extendee_complex| {
-        var target_compound: ?CompoundSelector = null;
-        for (extendee_complex.components.items) |comp| {
-            if (comp == .compound) target_compound = comp.compound;
-        }
-        if (target_compound) |tc| {
-            var target_clone = try tc.clone(allocator);
-            errdefer target_clone.deinit();
-            const extender_clone = try extender.clone(allocator);
-            try store.addExtension(.{
-                .extender = extender_clone,
-                .target = target_clone,
-                .optional = false,
-                .span = null,
-            });
-        }
-    }
-
-    if (try combinedExtendeeTarget(allocator, extendee)) |combined_target| {
-        var target_clone = combined_target;
-        errdefer target_clone.deinit();
-        const extender_clone = try extender.clone(allocator);
-        try store.addExtension(.{
-            .extender = extender_clone,
-            .target = target_clone,
-            .optional = false,
-            .span = null,
-        });
-    }
 }
 
 fn getLastCompoundValue(complex: *const ComplexSelector) ?CompoundSelector {

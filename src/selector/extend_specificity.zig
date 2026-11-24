@@ -260,19 +260,6 @@ pub fn narrowerHasWhitelistedLastCompoundPseudoExtras(
     return found_any;
 }
 
-pub fn complexHasAnyPseudo(sel: *const ComplexSelector) bool {
-    for (sel.components.items) |comp| {
-        if (comp != .compound) continue;
-        for (comp.compound.simple_selectors.items) |ss| {
-            switch (ss) {
-                .pseudo_class, .pseudo_element => return true,
-                else => {},
-            }
-        }
-    }
-    return false;
-}
-
 pub fn complexHasSiblingCombinator(sel: *const ComplexSelector) bool {
     for (sel.components.items) |comp| {
         if (comp != .combinator) continue;
@@ -502,41 +489,6 @@ fn compoundIsAnyUniversal(compound: *const CompoundSelector) bool {
         .type_selector => |name| std.mem.eql(u8, name, "*|*"),
         else => false,
     };
-}
-
-pub fn complexHasUniversalLastCompoundNoOp(broader: *const ComplexSelector, narrower: *const ComplexSelector) bool {
-    if (broader.components.items.len != narrower.components.items.len) return false;
-
-    const broader_last = getLastCompound(broader) orelse return false;
-    const narrower_last = getLastCompound(narrower) orelse return false;
-    if (!compoundIsAnyUniversal(broader_last)) return false;
-    if (compoundSelectorEql(broader_last, narrower_last)) return false;
-
-    var seen_last = false;
-    var idx: usize = broader.components.items.len;
-    while (idx > 0) {
-        idx -= 1;
-        const b = broader.components.items[idx];
-        const n = narrower.components.items[idx];
-        const b_tag: @TypeOf(std.meta.activeTag(b)) = b;
-        const n_tag: @TypeOf(std.meta.activeTag(n)) = n;
-        if (b_tag != n_tag) return false;
-
-        switch (b) {
-            .combinator => |comb| {
-                if (comb != n.combinator) return false;
-            },
-            .compound => |bc| {
-                if (!seen_last) {
-                    seen_last = true;
-                    continue;
-                }
-                if (!compoundSelectorEql(&bc, &n.compound)) return false;
-            },
-        }
-    }
-
-    return seen_last;
 }
 
 /// Returns true if complex selector `other` supersedes `self`, meaning `self`

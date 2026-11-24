@@ -2138,29 +2138,22 @@ test "api: a signed number right after a word is added to it" {
     , css);
 }
 
-test "api: a repeated @extend target past the limit is still extended" {
+test "api: a target repeated in ten compounds is extended in every combination" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    // Weaving `.x .f` into ten compounds makes more selectors than the
-    // combined path allows, so the selector takes the ordinary path.
     const source =
         \\.p0 .a .p1 .a .p2 .a .p3 .a .p4 .a .p5 .a .p6 .a .p7 .a .p8 .a .p9 .a { x: y; }
         \\.x .f { @extend .a; }
         \\
     ;
     const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
-    // One compound at a time: the original and, for each of the ten
-    // compounds, the two ways of weaving `.x` in.
+    // The official CLI writes the original and 2046 more: every way of
+    // taking `.x .f` for some of the ten, woven. A list this long is not
+    // trimmed.
     const selector_list = css[0..std.mem.indexOfScalar(u8, css, '{').?];
-    try std.testing.expectEqual(@as(usize, 21), std.mem.count(u8, selector_list, ", ") + 1);
-    for (0..10) |i| {
-        var buf: [32]u8 = undefined;
-        const direct = try std.fmt.bufPrint(&buf, ".p{d} .x .f", .{i});
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, selector_list, direct));
-        const woven = try std.fmt.bufPrint(&buf, ".p{d} .f", .{i});
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, selector_list, woven));
-    }
+    try std.testing.expectEqual(@as(usize, 2047), std.mem.count(u8, selector_list, ", ") + 1);
+    try std.testing.expect(std.mem.startsWith(u8, selector_list, ".p0 .a .p1 .a .p2 .a .p3 .a .p4 .a .p5 .a .p6 .a .p7 .a .p8 .a .p9 .a, .p0 .x .f .p1 .a "));
 }
 
 test "api: @extend is not applied again to what it produced" {
@@ -2293,29 +2286,95 @@ test "api: @extend leaves out a result its original covers" {
     , css);
 }
 
-test "api: @extend keeps an extender that is more specific than what covers it" {
+test "api: @extend follows the specification's model as the official CLI applies it" {
     const alloc = std.testing.allocator;
-    // `.d.g` extends `.d`, which extends `.f`. `.d` covers `.d.g` but is
-    // less specific than the extender, so both stay. `.e.d` is as specific
-    // as `.d.g`, so `.e.d.g` goes.
+    // In order: a rule before its `@extend`s, a rule after them, an
+    // extender that is extended, parents woven by their combinators, a
+    // result kept for its extender's specificity, a target repeated in an
+    // extender, selectors that differ only in how they are written, an
+    // extender as written beside one that covers it, and the line a
+    // repeated selector is written on. Then the superselector test front
+    // to back, a pseudo-element with something after it, and an extender
+    // that ends with a combinator.
     const source =
-        \\.f {x: 0}
-        \\.d.g {@extend .d}
-        \\.d {@extend .f}
-        \\.h.e {y: 1}
-        \\.i.k {@extend .i}
-        \\.i {@extend .h}
+        \\@use "sass:selector";
+        \\.a1.b1 {x: 0}
+        \\.x1 {@extend .a1}
+        \\.y1 {@extend .b1}
+        \\.x2 {@extend .a2}
+        \\.y2 {@extend .b2}
+        \\.a2.b2 {x: 1}
+        \\.f3 {x: 2}
+        \\.d3 {@extend .f3}
+        \\.d3.g3 {@extend .d3}
+        \\.a4 > .d4 {x: 3}
+        \\.i4 ~ .k4 + .x4 {@extend .d4}
+        \\.x5.y5.z5 {@extend .a5}
+        \\.a5.k5, .x5.k5 {x: 4}
+        \\.c6 .c6 .c6 {@extend .c6}
+        \\.h6 {@extend .c6}
+        \\.z6.c6 {x: 5}
+        \\.x7 {@extend .a7}
+        \\.a7, .b7.c7, .c7.b7 {x: 6}
+        \\:is(.z8, .y8) {@extend .a8}
+        \\.z8 {@extend .a8}
+        \\.a8 {x: 7}
+        \\.btn9,
+        \\.btn9-floating,
+        \\.btn9-large {x: 8}
+        \\.btn9-large {@extend .btn9}
+        \\t {
+        \\  a: selector.is-superselector(".a .x", ".a.e + .a.b .x");
+        \\  b: selector.is-superselector("::foo", "::foo.baz");
+        \\  c: selector.extend(".c.x .d", ".c", ".e >");
+        \\}
         \\
     ;
     const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
     defer alloc.free(css);
     try std.testing.expectEqualStrings(
-        \\.f, .d, .d.g {
+        \\.a1.b1, .a1.y1, .b1.x1, .x1.y1 {
         \\  x: 0;
         \\}
         \\
-        \\.h.e, .e.i {
-        \\  y: 1;
+        \\.a2.b2, .b2.x2, .a2.y2, .x2.y2 {
+        \\  x: 1;
+        \\}
+        \\
+        \\.f3, .d3, .d3.g3 {
+        \\  x: 2;
+        \\}
+        \\
+        \\.a4 > .d4, .a4 > .i4 ~ .k4 + .x4 {
+        \\  x: 3;
+        \\}
+        \\
+        \\.a5.k5, .k5.x5.y5.z5, .x5.k5 {
+        \\  x: 4;
+        \\}
+        \\
+        \\.z6.c6, .c6 .c6 .z6.c6, .z6.h6, .h6 .c6 .z6.c6, .c6 .h6 .z6.c6, .h6 .h6 .z6.c6, .c6 .c6 .z6.h6, .h6 .c6 .z6.h6, .c6 .h6 .z6.h6 {
+        \\  x: 5;
+        \\}
+        \\
+        \\.a7, .x7, .b7.c7, .c7.b7 {
+        \\  x: 6;
+        \\}
+        \\
+        \\.a8, :is(.z8, .y8), .z8 {
+        \\  x: 7;
+        \\}
+        \\
+        \\.btn9,
+        \\.btn9-large,
+        \\.btn9-floating {
+        \\  x: 8;
+        \\}
+        \\
+        \\t {
+        \\  a: false;
+        \\  b: true;
+        \\  c: .c.x .d, .x.e > .d;
         \\}
         \\
     , css);

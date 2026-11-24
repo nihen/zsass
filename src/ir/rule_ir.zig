@@ -950,6 +950,8 @@ pub const RuleIR = struct {
     /// Borrowed from VM during `runTop()` for cross-module @extend scope checks.
     module_visibility_matrix: []const bool = &.{},
     module_visibility_n: u32 = 0,
+    /// Set just before `appendRuleBegin` for a rule entered earlier.
+    next_rule_extend_snapshot: ?u32 = null,
     flushed_chunks: std.ArrayListUnmanaged(FlushedChunk) = .empty,
     streaming_enabled: bool = false,
     streaming_threshold_nodes: usize = 0,
@@ -1035,7 +1037,11 @@ pub const RuleIR = struct {
         span: Span,
     ) !void {
         const extra_off: u32 = @intCast(self.extra.items.len);
-        const extend_snapshot: u32 = @intCast(self.extend_edges.items.len);
+        // A rule whose block was entered earlier than this is written
+        // counts the `@extend`s that had run when it was entered.
+        const edges_now: u32 = @intCast(self.extend_edges.items.len);
+        const extend_snapshot: u32 = if (self.next_rule_extend_snapshot) |entered| @min(entered, edges_now) else edges_now;
+        self.next_rule_extend_snapshot = null;
         try self.extra.appendSlice(allocator, &[_]u32{ selector_intern, nest_depth, 0, extend_snapshot });
         try self.nodes.append(allocator, .{
             .kind = .rule_begin,
@@ -4321,6 +4327,7 @@ pub const RuleIR = struct {
                     };
                     if (!has_visible_carrier and !compoundIsSelectorPseudoTarget(&target_compound)) {
                         if (!edge.optional) edge_required_unmatched[edge_idx] = true;
+                        try extend_state.addUnmatchedEdge(target_module_idx, @intCast(edge_idx), edge.source_module, extending_list, &target_compound);
                         continue;
                     }
                 }
@@ -4339,6 +4346,7 @@ pub const RuleIR = struct {
                         .statement_branch_index = edge.relation_branch_index,
                         .statement_branch_leading_newline = edge.relation_branch_leading_newline,
                         .module_group_start_order = edge.module_group_start_order,
+                        .source_module = edge.source_module,
                     },
                 ))) {
                     edge_duplicate_satisfied[edge_idx] = true;
@@ -9872,6 +9880,7 @@ pub const RuleIR = struct {
 
         var extend_state = try extend_mod.RuleModuleExtendState.init(temp, module_store_count);
         defer extend_state.deinit();
+        extend_state.setVisibility(self.module_visibility_matrix, self.module_visibility_n);
 
         const edge_eligible = try temp.alloc(bool, self.extend_edges.items.len);
         @memset(edge_eligible, false);
@@ -10198,34 +10207,6 @@ pub const RuleIR = struct {
                     },
                 );
                 defer applied.deinit();
-                var preserve_direct_selector_pseudo_variants = true;
-                if (has_extensions and matched.len == extension_count) {
-                    const local_matches = local_matches_opt.?;
-                    const edge_indices = extend_state.moduleEdgeIndices(rule_module_idx);
-                    if (edge_indices.len == local_matches.len) {
-                        for (local_matches, 0..) |is_local_match, ext_idx| {
-                            if (!is_local_match) continue;
-                            const edge_idx: usize = @intCast(edge_indices[ext_idx]);
-                            if (edge_idx >= self.extend_edges.items.len) continue;
-                            const edge_source_module = self.extend_edges.items[edge_idx].source_module;
-                            if (edge_source_module != source_file_id) {
-                                preserve_direct_selector_pseudo_variants = false;
-                                break;
-                            }
-                        }
-                    }
-                }
-                try extend_mod.restoreDirectSelectorPseudoVariants(
-                    temp,
-                    extend_state.moduleExtensions(rule_module_idx),
-                    &selector_list,
-                    &applied,
-                    preserve_direct_selector_pseudo_variants,
-                );
-                if (rule_in_media[i]) {
-                    try extend_mod.preferBroaderOriginalsOverExtraNotPseudos(&applied, &selector_list);
-                }
-                extend_mod.removeBranchesCoveredByPureNotBranch(&applied);
                 const merged_css = try selector_mod.toCss(temp, &applied);
                 // Prefer merged_css as the separator template: toCss() emits
                 // `,\n` based on ComplexSelector.leading_separator_has_newline,
@@ -10251,7 +10232,8 @@ pub const RuleIR = struct {
             var visible: SelectorVec = .empty;
             defer visible.deinit(temp);
             try visible.ensureTotalCapacity(temp, merged.items.len);
-            const preserve_duplicates = selectorListHasExactDuplicateBranches(selector_text);
+            // What the extension left is what is written, repeats included.
+            const preserve_duplicates = true;
             for (merged.items) |cand| {
                 const cleaned = (try cleanedSelectorWithoutPlaceholders(temp, cand)) orelse continue;
                 if (selector_helpers_mod.hasBogusCombinatorsSimple(cleaned)) continue;
@@ -14623,6 +14605,10 @@ test "rule_ir merge extend: :is pseudo keeps direct + transitive variants" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
+    // The `@extend`s come before the rule, as in the stylesheet.
+    try ir.appendExtendRelation(allocator, &pool, sel_is_midstream, sel_upstream, false, false);
+    try ir.appendExtendRelation(allocator, &pool, sel_downstream, sel_midstream, false, false);
+
     try ir.appendRuleBegin(allocator, @intFromEnum(sel_upstream), 0, .{ .start = 0, .end = 0 });
     try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
@@ -14631,9 +14617,6 @@ test "rule_ir merge extend: :is pseudo keeps direct + transitive variants" {
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendRuleBegin(allocator, @intFromEnum(sel_downstream), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
-
-    try ir.appendExtendRelation(allocator, &pool, sel_is_midstream, sel_upstream, false, false);
-    try ir.appendExtendRelation(allocator, &pool, sel_downstream, sel_midstream, false, false);
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
@@ -14661,6 +14644,10 @@ test "rule_ir merge extend: :where pseudo keeps direct + transitive variants" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
+    // The `@extend`s come before the rule, as in the stylesheet.
+    try ir.appendExtendRelation(allocator, &pool, sel_where_midstream, sel_upstream, false, false);
+    try ir.appendExtendRelation(allocator, &pool, sel_downstream, sel_midstream, false, false);
+
     try ir.appendRuleBegin(allocator, @intFromEnum(sel_upstream), 0, .{ .start = 0, .end = 0 });
     try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
@@ -14669,9 +14656,6 @@ test "rule_ir merge extend: :where pseudo keeps direct + transitive variants" {
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendRuleBegin(allocator, @intFromEnum(sel_downstream), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
-
-    try ir.appendExtendRelation(allocator, &pool, sel_where_midstream, sel_upstream, false, false);
-    try ir.appendExtendRelation(allocator, &pool, sel_downstream, sel_midstream, false, false);
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
@@ -14738,6 +14722,10 @@ test "rule_ir merge extend: result of :not extend remains extendable" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
+    // The `@extend`s come before the rule, as in the stylesheet.
+    try ir.appendExtendRelation(allocator, &pool, sel_a, sel_not_b, false, false);
+    try ir.appendExtendRelation(allocator, &pool, sel_b, sel_c, false, false);
+
     try ir.appendRuleBegin(allocator, @intFromEnum(sel_a), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendRuleBegin(allocator, @intFromEnum(sel_b), 0, .{ .start = 0, .end = 0 });
@@ -14745,9 +14733,6 @@ test "rule_ir merge extend: result of :not extend remains extendable" {
     try ir.appendRuleBegin(allocator, @intFromEnum(sel_not_c), 0, .{ .start = 0, .end = 0 });
     try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
-
-    try ir.appendExtendRelation(allocator, &pool, sel_a, sel_not_b, false, false);
-    try ir.appendExtendRelation(allocator, &pool, sel_b, sel_c, false, false);
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
