@@ -1520,6 +1520,21 @@ test "api: compressed output writes a token the way its value says" {
             ,
             .css = "a{b:calc(var(--w)*.5 + var(--x, \"\\\\0.5\", 0.5px));c:[.5 .3] 0.5,.5em/1\\&,[.5/2]}\n",
         },
+        // A comment kept as text is copied whole, a color is told apart
+        // from a string that reads the same, and the spaces of a string
+        // inside a calculation do not hide it from its override.
+        .{
+            .source =
+            \\$c: calc(#{0.5px} + var(--x, "a  b") * 0.25);
+            \\a {
+            \\  b: #{"/* ( */"};
+            \\  c: 0.5em rgba(0, 0, 0, 0.5) unquote("rgba(0, 0, 0, 0.5)");
+            \\  d: $c;
+            \\}
+            \\
+            ,
+            .css = "a{b:/* ( */;c:.5em rgba(0,0,0,.5) rgba(0, 0, 0, 0.5);d:calc(0.5px + var(--x, \"a  b\")*.25)}\n",
+        },
         // In plain CSS a hex color with an alpha channel is a color, an
         // `rgba()` of the stylesheet is not, and a number with ten
         // decimals keeps its zero.

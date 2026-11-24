@@ -5711,7 +5711,7 @@ pub const VM = struct {
                 } else if (decimals > 10 and std.mem.startsWith(u8, text, "-0.")) {
                     // Rounded: the zero goes, after a minus sign as well.
                     try appendDeclToken(self.allocator, tokens, text, text[1..]);
-                    tokens.items[tokens.items.len - text.len] = '-';
+                    tokens.items[tokens.items.len - (text.len - 1)] = '-';
                 } else if (list_plain_numbers) {
                     try appendDeclToken(self.allocator, tokens, text, rule_ir_mod.decl_token_as_usual);
                 }
@@ -5722,15 +5722,21 @@ pub const VM = struct {
                 const entry = val.colorEntry(self.color_pool).*;
                 if (!entry.legacy) return;
                 const text = self.intern_pool.get(try valueToInternIdDecl(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, val, false));
-                if (!std.mem.startsWith(u8, text, "rgb") and !std.mem.startsWith(u8, text, "hsl")) return;
-                if (std.mem.indexOfScalar(u8, text, '.') == null) return;
-                if (entry.space != .srgb or entry.missing != 0) return;
                 const rgb: [3]f64 = .{ entry.channels[0] * 255.0, entry.channels[1] * 255.0, entry.channels[2] * 255.0 };
                 var whole = true;
                 for (rgb) |channel| {
                     if (@abs(channel - @round(channel)) >= 1e-11) whole = false;
                 }
-                if (whole) return;
+                if (whole or entry.space != .srgb or entry.missing != 0 or std.mem.indexOfScalar(u8, text, '.') == null or
+                    (!std.mem.startsWith(u8, text, "rgb") and !std.mem.startsWith(u8, text, "hsl")))
+                {
+                    // Listed so that a string reading the same is not
+                    // taken for it.
+                    if (list_plain_numbers and std.mem.indexOfScalar(u8, text, '(') != null) {
+                        try appendDeclToken(self.allocator, tokens, text, rule_ir_mod.decl_token_as_usual);
+                    }
+                    return;
+                }
                 const short = try rule_ir_mod.RuleIR.compressedLegacyColorText(self.allocator, rgb, entry.channels[3]);
                 defer self.allocator.free(short);
                 try appendDeclToken(self.allocator, tokens, text, short);
@@ -5751,24 +5757,23 @@ pub const VM = struct {
                     // The declaration has the calculation on one line.
                     const written = try singleLineCalcText(self.allocator, text);
                     defer self.allocator.free(written);
-                    if (std.mem.indexOfAny(u8, written, &.{ 0x01, 0x02, 0x03 }) != null) return;
-                    try appendDeclToken(self.allocator, tokens, written, rule_ir_mod.decl_token_keeps_zeros);
+                    var replacement: std.ArrayListUnmanaged(u8) = .empty;
+                    defer replacement.deinit(self.allocator);
+                    try replacement.appendSlice(self.allocator, rule_ir_mod.decl_token_keeps_zeros);
                     if (short) |id| {
-                        // The separator goes after the short form instead.
-                        tokens.items.len -= 1;
-                        const from = tokens.items.len;
-                        try tokens.appendSlice(self.allocator, self.intern_pool.get(id));
-                        for (tokens.items[from..]) |*ch| {
+                        try replacement.appendSlice(self.allocator, self.intern_pool.get(id));
+                        for (replacement.items) |*ch| {
                             if (ch.* == '\n' or ch.* == '\r' or ch.* == '\t') ch.* = ' ';
                         }
-                        try tokens.append(self.allocator, rule_ir_mod.decl_token_separator);
                     }
+                    try appendDeclToken(self.allocator, tokens, written, replacement.items);
                     return;
                 }
                 if (depth == 0) return;
+                // A token that starts with a quote is copied as a string.
+                if (text.len == 0 or text[0] == '"' or text[0] == '\'') return;
                 var plain_word = true;
                 for (text) |ch| {
-                    if (ch < 0x04) return;
                     if (!std.ascii.isAlphanumeric(ch) and ch != '-' and ch != '_') plain_word = false;
                 }
                 // A word reads the same either way. A calculation is stored
@@ -8745,7 +8750,21 @@ fn singleLineCalcText(alloc: std.mem.Allocator, text: []const u8) VMError![]u8 {
     errdefer out.deinit(alloc);
     try out.ensureTotalCapacity(alloc, text.len);
     var pending_space = false;
+    var quote: u8 = 0;
+    var escaped = false;
     for (text) |ch| {
+        // A string is text.
+        if (quote != 0) {
+            out.appendAssumeCapacity(ch);
+            if (escaped) {
+                escaped = false;
+            } else if (ch == '\\') {
+                escaped = true;
+            } else if (ch == quote) {
+                quote = 0;
+            }
+            continue;
+        }
         if (ch == ' ' or ch == '\n' or ch == '\r' or ch == '\t') {
             pending_space = true;
             continue;
@@ -8753,16 +8772,13 @@ fn singleLineCalcText(alloc: std.mem.Allocator, text: []const u8) VMError![]u8 {
         if (pending_space and out.items.len != 0 and out.items[out.items.len - 1] != '(' and ch != ')') out.appendAssumeCapacity(' ');
         pending_space = false;
         out.appendAssumeCapacity(ch);
+        if (ch == '"' or ch == '\'') quote = ch;
     }
     return try out.toOwnedSlice(alloc);
 }
 
 fn appendDeclToken(alloc: std.mem.Allocator, tokens: *std.ArrayListUnmanaged(u8), text: []const u8, replacement: []const u8) VMError!void {
-    try tokens.ensureUnusedCapacity(alloc, text.len + replacement.len + 2);
-    tokens.appendSliceAssumeCapacity(text);
-    tokens.appendAssumeCapacity(rule_ir_mod.decl_token_separator);
-    tokens.appendSliceAssumeCapacity(replacement);
-    tokens.appendAssumeCapacity(rule_ir_mod.decl_token_separator);
+    try rule_ir_mod.appendDeclTokenOverride(alloc, tokens, text, replacement);
 }
 
 fn plainCssDeclHints(emit_decl_flags: u16) u8 {

@@ -344,9 +344,20 @@ pub const decl_hint_hex_alpha_expanded: u8 = 1 << 4;
 /// Set by the writer when the marker carries token overrides.
 const decl_hint_has_tokens: u8 = 1 << 3;
 
-/// Separates the texts of a token override list, and ends the list.
-pub const decl_token_separator: u8 = 0x03;
+/// Ends a token override list.
 const decl_token_list_end: u8 = 0x02;
+
+/// Adds an override to a token override list: the lengths of `text` and
+/// `replacement` as eight hex digits each, then the two. With the lengths
+/// in front, an override is passed over without reading it.
+pub fn appendDeclTokenOverride(allocator: std.mem.Allocator, tokens: *std.ArrayListUnmanaged(u8), text: []const u8, replacement: []const u8) error{OutOfMemory}!void {
+    try tokens.ensureUnusedCapacity(allocator, 16 + text.len + replacement.len);
+    var header: [16]u8 = undefined;
+    _ = std.fmt.bufPrint(&header, "{x:0>8}{x:0>8}", .{ @as(u32, @truncate(text.len)), @as(u32, @truncate(replacement.len)) }) catch unreachable;
+    tokens.appendSliceAssumeCapacity(&header);
+    tokens.appendSliceAssumeCapacity(text);
+    tokens.appendSliceAssumeCapacity(replacement);
+}
 /// At the start of a replacement: the token is shortened like any other,
 /// except for the zero before the point of a number. Those stay, apart
 /// from the ones the rest of the replacement, the text of the token
@@ -946,8 +957,8 @@ pub const RuleIR = struct {
     /// `nodes.items.len` after stream_chunk). stmt_gap / sourcemap_gap / group_boundary etc.
     /// Not updated in the boundary marker system. Used by the VM to determine trailing-empty-scope detection.
     last_visible_emit_node_count: usize = 0,
-    /// Token override lists of declarations, each a sequence of
-    /// `text`, `decl_token_separator`, `replacement`, `decl_token_separator`.
+    /// Token override lists of declarations, each made with
+    /// `appendDeclTokenOverride`.
     /// Compressed output writes `replacement` where a token of the value
     /// reads `text`: a string is written as it is, and the zero before the
     /// point of a number depends on how the number was rounded.
@@ -5432,6 +5443,10 @@ pub const RuleIR = struct {
 
     const DeclTokenOverride = struct { len: usize, replacement: []const u8 };
 
+    /// How many overrides a token may pass over to find its own. Looking
+    /// only a few ahead keeps a long value linear.
+    const decl_token_look_ahead = 8;
+
     fn endsDeclToken(text: []const u8, at: usize) bool {
         if (at >= text.len) return true;
         return switch (text[at]) {
@@ -5443,14 +5458,17 @@ pub const RuleIR = struct {
     /// The override for the token `text` starts with, taken from `tokens`
     /// in the order the value has them. An override the text no longer
     /// shows is passed over.
-    fn takeDeclTokenOverride(tokens: *[]const u8, text: []const u8) ?DeclTokenOverride {
+    fn takeDeclTokenOverride(tokens: *[]const u8, text: []const u8, look_ahead: usize) ?DeclTokenOverride {
         var rest = tokens.*;
-        while (rest.len != 0) {
-            const match_end = std.mem.indexOfScalar(u8, rest, decl_token_separator) orelse return null;
-            const replacement_end = std.mem.indexOfScalarPos(u8, rest, match_end + 1, decl_token_separator) orelse return null;
-            const match = rest[0..match_end];
-            const replacement = rest[match_end + 1 .. replacement_end];
-            rest = rest[replacement_end + 1 ..];
+        var looked: usize = 0;
+        while (rest.len != 0 and looked < look_ahead) : (looked += 1) {
+            if (rest.len < 16) return null;
+            const match_len = std.fmt.parseInt(usize, rest[0..8], 16) catch return null;
+            const replacement_len = std.fmt.parseInt(usize, rest[8..16], 16) catch return null;
+            if (rest.len - 16 < match_len or rest.len - 16 - match_len < replacement_len) return null;
+            const match = rest[16 .. 16 + match_len];
+            const replacement = rest[16 + match_len .. 16 + match_len + replacement_len];
+            rest = rest[16 + match_len + replacement_len ..];
             if (match.len != 0 and std.mem.startsWith(u8, text, match) and endsDeclToken(text, match.len)) {
                 tokens.* = rest;
                 return .{ .len = match.len, .replacement = replacement };
@@ -5560,6 +5578,9 @@ pub const RuleIR = struct {
         var first_tokens: []const u8 = "";
         // Whether its value is one unquoted string.
         var first_string_value = false;
+        // Where in `first` the comments are that such a value has as text.
+        var text_comments: std.ArrayList([2]usize) = .empty;
+        defer text_comments.deinit(allocator);
 
         var i: usize = 0;
         while (i < expanded.len) : (i += 1) {
@@ -5585,7 +5606,7 @@ pub const RuleIR = struct {
                 i + 1 < expanded.len and expanded[i + 1] == '*')
             {
                 var tokens = first_tokens;
-                if (takeDeclTokenOverride(&tokens, expanded[i..])) |override| {
+                if (takeDeclTokenOverride(&tokens, expanded[i..], std.math.maxInt(usize))) |override| {
                     if (std.mem.eql(u8, override.replacement, expanded[i .. i + override.len])) {
                         try first.appendSlice(allocator, override.replacement);
                         i += override.len - 1;
@@ -5596,12 +5617,27 @@ pub const RuleIR = struct {
 
             // A comment is dropped, except where it is text: inside a string
             // or in the value of a custom property.
-            if (c == '/' and i + 1 < expanded.len and expanded[i + 1] == '*' and first_in_string == 0 and !first_escaped) {
+            // In a value that is one string, a comment that ends on its
+            // line is text, and one that does not is no comment at all.
+            const string_comment_end: ?usize = end: {
+                if (!first_string_value or c != '/' or i + 1 >= expanded.len or expanded[i + 1] != '*') break :end null;
+                const line_end = std.mem.indexOfScalarPos(u8, expanded, i, '\n') orelse expanded.len;
+                const end = std.mem.indexOfPos(u8, expanded[0..line_end], i + 2, "*/") orelse break :end null;
+                break :end end + 2;
+            };
+            if (string_comment_end) |end| {
+                if (first_in_string == 0 and !first_escaped) {
+                    try text_comments.append(allocator, .{ first.items.len, first.items.len + (end - i) });
+                    try first.appendSlice(allocator, expanded[i..end]);
+                    i = end - 1;
+                    continue;
+                }
+            }
+            if (c == '/' and i + 1 < expanded.len and expanded[i + 1] == '*' and first_in_string == 0 and !first_escaped and !first_string_value) {
                 // Once a search finds no end, no later one will.
                 const comment_end = if (first_no_comment_end) null else std.mem.indexOfPos(u8, expanded, i + 2, "*/");
                 if (comment_end == null) first_no_comment_end = true;
-                const kept = first_string_value or
-                    std.mem.startsWith(u8, statementWithoutDeclHint(first.items[first_statement_start..]), "--");
+                const kept = std.mem.startsWith(u8, statementWithoutDeclHint(first.items[first_statement_start..]), "--");
                 if (!kept) {
                     // A `/*!` comment that is a statement of its own stays.
                     // Its later lines lose the indentation the comment
@@ -5739,6 +5775,7 @@ pub const RuleIR = struct {
         var input_statement_start: usize = 0;
         var statement_is_style_rule: ?bool = null;
         var no_comment_end = false;
+        var next_text_comment: usize = 0;
         i = 0;
         while (i < first.items.len) : (i += 1) {
             // The marker is not text, wherever the statement it leads is
@@ -5812,6 +5849,14 @@ pub const RuleIR = struct {
             }
             // A comment the first pass kept, in a custom property, is copied
             // whole. The test is the one the first pass made.
+            // A comment that is the text of a string value is copied whole.
+            while (next_text_comment < text_comments.items.len and text_comments.items[next_text_comment][0] < i) next_text_comment += 1;
+            if (next_text_comment < text_comments.items.len and text_comments.items[next_text_comment][0] == i) {
+                const end = text_comments.items[next_text_comment][1];
+                try out.appendSlice(allocator, first.items[i..end]);
+                i = end - 1;
+                continue;
+            }
             if (c == '/' and i + 1 < first.items.len and first.items[i + 1] == '*' and
                 std.mem.startsWith(u8, std.mem.trimStart(u8, out.items[statement_start..], " "), "--"))
             {
@@ -5900,7 +5945,7 @@ pub const RuleIR = struct {
             // An item of a list also starts after a bracket or a slash.
             const token_context = value_context or (out.items.len != 0 and (out.items[out.items.len - 1] == '[' or out.items[out.items.len - 1] == '/'));
             if (!raw and in_decl_value and paren_depth == 0 and c != ':' and token_context and stmt_tokens.len != 0) {
-                if (takeDeclTokenOverride(&stmt_tokens, first.items[i..])) |override| {
+                if (takeDeclTokenOverride(&stmt_tokens, first.items[i..], decl_token_look_ahead)) |override| {
                     if (!std.mem.eql(u8, override.replacement, decl_token_as_usual)) {
                         if (!std.mem.startsWith(u8, override.replacement, decl_token_keeps_zeros)) {
                             try out.appendSlice(allocator, override.replacement);
