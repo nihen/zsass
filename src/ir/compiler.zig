@@ -2498,7 +2498,7 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
             }
             try compileExpr(ctx, b.lhs);
             try compileExpr(ctx, b.rhs);
-            try ctx.cb.emit(mapBinOpcode(b.op), 0, 0);
+            try ctx.cb.emit(mapBinOpcode(b.op), @intFromBool(b.op == .div and b.lhs_written_slash), 0);
         },
         .unary => {
             const u = resolved.unary_exprs.items[ex.payload];

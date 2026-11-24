@@ -2751,6 +2751,7 @@ pub const VM = struct {
                     b,
                     self.pendingCssMathCallPreserveContext(chunk),
                     slash_dep,
+                    inst.arg_a != 0,
                 ));
             },
             .mod => {
@@ -6705,7 +6706,7 @@ pub const VM = struct {
                     .add => try addValues(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.callable_payload_pool, raw_lhs, raw_rhs, false),
                     .sub => try subValues(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, raw_lhs, raw_rhs, false),
                     .mul => try mulValues(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, raw_lhs, raw_rhs, false),
-                    .div => try divValues(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, raw_lhs, raw_rhs, false, null),
+                    .div => try divValues(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, raw_lhs, raw_rhs, false, null, false),
                     .mod => try modValues(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, raw_lhs, raw_rhs),
                     .eq, .neq, .lt, .gt, .le, .ge => cmp: {
                         const lhs = try self.coerceSlashFreeValue(raw_lhs);
@@ -9760,6 +9761,7 @@ fn divValues(
     b: Value,
     preserve_css_math: bool,
     slash_dep: ?deprecation_mod.SlashDivDeprecationSite,
+    lhs_written_as_slash: bool,
 ) VMError!Value {
     const lhs = try coerceCalcStringToNumberish(pool, number_pool, alloc, list_pool, a);
     const rhs = try coerceCalcStringToNumberish(pool, number_pool, alloc, list_pool, b);
@@ -9843,11 +9845,14 @@ fn divValues(
         }
         return try Value.number((numerator / denominator) * factor, out_unit, number_pool, alloc);
     }
-    const sa_raw = try valueToArithmeticOperandText(pool, number_pool, alloc, list_pool, color_pool, slash_list_preserve, lhs);
+    // Numbers written with a slash between them (`1/2`) are still that
+    // text when what follows is not a number: `1/2/x`.
+    const lhs_written_slash = lhs_written_as_slash and a.kind() == .list and lhs.kind() == .number and rhs.kind() != .number and !mark_result;
+    const sa_raw = try valueToArithmeticOperandText(pool, number_pool, alloc, list_pool, color_pool, slash_list_preserve, if (lhs_written_slash) a else lhs);
     defer alloc.free(sa_raw);
     const sb_raw = try valueToArithmeticOperandText(pool, number_pool, alloc, list_pool, color_pool, slash_list_preserve, rhs);
     defer alloc.free(sb_raw);
-    const sa = try simplifySlashOperandText(pool, number_pool, alloc, sa_raw);
+    const sa = if (lhs_written_slash) try alloc.dupe(u8, sa_raw) else try simplifySlashOperandText(pool, number_pool, alloc, sa_raw);
     defer alloc.free(sa);
     const sb = try simplifySlashOperandText(pool, number_pool, alloc, sb_raw);
     defer alloc.free(sb);

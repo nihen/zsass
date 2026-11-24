@@ -508,6 +508,9 @@ const Ctx = struct {
     /// Whether declaration value is being resolved.
     /// Used to determine the declaration context of slash ambiguity (`/`).
     in_declaration_value: bool = false,
+    /// How many parentheses enclose the expression being resolved. Inside
+    /// them `1/2` is a division.
+    slash_paren_depth: u32 = 0,
     /// Declaration value validation in plain-CSS context. custom CSS `@function --*`
     /// Set it to false in the immediate body to maintain CSS text compatibility rules.
     plain_css_validate_values: bool = true,
@@ -3303,14 +3306,19 @@ fn resolveExprSlashExpr(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: S
         }
     }
 
+    const lhs_written_slash = ctx.slash_paren_depth == 0 and isSlashListExpr(ctx.prog, li) and
+        ctx.prog.list_exprs.items[ctx.prog.exprs.items[li].payload].slash_coercible;
     const bidx: u32 = @intCast(ctx.prog.binary_exprs.items.len);
-    try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = .div });
+    try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = .div, .lhs_written_slash = lhs_written_slash });
     return try appendExpr(ctx.prog, ctx.a, .{ .kind = .binary, .payload = bidx, .span = span });
 }
 
 fn resolveExprParen(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Span) ResolveError!ExprIndex {
     const inner: NodeIndex = @enumFromInt(n.payload);
     const inner_node = ast.getNode(inner);
+    const saved_slash_paren_depth = ctx.slash_paren_depth;
+    ctx.slash_paren_depth = saved_slash_paren_depth + 1;
+    defer ctx.slash_paren_depth = saved_slash_paren_depth;
     if (ctx.calc_arg_mode and (inner_node.tag == .expr_variable or inner_node.tag == .expr_namespaced_var)) {
         const inner_e = try resolveExpr(ast, ctx, inner);
         const open_id = try markCalcArgText(ctx, "(");
@@ -3963,6 +3971,13 @@ fn resolveExpr(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ResolveErro
                 children.appendAssumeCapacity(@enumFromInt(u));
             }
             const separator: ListSeparator = if (n.tag == .expr_comma_list) .comma else .space;
+            // A comma-separated list in parentheses has no node for them.
+            const parenthesized = n.tag == .expr_comma_list and span.start < ast.source.len and ast.source[span.start] == '(';
+            const saved_slash_paren_depth = ctx.slash_paren_depth;
+            if (parenthesized) ctx.slash_paren_depth = saved_slash_paren_depth + 1;
+            defer if (parenthesized) {
+                ctx.slash_paren_depth = saved_slash_paren_depth;
+            };
             return try resolveList(ast, ctx, children.items, separator, false, span);
         },
         .expr_bracketed_list => {
@@ -3987,6 +4002,9 @@ fn resolveExpr(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ResolveErro
             return try resolveList(ast, ctx, children.items, separator, true, span);
         },
         .expr_map_literal => {
+            const saved_slash_paren_depth = ctx.slash_paren_depth;
+            ctx.slash_paren_depth = saved_slash_paren_depth + 1;
+            defer ctx.slash_paren_depth = saved_slash_paren_depth;
             const off: ExtraIndex = n.payload;
             const pair_count = ast.getExtraU32(off);
             const key_start: ExtraIndex = off + 1;
@@ -4543,7 +4561,11 @@ fn resolveList(
     var elems: std.ArrayListUnmanaged(ExprIndex) = .empty;
     defer elems.deinit(ctx.a);
     try elems.ensureTotalCapacity(ctx.a, children.len);
-    for (children) |ch| {
+    // Once a space-separated list in parentheses has a second item, what
+    // follows up to the closing parenthesis no longer counts as inside
+    // them as far as `1/2` is concerned: `(a 1/2/x, 1/2/y)` keeps both.
+    for (children, 0..) |ch, child_index| {
+        if (separator == .space and child_index != 0) ctx.slash_paren_depth = 0;
         try elems.append(ctx.a, try resolveExpr(ast, ctx, ch));
     }
     var effective_separator = separator;
@@ -10024,6 +10046,7 @@ const preamble_ctx_default_only = [_][]const u8{
     "calc_arg_mode",
     "calc_arg_allow_numberish_ident_literals",
     "in_declaration_value",
+    "slash_paren_depth",
     "plain_css_validate_values",
     "mixin_accepts_content",
 };

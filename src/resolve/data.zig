@@ -302,7 +302,15 @@ pub const ResolvedFunction = struct {
 pub const ResolvedProgram = struct {
     arena: std.heap.ArenaAllocator,
     exprs: std.ArrayListUnmanaged(ResolvedExpr) = .empty,
-    binary_exprs: std.ArrayListUnmanaged(struct { lhs: ExprIndex, rhs: ExprIndex, op: BinOp }) = .empty,
+    binary_exprs: std.ArrayListUnmanaged(struct {
+        lhs: ExprIndex,
+        rhs: ExprIndex,
+        op: BinOp,
+        /// For `div`: the left side is numbers written with a slash between
+        /// them (`1/2`), outside parentheses. They are still that text
+        /// when the right side turns out not to be a number.
+        lhs_written_slash: bool = false,
+    }) = .empty,
     unary_exprs: std.ArrayListUnmanaged(struct { operand: ExprIndex, op: UnaryOp }) = .empty,
     call_exprs: std.ArrayListUnmanaged(struct {
         callee_module: u32,
