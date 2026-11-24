@@ -2175,6 +2175,13 @@ test "api: is-superselector follows the official CLI on :not(), :is(), and the u
         \\  is: s(":is(.c)", ":any(.c)") s(":is(.c, .d)", ":any(.c, .d)") s(":is(.c, .d)", ".e:is(.c, .d)") s(".c", ":is(.c, .d)") s(".c", ":is(.c.d, .c.e)") s(".d", ":is(.c .d)") s("a", ":is(a.c)");
         \\  nth: s(".c", ":nth-child(2n of .c.d)") s(".c", ":nth-child(2n of .c, .d)");
         \\  universal: s("*", ".c") s("*.c", ".c") s("*.c", "a.c") s("*.c", ".c.d") s("*:is(.c)", ".c") s("*:hover", ":hover");
+        \\  namespace: s(":not(*|a)", "a") s(":not(ns|*)", "ns|a") s(":not(#i)", "#j");
+        \\}
+        \\.a .a {
+        \\  x: y;
+        \\}
+        \\.c, :is(.c, .d) {
+        \\  @extend .a;
         \\}
         \\
     ;
@@ -2186,6 +2193,11 @@ test "api: is-superselector follows the official CLI on :not(), :is(), and the u
         \\  is: true false true false true true true;
         \\  nth: true false;
         \\  universal: true false true true true false;
+        \\  namespace: true false true;
+        \\}
+        \\
+        \\.a .a, :is(.c, .d) .a, .a :is(.c, .d), :is(.c, .d) :is(.c, .d) {
+        \\  x: y;
         \\}
         \\
     , css);

@@ -2710,14 +2710,28 @@ fn notSuperSimpleMatchesRange(
     // does not count, as in the official CLI.
     // A type selector or an id the compound has rules out a different
     // one: `:not(a)` covers `b`.
-    if (not_covers_by_overlap) return notSuperSimpleMatchesRangeByOverlap(super_ps, sub, start, end);
+    // The earlier reading compared two compounds made of `:not()` alone the
+    // way it is done below, and went by overlap otherwise.
+    if (not_covers_by_overlap) {
+        var only_nots = end > start;
+        for (sub.simple_selectors.items[start..end]) |sub_ss| {
+            const is_not = sub_ss == .pseudo_class and sub_ss.pseudo_class.selector != null and
+                std.ascii.eqlIgnoreCase(pseudoBaseName(sub_ss.pseudo_class.name), "not");
+            if (!is_not) only_nots = false;
+        }
+        if (!only_nots) return notSuperSimpleMatchesRangeByOverlap(super_ps, sub, start, end);
+    }
     const selectors = super_ps.selector orelse return false;
     for (selectors.selectors.items) |*inner_complex| {
         var covered = false;
         if (singleCompoundFromComplex(inner_complex)) |inner_compound| {
             for (inner_compound.simple_selectors.items) |inner_ss| {
                 for (sub.simple_selectors.items[start..end]) |sub_ss| {
-                    const same_kind = (inner_ss == .type_selector and sub_ss == .type_selector) or (inner_ss == .id and sub_ss == .id);
+                    // `ns|*` is a universal selector, not a type.
+                    const both_types = inner_ss == .type_selector and sub_ss == .type_selector and
+                        !std.mem.eql(u8, parseNs(inner_ss.type_selector).name, "*") and
+                        !std.mem.eql(u8, parseNs(sub_ss.type_selector).name, "*");
+                    const same_kind = both_types or (inner_ss == .id and sub_ss == .id);
                     if (same_kind and !simpleSelectorEqlForSuper(inner_ss, sub_ss)) covered = true;
                 }
             }
