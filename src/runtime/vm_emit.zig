@@ -31,6 +31,7 @@ pub fn appendCurrentRuleBegin(self: anytype, suppress_top_level_blank: bool) !vo
         1
     else
         saturateNestDepth(parent_depth);
+    self.rule_ir.next_rule_extend_snapshot = self.currentScopeExtendCount();
     try self.rule_ir.appendRuleBegin(
         self.allocator,
         @intFromEnum(selector_id),

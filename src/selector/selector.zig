@@ -2308,33 +2308,31 @@ pub fn complexIsSuperSelector(super_sel: *const ComplexSelector, sub: *const Com
     if (super_parts.compound_count == 0 or sub_parts.compound_count == 0) return false;
     if (super_parts.compound_count > sub_parts.compound_count) return false;
 
-    var super_idx = super_parts.compound_count - 1;
-    var sub_idx = sub_parts.compound_count - 1;
-
-    if (!compoundIsSuperSelector(super_parts.compounds[super_idx], sub_parts.compounds[sub_idx])) {
-        return false;
-    }
-
-    while (super_idx > 0) {
-        const super_comb = super_parts.combinators[super_idx - 1];
-        super_idx -= 1;
-
-        var matched = false;
-        var candidate = sub_idx;
-        while (candidate > 0) {
-            candidate -= 1;
-            if (!compoundIsSuperSelector(super_parts.compounds[super_idx], sub_parts.compounds[candidate])) {
-                continue;
+    // Front to back, as the official CLI does it: each compound of the
+    // covering selector takes the first compound it covers, and the last
+    // one takes the last. A first match that the combinators rule out is
+    // not retried further on, so `.a .x` does not cover `.a.e + .a.b .x`.
+    var sub_from: usize = 0;
+    var previous: ?usize = null;
+    var super_idx: usize = 0;
+    while (super_idx < super_parts.compound_count) : (super_idx += 1) {
+        const last_sub = sub_parts.compound_count - 1;
+        var match: usize = last_sub;
+        if (super_idx + 1 == super_parts.compound_count) {
+            if (last_sub < sub_from) return false;
+            if (!compoundIsSuperSelector(super_parts.compounds[super_idx], sub_parts.compounds[last_sub])) return false;
+        } else {
+            match = sub_from;
+            while (match < last_sub) : (match += 1) {
+                if (compoundIsSuperSelector(super_parts.compounds[super_idx], sub_parts.compounds[match])) break;
             }
-            if (!combinatorPathMatches(super_comb, &sub_parts, candidate, sub_idx)) {
-                continue;
-            }
-            sub_idx = candidate;
-            matched = true;
-            break;
+            if (match >= last_sub) return false;
         }
-
-        if (!matched) return false;
+        if (previous) |from| {
+            if (!combinatorPathMatches(super_parts.combinators[super_idx - 1], &sub_parts, from, match)) return false;
+        }
+        previous = match;
+        sub_from = match + 1;
     }
 
     return true;
@@ -2913,18 +2911,8 @@ fn compoundPseudoElementInfo(compound: CompoundSelector) CompoundPseudoElementIn
         result.index = idx;
     }
 
-    if (result.index) |pseudo_idx| {
-        for (compound.simple_selectors.items[pseudo_idx + 1 ..]) |ss| {
-            switch (ss) {
-                .pseudo_class => {},
-                else => {
-                    result.invalid = true;
-                    return result;
-                },
-            }
-        }
-    }
-
+    // What follows the pseudo-element may be anything: the official CLI
+    // takes `::foo` to cover `::foo.baz`.
     return result;
 }
 

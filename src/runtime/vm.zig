@@ -328,6 +328,8 @@ const SavedAtRootSelectorFrame = struct {
     selectors: []InternId,
     owner_modules: []u32,
     push_ir_lens: []usize,
+    /// The `@extend` counts noted for the scopes set aside.
+    extend_counts: []ScopeExtendCount,
     keep_len: usize,
     parent: ?InternId,
 };
@@ -424,6 +426,11 @@ inline fn saturateNestDepth(depth: usize) u8 {
     return std.math.cast(u8, depth) orelse std.math.maxInt(u8);
 }
 
+const ScopeExtendCount = struct {
+    selector: InternId,
+    count: u32,
+};
+
 pub const VM = struct {
     stack: std.ArrayListUnmanaged(Value) = .empty,
     stack_source_spans: std.ArrayListUnmanaged(Span) = .empty,
@@ -508,6 +515,10 @@ pub const VM = struct {
     /// Combined with `rule_ir.last_visible_emit_node_count` to set stmt_gap since last visible emit.
     /// Also check that it is not included.
     scope_push_ir_lens: std.ArrayListUnmanaged(usize) = .empty,
+    /// By selector-stack depth: the selector pushed there and how many
+    /// `@extend`s had run by then. A rule exists from the moment its block
+    /// is entered, though its `rule_begin` may be written later.
+    scope_extend_counts: std.ArrayListUnmanaged(ScopeExtendCount) = .empty,
     /// True if empty scope was popped immediately after the most recent visible emit (without stmt_gap).
     /// In the next `emit_stmt_gap`, set the `stmt_gap_after_empty_skip` flag on the stmt_gap node and consume it.
     /// Just before emit_stmt_gap `rule_ir.last_visible_emit_node_count >
@@ -765,6 +776,26 @@ pub const VM = struct {
         try self.maybeNoteListParentSelNoneFromItems(handle, items);
     }
 
+    fn noteScopeExtendCount(self: *VM, selector: InternId) !void {
+        const depth = self.selector_stack.items.len;
+        while (self.scope_extend_counts.items.len < depth) {
+            try self.scope_extend_counts.append(self.allocator, .{ .selector = selector, .count = 0 });
+        }
+        self.scope_extend_counts.items[depth - 1] = .{
+            .selector = selector,
+            .count = @intCast(self.rule_ir.extend_edges.items.len),
+        };
+    }
+
+    /// How many `@extend`s had run when the innermost rule was entered.
+    pub fn currentScopeExtendCount(self: *const VM) ?u32 {
+        const depth = self.selector_stack.items.len;
+        if (depth == 0 or depth > self.scope_extend_counts.items.len) return null;
+        const noted = self.scope_extend_counts.items[depth - 1];
+        if (noted.selector != self.selector_stack.items[depth - 1]) return null;
+        return noted.count;
+    }
+
     pub fn deinit(self: *VM) void {
         self.freeModGlobalsIfAny();
         self.stack.deinit(self.allocator);
@@ -799,6 +830,7 @@ pub const VM = struct {
         self.selector_stack.deinit(self.allocator);
         self.selector_owner_stack.deinit(self.allocator);
         self.scope_push_ir_lens.deinit(self.allocator);
+        self.scope_extend_counts.deinit(self.allocator);
         self.open_rule_selector_depth_stack.deinit(self.allocator);
         self.at_root_selector_context_stack.deinit(self.allocator);
         self.at_rule_media_stack.deinit(self.allocator);
@@ -1050,6 +1082,7 @@ pub const VM = struct {
             self.allocator.free(frame.selectors);
             self.allocator.free(frame.owner_modules);
             self.allocator.free(frame.push_ir_lens);
+            self.allocator.free(frame.extend_counts);
         }
         self.at_root_saved_selector_frames.clearRetainingCapacity();
     }
@@ -5269,6 +5302,7 @@ pub const VM = struct {
             const nest_depth: u8 = saturateNestDepth(self.selector_stack.items.len);
             const owner_module = self.currentSelectorPushOwnerModuleTag();
             try self.selector_stack.append(self.allocator, out_id);
+            try self.noteScopeExtendCount(out_id);
             try self.selector_owner_stack.append(self.allocator, owner_module);
             try self.scope_push_ir_lens.append(self.allocator, self.rule_ir.nodes.items.len);
             var span = self.current_source_span;
@@ -5286,6 +5320,7 @@ pub const VM = struct {
             self.open_block_depth += 1;
         } else {
             try self.selector_stack.append(self.allocator, out_id);
+            try self.noteScopeExtendCount(out_id);
             try self.selector_owner_stack.append(self.allocator, self.currentSelectorPushOwnerModuleTag());
             try self.scope_push_ir_lens.append(self.allocator, self.rule_ir.nodes.items.len);
         }
@@ -5307,16 +5342,21 @@ pub const VM = struct {
         // scope_push_ir_lens keeps the same length as selector_stack. Cut with keep_len.
         const saved_lens = try self.allocator.dupe(usize, self.scope_push_ir_lens.items[keep_len..]);
         errdefer self.allocator.free(saved_lens);
+        const counts_kept = @min(keep_len, self.scope_extend_counts.items.len);
+        const saved_counts = try self.allocator.dupe(ScopeExtendCount, self.scope_extend_counts.items[counts_kept..]);
+        errdefer self.allocator.free(saved_counts);
         try self.at_root_saved_selector_frames.append(self.allocator, .{
             .selectors = saved,
             .owner_modules = saved_owner_modules,
             .push_ir_lens = saved_lens,
+            .extend_counts = saved_counts,
             .keep_len = keep_len,
             .parent = parent,
         });
         self.selector_stack.items.len = keep_len;
         self.selector_owner_stack.items.len = keep_len;
         self.scope_push_ir_lens.items.len = keep_len;
+        self.scope_extend_counts.items.len = counts_kept;
     }
 
     fn popAtRootScope(self: *VM) VMError!void {
@@ -5325,6 +5365,12 @@ pub const VM = struct {
         defer self.allocator.free(frame.selectors);
         defer self.allocator.free(frame.owner_modules);
         defer self.allocator.free(frame.push_ir_lens);
+        defer self.allocator.free(frame.extend_counts);
+        // The scopes set aside come back with the counts they had.
+        if (self.scope_extend_counts.items.len > frame.keep_len) self.scope_extend_counts.items.len = frame.keep_len;
+        if (self.scope_extend_counts.items.len == frame.keep_len) {
+            try self.scope_extend_counts.appendSlice(self.allocator, frame.extend_counts);
+        }
         while (self.selector_stack.items.len > frame.keep_len) {
             _ = self.selector_stack.pop();
         }
@@ -21526,7 +21572,7 @@ test "vm: placeholder declared after sibling extenders keeps source order in med
     );
 }
 
-test "vm: placeholder responsive container selector order keeps base-first responsive order" {
+test "vm: placeholder responsive container selector order follows the order of the @extends" {
     try expectVmCss(
         \\$breakpoints: (sm: 576px, md: 768px, lg: 992px, xl: 1200px);
         \\$max-widths: (sm: 540px, md: 720px, lg: 960px, xl: 1140px);
@@ -21545,7 +21591,7 @@ test "vm: placeholder responsive container selector order keeps base-first respo
         \\  }
         \\}
     ,
-        \\.navshell .box, .navshell .fluid, .navshell .box-sm, .navshell .box-md, .navshell .box-lg, .navshell .box-xl {
+        \\.navshell > .box-xl, .navshell > .box-lg, .navshell > .box-md, .navshell > .box-sm, .navshell .box, .navshell .fluid, .navshell .box-sm, .navshell .box-md, .navshell .box-lg, .navshell .box-xl {
         \\  display: flex;
         \\}
         \\
@@ -21643,7 +21689,7 @@ test "vm: declarations before nested rules keep later nested rules outside paren
     );
 }
 
-test "vm: @extend saturates :not() exclusions without subset branches" {
+test "vm: @extend adds every extender to a :not() and extends the rule itself" {
     try expectVmCss(
         \\.alert a:not(.alert a.btn) { x: y; }
         \\.notice-root { @extend .alert; }
@@ -21654,7 +21700,7 @@ test "vm: @extend saturates :not() exclusions without subset branches" {
         \\.notice-e { @extend .alert; }
         \\.notice-f { @extend .alert; }
     ,
-        \\.alert a:not(.alert a.btn):not(.notice-root a.btn):not(.notice-a a.btn):not(.notice-b a.btn):not(.notice-c a.btn):not(.notice-d a.btn):not(.notice-e a.btn):not(.notice-f a.btn), .notice-f a:not(.alert a.btn):not(.notice-root a.btn):not(.notice-a a.btn):not(.notice-b a.btn):not(.notice-c a.btn):not(.notice-d a.btn):not(.notice-e a.btn):not(.notice-f a.btn), .notice-e a:not(.alert a.btn):not(.notice-root a.btn):not(.notice-a a.btn):not(.notice-b a.btn):not(.notice-c a.btn):not(.notice-d a.btn):not(.notice-e a.btn):not(.notice-f a.btn), .notice-d a:not(.alert a.btn):not(.notice-root a.btn):not(.notice-a a.btn):not(.notice-b a.btn):not(.notice-c a.btn):not(.notice-d a.btn):not(.notice-e a.btn):not(.notice-f a.btn), .notice-c a:not(.alert a.btn):not(.notice-root a.btn):not(.notice-a a.btn):not(.notice-b a.btn):not(.notice-c a.btn):not(.notice-d a.btn):not(.notice-e a.btn):not(.notice-f a.btn), .notice-b a:not(.alert a.btn):not(.notice-root a.btn):not(.notice-a a.btn):not(.notice-b a.btn):not(.notice-c a.btn):not(.notice-d a.btn):not(.notice-e a.btn):not(.notice-f a.btn), .notice-a a:not(.alert a.btn):not(.notice-root a.btn):not(.notice-a a.btn):not(.notice-b a.btn):not(.notice-c a.btn):not(.notice-d a.btn):not(.notice-e a.btn):not(.notice-f a.btn), .notice-root a:not(.alert a.btn):not(.notice-root a.btn):not(.notice-a a.btn):not(.notice-b a.btn):not(.notice-c a.btn):not(.notice-d a.btn):not(.notice-e a.btn):not(.notice-f a.btn) {
+        \\.alert a:not(.alert a.btn):not(.notice-f a.btn):not(.notice-e a.btn):not(.notice-d a.btn):not(.notice-c a.btn):not(.notice-b a.btn):not(.notice-a a.btn):not(.notice-root a.btn), .notice-f a:not(.alert a.btn):not(.notice-f a.btn):not(.notice-e a.btn):not(.notice-d a.btn):not(.notice-c a.btn):not(.notice-b a.btn):not(.notice-a a.btn):not(.notice-root a.btn), .notice-e a:not(.alert a.btn):not(.notice-f a.btn):not(.notice-e a.btn):not(.notice-d a.btn):not(.notice-c a.btn):not(.notice-b a.btn):not(.notice-a a.btn):not(.notice-root a.btn), .notice-d a:not(.alert a.btn):not(.notice-f a.btn):not(.notice-e a.btn):not(.notice-d a.btn):not(.notice-c a.btn):not(.notice-b a.btn):not(.notice-a a.btn):not(.notice-root a.btn), .notice-c a:not(.alert a.btn):not(.notice-f a.btn):not(.notice-e a.btn):not(.notice-d a.btn):not(.notice-c a.btn):not(.notice-b a.btn):not(.notice-a a.btn):not(.notice-root a.btn), .notice-b a:not(.alert a.btn):not(.notice-f a.btn):not(.notice-e a.btn):not(.notice-d a.btn):not(.notice-c a.btn):not(.notice-b a.btn):not(.notice-a a.btn):not(.notice-root a.btn), .notice-a a:not(.alert a.btn):not(.notice-f a.btn):not(.notice-e a.btn):not(.notice-d a.btn):not(.notice-c a.btn):not(.notice-b a.btn):not(.notice-a a.btn):not(.notice-root a.btn), .notice-root a:not(.alert a.btn):not(.notice-f a.btn):not(.notice-e a.btn):not(.notice-d a.btn):not(.notice-c a.btn):not(.notice-b a.btn):not(.notice-a a.btn):not(.notice-root a.btn) {
         \\  x: y;
         \\}
         \\

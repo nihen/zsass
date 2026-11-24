@@ -78,6 +78,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `@extend` leaves out a result that its original selector covers when the
   extender has the target itself and is no more specific than the original:
   `b.c {@extend .c}` adds nothing to `:focus.c`.
+- `@extend` is reimplemented after the Sass specification's model, with the
+  parts the specification leaves open taken from the official CLI's output:
+  the order `@extend`s are applied in, how an extender is itself extended,
+  how the parents of an extender are woven in, and which generated
+  selectors are trimmed. On random stylesheets with chained `@extend`s the
+  output now agrees with the official CLI about 98% of the time, up from
+  70%; selectors the official CLI writes are no longer missing, and
+  stylesheets that made the old implementation loop (a target repeated in
+  its own extender, such as `.c .c .c {@extend .c}`) now compile.
+- `selector.extend()` and `selector.replace()` use the same implementation.
+- `selector.is-superselector()` matches front to back as the official CLI
+  does: `.a .x` does not cover `.a.e + .a.b .x`, and `::foo` covers
+  `::foo.baz`.
+- A style rule counts the `@extend`s that ran before its block was entered,
+  also when its first declaration comes after an `@extend` of its own.
 
 ## 0.4.2 (2026-11-23)
 
