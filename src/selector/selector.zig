@@ -2276,6 +2276,13 @@ pub fn isSuperSelector(super_sel: *const SelectorList, sub: *const SelectorList)
 }
 
 pub fn complexIsSuperSelector(super_sel: *const ComplexSelector, sub: *const ComplexSelector) bool {
+    // The earlier reading compared two selectors made of `:not()` alone
+    // list against list, and asked of any other whether it could match
+    // what the `:not()` excludes.
+    if (not_covers_by_overlap) {
+        if (complexNotIsSuperSelector(super_sel, sub)) |result| return result;
+    }
+
     if (transparentPseudoPairIsSuperSelector(super_sel, sub)) |result| {
         return result;
     }
@@ -2401,6 +2408,87 @@ fn isTransparentSelectorPseudo(name: []const u8) bool {
         std.ascii.eqlIgnoreCase(base, "where") or
         std.ascii.eqlIgnoreCase(base, "matches") or
         std.ascii.eqlIgnoreCase(base, "any");
+}
+
+const NotCompoundInfo = struct {
+    name: []const u8,
+    selectors: SelectorList,
+
+    fn deinit(self: *NotCompoundInfo) void {
+        self.selectors.deinit();
+    }
+};
+
+fn complexNotIsSuperSelector(super_sel: *const ComplexSelector, sub: *const ComplexSelector) ?bool {
+    const super_not = aggregateNotCompound(std.heap.page_allocator, super_sel) catch return null;
+    if (super_not == null) return null;
+    var super_info = super_not.?;
+    defer super_info.deinit();
+
+    const sub_not = aggregateNotCompound(std.heap.page_allocator, sub) catch return false;
+    if (sub_not) |info| {
+        var sub_info = info;
+        defer sub_info.deinit();
+        if (!std.mem.eql(u8, super_info.name, sub_info.name)) return false;
+        return isSuperSelector(&sub_info.selectors, &super_info.selectors);
+    }
+
+    return !complexCouldMatchAnyNotSelector(&super_info.selectors, sub);
+}
+
+fn aggregateNotCompound(allocator: std.mem.Allocator, complex: *const ComplexSelector) !?NotCompoundInfo {
+    if (complex.components.items.len != 1) return null;
+    const compound = switch (complex.components.items[0]) {
+        .compound => |c| c,
+        .combinator => return null,
+    };
+    if (compound.simple_selectors.items.len == 0) return null;
+
+    var result = SelectorList.init(allocator);
+    errdefer result.deinit();
+
+    var not_name: ?[]const u8 = null;
+    for (compound.simple_selectors.items) |simple| {
+        const pseudo = switch (simple) {
+            .pseudo_class => |ps| ps,
+            else => return null,
+        };
+        if (!std.ascii.eqlIgnoreCase(pseudoBaseName(pseudo.name), "not")) return null;
+        const inner = pseudo.selector orelse return null;
+
+        if (not_name == null) {
+            not_name = pseudo.name;
+        } else if (!std.mem.eql(u8, not_name.?, pseudo.name)) {
+            return null;
+        }
+
+        for (inner.selectors.items) |inner_complex| {
+            try result.selectors.append(allocator, try inner_complex.clone(allocator));
+        }
+    }
+
+    return .{
+        .name = not_name.?,
+        .selectors = result,
+    };
+}
+
+fn complexCouldMatchAnyNotSelector(not_selectors: *const SelectorList, sub: *const ComplexSelector) bool {
+    for (not_selectors.selectors.items) |excluded| {
+        if (complexIsSuperSelector(&excluded, sub) or complexIsSuperSelector(sub, &excluded)) {
+            return true;
+        }
+        if (complexesCouldOverlap(&excluded, sub)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn complexesCouldOverlap(a: *const ComplexSelector, b: *const ComplexSelector) bool {
+    const a_compound = singleCompoundFromComplex(a) orelse return false;
+    const b_compound = singleCompoundFromComplex(b) orelse return false;
+    return compoundsCouldOverlap(a_compound, b_compound);
 }
 
 fn compoundsCouldOverlap(a: CompoundSelector, b: CompoundSelector) bool {
@@ -2710,17 +2798,7 @@ fn notSuperSimpleMatchesRange(
     // does not count, as in the official CLI.
     // A type selector or an id the compound has rules out a different
     // one: `:not(a)` covers `b`.
-    // The earlier reading compared two compounds made of `:not()` alone the
-    // way it is done below, and went by overlap otherwise.
-    if (not_covers_by_overlap) {
-        var only_nots = end > start;
-        for (sub.simple_selectors.items[start..end]) |sub_ss| {
-            const is_not = sub_ss == .pseudo_class and sub_ss.pseudo_class.selector != null and
-                std.ascii.eqlIgnoreCase(pseudoBaseName(sub_ss.pseudo_class.name), "not");
-            if (!is_not) only_nots = false;
-        }
-        if (!only_nots) return notSuperSimpleMatchesRangeByOverlap(super_ps, sub, start, end);
-    }
+    if (not_covers_by_overlap) return notSuperSimpleMatchesRangeByOverlap(super_ps, sub, start, end);
     const selectors = super_ps.selector orelse return false;
     for (selectors.selectors.items) |*inner_complex| {
         var covered = false;
