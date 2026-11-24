@@ -1772,12 +1772,25 @@ const SlashSim = struct {
             .expr_map_literal => {
                 const outside = self.in_parens;
                 self.in_parens = true;
+                // The keys are stored before the values; they are read
+                // pair by pair.
                 const pair_count = self.ast.getExtraU32(n.payload);
                 var index: u32 = 0;
-                while (index < pair_count * 2) : (index += 1) {
+                while (index < pair_count) : (index += 1) {
                     try self.readElement(@enumFromInt(self.ast.getExtraU32(n.payload + 1 + index)));
+                    try self.readElement(@enumFromInt(self.ast.getExtraU32(n.payload + 1 + pair_count + index)));
                 }
                 self.in_parens = outside;
+            },
+            // An interpolation and a spread are read where they stand.
+            .expr_interp, .expr_splat => try self.readElement(@enumFromInt(n.payload)),
+            .expr_string_interp, .expr_text_template => {
+                const part_count = self.ast.getExtraU32(n.payload);
+                var index: u32 = 0;
+                while (index < part_count) : (index += 1) {
+                    if (self.ast.getExtraU32(n.payload + 1 + index * 2) == 0) continue;
+                    try self.readElement(@enumFromInt(self.ast.getExtraU32(n.payload + 2 + index * 2)));
+                }
             },
             .expr_bracketed_list => {
                 for (readChildList(self.ast, n.payload)) |child| {
