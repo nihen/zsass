@@ -6025,7 +6025,7 @@ pub fn parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
     parser.is_plain_css = if (syntax_override_mod.get()) |over|
         over == .css
     else if (source_path) |p|
-        std.ascii.endsWithIgnoreCase(p, ".css")
+        std.mem.endsWith(u8, p, ".css")
     else
         false;
     parser.no_interpolation = !lexer.saw_interpolation;

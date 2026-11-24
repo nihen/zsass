@@ -1409,7 +1409,9 @@ pub const Parser = struct {
             if (tok.span.start >= raw_end) break;
             if (tok.tag == .invalid and !self.in_css_custom_function and !allow_invalid_tokens) return error.SyntaxError;
         }
-        if (rawDeclarationValueEmptyCommaOperand(raw_text)) |hit| {
+        // A CSS custom function keeps the text of `result` as written.
+        const empty_comma = if (self.in_css_custom_function) null else rawDeclarationValueEmptyCommaOperand(raw_text);
+        if (empty_comma) |hit| {
             const hit_byte = value_start_byte + @as(u32, @intCast(hit.offset));
             var hit_pos = saved_pos;
             while (hit_pos < self.tokens.len and self.tokens[hit_pos].span.start < hit_byte) : (hit_pos += 1) {}
@@ -2072,7 +2074,9 @@ pub const Parser = struct {
     /// Whether a function keeps its argument text as written, so that a comma
     /// with nothing before it is allowed inside.
     fn rawFunctionKeepsArgumentText(name: []const u8, after_open: []const u8) bool {
-        if (std.ascii.findIgnoreCase(name, "progid:") != null) return true;
+        if (std.mem.findScalar(u8, name, ':')) |colon| {
+            return std.ascii.eqlIgnoreCase(cssFunctionBaseName(name[0..colon]), "progid");
+        }
         if (std.ascii.eqlIgnoreCase(name, "type") or std.ascii.eqlIgnoreCase(name, "if")) return true;
         const base = cssFunctionBaseName(name);
         if (std.ascii.eqlIgnoreCase(base, "expression") or std.ascii.eqlIgnoreCase(base, "element")) return true;
@@ -12951,6 +12955,8 @@ test "rawDeclarationValueEmptyCommaOperand: a comma with no value before it" {
         .{ .text = "foo(url(,),,)", .offset = 11, .in_paren = true },
         .{ .text = "-x-type(,)", .offset = 8, .in_paren = true },
         .{ .text = "calc(1px,,2px)", .offset = 9, .in_paren = true },
+        .{ .text = "xprogid:y(,)", .offset = 10, .in_paren = true },
+        .{ .text = "foo-progid:bar(,)", .offset = 15, .in_paren = true },
         .{ .text = "[1,,2]", .offset = 3, .in_paren = false },
         .{ .text = "foo([,])", .offset = 5, .in_paren = false },
         .{ .text = "1,,2", .offset = 2, .in_paren = false },
@@ -12982,8 +12988,28 @@ test "rawDeclarationValueEmptyCommaOperand: a comma with no value before it" {
         "type(,)",
         "-webkit-calc(,)",
         "a progid:foo(,)",
+        "a PROGID:a.b.c(,)",
+        "a -ms-progid:foo(,)",
     };
     for (accepted) |text| {
         try std.testing.expect(find(text) == null);
+    }
+}
+
+test "parse: a CSS custom function keeps a comma with no value before it in `result`" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var pool = try InternPool.init(alloc);
+    defer pool.deinit(alloc);
+
+    // Verified with the official CLI: both compile and keep the text.
+    for ([_][]const u8{
+        "@function --f() { result: foo(,); }",
+        "@function --f() { result: ,; }",
+    }) |source| {
+        var result = try parseFullSource(alloc, &pool, source);
+        result.ast.deinit();
     }
 }
