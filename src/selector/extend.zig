@@ -3785,6 +3785,61 @@ pub const ApplyState = struct {
                             // the ordinary path, as it does when the
                             // estimate itself is past the limit.
                             var abandoned = false;
+                            // Covered results are left out only where
+                            // every selector involved is a plain chain
+                            // of descendants: there the results and the
+                            // test for covering can be relied on.
+                            var trim_results = complexIsPlainDescendantChain(&complex) and complexIsPairOfSimpleCompounds(&complex);
+                            for (related_exts.items) |related_ext| {
+                                for (related_ext.extender.selectors.items) |*extender_complex| {
+                                    if (!complexIsPlainDescendantChain(extender_complex) or complexRepeatsCompound(extender_complex)) trim_results = false;
+                                }
+                            }
+                            // An ancestor of one extender that matches
+                            // an ancestor of another, or what an extender
+                            // ends with, is woven into it, which the test
+                            // does not follow.
+                            if (trim_results) ancestors: for (related_exts.items) |related_ext| {
+                                for (related_ext.extender.selectors.items) |*with_ancestors| {
+                                    const ancestor_items = with_ancestors.components.items;
+                                    if (ancestor_items.len < 2) continue;
+                                    for (ancestor_items[0 .. ancestor_items.len - 1]) |*ancestor| {
+                                        if (ancestor.* != .compound) continue;
+                                        for (related_exts.items) |other_ext| {
+                                            for (other_ext.extender.selectors.items) |*other_complex| {
+                                                for (other_complex.components.items) |*other_component| {
+                                                    if (other_component.* != .compound or other_component == ancestor) continue;
+                                                    if (selector_mod.compoundIsSuperSelector(ancestor.compound, other_component.compound) or
+                                                        selector_mod.compoundIsSuperSelector(other_component.compound, ancestor.compound))
+                                                    {
+                                                        trim_results = false;
+                                                        break :ancestors;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            };
+                            // Extenders of different rules that end
+                            // with compounds covering each other are
+                            // put together by the later passes.
+                            if (trim_results) lasts: for (related_exts.items, 0..) |related_ext, related_idx| {
+                                for (related_ext.extender.selectors.items) |*extender_complex| {
+                                    const extender_last = lastCompound(extender_complex) orelse continue;
+                                    for (related_exts.items[related_idx + 1 ..]) |later_ext| {
+                                        for (later_ext.extender.selectors.items) |*later_complex| {
+                                            const later_last = lastCompound(later_complex) orelse continue;
+                                            if (selector_mod.compoundIsSuperSelector(extender_last.*, later_last.*) or
+                                                selector_mod.compoundIsSuperSelector(later_last.*, extender_last.*))
+                                            {
+                                                trim_results = false;
+                                                break :lasts;
+                                            }
+                                        }
+                                    }
+                                }
+                            };
                             product_loop: for (repeated_target_exts.items) |repeated_ext_i| {
                                 const repeated_ext = &self.extensions.items[repeated_ext_i];
                                 for (generated.items, 0..) |*base, base_idx| {
@@ -3833,6 +3888,40 @@ pub const ApplyState = struct {
                                 }
                                 generated.clearRetainingCapacity();
                                 std.mem.swap(std.ArrayList(Generated), &generated, &expanded);
+
+                                // After each extension, a result that
+                                // another one covers is left out when the
+                                // covering one is at least as specific as
+                                // what the result came from: `.g .f .f:hover`
+                                // next to `.g .f .f`. Later extensions do
+                                // not see it. A long list is kept whole.
+                                if (trim_results and generated.items.len <= repeated_target_trim_max) {
+                                    var redundant = try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, generated.items.len);
+                                    defer redundant.deinit(self.allocator);
+                                    for (generated.items[1..], 1..) |*candidate, candidate_idx| {
+                                        const source_specificity = repeatedTargetSourceSpecificity(&complex, candidate.applied, self.extensions.items);
+                                        for (generated.items[1..], 1..) |*other, other_idx| {
+                                            if (other_idx == candidate_idx or redundant.isSet(other_idx)) continue;
+                                            if (!selector_mod.complexIsSuperSelector(&other.selector, &candidate.selector)) continue;
+                                            // Of two that cover each other the first stays.
+                                            if (other_idx > candidate_idx and selector_mod.complexIsSuperSelector(&candidate.selector, &other.selector)) continue;
+                                            if (!specificity.specificityGte(specificity.complexSpecificity(&other.selector), source_specificity)) continue;
+                                            redundant.set(candidate_idx);
+                                            break;
+                                        }
+                                    }
+                                    var kept: usize = 0;
+                                    for (generated.items, 0..) |*g, generated_idx| {
+                                        if (redundant.isSet(generated_idx)) {
+                                            g.selector.deinit();
+                                            g.applied.deinit(self.allocator);
+                                            continue;
+                                        }
+                                        generated.items[kept] = g.*;
+                                        kept += 1;
+                                    }
+                                    generated.shrinkRetainingCapacity(kept);
+                                }
                             }
 
                             if (abandoned) {
@@ -7003,6 +7092,85 @@ fn firstExtenderSpecificityWith(
     return null;
 }
 
+/// Whether `sel` is compounds joined by descendant combinators only, with
+/// no `*`, no pseudo-element and no pseudo-class that takes selectors.
+fn complexIsPlainDescendantChain(sel: *const ComplexSelector) bool {
+    for (sel.components.items) |*component| {
+        switch (component.*) {
+            .combinator => |combinator| if (combinator != .descendant) return false,
+            .compound => |*compound| for (compound.simple_selectors.items) |simple| {
+                switch (simple) {
+                    .pseudo_element, .universal => return false,
+                    // `*|div` and `ns|*` are written as type selectors.
+                    .type_selector => |name| if (std.mem.indexOfScalar(u8, name, '*') != null) return false,
+                    // `:before` is a pseudo-element written the old way.
+                    .pseudo_class => |pseudo| if (pseudo.selector != null or isCss2PseudoElementName(pseudo.name)) return false,
+                    else => {},
+                }
+            },
+        }
+    }
+    return true;
+}
+
+/// Whether `sel` is two compounds of one simple selector each, such as
+/// `.a .a`. Putting an extender in place of such a compound adds nothing to
+/// the extender, and with two places every combination is made.
+fn complexIsPairOfSimpleCompounds(sel: *const ComplexSelector) bool {
+    var compounds: usize = 0;
+    for (sel.components.items) |*component| {
+        if (component.* != .compound) continue;
+        if (component.compound.simple_selectors.items.len != 1) return false;
+        compounds += 1;
+    }
+    return compounds == 2;
+}
+
+fn lastCompound(sel: *const ComplexSelector) ?*const CompoundSelector {
+    const items = sel.components.items;
+    if (items.len == 0 or items[items.len - 1] != .compound) return null;
+    return &items[items.len - 1].compound;
+}
+
+/// Whether one compound of `sel` covers another one of it, as in
+/// `.g.h .g`, or has the same simple selector twice, as in `:hover.f:hover`.
+/// Weaving and comparing such a selector is not relied on.
+fn complexRepeatsCompound(sel: *const ComplexSelector) bool {
+    for (sel.components.items, 0..) |*component, idx| {
+        if (component.* != .compound) continue;
+        const simples = component.compound.simple_selectors.items;
+        for (simples, 0..) |simple, simple_idx| {
+            for (simples[simple_idx + 1 ..]) |later| {
+                if (specificity.simpleSelectorEql(simple, later)) return true;
+            }
+        }
+        for (sel.components.items, 0..) |*other, other_idx| {
+            if (other_idx == idx or other.* != .compound) continue;
+            if (selector_mod.compoundIsSuperSelector(component.compound, other.compound)) return true;
+        }
+    }
+    return false;
+}
+
+/// The highest specificity among what a result may have come from: the
+/// selector that was extended and every extender of the extensions applied
+/// to the result.
+fn repeatedTargetSourceSpecificity(
+    original: *const ComplexSelector,
+    applied: std.DynamicBitSetUnmanaged,
+    extensions: []const Extension,
+) specificity.Specificity {
+    var source = specificity.complexSpecificity(original);
+    var it = applied.iterator(.{});
+    while (it.next()) |ext_i| {
+        if (ext_i >= extensions.len) continue;
+        for (extensions[ext_i].extender.selectors.items) |*extender_complex| {
+            source = specificityMax(source, specificity.complexSpecificity(extender_complex));
+        }
+    }
+    return source;
+}
+
 fn specificityMax(a: specificity.Specificity, b: specificity.Specificity) specificity.Specificity {
     return if (specificity.specificityGte(a, b)) a else b;
 }
@@ -7101,7 +7269,7 @@ fn appendSingleTargetReplacements(
             // An extender with a sibling combinator is not woven into a
             // selector that already has one before this compound.
             if (complexHasSiblingCombinator(extender_complex) and prefixHasSiblingCombinator(complex.components.items[0..comp_idx])) {
-                if (try joinExtenderAfterDescendant(allocator, complex, comp_idx, &ext.target, extender_complex)) |joined| {
+                if (try joinExtenderAfterDescendant(allocator, complex, comp_idx, &ext.target, extender_complex, soleExtender(complex, ext, related))) |joined| {
                     errdefer {
                         var doomed = joined;
                         doomed.deinit();
@@ -7141,6 +7309,16 @@ fn appendSingleTargetReplacements(
     }
 }
 
+/// Whether `ext` is the only extension applied and has one extender, and
+/// `complex`, which it extends, has descendant combinators only.
+fn soleExtender(complex: *const ComplexSelector, ext: *const Extension, related: []const *const Extension) bool {
+    if (related.len != 1 or ext.extender.selectors.items.len != 1) return false;
+    for (complex.components.items) |component| {
+        if (component == .combinator and component.combinator != .descendant) return false;
+    }
+    return true;
+}
+
 /// Put `extender` in place of the compound at `comp_idx`, keeping everything
 /// before it as it is, where a descendant combinator comes before that
 /// compound: `.f + .g .a` and `.f + .h` give `.f + .g .f + .h`. Returns
@@ -7151,6 +7329,10 @@ fn joinExtenderAfterDescendant(
     comp_idx: usize,
     target: *const CompoundSelector,
     extender: *const ComplexSelector,
+    /// Whether the extender's ancestors may be shared with the selector's.
+    /// With other extenders around, the combinations that take away from
+    /// the later passes are not all made here.
+    share_ancestors: bool,
 ) error{OutOfMemory}!?ComplexSelector {
     const items = selector.components.items;
     const extender_items = extender.components.items;
@@ -7159,11 +7341,39 @@ fn joinExtenderAfterDescendant(
     if (items[comp_idx - 1] != .combinator or items[comp_idx - 1].combinator != .descendant) return null;
     const extender_last = extender_items[extender_items.len - 1];
     if (extender_last != .compound) return null;
-    // An extender with ancestors of its own (`.x .f + .g`) shares them with
-    // what is already there; that takes a weave.
-    for (extender_items) |component| {
+    // The extender's own ancestors (`.x` in `.x .f + .g`) are shared with
+    // what is already there when the selector starts with the same ones;
+    // only the part joined by sibling combinators is put in. Any other
+    // ancestors take a weave.
+    var group_start: usize = 0;
+    var seen_sibling = false;
+    for (extender_items, 0..) |component, idx| {
         if (component != .combinator) continue;
-        if (component.combinator != .next_sibling and component.combinator != .general_sibling) return null;
+        switch (component.combinator) {
+            .next_sibling, .general_sibling => seen_sibling = true,
+            // Ancestors come first; `.p ~ .q .r` has none to share.
+            .descendant => {
+                if (seen_sibling or !share_ancestors) return null;
+                group_start = idx + 1;
+            },
+            else => return null,
+        }
+    }
+    if (group_start > comp_idx) return null;
+    for (extender_items[0..group_start], items[0..group_start]) |extender_component, component| {
+        switch (extender_component) {
+            .combinator => |c| if (component != .combinator or component.combinator != c) return null,
+            .compound => |*c| {
+                if (component != .compound or !specificity.compoundSelectorEql(c, &component.compound)) return null;
+                // An ancestor that the extender's last compound also
+                // matches (`div .f + div`) is not shared this way, nor
+                // one that a compound already put in matches.
+                if (selector_mod.compoundIsSuperSelector(c.*, extender_last.compound)) return null;
+                for (items[group_start..comp_idx]) |between| {
+                    if (between == .compound and selector_mod.compoundIsSuperSelector(c.*, between.compound)) return null;
+                }
+            },
+        }
     }
 
     var joined = ComplexSelector.init(allocator);
@@ -7173,7 +7383,7 @@ fn joinExtenderAfterDescendant(
         .compound => |c| .{ .compound = try c.clone(allocator) },
         .combinator => |c| .{ .combinator = c },
     });
-    for (extender_items[0 .. extender_items.len - 1]) |component| joined.components.appendAssumeCapacity(switch (component) {
+    for (extender_items[group_start .. extender_items.len - 1]) |component| joined.components.appendAssumeCapacity(switch (component) {
         .compound => |c| .{ .compound = try c.clone(allocator) },
         .combinator => |c| .{ .combinator = c },
     });
@@ -7208,6 +7418,9 @@ const repeated_target_max_positions = 10;
 /// Later passes compare the results with one another, so the time grows
 /// with the square of this.
 const repeated_target_max_results = 1024;
+/// The longest list whose covered results are left out. The official CLI
+/// leaves them out of a list of 97 and keeps them in one of 105.
+const repeated_target_trim_max = 100;
 
 /// Extend a complex selector whose compounds contain the target more than
 /// once. Each such compound is either kept or replaced by one of the
@@ -7330,7 +7543,7 @@ fn appendRepeatedTargetProduct(
                 // is there (`.f + .g .f + .g`); elsewhere the combination is
                 // left out rather than written wrongly.
                 if (partial.has_combinator_extender and extender_complex.components.items.len > 1) {
-                    const joined = (try joinExtenderAfterDescendant(allocator, &partial.selector, comp_idx, &ext.target, extender_complex)) orelse {
+                    const joined = (try joinExtenderAfterDescendant(allocator, &partial.selector, comp_idx, &ext.target, extender_complex, soleExtender(complex, ext, related))) orelse {
                         skipped_combination.* = true;
                         continue;
                     };

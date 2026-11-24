@@ -104,6 +104,7 @@ pub const ParsedAstCache = struct {
 
         var parser = parser_mod.Parser.init(a, self.pool, tokens, parse_source);
         parser.is_indented_syntax = is_indented_syntax;
+        parser.is_plain_css = is_plain_css;
         parser.no_interpolation = !lexer.saw_interpolation;
         defer parser.deinit();
         var ast = try parser.parse();

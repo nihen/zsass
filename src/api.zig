@@ -182,6 +182,9 @@ pub const CompileCssWithSourceMapResult = struct {
 };
 
 /// SCSS source  ->  expanded CSS. The return value comes from `alloc` and caller `alloc.free`.
+/// The compile itself runs in an arena on top of `alloc`, which is returned
+/// when the call ends; only the result is copied out. An `alloc` that cannot
+/// give memory back, such as another arena, keeps both until it is reset.
 /// The error set returned is a union of parser / resolver / compiler / VM / writer.
 /// If you need to grep them individually, use a separate wrapper.
 ///
@@ -196,10 +199,28 @@ pub fn compileSourceToCss(
     load_paths: []const []const u8,
     opts: CompileOptions,
 ) anyerror![]u8 {
+    // The compiler keeps what it allocates for the whole compile and gives
+    // it back in one go, as the CLI does. Values made along the way, such
+    // as the lists built-in functions return, have no other owner.
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    // Declared after the arena so it runs first: the message may point into
+    // memory the compile allocated. It also covers the copy below.
+    errdefer |err| reportFinalErrorDiagnostic(err, file_path, opts);
+    const css = try compileSourceToCssInArena(arena.allocator(), source, file_path, load_paths, opts);
+    return try alloc.dupe(u8, css);
+}
+
+fn compileSourceToCssInArena(
+    alloc: std.mem.Allocator,
+    source: []const u8,
+    file_path: []const u8,
+    load_paths: []const []const u8,
+    opts: CompileOptions,
+) anyerror![]u8 {
     error_format_mod.clearContextMessage();
     const prev_diag = pushDiagnosticSink(opts);
     defer restoreDiagnosticSink(prev_diag);
-    errdefer |err| reportFinalErrorDiagnostic(err, file_path, opts);
     var r = try compiler_mod.parseResolveCompileWithPath(alloc, source, file_path, load_paths);
     defer r.pool.deinit(alloc);
     defer r.color_pool.deinit(alloc);
@@ -244,10 +265,26 @@ pub fn compileSourceToCssWithSourceMap(
     source_map_output_css_path: ?[]const u8,
     opts: CompileOptions,
 ) anyerror!CompileCssWithSourceMapResult {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    errdefer |err| reportFinalErrorDiagnostic(err, file_path, opts);
+    const result = try compileSourceToCssWithSourceMapInArena(arena.allocator(), source, file_path, load_paths, source_map_output_css_path, opts);
+    const css = try alloc.dupe(u8, result.css);
+    errdefer alloc.free(css);
+    return .{ .css = css, .source_map_json = try alloc.dupe(u8, result.source_map_json) };
+}
+
+fn compileSourceToCssWithSourceMapInArena(
+    alloc: std.mem.Allocator,
+    source: []const u8,
+    file_path: []const u8,
+    load_paths: []const []const u8,
+    source_map_output_css_path: ?[]const u8,
+    opts: CompileOptions,
+) anyerror!CompileCssWithSourceMapResult {
     error_format_mod.clearContextMessage();
     const prev_diag = pushDiagnosticSink(opts);
     defer restoreDiagnosticSink(prev_diag);
-    errdefer |err| reportFinalErrorDiagnostic(err, file_path, opts);
     var r = try compiler_mod.parseResolveCompileWithPath(alloc, source, file_path, load_paths);
     defer r.pool.deinit(alloc);
     defer r.color_pool.deinit(alloc);
@@ -1242,8 +1279,6 @@ test "api: a lone escaped hyphen stays escaped in a selector" {
 }
 
 test "api: the space that ends a hex escape is kept apart from what follows" {
-    // Lists a built-in function returns live until the allocator is torn
-    // down, so these compiles run in an arena.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1601,8 +1636,6 @@ test "api: compressed output leaves string contents alone and resets after an em
 }
 
 test "api: a hex escape gets its space only where a selector name ends" {
-    // Lists a built-in function returns live until the allocator is torn
-    // down, so this compile runs in an arena.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1616,8 +1649,6 @@ test "api: a hex escape gets its space only where a selector name ends" {
 }
 
 test "api: selector.nest returns a selector list" {
-    // Lists a built-in function returns live until the allocator is torn
-    // down, so these compiles run in an arena.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1648,9 +1679,81 @@ test "api: compressed output drops an empty rule without its enclosing block" {
     try std.testing.expectEqualStrings("@media print{.w a{b:c}}@media print{a{b:c}}e{f:g}k{l:url(a;b);n:o}\n", css);
 }
 
+test "api: lists made by built-in functions are freed" {
+    // `std.testing.allocator` reports what is still allocated at the end.
+    const alloc = std.testing.allocator;
+    const source =
+        \\@use "sass:list";
+        \\@use "sass:map";
+        \\@use "sass:selector";
+        \\@use "sass:string";
+        \\@use "sass:color";
+        \\$m: map.merge((a: 1), (b: 2));
+        \\a {
+        \\  b: list.append(1 2, 3);
+        \\  c: list.join(1 2, 3 4);
+        \\  d: list.zip(1 2, 3 4);
+        \\  e: map.keys($m);
+        \\  f: map.values(map.remove($m, a));
+        \\  g: selector.nest(".a", ".b");
+        \\  h: selector.parse(".a .b, .c");
+        \\  i: string.split("a b", " ");
+        \\  j: list.set-nth(1 2 3, 2, 4);
+        \\  k: list.slash(1, 2);
+        \\  l: color.to-space(#abc, hsl);
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expect(std.mem.indexOf(u8, css, "b: 1 2 3;") != null);
+
+    var mapped = try compileSourceToCssWithSourceMap(alloc, source, "", &.{}, null, .{});
+    defer mapped.deinit(alloc);
+    try std.testing.expectEqualStrings(css, mapped.css);
+}
+
+test "api: a failed copy of the result is reported as an error diagnostic" {
+    const Counter = struct {
+        fn sink(diag: *const Diagnostic, ctx: ?*anyopaque) void {
+            const errors: *usize = @ptrCast(@alignCast(ctx.?));
+            if (diag.level == .err) errors.* += 1;
+        }
+    };
+    const source = "a { b: c; }\n";
+
+    // The copy handed back to the caller is the last allocation of a
+    // compile, so failing that one leaves the compile itself intact.
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const css = try compileSourceToCss(counting.allocator(), source, "", &.{}, .{});
+    counting.allocator().free(css);
+    const map_start = counting.alloc_index;
+    const mapped = try compileSourceToCssWithSourceMap(counting.allocator(), source, "", &.{}, null, .{});
+    const map_allocs = counting.alloc_index - map_start;
+    counting.allocator().free(mapped.css);
+    counting.allocator().free(mapped.source_map_json);
+
+    var errors: usize = 0;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = map_start - 1 });
+    try std.testing.expectError(error.OutOfMemory, compileSourceToCss(failing.allocator(), source, "", &.{}, .{
+        .diagnostic_sink = Counter.sink,
+        .diagnostic_ctx = &errors,
+    }));
+    try std.testing.expectEqual(@as(usize, 1), errors);
+
+    // The CSS copy and the source map copy are the last two allocations.
+    for ([_]usize{ map_allocs - 2, map_allocs - 1 }) |fail_index| {
+        errors = 0;
+        var failing_map = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, compileSourceToCssWithSourceMap(failing_map.allocator(), source, "", &.{}, null, .{
+            .diagnostic_sink = Counter.sink,
+            .diagnostic_ctx = &errors,
+        }));
+        try std.testing.expectEqual(@as(usize, 1), errors);
+    }
+}
+
 test "api: @extend covers every combination of a repeated target" {
-    // Lists a built-in function returns live until the allocator is torn
-    // down, so this compile runs in an arena.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1714,6 +1817,152 @@ test "api: a repeated @extend target leaves out covered extenders and keeps sibl
         \\}
         \\
         \\.c .c, .i .c, #j.i .c, .c .i, .i .i, #j.i .i, .c #j.i, .i #j.i {
+        \\  x: y;
+        \\}
+        \\
+    , css);
+}
+
+test "api: a repeated @extend target leaves out results another result covers" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\.a .a { x: y; }
+        \\.f:hover, .g .f { @extend .a; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    defer alloc.free(css);
+    // `.g .f .f:hover` and `.g .f:hover .f` are covered by `.g .f .f`.
+    try std.testing.expectEqualStrings(
+        \\.a .a, .f:hover .a, .g .f .a, .a .f:hover, .f:hover .f:hover, .a .g .f, .g .a .f, .f:hover .g .f, .g .f .f {
+        \\  x: y;
+        \\}
+        \\
+    , css);
+}
+
+test "api: a covered @extend result is judged by the extensions applied to it" {
+    const alloc = std.testing.allocator;
+    // `#q` comes with a later rule, so it does not keep `.g .f .f:hover`.
+    const source =
+        \\.a .a { x: y; }
+        \\.f:hover, .g .f { @extend .a; }
+        \\#q { @extend .a; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.a .a, #q .a, .a #q, #q #q, .f:hover .a, .f:hover #q, .g .f .a, .g .f #q, .a .f:hover, #q .f:hover, .f:hover .f:hover, .a .g .f, #q .g .f, .g .a .f, .g #q .f, .f:hover .g .f, .g .f .f {
+        \\  x: y;
+        \\}
+        \\
+    , css);
+}
+
+test "api: covered @extend results are left out after each extension" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { source: []const u8, selectors: usize, covered_kept: bool }{
+        // One extension, 109 results: too many to compare.
+        .{
+            .source =
+            \\.a .a { x: y; }
+            \\.f:hover, .g .f, .h1, .h2, .h3, .h4, .h5, .h6, .h7 { @extend .a; }
+            \\
+            ,
+            .selectors = 109,
+            .covered_kept = true,
+        },
+        // The first extension makes 9 results and loses two of them.
+        .{
+            .source =
+            \\.a .a { x: y; }
+            \\.f:hover, .g .f { @extend .a; }
+            \\.h1, .h2, .h3, .h4, .h5, .h6, .h7 { @extend .a; }
+            \\
+            ,
+            .selectors = 107,
+            .covered_kept = false,
+        },
+        // The second extension brings the list to 109 results.
+        .{
+            .source =
+            \\.a .a { x: y; }
+            \\.h1, .h2, .h3, .h4, .h5, .h6, .h7 { @extend .a; }
+            \\.f:hover, .g .f { @extend .a; }
+            \\
+            ,
+            .selectors = 109,
+            .covered_kept = true,
+        },
+    };
+    for (cases) |case| {
+        const css = try compileSourceToCss(alloc, case.source, "", &.{}, .{});
+        defer alloc.free(css);
+        const prelude = css[0 .. std.mem.indexOf(u8, css, " {") orelse return error.TestUnexpectedResult];
+        try std.testing.expectEqual(case.selectors, std.mem.count(u8, prelude, ", ") + 1);
+        try std.testing.expectEqual(case.covered_kept, std.mem.indexOf(u8, prelude, ", .g .f .f:hover,") != null);
+    }
+}
+
+test "api: a covered @extend result stays where covering is not a plain match" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { source: []const u8, kept: []const u8 }{
+        // A child combinator.
+        .{ .source = ".a .a { x: y; }\n.k .f > a, .f { @extend .a; }\n", .kept = ", .k .f > a .f > a," },
+        // `*` leaves no trace in what it is unified with.
+        .{ .source = ".a.b .a.b { x: y; }\n.f:hover, #x *.f:hover { @extend .a; }\n", .kept = ", #x .b.f:hover .b.f:hover," },
+        .{ .source = "div.a div.a { x: y; }\n.f:hover, #x *|div.f:hover { @extend .a; }\n", .kept = ", #x div.f:hover div.f:hover," },
+        // Unifying with `.a.f` and `.a.g` makes compounds that cover others.
+        .{ .source = ".a.f .a.g { x: y; }\n.f .g { @extend .a; }\n", .kept = ", .f .f.g .a.g," },
+        // The ancestor `.f` of one extender is what another one ends with.
+        .{ .source = ".a .a .a { x: y; }\n.f :hover, .f, .g.h, .f.k { @extend .a; }\n", .kept = ", .a .a .f :hover," },
+        // The ancestors `.g` and `.f.g.k` of two extenders cover each other.
+        .{ .source = ".a .a { x: y; }\n.f.g.k .h, .g .h, .x .h { @extend .a; }\n", .kept = ", .x .h .f.g.k .h," },
+        // With three places not every combination is made.
+        .{ .source = ".a .a .a { x: y; }\nspan, .k :hover, .d span { @extend .a; }\n", .kept = ", .d .k :hover span .a," },
+        // `:where()` adds no specificity.
+        .{ .source = ".a .a { x: y; }\n.f:hover, .g :where(.f) { @extend .a; }\n", .kept = ", .g :where(.f) .f:hover," },
+    };
+    for (cases) |case| {
+        const css = try compileSourceToCss(alloc, case.source, "", &.{}, .{});
+        defer alloc.free(css);
+        try std.testing.expect(std.mem.indexOf(u8, css, case.kept) != null);
+    }
+}
+
+test "api: an ancestor the extender's last compound matches is not shared" {
+    const alloc = std.testing.allocator;
+    const css = try compileSourceToCss(alloc, ".a .a { x: y; }\ndiv .f + div { @extend .a; }\n", "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expect(std.mem.indexOf(u8, css, ", div .f + div .f + div") == null);
+}
+
+test "api: an extender's ancestors are not shared past a sibling combinator" {
+    const alloc = std.testing.allocator;
+    const css = try compileSourceToCss(alloc, ".p + .a .a { x: y; }\n.x .f + .g ~ .h { @extend .a; }\n", "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".x .f .g ~ .p + .h .f + .g ~ .h") == null);
+}
+
+test "api: an extender's ancestors are shared only when it is the sole extender" {
+    const alloc = std.testing.allocator;
+    const css = try compileSourceToCss(alloc, ".a .a { x: y; }\n.g { @extend .a; }\n.x .f + .g { @extend .a; }\n", "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".x .f + .g .f + .g") == null);
+}
+
+test "api: an extender with ancestors and a sibling joins a repeated @extend target" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\.x .p .a .a { x: y; }
+        \\.x .f + .g { @extend .a; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.x .p .a .a, .x .p .f + .g .a, .x .p .a .f + .g, .x .p .f + .g .f + .g {
         \\  x: y;
         \\}
         \\
