@@ -2229,3 +2229,66 @@ test "api: is-superselector follows the official CLI on :not(), :is(), and the u
         \\
     , css);
 }
+
+test "api: @extend leaves out a result its original covers" {
+    const alloc = std.testing.allocator;
+    // An extender that has the target itself only adds to the compound.
+    // The result is left out when the original is at least as specific
+    // as the extender; `selector.replace()` has no original to keep.
+    const source =
+        \\@use "sass:selector";
+        \\:focus.c {x: 1}
+        \\b.c {@extend .c}
+        \\.e {y: 2}
+        \\b.e {@extend .e}
+        \\:focus.f {z: 3}
+        \\.g .h .f {@extend .f}
+        \\.i .f {@extend .f}
+        \\.j:where(#x) {w: 4}
+        \\.k.j {@extend .j}
+        \\.l .m {v: 5}
+        \\.n .m {@extend .m}
+        \\:focus.o {u: 6}
+        \\.o:nth-child(2n of .p) {@extend .o}
+        \\.q:before {t: 7}
+        \\.r .q {@extend .q}
+        \\a {r: selector.replace("foo.bar", "foo", "foo[baz]")}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\:focus.c {
+        \\  x: 1;
+        \\}
+        \\
+        \\.e, b.e {
+        \\  y: 2;
+        \\}
+        \\
+        \\:focus.f, .g .h .f:focus {
+        \\  z: 3;
+        \\}
+        \\
+        \\.j:where(#x), .k.j:where(#x) {
+        \\  w: 4;
+        \\}
+        \\
+        \\.l .m {
+        \\  v: 5;
+        \\}
+        \\
+        \\:focus.o, .o:focus:nth-child(2n of .p) {
+        \\  u: 6;
+        \\}
+        \\
+        \\.q:before, .r .q:before {
+        \\  t: 7;
+        \\}
+        \\
+        \\a {
+        \\  r: foo.bar[baz];
+        \\}
+        \\
+    , css);
+}
