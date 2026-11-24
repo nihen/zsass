@@ -2032,6 +2032,31 @@ test "api: an extender with ancestors and a sibling joins a repeated @extend tar
     , css);
 }
 
+test "api: a repeated @extend target past the limit is still extended" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // Weaving `.x .f` into ten compounds makes more selectors than the
+    // combined path allows, so the selector takes the ordinary path.
+    const source =
+        \\.p0 .a .p1 .a .p2 .a .p3 .a .p4 .a .p5 .a .p6 .a .p7 .a .p8 .a .p9 .a { x: y; }
+        \\.x .f { @extend .a; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    // One compound at a time: the original and, for each of the ten
+    // compounds, the two ways of weaving `.x` in.
+    const selector_list = css[0..std.mem.indexOfScalar(u8, css, '{').?];
+    try std.testing.expectEqual(@as(usize, 21), std.mem.count(u8, selector_list, ", ") + 1);
+    for (0..10) |i| {
+        var buf: [32]u8 = undefined;
+        const direct = try std.fmt.bufPrint(&buf, ".p{d} .x .f", .{i});
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, selector_list, direct));
+        const woven = try std.fmt.bufPrint(&buf, ".p{d} .f", .{i});
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, selector_list, woven));
+    }
+}
+
 test "api: is-superselector follows the official CLI on :not(), :is(), and the universal selector" {
     const alloc = std.testing.allocator;
     const source =
@@ -2058,29 +2083,4 @@ test "api: is-superselector follows the official CLI on :not(), :is(), and the u
         \\}
         \\
     , css);
-}
-
-test "api: a repeated @extend target past the limit is still extended" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    // Weaving `.x .f` into ten compounds makes more selectors than the
-    // combined path allows, so the selector takes the ordinary path.
-    const source =
-        \\.p0 .a .p1 .a .p2 .a .p3 .a .p4 .a .p5 .a .p6 .a .p7 .a .p8 .a .p9 .a { x: y; }
-        \\.x .f { @extend .a; }
-        \\
-    ;
-    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
-    // One compound at a time: the original and, for each of the ten
-    // compounds, the two ways of weaving `.x` in.
-    const selector_list = css[0..std.mem.indexOfScalar(u8, css, '{').?];
-    try std.testing.expectEqual(@as(usize, 21), std.mem.count(u8, selector_list, ", ") + 1);
-    for (0..10) |i| {
-        var buf: [32]u8 = undefined;
-        const direct = try std.fmt.bufPrint(&buf, ".p{d} .x .f", .{i});
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, selector_list, direct));
-        const woven = try std.fmt.bufPrint(&buf, ".p{d} .f", .{i});
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, selector_list, woven));
-    }
 }
