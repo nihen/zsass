@@ -352,6 +352,9 @@ const decl_token_list_end: u8 = 0x02;
 /// from the ones the rest of the replacement, the text of the token
 /// without them, leaves out.
 pub const decl_token_keeps_zeros = "\x04";
+/// As a replacement: the token is shortened like any other. It is listed
+/// so that an override with the same text is not applied to it.
+pub const decl_token_as_usual = "\x05";
 
 /// Written in front of a declaration for `compressCss`, followed by one
 /// byte holding the hints above plus '0'. With `decl_hint_has_tokens` the
@@ -5475,7 +5478,7 @@ pub const RuleIR = struct {
         if (pos == digits_start or !std.ascii.isDigit(text[pos - 1])) return false;
         if (pos < text.len and text[pos] == '%') return pos + 1 == text.len;
         for (text[pos..]) |ch| {
-            if (!std.ascii.isAlphabetic(ch)) return false;
+            if (!std.ascii.isAlphanumeric(ch) and ch != '-' and ch != '_' and ch < 0x80) return false;
         }
         return true;
     }
@@ -5873,7 +5876,9 @@ pub const RuleIR = struct {
                 (selector_argument_parens.items.len != 0 and selector_argument_parens.items[selector_argument_parens.items.len - 1]);
             const value_context = out.items.len != 0 and (out.items[out.items.len - 1] == ':' or out.items[out.items.len - 1] == ',' or out.items[out.items.len - 1] == ' ' or out.items[out.items.len - 1] == '(');
             if (!raw and in_decl_value and paren_depth == 0 and c != ':' and value_context) {
-                if (takeDeclTokenOverride(&stmt_tokens, first.items[i..])) |override| {
+                const taken = takeDeclTokenOverride(&stmt_tokens, first.items[i..]);
+                const as_usual = if (taken) |override| std.mem.eql(u8, override.replacement, decl_token_as_usual) else false;
+                if (!as_usual) if (taken) |override| {
                     if (!std.mem.startsWith(u8, override.replacement, decl_token_keeps_zeros)) {
                         try out.appendSlice(allocator, override.replacement);
                         i += override.len - 1;
@@ -5883,7 +5888,7 @@ pub const RuleIR = struct {
                     // The character the token starts with is being written.
                     zero_form = override.replacement[decl_token_keeps_zeros.len..];
                     zero_form = if (zero_form.len != 0 and zero_form[0] == c) zero_form[1..] else "";
-                }
+                };
                 const operand_len = textSlashOperandsLen(first.items[i..]);
                 if (operand_len != 0) {
                     try out.appendSlice(allocator, first.items[i .. i + operand_len]);

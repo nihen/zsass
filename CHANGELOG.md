@@ -30,7 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one with ten decimals as they are (`0.0333333333em`).
 - Compressed output leaves an unquoted string in a list as it is, and the
   parts of a value joined by `/` when one of them is not a number
-  (`center/0.4rem`). A string that reads as a comment stays.
+  (`center/0.4rem`). A string made by an interpolation stays when it
+  reads as a comment.
 - In a calculation kept in a variable or returned by a function, compressed
   output keeps the zero of a number an interpolation put there
   (`calc(0.375rem + var(--w))`) and drops the zero of one written beside it.

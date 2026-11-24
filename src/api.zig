@@ -1471,11 +1471,12 @@ test "api: compressed output writes a token the way its value says" {
             \\  e: shadow(2);
             \\  f: 1px solid color.mix(#6f42c1, white, 20.3%);
             \\  g: color.adjust(#26a69a, $lightness: 54.5%);
-            \\  h: center / 0.4rem 0.5rem, 0.5 / 0.4;
+            \\  h: center / 0.4rem 0.5rem, 0.5 / 0.4, 0.5em/1foo-bar;
+            \\  i: 0.5rem (0.5 + rem), -0.075em (0.3 - 0.375) * 1em;
             \\}
             \\
             ,
-            .css = "a{b:-.075em 0.0333333333em -0.5em;c:-.075em;d:0.5rem .5rem;e:0px 0px transparent, 0.5px #aaa,1px #aaa;f:1px solid rgb(88.5364705882%,84.9541176471%,95.0643137255%);g:hsl(174.375,62.7450980392%,94.5%);h:center/0.4rem .5rem,.5/.4}\n",
+            .css = "a{b:-.075em 0.0333333333em -0.5em;c:-.075em;d:0.5rem .5rem;e:0px 0px transparent, 0.5px #aaa,1px #aaa;f:1px solid rgb(88.5364705882%,84.9541176471%,95.0643137255%);g:hsl(174.375,62.7450980392%,94.5%);h:center/0.4rem .5rem,.5/.4,.5em/1foo-bar;i:.5rem 0.5rem,-0.075em -.075em}\n",
         },
         // In a calculation kept in a variable, a number an interpolation
         // put there keeps its zero and one written beside it does not. A
@@ -1496,13 +1497,14 @@ test "api: compressed output writes a token the way its value says" {
             \\  c: add($a, 0.5px) 0.5em;
             \\  d: $t 0.75rem;
             \\  e: calc(#{$w} * 0.75);
+            \\  e2: calc(#{"var(--x)"} * 0.5) calc(0.1234567891px + #{0.5});
             \\  f: var(--x, "/") #{"/* rtl:"} var(--y) #{"*/"};
             \\  g: #{"/* x */"};
             \\  #{"--h"}: #{0.5em} 0.5em, 0.5em;
             \\}
             \\
             ,
-            .css = "a{b:calc(0.375rem + var(--w));c:calc(0.375rem + 0.5px) .5em;d:calc(0.375rem - 1px - var(--w)*.25) .75rem;e:calc(var(--w)*.75);f:var(--x, \"/\") /* rtl: var(--y) */;g:/* x */;--h:0.5em .5em,.5em}\n",
+            .css = "a{b:calc(0.375rem + var(--w));c:calc(0.375rem + 0.5px) .5em;d:calc(0.375rem - 1px - var(--w)*.25) .75rem;e:calc(var(--w)*.75);e2:calc(var(--x)*.5) calc(0.1234567891px + 0.5);f:var(--x, \"/\") /* rtl: var(--y) */;g:/* x */;--h:0.5em .5em,.5em}\n",
         },
         // In plain CSS a hex color with an alpha channel is a color, an
         // `rgba()` of the stylesheet is not, and a number with ten

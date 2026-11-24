@@ -451,7 +451,8 @@ pub const VM = struct {
     /// For a calculation written with interpolation, stored as a string:
     /// its text without the zeros compressed output drops. Those are the
     /// ones written in the source; a number an interpolation put there
-    /// keeps its zero.
+    /// keeps its zero. `.none` stands for a calculation whose numbers
+    /// could not be told apart.
     calc_zero_forms: std.AutoHashMapUnmanaged(InternId, InternId) = .empty,
     /// list_pool handle indexed sidecar bitset. Bit is set = "This list handle is
     /// Guaranteed (recursively) to not contain `&` (slice in list_pool is immutable, so
@@ -3643,7 +3644,9 @@ pub const VM = struct {
                         protect_interpolated_calc_list or
                         self.shouldProtectInterpolatedCalcString(part, s, interpolation_context, source_has_interp, part_preserve_literal_calc);
                     if (protect_interpolated_calc) try acc.appendSlice(self.allocator, calc_interp_preserve_start);
-                    if (interpolation_context and (part.kind() != .string or part.stringPreserveLiteralText(self.string_flags_pool.items))) {
+                    if (interpolation_context and (part.kind() != .string or part.stringQuoted(self.string_flags_pool.items) or
+                        part.stringPreserveLiteralText(self.string_flags_pool.items)))
+                    {
                         if (value_span_count < value_spans.len) value_spans[value_span_count] = .{ acc.items.len, acc.items.len + s.len };
                         value_span_count += 1;
                     }
@@ -3687,10 +3690,15 @@ pub const VM = struct {
                 // If left as merged text. In the later stage (internDynamicSelectorValue etc.)
                 // maybeResolveParentSelectorValue makes bare "&" parent text again
                 // Push with preserve_ampersand flag to prevent it from resolving.
-                if (interpolation_context and !quoted_result and value_span_count != 0 and value_span_count <= value_spans.len and
-                    merged_text.ptr == merged_as_accumulated.ptr and css_utils.containsCalcFunction(merged_text))
+                if (interpolation_context and (source_has_interp or value_span_count != 0) and !quoted_result and
+                    css_utils.containsCalcFunction(merged_text))
                 {
-                    try self.noteCalcZeroForm(merged, merged_text, value_spans[0..value_span_count]);
+                    if (value_span_count <= value_spans.len and merged_text.ptr == merged_as_accumulated.ptr) {
+                        try self.noteCalcZeroForm(merged, merged_text, value_spans[0..value_span_count]);
+                    } else {
+                        // Where the values are in the text is not known.
+                        try self.calc_zero_forms.put(self.allocator, merged, .none);
+                    }
                 }
                 const merged_value = if (preserved_parent_marker)
                     Value.stringPreservingAmpersand(merged, false)
@@ -4155,7 +4163,7 @@ pub const VM = struct {
                 try self.rule_ir.appendDecl(self.allocator, @intFromEnum(prop_id), @intFromEnum(vid), self.currentSourceSpan());
                 if (!is_custom_property) {
                     self.rule_ir.hintLastDecl(self.declStringValueHint(opcode_mod.emit_decl_flag_value_single_dynamic, val));
-                    try self.noteLastDeclTokens(val, false);
+                    try self.noteLastDeclTokens(val);
                 }
             },
             .emit_decl => {
@@ -4256,7 +4264,7 @@ pub const VM = struct {
                     defer if (unmarked_literal.ptr != raw_literal.ptr) self.allocator.free(unmarked_literal);
                     try self.rule_ir.appendDeclRaw(self.allocator, @intFromEnum(prop_id), unmarked_literal, self.currentSourceSpan());
                     self.rule_ir.hintLastDecl(if (is_plain_css_decl) plainCssDeclHints(emit_decl_flags) else self.declStringValueHint(emit_decl_flags, val));
-                    if (!is_plain_css_decl) try self.noteLastDeclTokens(val, declSourceHasInterp(emit_decl_flags));
+                    if (!is_plain_css_decl) try self.noteLastDeclTokens(val);
                     return .continue_exec;
                 }
                 if (!is_custom_property) {
@@ -4266,7 +4274,7 @@ pub const VM = struct {
                     {
                         try self.rule_ir.appendDeclRaw(self.allocator, @intFromEnum(prop_id), vid_raw, self.currentSourceSpan());
                         self.rule_ir.hintLastDecl(if (is_plain_css_decl) plainCssDeclHints(emit_decl_flags) else self.declStringValueHint(emit_decl_flags, val));
-                        if (!is_plain_css_decl) try self.noteLastDeclTokens(val, declSourceHasInterp(emit_decl_flags));
+                        if (!is_plain_css_decl) try self.noteLastDeclTokens(val);
                         return .continue_exec;
                     }
                 }
@@ -4278,7 +4286,7 @@ pub const VM = struct {
                     {
                         try self.rule_ir.appendDeclRaw(self.allocator, @intFromEnum(prop_id), marked_value, self.currentSourceSpan());
                         self.rule_ir.hintLastDecl(if (is_plain_css_decl) plainCssDeclHints(emit_decl_flags) else self.declStringValueHint(emit_decl_flags, val));
-                        if (!is_plain_css_decl) try self.noteLastDeclTokens(val, declSourceHasInterp(emit_decl_flags));
+                        if (!is_plain_css_decl) try self.noteLastDeclTokens(val);
                         return .continue_exec;
                     }
                 }
@@ -4350,7 +4358,7 @@ pub const VM = struct {
                 try self.rule_ir.appendDecl(self.allocator, @intFromEnum(prop_id), @intFromEnum(vid), self.currentSourceSpan());
                 if (!is_custom_property) {
                     self.rule_ir.hintLastDecl(if (is_plain_css_decl) plainCssDeclHints(emit_decl_flags) else self.declStringValueHint(emit_decl_flags, val));
-                    if (!is_plain_css_decl) try self.noteLastDeclTokens(val, declSourceHasInterp(emit_decl_flags));
+                    if (!is_plain_css_decl) try self.noteLastDeclTokens(val);
                 }
             },
             .emit_decl_raw, .emit_raw_decl => {
@@ -4924,7 +4932,7 @@ pub const VM = struct {
                         defer if (unmarked.ptr != normalized.ptr) self.allocator.free(unmarked);
                         try self.rule_ir.appendDeclRaw(self.allocator, prop_u, unmarked, self.currentSourceSpan());
                         self.rule_ir.hintLastDecl(self.scriptCustomPropertyHints(inst.arg_a, val));
-                        try self.noteLastDeclTokens(val, declSourceHasInterp(inst.arg_a));
+                        try self.noteLastDeclTokens(val);
                         return .continue_exec;
                     }
                 }
@@ -4978,7 +4986,7 @@ pub const VM = struct {
                         defer if (unmarked.ptr != raw_out.ptr) self.allocator.free(unmarked);
                         try self.rule_ir.appendDeclRaw(self.allocator, prop_u, unmarked, self.currentSourceSpan());
                         self.rule_ir.hintLastDecl(self.scriptCustomPropertyHints(inst.arg_a, val));
-                        try self.noteLastDeclTokens(val, declSourceHasInterp(inst.arg_a));
+                        try self.noteLastDeclTokens(val);
                         return .continue_exec;
                     }
                     const raw = calc_utils.stripCalcArgMarker(self.intern_pool.get(vid));
@@ -5011,12 +5019,12 @@ pub const VM = struct {
                     defer if (raw_out.ptr != value_text.ptr) self.allocator.free(@constCast(raw_out));
                     try self.rule_ir.appendDeclRaw(self.allocator, prop_u, raw_out, self.currentSourceSpan());
                     self.rule_ir.hintLastDecl(self.scriptCustomPropertyHints(inst.arg_a, val));
-                    try self.noteLastDeclTokens(val, declSourceHasInterp(inst.arg_a));
+                    try self.noteLastDeclTokens(val);
                     return .continue_exec;
                 }
                 try self.rule_ir.appendDecl(self.allocator, prop_u, @intFromEnum(vid), self.currentSourceSpan());
                 self.rule_ir.hintLastDecl(self.declStringValueHint(inst.arg_a, val));
-                try self.noteLastDeclTokens(val, declSourceHasInterp(inst.arg_a));
+                try self.noteLastDeclTokens(val);
             },
             .push_prop_namespace => {
                 const prefix_v = try self.maybeResolveParentSelectorValue(try self.pop());
@@ -5611,39 +5619,46 @@ pub const VM = struct {
             if (ch == calc_interp_preserve_end[0]) continue;
             if (!in_value and ch == '0' and at + 1 < text.len and text[at + 1] == '.') {
                 const prev = if (short.items.len != 0) short.items[short.items.len - 1] else 0;
-                if (prev != '-' and !std.ascii.isAlphanumeric(prev) and prev != '_' and prev != '.') {
+                // Ten decimals as they are keep the zero, as elsewhere.
+                var decimals: usize = 0;
+                while (at + 2 + decimals < text.len and std.ascii.isDigit(text[at + 2 + decimals])) decimals += 1;
+                const ten_decimals = decimals == 10 and text[at + 11] != '0';
+                if (!ten_decimals and prev != '-' and !std.ascii.isAlphanumeric(prev) and prev != '_' and prev != '.') {
                     dropped = true;
                     continue;
                 }
             }
             short.appendAssumeCapacity(ch);
         }
-        if (!dropped) return;
         try self.calc_zero_forms.put(self.allocator, id, try self.intern_pool.intern(short.items));
     }
 
     /// Notes, for the declaration appended last, the tokens of `val` that
     /// compressed output does not write the way their text suggests.
-    ///
-    /// `source_has_interp` says the value is written with an interpolation
-    /// itself. What the numbers of a calculation in it keep is then known
-    /// from the source.
-    fn noteLastDeclTokens(self: *VM, val: Value, source_has_interp: bool) VMError!void {
+    fn noteLastDeclTokens(self: *VM, val: Value) VMError!void {
         const kind = val.kind();
         if (kind != .list and kind != .number and kind != .string and kind != .color) return;
         var tokens: std.ArrayListUnmanaged(u8) = .empty;
         defer tokens.deinit(self.allocator);
-        try self.collectDeclTokens(&tokens, val, 0, source_has_interp);
-        if (tokens.items.len != 0) try self.rule_ir.setLastDeclTokens(self.allocator, tokens.items);
+        try self.collectDeclTokens(&tokens, val, 0, false);
+        if (tokens.items.len == 0) return;
+        if (kind == .list) {
+            // An override is found by its text. A number that reads the
+            // same as a later string is listed too, so that it is not
+            // taken for that string.
+            tokens.clearRetainingCapacity();
+            try self.collectDeclTokens(&tokens, val, 0, true);
+        }
+        try self.rule_ir.setLastDeclTokens(self.allocator, tokens.items);
     }
 
-    fn collectDeclTokens(self: *VM, tokens: *std.ArrayListUnmanaged(u8), val: Value, depth: usize, source_has_interp: bool) VMError!void {
+    fn collectDeclTokens(self: *VM, tokens: *std.ArrayListUnmanaged(u8), val: Value, depth: usize, list_plain_numbers: bool) VMError!void {
         switch (val.kind()) {
             .list => {
                 if (depth >= 8) return;
                 const handle: usize = @intCast(val.listHandle());
                 if (handle >= self.list_pool.items.len) return;
-                for (self.list_pool.items[handle]) |item| try self.collectDeclTokens(tokens, item, depth + 1, source_has_interp);
+                for (self.list_pool.items[handle]) |item| try self.collectDeclTokens(tokens, item, depth + 1, list_plain_numbers);
             },
             .number => {
                 const number = val.asF64(&self.number_pool);
@@ -5654,17 +5669,17 @@ pub const VM = struct {
                 const shortest = std.fmt.bufPrint(&shortest_buf, "{d}", .{number}) catch return;
                 const dot = std.mem.indexOfScalar(u8, shortest, '.') orelse return;
                 const decimals = shortest.len - dot - 1;
-                if (decimals < 10) return;
+                if (decimals < 10 and !list_plain_numbers) return;
                 const text = self.intern_pool.get(try valueToInternIdDecl(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, val, false));
-                if (decimals == 10) {
+                if (decimals == 10 and std.mem.startsWith(u8, text, "0.")) {
                     // Ten decimals as they are: the zero stays.
-                    if (!std.mem.startsWith(u8, text, "0.")) return;
                     try appendDeclToken(self.allocator, tokens, text, text);
-                } else {
+                } else if (decimals > 10 and std.mem.startsWith(u8, text, "-0.")) {
                     // Rounded: the zero goes, after a minus sign as well.
-                    if (!std.mem.startsWith(u8, text, "-0.")) return;
                     try appendDeclToken(self.allocator, tokens, text, text[1..]);
                     tokens.items[tokens.items.len - text.len] = '-';
+                } else if (list_plain_numbers) {
+                    try appendDeclToken(self.allocator, tokens, text, rule_ir_mod.decl_token_as_usual);
                 }
             },
             .color => {
@@ -5695,8 +5710,10 @@ pub const VM = struct {
                 // What an interpolation put into a calculation is text
                 // there, and mostly it is the numbers.
                 if (val.stringPreserveLiteralText(self.string_flags_pool.items) and startsWithCalculationCall(text)) {
+                    // Without a record the text was put together some
+                    // other way, and all of it is a string.
                     const short = self.calc_zero_forms.get(val.stringIntern());
-                    if (short == null and source_has_interp) return;
+                    if (short == .none) return;
                     // The declaration has the calculation on one line.
                     const written = try singleLineCalcText(self.allocator, text);
                     defer self.allocator.free(written);
@@ -8712,11 +8729,6 @@ fn appendDeclToken(alloc: std.mem.Allocator, tokens: *std.ArrayListUnmanaged(u8)
     tokens.appendAssumeCapacity(rule_ir_mod.decl_token_separator);
     tokens.appendSliceAssumeCapacity(replacement);
     tokens.appendAssumeCapacity(rule_ir_mod.decl_token_separator);
-}
-
-/// Whether the value of a declaration is written with an interpolation.
-fn declSourceHasInterp(emit_decl_flags: u16) bool {
-    return (emit_decl_flags & (opcode_mod.emit_decl_flag_value_has_interp | opcode_mod.emit_decl_flag_zero_decimal_outside_interp)) != 0;
 }
 
 fn plainCssDeclHints(emit_decl_flags: u16) u8 {
