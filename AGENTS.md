@@ -37,3 +37,4 @@ Initialize `tests/sass-spec` with `git submodule update --init` after cloning. R
 - Code identifiers and comments are English ASCII. Add comments only for non-obvious constraints or rationale.
 - Keep a focused change focused. Do not introduce speculative compatibility shims for unreleased internal APIs.
 - Do not bypass Git hooks. Do not push directly to `main` when collaborating.
+- Merge a pull request from a feature branch into `main` by squashing (`gh pr merge --squash`), and confirm afterwards that CI on `main` passed.
