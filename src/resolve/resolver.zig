@@ -513,6 +513,10 @@ const Ctx = struct {
     /// counting as one. Inside them `1/2` is a division, as it has been;
     /// the official CLI keeps the text in some of these places too.
     slash_paren_depth: u32 = 0,
+    /// While an expression in parentheses, in brackets, or the arguments
+    /// of a call is resolved: which of its divisions the official CLI
+    /// reads as inside parentheses.
+    slash_sim: ?*const SlashSim = null,
     /// Declaration value validation in plain-CSS context. custom CSS `@function --*`
     /// Set it to false in the immediate body to maintain CSS text compatibility rules.
     plain_css_validate_values: bool = true,
@@ -1613,6 +1617,234 @@ fn resolveCalcArgInterpPart(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex
     }
     return resolveExpr(ast, ctx, node);
 }
+
+/// Follows an expression the way the official CLI reads it, to tell which
+/// of its `/` are divisions because they are inside parentheses.
+///
+/// The rules are taken from what the CLI writes: an opening parenthesis
+/// puts what follows inside; so does nothing else, and a call or brackets
+/// pass the state on. The second item of a space-separated list ends it
+/// for the rest of the enclosing parentheses, after the first part of that
+/// item has been read. When the item before it was no more than one
+/// operation, without an operator other than `/`, the list is read again
+/// from its first item, this time outside. After such an operator in the
+/// same item a `/` is a division anywhere.
+const SlashSim = struct {
+    ast: *const ast_flat.Ast,
+    allocator: std.mem.Allocator,
+    in_parens: bool = false,
+    divide: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    /// The divisions marked so far, in order, to take back a reading.
+    marked: std.ArrayListUnmanaged(u32) = .empty,
+    /// What reading an element marked and left the state at, by the
+    /// element and the state it was entered with. A list read again reads
+    /// what is nested in it again; without this the work would double
+    /// with every level.
+    read: std.AutoHashMapUnmanaged(u64, Read) = .empty,
+    read_marks: std.ArrayListUnmanaged(u32) = .empty,
+
+    const Read = struct { marks_start: u32, marks_len: u32, in_parens_after: bool };
+
+    const Flow = enum { done, read_again };
+
+    const Item = struct {
+        /// The first part of an item after the first is still to come.
+        first_part_pending: bool = false,
+        /// The item before this one allows reading the list again.
+        previous_allows: bool = false,
+        saw_operator: bool = false,
+        slashes: u32 = 0,
+
+        fn allowsReadingAgain(self: Item) bool {
+            return !self.saw_operator and self.slashes < 2;
+        }
+    };
+
+    fn deinit(self: *SlashSim) void {
+        self.divide.deinit(self.allocator);
+        self.marked.deinit(self.allocator);
+        self.read.deinit(self.allocator);
+        self.read_marks.deinit(self.allocator);
+    }
+
+    fn divides(self: *const SlashSim, node: NodeIndex) bool {
+        return self.divide.contains(@intFromEnum(node));
+    }
+
+    /// Whether following is worth it for the expression at `n`: it has
+    /// parentheses, brackets, or arguments, and a slash somewhere.
+    fn startsAt(ast: *const ast_flat.Ast, n: AstNode) bool {
+        switch (n.tag) {
+            .expr_paren, .expr_map_literal, .expr_func_call, .expr_bracketed_list, .expr_comma_list => {},
+            else => return false,
+        }
+        if (n.span_start > n.span_end or n.span_end > ast.source.len) return false;
+        return std.mem.indexOfScalar(u8, ast.source[n.span_start..n.span_end], '/') != null;
+    }
+
+    fn run(self: *SlashSim, node: NodeIndex) ResolveError!void {
+        var item: Item = .{};
+        _ = try self.visit(node, &item);
+    }
+
+    /// A comma-separated list in parentheses has no node for them; its
+    /// span starts at the parenthesis, before its first item.
+    fn commaListIsParenthesized(self: *const SlashSim, n: AstNode) bool {
+        const children = readChildList(self.ast, n.payload);
+        if (n.span_start >= self.ast.source.len or self.ast.source[n.span_start] != '(') return false;
+        if (children.len == 0) return true;
+        return self.ast.getNode(@enumFromInt(children[0])).span_start > n.span_start;
+    }
+
+    /// Reads what is between two commas: one item, or several separated
+    /// by spaces.
+    fn readElement(self: *SlashSim, node: NodeIndex) ResolveError!void {
+        const key = (@as(u64, @intFromEnum(node)) << 1) | @intFromBool(self.in_parens);
+        if (self.read.get(key)) |known| {
+            for (self.read_marks.items[known.marks_start..][0..known.marks_len]) |mark| {
+                try self.divide.put(self.allocator, mark, {});
+                try self.marked.append(self.allocator, mark);
+            }
+            self.in_parens = known.in_parens_after;
+            return;
+        }
+        const first_mark = self.marked.items.len;
+        try self.readElementAnew(node);
+        const marks_start: u32 = @intCast(self.read_marks.items.len);
+        try self.read_marks.appendSlice(self.allocator, self.marked.items[first_mark..]);
+        try self.read.put(self.allocator, key, .{
+            .marks_start = marks_start,
+            .marks_len = @intCast(self.marked.items.len - first_mark),
+            .in_parens_after = self.in_parens,
+        });
+    }
+
+    fn readElementAnew(self: *SlashSim, node: NodeIndex) ResolveError!void {
+        const n = self.ast.getNode(node);
+        const items: []const u32 = if (n.tag == .expr_space_list) readChildList(self.ast, n.payload) else &.{@intFromEnum(node)};
+        const marked_before = self.marked.items.len;
+        var again = false;
+        while (true) {
+            var previous_allows = false;
+            var flow: Flow = .done;
+            for (items, 0..) |child, index| {
+                var item: Item = .{ .first_part_pending = index != 0, .previous_allows = previous_allows };
+                flow = try self.visit(@enumFromInt(child), &item);
+                if (flow == .read_again) break;
+                previous_allows = item.allowsReadingAgain();
+            }
+            if (flow == .done or again) return;
+            // Outside this time; nothing asks for another reading then.
+            again = true;
+            for (self.marked.items[marked_before..]) |taken_back| _ = self.divide.remove(taken_back);
+            self.marked.items.len = marked_before;
+            self.in_parens = false;
+        }
+    }
+
+    fn readCommaSeparated(self: *SlashSim, children: []const u32) ResolveError!void {
+        for (children) |child| try self.readElement(@enumFromInt(child));
+    }
+
+    /// The first part of an item has been read.
+    fn firstPartRead(self: *SlashSim, item: *Item) Flow {
+        if (!item.first_part_pending) return .done;
+        item.first_part_pending = false;
+        if (!self.in_parens) return .done;
+        self.in_parens = false;
+        return if (item.previous_allows) .read_again else .done;
+    }
+
+    fn visit(self: *SlashSim, node: NodeIndex, item: *Item) ResolveError!Flow {
+        if (node == .none) return .done;
+        const n = self.ast.getNode(node);
+        switch (n.tag) {
+            .expr_slash_expr => {
+                const lhs: NodeIndex = @enumFromInt(self.ast.getExtraU32(n.payload));
+                const rhs: NodeIndex = @enumFromInt(self.ast.getExtraU32(n.payload + 1));
+                if (try self.visit(lhs, item) == .read_again) return .read_again;
+                // The operation on the left is settled when this slash is
+                // read, before what is on its right.
+                if (self.ast.getNode(lhs).tag == .expr_slash_expr and (self.in_parens or item.saw_operator)) {
+                    try self.divide.put(self.allocator, @intFromEnum(lhs), {});
+                    try self.marked.append(self.allocator, @intFromEnum(lhs));
+                }
+                item.slashes += 1;
+                return try self.visit(rhs, item);
+            },
+            .expr_binary_op => {
+                const lhs: NodeIndex = @enumFromInt(self.ast.getExtraU32(n.payload));
+                const rhs: NodeIndex = @enumFromInt(self.ast.getExtraU32(n.payload + 1));
+                if (try self.visit(lhs, item) == .read_again) return .read_again;
+                item.saw_operator = true;
+                return try self.visit(rhs, item);
+            },
+            .expr_unary_op => return try self.visit(@enumFromInt(self.ast.getExtraU32(n.payload)), item),
+            .expr_paren => {
+                const outside = self.in_parens;
+                self.in_parens = true;
+                const inner: NodeIndex = @enumFromInt(n.payload);
+                const inner_node = self.ast.getNode(inner);
+                if (inner_node.tag == .expr_comma_list) {
+                    try self.readCommaSeparated(readChildList(self.ast, inner_node.payload));
+                } else {
+                    try self.readElement(inner);
+                }
+                self.in_parens = outside;
+            },
+            .expr_comma_list => {
+                const outside = self.in_parens;
+                const parenthesized = self.commaListIsParenthesized(n);
+                if (parenthesized) self.in_parens = true;
+                try self.readCommaSeparated(readChildList(self.ast, n.payload));
+                if (parenthesized) self.in_parens = outside;
+            },
+            .expr_space_list => try self.readElement(node),
+            .expr_map_literal => {
+                const outside = self.in_parens;
+                self.in_parens = true;
+                // The keys are stored before the values; they are read
+                // pair by pair.
+                const pair_count = self.ast.getExtraU32(n.payload);
+                var index: u32 = 0;
+                while (index < pair_count) : (index += 1) {
+                    try self.readElement(@enumFromInt(self.ast.getExtraU32(n.payload + 1 + index)));
+                    try self.readElement(@enumFromInt(self.ast.getExtraU32(n.payload + 1 + pair_count + index)));
+                }
+                self.in_parens = outside;
+            },
+            // An interpolation and a spread are read where they stand.
+            .expr_interp, .expr_splat => try self.readElement(@enumFromInt(n.payload)),
+            .expr_string_interp, .expr_text_template => {
+                const part_count = self.ast.getExtraU32(n.payload);
+                var index: u32 = 0;
+                while (index < part_count) : (index += 1) {
+                    if (self.ast.getExtraU32(n.payload + 1 + index * 2) == 0) continue;
+                    try self.readElement(@enumFromInt(self.ast.getExtraU32(n.payload + 2 + index * 2)));
+                }
+            },
+            .expr_bracketed_list => {
+                for (readChildList(self.ast, n.payload)) |child| {
+                    const child_node = self.ast.getNode(@enumFromInt(child));
+                    if (child_node.tag == .expr_comma_list) {
+                        try self.readCommaSeparated(readChildList(self.ast, child_node.payload));
+                    } else {
+                        try self.readElement(@enumFromInt(child));
+                    }
+                }
+            },
+            .expr_func_call => {
+                const arg_count = self.ast.getExtraU32(n.payload + 2);
+                var index: u32 = 0;
+                while (index < arg_count) : (index += 1) {
+                    try self.readElement(@enumFromInt(self.ast.getExtraU32(n.payload + 3 + index)));
+                }
+            },
+            else => {},
+        }
+        return self.firstPartRead(item);
+    }
+};
 
 /// Whether `node` is literal numbers with a slash between them: `1/2/3`.
 fn nodeIsLiteralNumberSlashRun(ast: *const ast_flat.Ast, node: NodeIndex) bool {
@@ -3251,7 +3483,7 @@ fn resolveExprSlashExpr(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: S
         }
     }
     // Resolving the operands can change the count.
-    const outside_parens = ctx.slash_paren_depth == 0;
+    const outside_parens = if (ctx.slash_sim) |sim| !sim.divides(lhs) else ctx.slash_paren_depth == 0;
     const li = try resolveExpr(ast, ctx, lhs);
     const ri = try resolveExpr(ast, ctx, rhs);
     const lhs_calc_like = nodeIsCalcFunctionCall(ast, ctx, lhs);
@@ -3874,6 +4106,16 @@ fn resolveExpr(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ResolveErro
     if (node == .none) return error.SassError;
     const n = ast.getNode(node);
     const span = Span{ .start = n.span_start, .end = n.span_end };
+    var slash_sim: SlashSim = .{ .ast = ast, .allocator = ctx.a };
+    defer slash_sim.deinit();
+    const slash_sim_root = ctx.slash_sim == null and SlashSim.startsAt(ast, n);
+    if (slash_sim_root) {
+        try slash_sim.run(node);
+        ctx.slash_sim = &slash_sim;
+    }
+    defer if (slash_sim_root) {
+        ctx.slash_sim = null;
+    };
     // CLI-FIX-E Step 2: When an error occurs, record the most recent expr span in thread-local.
     // The span of the innermost frame (= closest to the actual error location) remains (via recordErrorSpanIfUnset).
     // Resolver-only diagnostics do not yet carry the module file id here, so
@@ -10271,6 +10513,7 @@ const preamble_ctx_default_only = [_][]const u8{
     "calc_arg_allow_numberish_ident_literals",
     "in_declaration_value",
     "slash_paren_depth",
+    "slash_sim",
     "plain_css_validate_values",
     "mixin_accepts_content",
 };

@@ -1701,6 +1701,60 @@ test "api: compressed output drops an empty rule without its enclosing block" {
     try std.testing.expectEqualStrings("@media print{.w a{b:c}}@media print{a{b:c}}e{f:g}k{l:url(a;b);n:o}\n", css);
 }
 
+test "api: numbers written with a slash follow the parentheses the official CLI sees" {
+    const alloc = std.testing.allocator;
+    // Inside parentheses `1/2` is a division; a call and brackets pass
+    // that on. The second item of a space-separated list ends it for the
+    // rest of the parentheses, and the list is read again from its first
+    // item when that item was simple.
+    const source =
+        \\a {
+        \\  b: foo(1/2/x) (foo(1/2/x)) (foo(1/2/x) b);
+        \\  c: (a 1/2/x) (1/2/x a) (1/2/x a 1/2/y);
+        \\  d: (1/2/x foo(1/2/y)) (1+2 foo(1/2/y));
+        \\  e: (a (1/2/x)) (a (b 1/2/x)) ((a 1/2/x) 1/2/y);
+        \\  f: [1/2/x] ([1/2/x]) (a [1/2/x]);
+        \\  g: (a b, 1/2/x) (1/2/x, 1/2/y);
+        \\  h: (nth(1/2/x 1, 1) b) (if(true, 1/2/x, 0) b);
+        \\  i: (1/2/x, foo(1/2/y) b) (1/x foo(1/2/y));
+        \\  j: (a), 1/2/x;
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\a {
+        \\  b: foo(1/2/x) foo(0.5/x) foo(1/2/x) b;
+        \\  c: a 1/2/x 0.5/x a 0.5/x a 1/2/y;
+        \\  d: 0.5/x foo(0.5/y) 3 foo(0.5/y);
+        \\  e: a 0.5/x a b 1/2/x a 1/2/x 1/2/y;
+        \\  f: [1/2/x] [0.5/x] a [1/2/x];
+        \\  g: a b, 1/2/x 0.5/x, 0.5/y;
+        \\  h: 0.5/x b 1/2/x b;
+        \\  i: 0.5/x, foo(1/2/y) b 1/x foo(1/2/y);
+        \\  j: a, 1/2/x;
+        \\}
+        \\
+    , css);
+}
+
+test "api: nested lists in parentheses are followed once each" {
+    const alloc = std.testing.allocator;
+    // Every level is read again when its second item comes; what is
+    // nested in it is not followed anew each time.
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(alloc);
+    try source.appendSlice(alloc, "a {b: ");
+    try source.appendNTimes(alloc, '(', 40);
+    try source.appendSlice(alloc, "foo(1/2/x)");
+    for (0..40) |_| try source.appendSlice(alloc, " b)");
+    try source.appendSlice(alloc, "}\n");
+    const css = try compileSourceToCss(alloc, source.items, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expect(std.mem.startsWith(u8, css, "a {\n  b: foo(1/2/x) b b"));
+}
+
 test "api: numbers written with a slash stay that text in front of something else" {
     const alloc = std.testing.allocator;
     // Outside parentheses `1/2` is still `1/2` when what it is divided by
