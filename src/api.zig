@@ -2204,6 +2204,10 @@ test "api: @extend leaves out a result its original covers" {
         \\:focus.f {z: 3}
         \\.g .h .f {@extend .f}
         \\.i .f {@extend .f}
+        \\.j:where(#x) {w: 4}
+        \\.k.j {@extend .j}
+        \\.l .m {v: 5}
+        \\.n .m {@extend .m}
         \\a {r: selector.replace("foo.bar", "foo", "foo[baz]")}
         \\
     ;
@@ -2220,6 +2224,14 @@ test "api: @extend leaves out a result its original covers" {
         \\
         \\:focus.f, .g .h .f:focus {
         \\  z: 3;
+        \\}
+        \\
+        \\.j:where(#x), .k.j:where(#x) {
+        \\  w: 4;
+        \\}
+        \\
+        \\.l .m {
+        \\  v: 5;
         \\}
         \\
         \\a {

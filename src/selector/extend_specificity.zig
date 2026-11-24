@@ -444,6 +444,8 @@ fn compoundSpecificity(compound: *const CompoundSelector) Specificity {
             .id => spec.a += 1,
             .class, .attribute, .placeholder => spec.b += 1,
             .pseudo_class => |ps| {
+                // `:where()` adds nothing, whatever it holds.
+                if (std.ascii.eqlIgnoreCase(ps.name, "where")) continue;
                 if (ps.selector) |sel_list| {
                     //:not(), :is(), :has() etc. -- specificity of most specific argument
                     var max_inner = Specificity{ .a = 0, .b = 0, .c = 0 };

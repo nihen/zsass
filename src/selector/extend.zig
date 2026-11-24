@@ -4017,7 +4017,10 @@ pub const ApplyState = struct {
                                     if (component.* != .compound) continue;
                                     normalizeGeneratedCompound(&component.compound, self.extensions.items, self.sort_extension_hints.items);
                                 }
-                                if (!hasBogusMultipleCombinators(&ec)) {
+                                if (may_be_covered and selector_mod.complexIsSuperSelector(&complex, &normalized)) {
+                                    var covered = normalized;
+                                    covered.deinit();
+                                } else if (!hasBogusMultipleCombinators(&ec)) {
                                     var applied = try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, self.extensions.items.len);
                                     applied.set(ext_i);
                                     try first_pass.appendDirect(self.allocator, .{
