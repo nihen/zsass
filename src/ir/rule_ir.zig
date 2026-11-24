@@ -246,8 +246,9 @@ fn writeWithoutCompressMarkers(emit: anytype, text: []const u8) !void {
     while (std.mem.indexOfScalar(u8, rest, 0x01)) |at| {
         try emit.writeAll(rest[0..at]);
         rest = rest[at..];
-        if (std.mem.startsWith(u8, rest, decl_hint_marker) and rest.len > decl_hint_marker.len) {
-            rest = rest[decl_hint_marker.len + 1 ..];
+        const hint_len = declHintMarkerLen(rest);
+        if (hint_len != 0) {
+            rest = rest[hint_len..];
         } else if (std.mem.startsWith(u8, rest, interp_decl_marker)) {
             rest = rest[interp_decl_marker.len..];
         } else if (std.mem.startsWith(u8, rest, literal_decl_marker)) {
@@ -337,24 +338,62 @@ pub const NodeKind = enum(u8) {
 pub const decl_hint_string_value: u8 = 1 << 0;
 pub const decl_hint_plain_css: u8 = 1 << 1;
 pub const decl_hint_script_custom_property: u8 = 1 << 2;
+/// With `decl_hint_plain_css`: an `rgba()` in the value was a hex color.
+pub const decl_hint_hex_alpha_expanded: u8 = 1 << 4;
+
+/// Set by the writer when the marker carries token overrides.
+const decl_hint_has_tokens: u8 = 1 << 3;
+
+/// Ends a token override list.
+const decl_token_list_end: u8 = 0x02;
+
+/// Adds an override to a token override list: the lengths of `text` and
+/// `replacement` as eight hex digits each, then the two. With the lengths
+/// in front, an override is passed over without reading it.
+pub fn appendDeclTokenOverride(allocator: std.mem.Allocator, tokens: *std.ArrayListUnmanaged(u8), text: []const u8, replacement: []const u8) error{OutOfMemory}!void {
+    try tokens.ensureUnusedCapacity(allocator, 16 + text.len + replacement.len);
+    var header: [16]u8 = undefined;
+    _ = std.fmt.bufPrint(&header, "{x:0>8}{x:0>8}", .{ @as(u32, @truncate(text.len)), @as(u32, @truncate(replacement.len)) }) catch unreachable;
+    tokens.appendSliceAssumeCapacity(&header);
+    tokens.appendSliceAssumeCapacity(text);
+    tokens.appendSliceAssumeCapacity(replacement);
+}
+/// At the start of a replacement: the token is shortened like any other,
+/// except for the zero before the point of a number. Those stay, apart
+/// from the ones the rest of the replacement, the text of the token
+/// without them, leaves out.
+pub const decl_token_keeps_zeros = "\x04";
+/// As a replacement: the token is shortened like any other. It is listed
+/// so that an override with the same text is not applied to it.
+pub const decl_token_as_usual = "\x05";
 
 /// Written in front of a declaration for `compressCss`, followed by one
-/// byte holding the hints above plus '0'.
+/// byte holding the hints above plus '0'. With `decl_hint_has_tokens` the
+/// token overrides of the declaration follow, up to `decl_token_list_end`.
 const decl_hint_marker = "\x01zsass-decl-hint:";
+
+/// The length of the hint marker `text` starts with, or 0 without one.
+fn declHintMarkerLen(text: []const u8) usize {
+    if (!std.mem.startsWith(u8, text, decl_hint_marker) or text.len <= decl_hint_marker.len) return 0;
+    const fixed = decl_hint_marker.len + 1;
+    if ((text[decl_hint_marker.len] -% '0') & decl_hint_has_tokens == 0) return fixed;
+    const end = std.mem.indexOfScalarPos(u8, text, fixed, decl_token_list_end) orelse return 0;
+    return end + 1;
+}
 
 /// `statement` without the indentation and the hint marker in front of it.
 fn statementWithoutDeclHint(statement: []const u8) []const u8 {
     const text = std.mem.trimStart(u8, statement, " ");
-    if (std.mem.startsWith(u8, text, decl_hint_marker) and text.len > decl_hint_marker.len) {
-        return text[decl_hint_marker.len + 1 ..];
-    }
-    return text;
+    return text[declHintMarkerLen(text)..];
 }
 
 pub const Node = struct {
     kind: NodeKind,
     /// `decl_hint_*` bits; only declarations use them.
     decl_hints: u8 = 0,
+    /// One more than the index in `RuleIR.decl_token_sets` of the token
+    /// overrides of a declaration, or 0 without any.
+    decl_tokens: u16 = 0,
     payload: u32, // offset into `extra`
     source_start: u32,
     source_end: u32,
@@ -918,6 +957,13 @@ pub const RuleIR = struct {
     /// `nodes.items.len` after stream_chunk). stmt_gap / sourcemap_gap / group_boundary etc.
     /// Not updated in the boundary marker system. Used by the VM to determine trailing-empty-scope detection.
     last_visible_emit_node_count: usize = 0,
+    /// Token override lists of declarations, each made with
+    /// `appendDeclTokenOverride`.
+    /// Compressed output writes `replacement` where a token of the value
+    /// reads `text`: a string is written as it is, and the zero before the
+    /// point of a number depends on how the number was rounded.
+    decl_token_sets: std.ArrayListUnmanaged([]const u8) = .empty,
+    decl_token_set_index: std.StringHashMapUnmanaged(u16) = .empty,
 
     comptime {
         std.debug.assert(@sizeOf(Node) == 16);
@@ -960,6 +1006,9 @@ pub const RuleIR = struct {
         for (self.strings.items) |s| {
             if (s.len != 0) allocator.free(s);
         }
+        for (self.decl_token_sets.items) |set| allocator.free(set);
+        self.decl_token_sets.deinit(allocator);
+        self.decl_token_set_index.deinit(allocator);
         self.flushed_chunks.deinit(allocator);
         self.extend_edges.deinit(allocator);
         self.extend_relation_media.deinit(allocator);
@@ -1037,6 +1086,39 @@ pub const RuleIR = struct {
         if (hints == 0 or self.nodes.items.len == 0) return;
         const node = &self.nodes.items[self.nodes.items.len - 1];
         if (node.kind == .decl or node.kind == .decl_raw) node.decl_hints |= hints;
+    }
+
+    /// Attaches token overrides to the declaration appended last. Without
+    /// room for another list the declaration goes without.
+    pub fn setLastDeclTokens(self: *RuleIR, allocator: std.mem.Allocator, tokens: []const u8) !void {
+        if (tokens.len == 0 or self.nodes.items.len == 0) return;
+        const node = &self.nodes.items[self.nodes.items.len - 1];
+        if (node.kind != .decl and node.kind != .decl_raw) return;
+        if (std.mem.indexOfAny(u8, tokens, &.{ 0x01, decl_token_list_end, '\n' }) != null) return;
+        if (self.decl_token_set_index.get(tokens)) |known| {
+            node.decl_tokens = known;
+            return;
+        }
+        if (self.decl_token_sets.items.len >= std.math.maxInt(u16)) return;
+        const owned = try allocator.dupe(u8, tokens);
+        errdefer allocator.free(owned);
+        try self.decl_token_sets.ensureUnusedCapacity(allocator, 1);
+        const id: u16 = @intCast(self.decl_token_sets.items.len + 1);
+        try self.decl_token_set_index.put(allocator, owned, id);
+        self.decl_token_sets.appendAssumeCapacity(owned);
+        node.decl_tokens = id;
+    }
+
+    fn writeDeclHintMarker(self: *const RuleIR, emit: anytype, node: Node) !void {
+        if (node.decl_hints == 0 and node.decl_tokens == 0) return;
+        try emit.writeAll(decl_hint_marker);
+        if (node.decl_tokens == 0) {
+            try emit.writeByte('0' + node.decl_hints);
+            return;
+        }
+        try emit.writeByte('0' + (node.decl_hints | decl_hint_has_tokens));
+        try emit.writeAll(self.decl_token_sets.items[node.decl_tokens - 1]);
+        try emit.writeByte(decl_token_list_end);
     }
 
     pub fn appendDeclRaw(self: *RuleIR, allocator: std.mem.Allocator, prop_intern: u32, rendered_value: []const u8, span: Span) !void {
@@ -3908,6 +3990,7 @@ pub const RuleIR = struct {
             .module_visibility_matrix = self.module_visibility_matrix,
             .module_visibility_n = self.module_visibility_n,
             .flushed_chunks = .{ .items = @constCast(self.flushed_chunks.items), .capacity = self.flushed_chunks.items.len },
+            .decl_token_sets = .{ .items = @constCast(self.decl_token_sets.items), .capacity = self.decl_token_sets.items.len },
         };
 
         var buf: std.ArrayList(u8) = .empty;
@@ -5207,6 +5290,22 @@ pub const RuleIR = struct {
             if (@abs(channel - @round(channel)) >= 1e-11) whole = false;
         }
 
+        try appendCompressedColorChannels(out, allocator, written, rgb, whole, alpha);
+        i.* = pos;
+        return true;
+    }
+
+    /// The shortest way compressed output writes a legacy color: for an
+    /// rgb or hsl color with channels that are not whole, `rgb` holds them
+    /// (0 to 255) as they are before any rounding.
+    pub fn compressedLegacyColorText(allocator: std.mem.Allocator, rgb: [3]f64, alpha: f64) error{OutOfMemory}![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        try appendCompressedColorChannels(&out, allocator, rgb, rgb, false, alpha);
+        return try out.toOwnedSlice(allocator);
+    }
+
+    fn appendCompressedColorChannels(out: *std.ArrayList(u8), allocator: std.mem.Allocator, written: [3]f64, rgb: [3]f64, whole: bool, alpha: f64) error{OutOfMemory}!void {
         var alpha_text: []const u8 = "";
         defer allocator.free(alpha_text);
         if (alpha != 1.0) {
@@ -5223,8 +5322,7 @@ pub const RuleIR = struct {
                 @intFromFloat(@round(written[1])),
                 @intFromFloat(@round(written[2])),
             );
-            i.* = pos;
-            return true;
+            return;
         }
 
         // `rgb()` holds whole channels as they are and others as
@@ -5272,8 +5370,6 @@ pub const RuleIR = struct {
             try out.appendSlice(allocator, alpha_text);
         }
         try out.append(allocator, ')');
-        i.* = pos;
-        return true;
     }
 
     fn isCompressedSelectorContext(text: []const u8, pos: usize) bool {
@@ -5345,6 +5441,129 @@ pub const RuleIR = struct {
         return pos - line_start;
     }
 
+    const DeclTokenOverride = struct { len: usize, replacement: []const u8 };
+
+    /// How many overrides a token may pass over to find its own. Looking
+    /// only a few ahead keeps a long value linear.
+    const decl_token_look_ahead = 8;
+
+    fn endsDeclToken(text: []const u8, at: usize) bool {
+        if (at >= text.len) return true;
+        return switch (text[at]) {
+            ' ', ',', ';', '}', '/', ')', ']' => true,
+            else => false,
+        };
+    }
+
+    /// The override for the token `text` starts with, taken from `tokens`
+    /// in the order the value has them. An override the text no longer
+    /// shows is passed over.
+    fn takeDeclTokenOverride(tokens: *[]const u8, text: []const u8, look_ahead: usize) ?DeclTokenOverride {
+        var rest = tokens.*;
+        var looked: usize = 0;
+        while (rest.len != 0 and looked < look_ahead) : (looked += 1) {
+            if (rest.len < 16) return null;
+            const match_len = std.fmt.parseInt(usize, rest[0..8], 16) catch return null;
+            const replacement_len = std.fmt.parseInt(usize, rest[8..16], 16) catch return null;
+            if (rest.len - 16 < match_len or rest.len - 16 - match_len < replacement_len) return null;
+            const match = rest[16 .. 16 + match_len];
+            const replacement = rest[16 + match_len .. 16 + match_len + replacement_len];
+            rest = rest[16 + match_len + replacement_len ..];
+            if (match.len != 0 and std.mem.startsWith(u8, text, match) and endsDeclToken(text, match.len)) {
+                tokens.* = rest;
+                return .{ .len = match.len, .replacement = replacement };
+            }
+        }
+        return null;
+    }
+
+    /// Whether `text` starts with exactly ten digits, the last not a zero.
+    fn hasTenDecimals(text: []const u8) bool {
+        var digits: usize = 0;
+        while (digits < text.len and std.ascii.isDigit(text[digits])) digits += 1;
+        return digits == 10 and text[9] != '0';
+    }
+
+    /// The length of the escape that starts with the backslash at `pos`:
+    /// up to six hex digits and the space that ends them, or one character.
+    fn escapeLen(text: []const u8, pos: usize) usize {
+        var end = pos + 1;
+        while (end < text.len and end - pos <= 6 and std.ascii.isHex(text[end])) end += 1;
+        if (end == pos + 1) return @min(2, text.len - pos);
+        if (end < text.len and text[end] == ' ') end += 1;
+        return end - pos;
+    }
+
+    fn isNumberText(text: []const u8) bool {
+        var pos: usize = 0;
+        if (pos < text.len and (text[pos] == '-' or text[pos] == '+')) pos += 1;
+        const digits_start = pos;
+        while (pos < text.len and std.ascii.isDigit(text[pos])) pos += 1;
+        if (pos < text.len and text[pos] == '.') {
+            pos += 1;
+            while (pos < text.len and std.ascii.isDigit(text[pos])) pos += 1;
+        }
+        if (pos == digits_start or !std.ascii.isDigit(text[pos - 1])) return false;
+        if (pos < text.len and text[pos] == '%') return pos + 1 == text.len;
+        while (pos < text.len) : (pos += 1) {
+            const ch = text[pos];
+            if (ch == '\\') {
+                // An escaped character is part of the unit.
+                pos += escapeLen(text, pos) - 1;
+            } else if (!std.ascii.isAlphanumeric(ch) and ch != '-' and ch != '_' and ch < 0x80) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// The length of the token `text` starts with when its parts are
+    /// joined by `/` and one of them is not a number, or 0. Dividing by
+    /// such a part, or it by a number, makes a string of both, which is
+    /// written as it is.
+    fn textSlashOperandsLen(text: []const u8) usize {
+        var pos: usize = 0;
+        var depth: usize = 0;
+        var quote: u8 = 0;
+        var operand_start: usize = 0;
+        var slashes: usize = 0;
+        var has_text = false;
+        // The items of a bracketed list are looked at one by one.
+        if (text.len != 0 and text[0] == '[') return 0;
+        while (pos < text.len) : (pos += 1) {
+            const ch = text[pos];
+            if (quote != 0) {
+                if (ch == '\\') {
+                    pos += 1;
+                } else if (ch == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            switch (ch) {
+                '\\' => pos += escapeLen(text, pos) - 1,
+                '"', '\'' => quote = ch,
+                '(' => depth += 1,
+                ')' => {
+                    if (depth == 0) break;
+                    depth -= 1;
+                },
+                ' ', ',', ';', '}', '!', ']' => if (depth == 0) break,
+                '/' => if (depth == 0) {
+                    if (pos == operand_start) return 0;
+                    if (!isNumberText(text[operand_start..pos])) has_text = true;
+                    slashes += 1;
+                    operand_start = pos + 1;
+                },
+                else => {},
+            }
+        }
+        if (slashes == 0 or quote != 0 or depth != 0 or pos > text.len) return 0;
+        if (pos == operand_start) return 0;
+        if (!isNumberText(text[operand_start..pos])) has_text = true;
+        return if (has_text) pos else 0;
+    }
+
     fn compressCss(allocator: std.mem.Allocator, expanded: []const u8) error{OutOfMemory}![]const u8 {
         var first: std.ArrayList(u8) = .empty;
         errdefer first.deinit(allocator);
@@ -5355,14 +5574,68 @@ pub const RuleIR = struct {
         var first_escaped = false;
         var first_paren_depth: usize = 0;
         var first_no_comment_end = false;
+        // The token overrides of the declaration being copied.
+        var first_tokens: []const u8 = "";
+        // Whether its value is one unquoted string.
+        var first_string_value = false;
+        // Where in `first` the comments are that such a value has as text.
+        var text_comments: std.ArrayList([2]usize) = .empty;
+        defer text_comments.deinit(allocator);
 
         var i: usize = 0;
         while (i < expanded.len) : (i += 1) {
             const c = expanded[i];
 
+            // The texts a hint marker carries are not CSS.
+            if (c == decl_hint_marker[0]) {
+                const hint_len = declHintMarkerLen(expanded[i..]);
+                if (hint_len != 0) {
+                    try first.appendSlice(allocator, expanded[i .. i + hint_len]);
+                    first_string_value = (expanded[i + decl_hint_marker.len] -% '0') & decl_hint_string_value != 0;
+                    first_tokens = if ((expanded[i + decl_hint_marker.len] -% '0') & decl_hint_has_tokens != 0)
+                        expanded[i + decl_hint_marker.len + 1 .. i + hint_len - 1]
+                    else
+                        "";
+                    i += hint_len - 1;
+                    continue;
+                }
+            }
+
+            // A string that reads as the start of a comment is text.
+            if (c == '/' and first_tokens.len != 0 and first_in_string == 0 and !first_escaped and first_paren_depth == 0 and
+                i + 1 < expanded.len and expanded[i + 1] == '*')
+            {
+                var tokens = first_tokens;
+                if (takeDeclTokenOverride(&tokens, expanded[i..], std.math.maxInt(usize))) |override| {
+                    if (std.mem.eql(u8, override.replacement, expanded[i .. i + override.len])) {
+                        try first.appendSlice(allocator, override.replacement);
+                        i += override.len - 1;
+                        // The next one is looked for after this one.
+                        first_tokens = tokens;
+                        continue;
+                    }
+                }
+            }
+
             // A comment is dropped, except where it is text: inside a string
             // or in the value of a custom property.
-            if (c == '/' and i + 1 < expanded.len and expanded[i + 1] == '*' and first_in_string == 0 and !first_escaped) {
+            // In a value that is one string, a comment that ends on its
+            // line is text, and one that does not is no comment at all.
+            const string_comment_end: ?usize = end: {
+                if (!first_string_value or c != '/' or i + 1 >= expanded.len or expanded[i + 1] != '*') break :end null;
+                const line_end = std.mem.indexOfScalarPos(u8, expanded, i, '\n') orelse expanded.len;
+                const end = std.mem.indexOfPos(u8, expanded[0..line_end], i + 2, "*/") orelse break :end null;
+                break :end end + 2;
+            };
+            if (string_comment_end) |end| {
+                if (first_in_string == 0 and !first_escaped) {
+                    try text_comments.append(allocator, .{ first.items.len, first.items.len + (end - i) });
+                    try first.appendSlice(allocator, expanded[i..end]);
+                    i = end - 1;
+                    continue;
+                }
+            }
+            if (c == '/' and i + 1 < expanded.len and expanded[i + 1] == '*' and first_in_string == 0 and !first_escaped and !first_string_value) {
                 // Once a search finds no end, no later one will.
                 const comment_end = if (first_no_comment_end) null else std.mem.indexOfPos(u8, expanded, i + 2, "*/");
                 if (comment_end == null) first_no_comment_end = true;
@@ -5446,6 +5719,8 @@ pub const RuleIR = struct {
                 ')' => first_paren_depth -|= 1,
                 '{', '}', ';' => if (first_paren_depth == 0) {
                     first_statement_start = first.items.len;
+                    first_tokens = "";
+                    first_string_value = false;
                 },
                 else => {},
             }
@@ -5475,8 +5750,14 @@ pub const RuleIR = struct {
         var in_custom_decl = false;
         var raw_prelude = false;
         var in_media_prelude = false;
-        // The `decl_hint_*` bits of the declaration being written.
+        // The `decl_hint_*` bits of the declaration being written, and the
+        // token overrides it has left.
         var stmt_hints: u8 = 0;
+        var stmt_tokens: []const u8 = "";
+        // Where the token that keeps its zeros ends in `first`, and what
+        // is left of its text without the zeros it loses.
+        var zeros_kept_until: usize = 0;
+        var zero_form: []const u8 = "";
         // Where the statement being written starts in `out`, and for every
         // open block where its prelude starts. An empty block is removed
         // from there; searching backwards for a brace or semicolon would
@@ -5496,17 +5777,39 @@ pub const RuleIR = struct {
         var input_statement_start: usize = 0;
         var statement_is_style_rule: ?bool = null;
         var no_comment_end = false;
+        var next_text_comment: usize = 0;
         i = 0;
         while (i < first.items.len) : (i += 1) {
             // The marker is not text, wherever the statement it leads is
             // taken to start.
-            if (first.items[i] == decl_hint_marker[0] and
-                std.mem.startsWith(u8, first.items[i..], decl_hint_marker) and
-                i + decl_hint_marker.len < first.items.len)
-            {
-                stmt_hints = first.items[i + decl_hint_marker.len] -% '0';
-                i += decl_hint_marker.len;
-                continue;
+            if (first.items[i] == decl_hint_marker[0]) {
+                const hint_len = declHintMarkerLen(first.items[i..]);
+                if (hint_len != 0) {
+                    stmt_hints = first.items[i + decl_hint_marker.len] -% '0';
+                    stmt_tokens = if (stmt_hints & decl_hint_has_tokens != 0)
+                        first.items[i + decl_hint_marker.len + 1 .. i + hint_len - 1]
+                    else
+                        "";
+                    i += hint_len - 1;
+                    continue;
+                }
+            }
+            if (i >= zeros_kept_until) {
+                zero_form = "";
+            } else if (zero_form.len != 0 and first.items[i] != ' ') {
+                zero_form = std.mem.trimStart(u8, zero_form, " ");
+                if (zero_form.len != 0 and zero_form[0] == first.items[i]) {
+                    zero_form = zero_form[1..];
+                    // What a backslash escapes is not looked at below.
+                    if (first.items[i] == '\\' and i + 1 < first.items.len) {
+                        zero_form = if (zero_form.len != 0 and zero_form[0] == first.items[i + 1]) zero_form[1..] else "";
+                    }
+                } else if (first.items[i] == '0' and in_string == 0) {
+                    continue;
+                } else {
+                    // The text is not the one the short form was made of.
+                    zero_form = "";
+                }
             }
             // In plain CSS a number is still a number.
             const literal_text = (stmt_hints & decl_hint_plain_css) == 0;
@@ -5548,6 +5851,14 @@ pub const RuleIR = struct {
             }
             // A comment the first pass kept, in a custom property, is copied
             // whole. The test is the one the first pass made.
+            // A comment that is the text of a string value is copied whole.
+            while (next_text_comment < text_comments.items.len and text_comments.items[next_text_comment][0] < i) next_text_comment += 1;
+            if (next_text_comment < text_comments.items.len and text_comments.items[next_text_comment][0] == i) {
+                const end = text_comments.items[next_text_comment][1];
+                try out.appendSlice(allocator, first.items[i..end]);
+                i = end - 1;
+                continue;
+            }
             if (c == '/' and i + 1 < first.items.len and first.items[i + 1] == '*' and
                 std.mem.startsWith(u8, std.mem.trimStart(u8, out.items[statement_start..], " "), "--"))
             {
@@ -5597,6 +5908,7 @@ pub const RuleIR = struct {
                     in_media_prelude = false;
                     in_decl_value = false;
                     stmt_hints = 0;
+                    stmt_tokens = "";
                 }
             }
             if (c == ';' or c == '}') {
@@ -5632,10 +5944,38 @@ pub const RuleIR = struct {
             const combinators_shortened = paren_depth == 0 or
                 (selector_argument_parens.items.len != 0 and selector_argument_parens.items[selector_argument_parens.items.len - 1]);
             const value_context = out.items.len != 0 and (out.items[out.items.len - 1] == ':' or out.items[out.items.len - 1] == ',' or out.items[out.items.len - 1] == ' ' or out.items[out.items.len - 1] == '(');
+            // An item of a list also starts after a bracket or a slash.
+            const token_context = value_context or (out.items.len != 0 and (out.items[out.items.len - 1] == '[' or out.items[out.items.len - 1] == '/'));
+            if (!raw and in_decl_value and paren_depth == 0 and c != ':' and token_context and stmt_tokens.len != 0) {
+                if (takeDeclTokenOverride(&stmt_tokens, first.items[i..], decl_token_look_ahead)) |override| {
+                    if (!std.mem.eql(u8, override.replacement, decl_token_as_usual)) {
+                        if (!std.mem.startsWith(u8, override.replacement, decl_token_keeps_zeros)) {
+                            try out.appendSlice(allocator, override.replacement);
+                            i += override.len - 1;
+                            continue;
+                        }
+                        zeros_kept_until = i + override.len;
+                        // The character the token starts with is being written.
+                        zero_form = override.replacement[decl_token_keeps_zeros.len..];
+                        zero_form = if (zero_form.len != 0 and zero_form[0] == c) zero_form[1..] else "";
+                    }
+                }
+            }
+            if (!raw and in_decl_value and paren_depth == 0 and c != ':' and value_context) {
+                // After the space that ends an escape the token goes on.
+                const operand_len = if (css_utils.endsWithEscapeWhitespace(out.items)) 0 else textSlashOperandsLen(first.items[i..]);
+                if (operand_len != 0) {
+                    try out.appendSlice(allocator, first.items[i .. i + operand_len]);
+                    i += operand_len - 1;
+                    continue;
+                }
+            }
             if (!raw and in_decl_value and paren_depth == 0 and c != ':') {
                 // In plain CSS a color name is a word and `rgb()` a function.
                 const colors_parsed = (stmt_hints & decl_hint_plain_css) == 0;
-                if (colors_parsed and value_context and try appendCompressedLegacyColor(&out, allocator, first.items, &i)) continue;
+                const rgba_parsed = colors_parsed or ((stmt_hints & decl_hint_hex_alpha_expanded) != 0 and
+                    std.mem.startsWith(u8, first.items[i..], "rgba("));
+                if (rgba_parsed and value_context and try appendCompressedLegacyColor(&out, allocator, first.items, &i)) continue;
                 if (colors_parsed and value_context and try appendCompressedTransparent(&out, allocator, first.items, &i)) continue;
                 if (colors_parsed and value_context and try appendCompressedNamedColor(&out, allocator, first.items, &i)) continue;
                 if (try appendCompressedHex(&out, allocator, first.items, &i)) continue;
@@ -5745,9 +6085,12 @@ pub const RuleIR = struct {
                 continue;
             }
 
-            if (!raw and !preserve_decl_zero and shortened and c == '0' and i + 1 < first.items.len and first.items[i + 1] == '.') {
+            if (!raw and !preserve_decl_zero and i >= zeros_kept_until and shortened and c == '0' and i + 1 < first.items.len and first.items[i + 1] == '.') {
                 const prev = if (out.items.len != 0) out.items[out.items.len - 1] else 0;
-                if (prev != '-' and !std.ascii.isAlphanumeric(prev) and prev != '_' and prev != '.') continue;
+                // A number of plain CSS is written as it reads; with ten
+                // decimals as they are, the zero stays.
+                const ten_decimals = (stmt_hints & decl_hint_plain_css) != 0 and hasTenDecimals(first.items[i + 2 ..]);
+                if (!ten_decimals and prev != '-' and !std.ascii.isAlphanumeric(prev) and prev != '_' and prev != '.') continue;
             }
 
             if (c == '}' and paren_depth == 0) {
@@ -10182,10 +10525,7 @@ pub const RuleIR = struct {
                     return;
                 }
                 try writeCurrentIndent(emit_ctx, state.indent_level);
-                if (emit_ctx.compressed and node.decl_hints != 0) {
-                    try emit_ctx.writeAll(decl_hint_marker);
-                    try emit_ctx.writeByte('0' + node.decl_hints);
-                }
+                if (emit_ctx.compressed) try self_ir.writeDeclHintMarker(emit_ctx, node);
                 try emit_ctx.writeAll(prop_str);
                 try emit_ctx.writeAll(": ");
                 var value_text = val_str;
@@ -10380,10 +10720,7 @@ pub const RuleIR = struct {
                     return;
                 }
                 try writeCurrentIndent(emit_ctx, state.indent_level);
-                if (emit_ctx.compressed and node.decl_hints != 0) {
-                    try emit_ctx.writeAll(decl_hint_marker);
-                    try emit_ctx.writeByte('0' + node.decl_hints);
-                }
+                if (emit_ctx.compressed) try self_ir.writeDeclHintMarker(emit_ctx, node);
                 try emit_ctx.writeAll(prop_str);
                 if (is_custom_property) {
                     const source_decl_col: ?usize = blk: {

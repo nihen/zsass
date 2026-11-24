@@ -296,6 +296,10 @@ pub const emit_decl_flag_value_single_dynamic: u16 = 1 << 11;
 /// The value is written as one interpolation, so it is a string even when
 /// it reads as a color name.
 pub const emit_decl_flag_value_single_interp: u16 = 1 << 12;
+/// The value is plain CSS in which a hex color with an alpha channel was
+/// written out as `rgba()`. That one is a color, unlike an `rgba()` the
+/// stylesheet has itself.
+pub const emit_decl_flag_hex_alpha_expanded: u16 = 1 << 13;
 
 /// Internal marker prepended to raw multiline custom-property values by the
 /// resolver. It carries the declaration line's source column, which remains
