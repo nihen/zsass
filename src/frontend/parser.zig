@@ -2088,6 +2088,40 @@ pub const Parser = struct {
         return false;
     }
 
+    /// Index of the `)` that closes the `(` at `open_idx`, for a call whose
+    /// argument text is kept as written. Null when the end is not clear:
+    /// `//` is a comment in some of these calls and text in others.
+    fn skipKeptArgumentText(text: []const u8, open_idx: usize) ?usize {
+        var depth: usize = 0;
+        var i = open_idx;
+        while (i < text.len) : (i += 1) {
+            switch (text[i]) {
+                '\\' => i += 1,
+                '"', '\'' => {
+                    const quote = text[i];
+                    i += 1;
+                    while (i < text.len and text[i] != quote) : (i += 1) {
+                        if (text[i] == '\\') i += 1;
+                    }
+                },
+                '/' => if (i + 1 < text.len) {
+                    if (text[i + 1] == '/') return null;
+                    if (text[i + 1] == '*') {
+                        const end = std.mem.findPos(u8, text, i + 2, "*/") orelse return null;
+                        i = end + 1;
+                    }
+                },
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if (depth == 0) return i;
+                },
+                else => {},
+            }
+        }
+        return null;
+    }
+
     /// Find a comma that has no value before it in a comma-separated list:
     /// `a(,)`, `a(1,,2)`, `(,)`, `[,1]`, `1,,2`. A trailing comma (`a(1,)`) is
     /// not one. Returns null when the text has a shape this scan does not
@@ -2119,7 +2153,10 @@ pub const Parser = struct {
                     if (i < text.len and std.ascii.isHex(text[i])) {
                         var digits: usize = 1;
                         while (digits < 6 and i + 1 < text.len and std.ascii.isHex(text[i + 1])) : (digits += 1) i += 1;
-                        if (i + 1 < text.len and (text[i + 1] == ' ' or text[i + 1] == '\t' or text[i + 1] == '\n')) i += 1;
+                        if (i + 1 < text.len) switch (text[i + 1]) {
+                            ' ', '\t', '\n', '\r', 0x0c => i += 1,
+                            else => {},
+                        };
                     }
                     name_has_escape = true;
                     ctx.expect_value = false;
@@ -2173,7 +2210,7 @@ pub const Parser = struct {
                     ctx.expect_value = false;
                     if (name_has_escape) {
                         name_has_escape = false;
-                        i = findMatchingParenInRaw(text, i) orelse return null;
+                        i = skipKeptArgumentText(text, i) orelse return null;
                         continue;
                     }
                     var name_start = i;
@@ -2182,7 +2219,7 @@ pub const Parser = struct {
                         if (!std.ascii.isAlphanumeric(p) and p != '-' and p != '_' and p != ':' and p != '.') break;
                     }
                     if (rawFunctionKeepsArgumentText(text[name_start..i], text[i + 1 ..])) {
-                        i = findMatchingParenInRaw(text, i) orelse return null;
+                        i = skipKeptArgumentText(text, i) orelse return null;
                         continue;
                     }
                     if (len == stack.len) return null;
@@ -13012,6 +13049,12 @@ test "rawDeclarationValueEmptyCommaOperand: a comma with no value before it" {
         "-x-pr\\6fgid:y(,)",
         "\\75 rl(,)",
         "expr\\65ssion(,)",
+        "pr\\6f\rgid:y(,)",
+        "pr\\6f\x0cgid:y(,)",
+        "pr\\6fgid:y(\\),,)",
+        "expression(\\),,)",
+        "expression(\")\",,) a",
+        "expression(/*)*/,,)",
     };
     for (accepted) |text| {
         try std.testing.expect(find(text) == null);
