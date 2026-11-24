@@ -2162,3 +2162,30 @@ test "api: a repeated @extend target past the limit is still extended" {
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, selector_list, woven));
     }
 }
+
+test "api: @extend is not applied again to what it produced" {
+    const alloc = std.testing.allocator;
+    // `.c + .g` extends `.c`. In `.a .c + .g` the `.c` is the extender's
+    // own, also once another extension has changed the selector.
+    const source =
+        \\.a .c {x: 1}
+        \\.c + .g {@extend .c}
+        \\.q {@extend .a}
+        \\.d:hover {y: 2}
+        \\.y.d > .h {@extend .d}
+        \\.z {@extend .h}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.a .c, .q .c, .a .c + .g, .q .c + .g {
+        \\  x: 1;
+        \\}
+        \\
+        \\.d:hover, .y.d > .h:hover, .y.d > .z:hover {
+        \\  y: 2;
+        \\}
+        \\
+    , css);
+}
