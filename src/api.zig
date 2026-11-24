@@ -2163,6 +2163,33 @@ test "api: a repeated @extend target past the limit is still extended" {
     }
 }
 
+test "api: @extend is not applied again to what it produced" {
+    const alloc = std.testing.allocator;
+    // `.c + .g` extends `.c`. In `.a .c + .g` the `.c` is the extender's
+    // own, also once another extension has changed the selector.
+    const source =
+        \\.a .c {x: 1}
+        \\.c + .g {@extend .c}
+        \\.q {@extend .a}
+        \\.d:hover {y: 2}
+        \\.y.d > .h {@extend .d}
+        \\.z {@extend .h}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.a .c, .q .c, .a .c + .g, .q .c + .g {
+        \\  x: 1;
+        \\}
+        \\
+        \\.d:hover, .y.d > .h:hover, .y.d > .z:hover {
+        \\  y: 2;
+        \\}
+        \\
+    , css);
+}
+
 test "api: is-superselector follows the official CLI on :not(), :is(), and the universal selector" {
     const alloc = std.testing.allocator;
     const source =
