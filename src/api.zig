@@ -2054,6 +2054,36 @@ test "api: an extender with ancestors and a sibling joins a repeated @extend tar
     , css);
 }
 
+test "api: a signed number right after a word is added to it" {
+    const alloc = std.testing.allocator;
+    // `x+1` is `x` plus 1, not one word. A unicode range stays as it is.
+    const source =
+        \\$v: 2;
+        \\a {
+        \\  b: x+1 x+1px 2 x+0.4rem;
+        \\  c: x+y+1 a, b+1;
+        \\  d: n+1 2n+1 -n+1;
+        \\  e: x-1 x+$v $v+1 1+x;
+        \\  f: U+26 u+1F;
+        \\  g: x+1 !important;
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\a {
+        \\  b: x1 x1px 2 x0.4rem;
+        \\  c: xy1 a, b1;
+        \\  d: n1 3n -n1;
+        \\  e: x-1 x2 3 1x;
+        \\  f: U+26 u+1F;
+        \\  g: x1 !important;
+        \\}
+        \\
+    , css);
+}
+
 test "api: a repeated @extend target past the limit is still extended" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
