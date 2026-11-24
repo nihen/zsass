@@ -2101,15 +2101,27 @@ pub const Parser = struct {
         var stack: [64]Context = undefined;
         stack[0] = .{ .close = 0 };
         var len: usize = 1;
+        // An escape in the name before `(` may spell a function that keeps
+        // its argument text (`pr\6fgid:y(,)`), so that call is not judged.
+        var name_has_escape = false;
         var i: usize = 0;
 
         while (i < text.len) : (i += 1) {
             const c = text[i];
             const ctx = &stack[len - 1];
+            const continues_name = std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or
+                c == ':' or c == '.' or c == '\\' or c == '(' or c >= 0x80;
+            if (!continues_name) name_has_escape = false;
             switch (c) {
                 ' ', '\t', '\n', '\r' => {},
                 '\\' => {
                     i += 1;
+                    if (i < text.len and std.ascii.isHex(text[i])) {
+                        var digits: usize = 1;
+                        while (digits < 6 and i + 1 < text.len and std.ascii.isHex(text[i + 1])) : (digits += 1) i += 1;
+                        if (i + 1 < text.len and (text[i + 1] == ' ' or text[i + 1] == '\t' or text[i + 1] == '\n')) i += 1;
+                    }
+                    name_has_escape = true;
                     ctx.expect_value = false;
                 },
                 '"', '\'' => {
@@ -2159,6 +2171,11 @@ pub const Parser = struct {
                 '{', '}' => return null,
                 '(' => {
                     ctx.expect_value = false;
+                    if (name_has_escape) {
+                        name_has_escape = false;
+                        i = findMatchingParenInRaw(text, i) orelse return null;
+                        continue;
+                    }
                     var name_start = i;
                     while (name_start > 0) : (name_start -= 1) {
                         const p = text[name_start - 1];
@@ -12956,6 +12973,7 @@ test "rawDeclarationValueEmptyCommaOperand: a comma with no value before it" {
         .{ .text = "-x-type(,)", .offset = 8, .in_paren = true },
         .{ .text = "calc(1px,,2px)", .offset = 9, .in_paren = true },
         .{ .text = "xprogid:y(,)", .offset = 10, .in_paren = true },
+        .{ .text = "\\66oo(1) bar(,)", .offset = 13, .in_paren = true },
         .{ .text = "foo-progid:bar(,)", .offset = 15, .in_paren = true },
         .{ .text = "[1,,2]", .offset = 3, .in_paren = false },
         .{ .text = "foo([,])", .offset = 5, .in_paren = false },
@@ -12990,6 +13008,10 @@ test "rawDeclarationValueEmptyCommaOperand: a comma with no value before it" {
         "a progid:foo(,)",
         "a PROGID:a.b.c(,)",
         "a -ms-progid:foo(,)",
+        "pr\\6fgid:y(,)",
+        "-x-pr\\6fgid:y(,)",
+        "\\75 rl(,)",
+        "expr\\65ssion(,)",
     };
     for (accepted) |text| {
         try std.testing.expect(find(text) == null);
