@@ -2379,3 +2379,53 @@ test "api: @extend follows the specification's model as the official CLI applies
         \\
     , css);
 }
+
+test "api: @extend keeps where a selector came from, and when its rule was entered" {
+    const alloc = std.testing.allocator;
+    // An extender whose `:not()` gains a selector stays beside the changed
+    // one; parents shared with the extender keep the extender's
+    // specificity; a rule set aside by `@at-root` still counts the
+    // `@extend`s from when it was entered. Then `selector.extend()` and
+    // `selector.replace()` with two extendees that begin alike.
+    const source =
+        \\@use "sass:selector";
+        \\:not(.a1) {@extend .b1}
+        \\.c1 {@extend .a1}
+        \\.b1 {x: 0}
+        \\.a2.b2 .x2.t2, .x2 {x: 1}
+        \\.a2.b2 * {@extend .t2}
+        \\.a3.b3 {
+        \\  @at-root {
+        \\    .x3 {@extend .a3}
+        \\    .y3 {@extend .b3}
+        \\  }
+        \\  x: 2;
+        \\}
+        \\t {
+        \\  a: selector.extend(".a.c", ".a.b, .a.c", ".x");
+        \\  b: selector.replace(".a.c", ".a.b, .a.c", ".x");
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.b1, :not(.a1), :not(.a1):not(.c1) {
+        \\  x: 0;
+        \\}
+        \\
+        \\.a2.b2 .x2.t2, .a2.b2 .x2, .x2 {
+        \\  x: 1;
+        \\}
+        \\
+        \\.a3.b3, .a3.y3, .b3.x3, .x3.y3 {
+        \\  x: 2;
+        \\}
+        \\
+        \\t {
+        \\  a: .a.c, .x;
+        \\  b: .x;
+        \\}
+        \\
+    , css);
+}

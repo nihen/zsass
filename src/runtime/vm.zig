@@ -328,6 +328,8 @@ const SavedAtRootSelectorFrame = struct {
     selectors: []InternId,
     owner_modules: []u32,
     push_ir_lens: []usize,
+    /// The `@extend` counts noted for the scopes set aside.
+    extend_counts: []ScopeExtendCount,
     keep_len: usize,
     parent: ?InternId,
 };
@@ -1080,6 +1082,7 @@ pub const VM = struct {
             self.allocator.free(frame.selectors);
             self.allocator.free(frame.owner_modules);
             self.allocator.free(frame.push_ir_lens);
+            self.allocator.free(frame.extend_counts);
         }
         self.at_root_saved_selector_frames.clearRetainingCapacity();
     }
@@ -5339,16 +5342,21 @@ pub const VM = struct {
         // scope_push_ir_lens keeps the same length as selector_stack. Cut with keep_len.
         const saved_lens = try self.allocator.dupe(usize, self.scope_push_ir_lens.items[keep_len..]);
         errdefer self.allocator.free(saved_lens);
+        const counts_kept = @min(keep_len, self.scope_extend_counts.items.len);
+        const saved_counts = try self.allocator.dupe(ScopeExtendCount, self.scope_extend_counts.items[counts_kept..]);
+        errdefer self.allocator.free(saved_counts);
         try self.at_root_saved_selector_frames.append(self.allocator, .{
             .selectors = saved,
             .owner_modules = saved_owner_modules,
             .push_ir_lens = saved_lens,
+            .extend_counts = saved_counts,
             .keep_len = keep_len,
             .parent = parent,
         });
         self.selector_stack.items.len = keep_len;
         self.selector_owner_stack.items.len = keep_len;
         self.scope_push_ir_lens.items.len = keep_len;
+        self.scope_extend_counts.items.len = counts_kept;
     }
 
     fn popAtRootScope(self: *VM) VMError!void {
@@ -5357,6 +5365,12 @@ pub const VM = struct {
         defer self.allocator.free(frame.selectors);
         defer self.allocator.free(frame.owner_modules);
         defer self.allocator.free(frame.push_ir_lens);
+        defer self.allocator.free(frame.extend_counts);
+        // The scopes set aside come back with the counts they had.
+        if (self.scope_extend_counts.items.len > frame.keep_len) self.scope_extend_counts.items.len = frame.keep_len;
+        if (self.scope_extend_counts.items.len == frame.keep_len) {
+            try self.scope_extend_counts.appendSlice(self.allocator, frame.extend_counts);
+        }
         while (self.selector_stack.items.len > frame.keep_len) {
             _ = self.selector_stack.pop();
         }

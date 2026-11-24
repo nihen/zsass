@@ -278,7 +278,7 @@ pub const Engine = struct {
         }
 
         const direct_start = self.entries.items.len;
-        for (extended) |item| try self.addEntry(targets, item, step_index, true);
+        for (extended) |item| try self.addEntry(targets, item, step_index, true, item.original);
 
         // When an earlier extender holds the target, every extender that
         // holds it is extended with the new entries, these new extenders
@@ -306,19 +306,22 @@ pub const Engine = struct {
             // The extender itself is there already; a first result that
             // differs from it (a pseudo-class argument was extended) is new.
             for (derived) |item| {
+                // The extender with a pseudo-class argument extended is
+                // written as much as the extender was.
                 if (item.original and !sameAsWritten(&item.complex, &entry.complex)) self.entries.items[index].superseded = true;
-                try self.addEntry(entry.targets, item, step_index, false);
+                try self.addEntry(entry.targets, item, step_index, false, item.original and entry.written);
             }
         }
     }
 
-    fn addEntry(self: *Engine, targets: []const SimpleSelector, item: Item, step: u32, direct: bool) Error!void {
+    fn addEntry(self: *Engine, targets: []const SimpleSelector, item: Item, step: u32, direct: bool, written: bool) Error!void {
         const a = self.arena.allocator();
         const first_key = try simpleKey(a, targets[0]);
         if (self.by_target.get(first_key)) |list| {
             for (list.items) |index| {
                 const existing = &self.entries.items[index];
-                if (existing.targets.len == targets.len and spec_mod.complexSelectorEql(&existing.complex, &item.complex)) return;
+                if (existing.targets.len == targets.len and holdsAll(existing.targets, targets) and
+                    spec_mod.complexSelectorEql(&existing.complex, &item.complex)) return;
             }
         }
         const entry_index: u32 = @intCast(self.entries.items.len);
@@ -334,7 +337,7 @@ pub const Engine = struct {
             .complex = item.complex,
             .step = step,
             .direct = direct,
-            .written = direct and item.original and self.mode != .function and self.mode != .replace,
+            .written = written and self.mode != .function and self.mode != .replace,
         });
     }
 
@@ -385,9 +388,11 @@ pub const Engine = struct {
         var result = SelectorList.init(out);
         errdefer result.deinit();
         for (current) |*item| {
-            var cloned = try item.complex.clone(out);
-            errdefer cloned.deinit();
-            try result.selectors.append(out, cloned);
+            {
+                var cloned = try item.complex.clone(out);
+                errdefer cloned.deinit();
+                try result.selectors.append(out, cloned);
+            }
             if (details) |list_out| try list_out.append(out, .{ .original = item.original, .source = sourceSpec(item.pieces) });
         }
         return result;
@@ -1109,9 +1114,25 @@ fn isRootish(compound: *const CompoundSelector) bool {
 /// the two put together when they name the same ID or pseudo-element.
 fn commonGroup(a: Allocator, first: []const Link, second: []const Link) Error!?[]const Link {
     if (shareUnique(first, second)) return unifyGroups(a, second, first);
-    if (try parentsCover(a, second, first)) return first;
-    if (try parentsCover(a, first, second)) return second;
+    if (try parentsCover(a, second, first)) return try markedAlso(a, first, second);
+    if (try parentsCover(a, first, second)) return try markedAlso(a, second, first);
     return null;
+}
+
+/// `group`, also carrying where `other` came from: it stands for both.
+fn markedAlso(a: Allocator, group: []const Link, other: []const Link) Error![]const Link {
+    var most = zero_spec;
+    for (other) |link| {
+        for (link.marks) |mark| most = specMax(most, mark);
+    }
+    if (spec_mod.specificityGte(zero_spec, most)) return group;
+    const out = try a.alloc(Link, group.len);
+    for (group, 0..) |link, index| {
+        const marks = try a.alloc(Specificity, link.marks.len);
+        for (link.marks, 0..) |mark, k| marks[k] = specMax(mark, most);
+        out[index] = .{ .compound = link.compound, .marks = marks, .combinator = link.combinator };
+    }
+    return out;
 }
 
 /// Weave two sequences of parents, each ending with the combinator that
