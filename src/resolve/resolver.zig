@@ -1636,6 +1636,14 @@ const SlashSim = struct {
     divide: std.AutoHashMapUnmanaged(u32, void) = .empty,
     /// The divisions marked so far, in order, to take back a reading.
     marked: std.ArrayListUnmanaged(u32) = .empty,
+    /// What reading an element marked and left the state at, by the
+    /// element and the state it was entered with. A list read again reads
+    /// what is nested in it again; without this the work would double
+    /// with every level.
+    read: std.AutoHashMapUnmanaged(u64, Read) = .empty,
+    read_marks: std.ArrayListUnmanaged(u32) = .empty,
+
+    const Read = struct { marks_start: u32, marks_len: u32, in_parens_after: bool };
 
     const Flow = enum { done, read_again };
 
@@ -1655,6 +1663,8 @@ const SlashSim = struct {
     fn deinit(self: *SlashSim) void {
         self.divide.deinit(self.allocator);
         self.marked.deinit(self.allocator);
+        self.read.deinit(self.allocator);
+        self.read_marks.deinit(self.allocator);
     }
 
     fn divides(self: *const SlashSim, node: NodeIndex) bool {
@@ -1689,6 +1699,27 @@ const SlashSim = struct {
     /// Reads what is between two commas: one item, or several separated
     /// by spaces.
     fn readElement(self: *SlashSim, node: NodeIndex) ResolveError!void {
+        const key = (@as(u64, @intFromEnum(node)) << 1) | @intFromBool(self.in_parens);
+        if (self.read.get(key)) |known| {
+            for (self.read_marks.items[known.marks_start..][0..known.marks_len]) |mark| {
+                try self.divide.put(self.allocator, mark, {});
+                try self.marked.append(self.allocator, mark);
+            }
+            self.in_parens = known.in_parens_after;
+            return;
+        }
+        const first_mark = self.marked.items.len;
+        try self.readElementAnew(node);
+        const marks_start: u32 = @intCast(self.read_marks.items.len);
+        try self.read_marks.appendSlice(self.allocator, self.marked.items[first_mark..]);
+        try self.read.put(self.allocator, key, .{
+            .marks_start = marks_start,
+            .marks_len = @intCast(self.marked.items.len - first_mark),
+            .in_parens_after = self.in_parens,
+        });
+    }
+
+    fn readElementAnew(self: *SlashSim, node: NodeIndex) ResolveError!void {
         const n = self.ast.getNode(node);
         const items: []const u32 = if (n.tag == .expr_space_list) readChildList(self.ast, n.payload) else &.{@intFromEnum(node)};
         const marked_before = self.marked.items.len;

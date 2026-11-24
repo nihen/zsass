@@ -1717,6 +1717,22 @@ test "api: numbers written with a slash follow the parentheses the official CLI 
     , css);
 }
 
+test "api: nested lists in parentheses are followed once each" {
+    const alloc = std.testing.allocator;
+    // Every level is read again when its second item comes; what is
+    // nested in it is not followed anew each time.
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(alloc);
+    try source.appendSlice(alloc, "a {b: ");
+    try source.appendNTimes(alloc, '(', 40);
+    try source.appendSlice(alloc, "foo(1/2/x)");
+    for (0..40) |_| try source.appendSlice(alloc, " b)");
+    try source.appendSlice(alloc, "}\n");
+    const css = try compileSourceToCss(alloc, source.items, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expect(std.mem.startsWith(u8, css, "a {\n  b: foo(1/2/x) b b"));
+}
+
 test "api: numbers written with a slash stay that text in front of something else" {
     const alloc = std.testing.allocator;
     // Outside parentheses `1/2` is still `1/2` when what it is divided by
