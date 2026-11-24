@@ -1571,6 +1571,28 @@ test "api: compressed output writes a token the way its value says" {
             ,
             .css = "a{b:/* ( */;c:.5em rgba(0,0,0,.5) rgba(0, 0, 0, 0.5);c2:#fff white rgba(0,0,0,0) transparent;d:calc(0.5px + var(--x, \"a  b\")*.25)}\n",
         },
+        // A string given to a calculation function is written as it is,
+        // and so is what an interpolation put into a calculation written
+        // in the declaration itself, whatever parentheses and spaces the
+        // declaration ends up with.
+        .{
+            .source =
+            \\$a: 0.375rem;
+            \\$s: #{0.875}rem;
+            \\@mixin c($w) {
+            \\  left: calc(50% - (#{$w} * 0.5));
+            \\}
+            \\a {
+            \\  b: clamp(13px, $s, 22px) min($s, 0.5px);
+            \\  c: calc(#{$a}*2 + 0.5px);
+            \\  d: calc(0.5px + #{$a}) 0.5em;
+            \\  e: clamp(0.5px, 0.5vw + 1px, 2px);
+            \\  @include c(1em);
+            \\}
+            \\
+            ,
+            .css = "a{b:clamp(13px,0.875rem,22px) min(0.875rem,.5px);c:calc(0.375rem*2 + .5px);d:calc(.5px + 0.375rem) .5em;e:clamp(.5px,.5vw + 1px,2px);left:calc(50% - 1em*.5)}\n",
+        },
         // In plain CSS a hex color with an alpha channel is a color, an
         // `rgba()` of the stylesheet is not, and a number with ten
         // decimals keeps its zero.
@@ -2081,6 +2103,36 @@ test "api: an extender with ancestors and a sibling joins a repeated @extend tar
     try std.testing.expectEqualStrings(
         \\.x .p .a .a, .x .p .f + .g .a, .x .p .a .f + .g, .x .p .f + .g .f + .g {
         \\  x: y;
+        \\}
+        \\
+    , css);
+}
+
+test "api: a signed number right after a word is added to it" {
+    const alloc = std.testing.allocator;
+    // `x+1` is `x` plus 1, not one word. A unicode range stays as it is.
+    const source =
+        \\$v: 2;
+        \\a {
+        \\  b: x+1 x+1px 2 x+0.4rem;
+        \\  c: x+y+1 a, b+1;
+        \\  d: n+1 2n+1 -n+1;
+        \\  e: x-1 x+$v $v+1 1+x;
+        \\  f: U+26 u+1F;
+        \\  g: x+1 !important;
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\a {
+        \\  b: x1 x1px 2 x0.4rem;
+        \\  c: xy1 a, b1;
+        \\  d: n1 3n -n1;
+        \\  e: x-1 x2 3 1x;
+        \\  f: U+26 u+1F;
+        \\  g: x1 !important;
         \\}
         \\
     , css);

@@ -5797,8 +5797,17 @@ pub const RuleIR = struct {
             if (i >= zeros_kept_until) {
                 zero_form = "";
             } else if (zero_form.len != 0 and first.items[i] != ' ') {
+                // The declaration may have dropped parentheses the short
+                // form still has, or have ones it lacks.
                 zero_form = std.mem.trimStart(u8, zero_form, " ");
-                if (zero_form.len != 0 and zero_form[0] == first.items[i]) {
+                while (zero_form.len != 0 and (zero_form[0] == '(' or zero_form[0] == ')') and zero_form[0] != first.items[i]) {
+                    zero_form = std.mem.trimStart(u8, zero_form[1..], " ");
+                }
+                const unmatched_paren = (first.items[i] == '(' or first.items[i] == ')') and
+                    (zero_form.len == 0 or zero_form[0] != first.items[i]);
+                if (unmatched_paren) {
+                    // Written as it is; the short form stays where it was.
+                } else if (zero_form.len != 0 and zero_form[0] == first.items[i]) {
                     zero_form = zero_form[1..];
                     // What a backslash escapes is not looked at below.
                     if (first.items[i] == '\\' and i + 1 < first.items.len) {

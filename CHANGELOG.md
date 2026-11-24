@@ -43,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   channels of a color before they are rounded, so the last digit matches.
 - In plain CSS, compressed output shortens the `rgba()` a hex color with an
   alpha channel becomes.
+- Compressed output writes a string given to `clamp()`, `min()`, or
+  `max()` as it is (`clamp(13px,0.875rem,22px)`), and keeps the zero of a
+  number an interpolation put into a calculation that is written in the
+  declaration itself.
 - `@extend` with the target repeated in a selector leaves out a result
   that another result covers (`.g .f .f:hover` next to `.g .f .f`), as the
   official CLI does after each `@extend` rule for a list of up to 100
@@ -59,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Numbers written with a slash follow the official CLI inside parentheses
   and in the arguments of a call too: `foo(1/2/x)` and `(a 1/2/x)` keep the
   text, `(1/2/x a)` and `(foo(1/2/x))` divide.
+- A signed number right after a word is added to it: `x+1` is `x1`, as in
+  the official CLI, where it was left as `x+1`.
 
 ## 0.4.2 (2026-11-23)
 
