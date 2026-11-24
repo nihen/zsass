@@ -6022,6 +6022,12 @@ pub fn parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
 
     var parser = parser_mod.Parser.init(sa, pool, tokens, source);
     parser.is_indented_syntax = is_indented_syntax;
+    parser.is_plain_css = if (syntax_override_mod.get()) |over|
+        over == .css
+    else if (source_path) |p|
+        std.ascii.endsWithIgnoreCase(p, ".css")
+    else
+        false;
     parser.no_interpolation = !lexer.saw_interpolation;
     defer parser.deinit();
     var ast = parser.parse() catch |err| {

@@ -74,6 +74,7 @@ pub fn loadImportChildAst(
     const tokens = lexer.tokenize() catch return error.SyntaxError;
     var parser = parser_mod.Parser.init(sa, pool, tokens, source);
     parser.is_indented_syntax = is_indented_syntax;
+    parser.is_plain_css = is_plain_css_source;
     parser.no_interpolation = !lexer.saw_interpolation;
     defer parser.deinit();
     var ast = parser.parse() catch return error.SyntaxError;
