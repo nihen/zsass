@@ -56,6 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never freed. Each compile now runs in an arena of its own on top of the
   given allocator, as the CLI does, and only the result is allocated with
   the allocator itself.
+- A signed number right after a word is added to it: `x+1` is `x1`, as in
+  the official CLI, where it was left as `x+1`.
 
 ## 0.4.2 (2026-11-23)
 
