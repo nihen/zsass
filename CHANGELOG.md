@@ -56,6 +56,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never freed. Each compile now runs in an arena of its own on top of the
   given allocator, as the CLI does, and only the result is allocated with
   the allocator itself.
+- Numbers written with a slash follow the official CLI inside parentheses
+  and in the arguments of a call too: `foo(1/2/x)` and `(a 1/2/x)` keep the
+  text, `(1/2/x a)` and `(foo(1/2/x))` divide.
 
 ## 0.4.2 (2026-11-23)
 
