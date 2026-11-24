@@ -1679,34 +1679,6 @@ test "api: compressed output drops an empty rule without its enclosing block" {
     try std.testing.expectEqualStrings("@media print{.w a{b:c}}@media print{a{b:c}}e{f:g}k{l:url(a;b);n:o}\n", css);
 }
 
-test "api: is-superselector follows the official CLI on :not(), :is(), and the universal selector" {
-    const alloc = std.testing.allocator;
-    const source =
-        \\@use "sass:selector";
-        \\@function s($a, $b) {
-        \\  @return selector.is-superselector($a, $b);
-        \\}
-        \\a {
-        \\  not: s(":not(.c)", ".d .e") s(":not(.c)", "b:not(.c)") s(":not(.c.d)", ":not(.c)") s(":not(.c, .d)", ":not(.c)") s(":not(.c, .d)", ":not(.c):not(.d)") s(":not(a)", "b") s(":not(.c)", ":not(.c)::before");
-        \\  is: s(":is(.c)", ":any(.c)") s(":is(.c, .d)", ":any(.c, .d)") s(":is(.c, .d)", ".e:is(.c, .d)") s(".c", ":is(.c, .d)") s(".c", ":is(.c.d, .c.e)") s(".d", ":is(.c .d)") s("a", ":is(a.c)");
-        \\  nth: s(".c", ":nth-child(2n of .c.d)") s(".c", ":nth-child(2n of .c, .d)");
-        \\  universal: s("*", ".c") s("*.c", ".c") s("*.c", "a.c") s("*.c", ".c.d") s("*:is(.c)", ".c") s("*:hover", ":hover");
-        \\}
-        \\
-    ;
-    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
-    defer alloc.free(css);
-    try std.testing.expectEqualStrings(
-        \\a {
-        \\  not: false true true false true true false;
-        \\  is: true false true false true true true;
-        \\  nth: true false;
-        \\  universal: true false true true true false;
-        \\}
-        \\
-    , css);
-}
-
 test "api: numbers written with a slash stay that text in front of something else" {
     const alloc = std.testing.allocator;
     // Outside parentheses `1/2` is still `1/2` when what it is divided by
@@ -2055,6 +2027,34 @@ test "api: an extender with ancestors and a sibling joins a repeated @extend tar
     try std.testing.expectEqualStrings(
         \\.x .p .a .a, .x .p .f + .g .a, .x .p .a .f + .g, .x .p .f + .g .f + .g {
         \\  x: y;
+        \\}
+        \\
+    , css);
+}
+
+test "api: is-superselector follows the official CLI on :not(), :is(), and the universal selector" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\@use "sass:selector";
+        \\@function s($a, $b) {
+        \\  @return selector.is-superselector($a, $b);
+        \\}
+        \\a {
+        \\  not: s(":not(.c)", ".d .e") s(":not(.c)", "b:not(.c)") s(":not(.c.d)", ":not(.c)") s(":not(.c, .d)", ":not(.c)") s(":not(.c, .d)", ":not(.c):not(.d)") s(":not(a)", "b") s(":not(.c)", ":not(.c)::before");
+        \\  is: s(":is(.c)", ":any(.c)") s(":is(.c, .d)", ":any(.c, .d)") s(":is(.c, .d)", ".e:is(.c, .d)") s(".c", ":is(.c, .d)") s(".c", ":is(.c.d, .c.e)") s(".d", ":is(.c .d)") s("a", ":is(a.c)");
+        \\  nth: s(".c", ":nth-child(2n of .c.d)") s(".c", ":nth-child(2n of .c, .d)");
+        \\  universal: s("*", ".c") s("*.c", ".c") s("*.c", "a.c") s("*.c", ".c.d") s("*:is(.c)", ".c") s("*:hover", ":hover");
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\a {
+        \\  not: false true true false true true false;
+        \\  is: true false true false true true true;
+        \\  nth: true false;
+        \\  universal: true false true true true false;
         \\}
         \\
     , css);
