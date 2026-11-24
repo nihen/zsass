@@ -187,7 +187,7 @@ fn evalBinary(env: anytype, prog: anytype, payload: u32) Error!Value {
         .add => try addValues(env, lhs, rhs),
         .sub => try subValues(env, lhs, rhs),
         .mul => try mulValues(env, lhs, rhs),
-        .div => try divValues(env, lhs, rhs),
+        .div => try divValues(env, lhs, rhs, b.lhs_written_slash),
         .mod => try modValues(env, lhs, rhs),
         .eq => if (valueEq(env, lhs, rhs)) Value.true_v else Value.false_v,
         .neq => if (!valueEq(env, lhs, rhs)) Value.true_v else Value.false_v,
@@ -587,7 +587,7 @@ fn mulValues(env: anytype, a: Value, b: Value) Error!Value {
     return error.SassError;
 }
 
-fn divValues(env: anytype, a: Value, b: Value) Error!Value {
+fn divValues(env: anytype, a: Value, b: Value, lhs_written_as_slash: bool) Error!Value {
     const lhs = try coerceCalcStringToNumberish(env, a);
     const rhs = try coerceCalcStringToNumberish(env, b);
     if (colorArithmeticShouldError(env.pool(), lhs, rhs)) {
@@ -658,13 +658,31 @@ fn divValues(env: anytype, a: Value, b: Value) Error!Value {
     }
 
     if (try calcBinaryIfMarked(env, lhs, rhs, "/")) |v| return v;
-    const sa_raw = try valueToArithmeticOperandText(env, lhs);
+    // Numbers written with a slash between them (`1/2`) are still that
+    // text when what follows is not a number: `1/2/x`. A list is written
+    // differently here than at run time, and so is a quoted string that
+    // needs escaping; with those the division stays as it was.
+    const rhs_quoted = rhs.kind() == .string and rhs.stringQuoted(env.stringFlagsPool().items);
+    const rhs_plain = switch (rhs.kind()) {
+        .string => !rhs_quoted or std.mem.indexOfAny(u8, env.pool().get(rhs.stringIntern()), "\"\\\n\r\x0c") == null,
+        .boolean, .nil => true,
+        else => false,
+    };
+    const lhs_written_slash = lhs_written_as_slash and a.kind() == .list and lhs.kind() == .number and rhs_plain;
+    const sa_raw = try valueToArithmeticOperandText(env, if (lhs_written_slash) a else lhs);
     defer env.allocator().free(sa_raw);
     const sb_raw = try valueToArithmeticOperandText(env, rhs);
     defer env.allocator().free(sb_raw);
-    const sa = try simplifySlashOperandText(env.pool(), env.numberPool(), env.allocator(), sa_raw);
+    const sa = if (lhs_written_slash)
+        try env.allocator().dupe(u8, sa_raw)
+    else
+        try simplifySlashOperandText(env.pool(), env.numberPool(), env.allocator(), sa_raw);
     defer env.allocator().free(sa);
-    const sb = try simplifySlashOperandText(env.pool(), env.numberPool(), env.allocator(), sb_raw);
+    // Run time writes a quoted string with its quotes.
+    const sb = if (lhs_written_slash and rhs_quoted)
+        try std.fmt.allocPrint(env.allocator(), "\"{s}\"", .{sb_raw})
+    else
+        try simplifySlashOperandText(env.pool(), env.numberPool(), env.allocator(), sb_raw);
     defer env.allocator().free(sb);
     const merged = try std.fmt.allocPrint(env.allocator(), "{s}/{s}", .{ sa, sb });
     defer env.allocator().free(merged);

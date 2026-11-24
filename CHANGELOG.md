@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- Numbers written with a slash between them stay that text when they are
+  divided by something that is not a number: `grid-area: 1 / 2 / auto` is
+  `1/2/auto`, not `0.5/auto`. In parentheses, on the right of an operator,
+  and through a variable the division still happens.
 - Compressed output keeps `/*!` comments, and a stylesheet does not end
   with a semicolon.
 - Compressed output leaves the prelude of an at-rule as it is, apart from

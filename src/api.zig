@@ -1679,6 +1679,69 @@ test "api: compressed output drops an empty rule without its enclosing block" {
     try std.testing.expectEqualStrings("@media print{.w a{b:c}}@media print{a{b:c}}e{f:g}k{l:url(a;b);n:o}\n", css);
 }
 
+test "api: numbers written with a slash stay that text in front of something else" {
+    const alloc = std.testing.allocator;
+    // Outside parentheses `1/2` is still `1/2` when what it is divided by
+    // is not a number. In parentheses, on the right of an operator, and
+    // through a variable it is 0.5.
+    const source =
+        \\@use "sass:map";
+        \\@function f() {
+        \\  @return 1/2/x;
+        \\}
+        \\@mixin m($a) {
+        \\  m: $a;
+        \\}
+        \\$v: 1/2;
+        \\a {
+        \\  b: 1 / 2 / auto;
+        \\  c: 1/2/3/x 1px/2px/"y", -1/2/x;
+        \\  d: 1.0/2.50/x 6/3/x/2/4;
+        \\  e: (1/2/x) (1/2)/x $v/x;
+        \\  f: (1/2/x, 1/2/y) foo((1/2/x));
+        \\  g: f() [1/2/x] 1/2/x + y;
+        \\  h: map.get((k: 1/2/x), k) y + 1/2/x;
+        \\  i: 1/2/3 1/2 + x "0.5/x" == 1/2/x;
+        \\  @include m(1/2/x);
+        \\}
+        \\@if 1/2/x == "1/2/x" {
+        \\  j {
+        \\    k: l;
+        \\  }
+        \\}
+        \\@if 1/2/"x" == '1/2/"x"' {
+        \\  m {
+        \\    n: 1/2/"x";
+        \\  }
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\a {
+        \\  b: 1/2/auto;
+        \\  c: 1/2/3/x 1px/2px/"y", -1/2/x;
+        \\  d: 1/2.5/x 6/3/x/2/4;
+        \\  e: 0.5/x 0.5/x 0.5/x;
+        \\  f: 0.5/x, 0.5/y foo(0.5/x);
+        \\  g: 1/2/x [1/2/x] 1/2/xy;
+        \\  h: 0.5/x y0.5/x;
+        \\  i: 1/2/3 0.5x true;
+        \\  m: 1/2/x;
+        \\}
+        \\
+        \\j {
+        \\  k: l;
+        \\}
+        \\
+        \\m {
+        \\  n: 1/2/"x";
+        \\}
+        \\
+    , css);
+}
+
 test "api: lists made by built-in functions are freed" {
     // `std.testing.allocator` reports what is still allocated at the end.
     const alloc = std.testing.allocator;
