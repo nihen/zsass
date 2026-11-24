@@ -2248,6 +2248,10 @@ test "api: @extend leaves out a result its original covers" {
         \\.k.j {@extend .j}
         \\.l .m {v: 5}
         \\.n .m {@extend .m}
+        \\:focus.o {u: 6}
+        \\.o:nth-child(2n of .p) {@extend .o}
+        \\.q:before {t: 7}
+        \\.r .q {@extend .q}
         \\a {r: selector.replace("foo.bar", "foo", "foo[baz]")}
         \\
     ;
@@ -2272,6 +2276,14 @@ test "api: @extend leaves out a result its original covers" {
         \\
         \\.l .m {
         \\  v: 5;
+        \\}
+        \\
+        \\:focus.o, .o:focus:nth-child(2n of .p) {
+        \\  u: 6;
+        \\}
+        \\
+        \\.q:before, .r .q:before {
+        \\  t: 7;
         \\}
         \\
         \\a {
