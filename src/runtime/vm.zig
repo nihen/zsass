@@ -9847,7 +9847,11 @@ fn divValues(
     }
     // Numbers written with a slash between them (`1/2`) are still that
     // text when what follows is not a number: `1/2/x`.
-    const lhs_written_slash = lhs_written_as_slash and a.kind() == .list and lhs.kind() == .number and rhs.kind() != .number and !mark_result;
+    const rhs_text_like = switch (rhs.kind()) {
+        .string, .boolean, .nil => true,
+        else => false,
+    };
+    const lhs_written_slash = lhs_written_as_slash and a.kind() == .list and lhs.kind() == .number and rhs_text_like and !mark_result;
     const sa_raw = try valueToArithmeticOperandText(pool, number_pool, alloc, list_pool, color_pool, slash_list_preserve, if (lhs_written_slash) a else lhs);
     defer alloc.free(sa_raw);
     const sb_raw = try valueToArithmeticOperandText(pool, number_pool, alloc, list_pool, color_pool, slash_list_preserve, rhs);
