@@ -306,10 +306,10 @@ pub const Engine = struct {
             // The extender itself is there already; a first result that
             // differs from it (a pseudo-class argument was extended) is new.
             for (derived) |item| {
-                // The extender with a pseudo-class argument extended is
-                // written as much as the extender was.
+                // What comes of a written extender counts as written too:
+                // standing alone it is not trimmed.
                 if (item.original and !sameAsWritten(&item.complex, &entry.complex)) self.entries.items[index].superseded = true;
-                try self.addEntry(entry.targets, item, step_index, false, item.original and entry.written);
+                try self.addEntry(entry.targets, item, step_index, false, entry.written);
             }
         }
     }
@@ -468,12 +468,17 @@ pub const Engine = struct {
         }
         var options: std.ArrayList(?[]const Made) = .empty;
         var any = false;
-        for (pieces) |piece| {
+        for (pieces, 0..) |piece, index| {
             if (piece != .compound) {
                 try options.append(a, null);
                 continue;
             }
-            const extended = try self.extendCompound(a, piece.compound, view);
+            // The official CLI compares a compound's results together with
+            // the combinator that follows, and a selector that ends with a
+            // combinator covers nothing: only a compound followed by a
+            // descendant combinator, or by nothing, has its results trimmed.
+            const tied = index + 1 < pieces.len and pieces[index + 1] == .combinator and pieces[index + 1].combinator != .descendant;
+            const extended = try self.extendCompound(a, piece.compound, view, !tied);
             if (extended != null) any = true;
             try options.append(a, extended);
         }
@@ -513,7 +518,7 @@ pub const Engine = struct {
     /// The results of extending one compound selector: the compound itself
     /// first, then one result per combination of extenders. Null when
     /// nothing in it is extended.
-    fn extendCompound(self: *Engine, a: Allocator, written: Marked, view: View) Error!?[]const Made {
+    fn extendCompound(self: *Engine, a: Allocator, written: Marked, view: View, trim_results: bool) Error!?[]const Made {
         // A pseudo-class whose argument is extended is replaced first; what
         // replaces it can be a target itself.
         var any = false;
@@ -611,7 +616,7 @@ pub const Engine = struct {
         for (results.items, 0..) |made, index| {
             try items.append(a, try makeItem(a, made.pieces, (index == 0 and !self.replace) or made.written_extender, made.newline));
         }
-        const kept = if (self.replace) items.items else try trim(a, items.items);
+        const kept = if (self.replace or !trim_results) items.items else try trim(a, items.items);
         const out = try a.alloc(Made, kept.len);
         for (kept, 0..) |item, index| {
             var written_extender = false;

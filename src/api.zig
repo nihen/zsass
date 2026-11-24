@@ -2429,3 +2429,31 @@ test "api: @extend keeps where a selector came from, and when its rule was enter
         \\
     , css);
 }
+
+test "api: @extend keeps the results of an extender extended by itself" {
+    const alloc = std.testing.allocator;
+    // The results of a compound followed by `>` are not trimmed among
+    // themselves, and what comes of a written extender is not trimmed
+    // where it stands alone.
+    const source =
+        \\.d1 {x: 0}
+        \\.f1.c1 > .k1 {@extend .d1}
+        \\.d1 .m1.f1 {@extend .f1}
+        \\.c2 .t2 {x: 1}
+        \\.c2 + .q2 {@extend %p2 !optional}
+        \\.a2.c2 ~ .k2 .i2 {@extend .c2}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.d1, .f1.c1 > .k1, .f1.c1 > .k1 .c1.m1.f1 > .k1, .f1.c1 > .k1 .c1.m1.f1 > .k1 .c1.m1.f1 > .k1 {
+        \\  x: 0;
+        \\}
+        \\
+        \\.c2 .t2, .a2.c2 ~ .k2 .i2 .t2, .a2.c2 ~ .k2 .a2.i2 ~ .k2 .i2 .t2 {
+        \\  x: 1;
+        \\}
+        \\
+    , css);
+}
