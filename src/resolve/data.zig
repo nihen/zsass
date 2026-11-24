@@ -204,6 +204,8 @@ pub const RuleData = struct {
     prop_namespace_prefix_expr: ?ExprIndex = null,
     /// `<expr>` in `prop-namespace: <expr>`. Null if not applicable.
     prop_namespace_value_expr: ?ExprIndex = null,
+    /// `emit_decl_flag_*` bits for the value in front of the block.
+    prop_namespace_value_flags: u16 = 0,
     /// `selector_kind == .dynamic` -- index into `selector_part_exprs`
     dynamic_parts_start: u32,
     dynamic_parts_count: u32,

@@ -1342,6 +1342,263 @@ test "api: compressed output reads strings and parentheses when it looks for a s
     try std.testing.expectEqualStrings("@supports selector([x=\";\"]:is(.a, .b)){a{x:y}}[x=\";\"]:is(.a,.b){--c: \"d;e\" f g}\n", css);
 }
 
+test "api: compressed output follows the official CLI" {
+    const cases = [_]struct { source: []const u8, css: []const u8 }{
+        // A `/*!` comment stays, without the indentation of its block.
+        .{
+            .source =
+            \\/*! a
+            \\ * b */
+            \\.x { b: c; /*! d */ }
+            \\/* gone */
+            \\@media screen { /*! e */ .y { f: g; } }
+            \\
+            ,
+            .css = "/*! a\n * b */.x{b:c;/*! d */}@media screen{/*! e */.y{f:g}}\n",
+        },
+        // Only a media query list is shortened among at-rule preludes.
+        .{
+            .source =
+            \\@import "b.css" screen and (min-width: 10px);
+            \\@layer a, b;
+            \\@media (width >= 64rem) and (height < 3px), print { a { b: c; } }
+            \\@supports (a: b) or (c: d) { a { b: c; } }
+            \\@container sidebar (min-width: 400px) and (max-width: 700px) { a { b: c; } }
+            \\a:nth-of-type(10n + 1) > b { c: d; }
+            \\@font-face { font-family: x; }
+            \\
+            ,
+            .css = "@import\"b.css\"screen and (min-width: 10px);@layer a, b;@media(width >= 64rem)and (height < 3px),print{a{b:c}}@supports(a: b) or (c: d){a{b:c}}@container sidebar (min-width: 400px) and (max-width: 700px){a{b:c}}a:nth-of-type(10n + 1)>b{c:d}@font-face{font-family:x}\n",
+        },
+        // A value that is one interpolation stays as written in front of
+        // nested properties and after a name made by interpolation.
+        .{
+            .source =
+            \\$color: white;
+            \\$v: calc(0.5px + 1%);
+            \\a {
+            \\  b: #{$color} { c: 1px; }
+            \\  #{"d"}: #{$v};
+            \\}
+            \\
+            ,
+            .css = "a{b:white;b-c:1px;d:calc(0.5px + 1%)}\n",
+        },
+        // A value that is one interpolation stays as written whatever it
+        // holds, and a brace in a comment does not end the interpolation.
+        .{
+            .source =
+            \\$v: 1px, 2px;
+            \\a {
+            \\  b: #{$v};
+            \\  c: #{white};
+            \\  d: #{/* } */ 0.5em};
+            \\  e: #{url(http://a/b), white};
+            \\  f: (#{"0.5em"});
+            \\}
+            \\
+            ,
+            .css = "a{b:1px, 2px;c:white;d:0.5em;e:url(http://a/b), white;f:0.5em}\n",
+        },
+        // The space that ends an escape stays in an import URL.
+        .{
+            .source = "@import url(a\\ );\n@import url(  b.css  );\n",
+            .css = "@import\"a\\ \";@import\"b.css\"\n",
+        },
+        // Comments on one line, and a comment in a custom property whose
+        // name came from interpolation.
+        .{
+            .source =
+            \\@use "sass:string";
+            \\@function s($v) { @return string.unquote("#{$v}"); }
+            \\x {
+            \\  /*! c */ /*! d */
+            \\  y: s(0.5rem);
+            \\}
+            \\a { #{"--x"}: #{"a/*keep*/b"}; }
+            \\
+            ,
+            .css = "x{/*! c *//*! d */y:0.5rem}a{--x:a/*keep*/b}\n",
+        },
+        // A color is written in the shorter of its forms, whichever it had.
+        .{
+            .source =
+            \\@use "sass:color";
+            \\a {
+            \\  b: hsl(40, 70%, 30%);
+            \\  c: rgb(15%, 15%, 15%);
+            \\  d: color.adjust(#abc, $lightness: -7%);
+            \\  e: rgba(204, 204, 204, 0.5);
+            \\  f: rgba(255, 255, 255, 0.2);
+            \\  g: hsl(0, 0%, 100%);
+            \\  h: hsla(24, 20%, 50%, 0.08);
+            \\  i: 1px solid white;
+            \\}
+            \\
+            ,
+            .css = "a{b:rgb(51%,37%,9%);c:hsl(0,0%,15%);d:hsl(210,25%,66.3333333333%);e:hsla(0,0%,80%,.5);f:rgba(255,255,255,.2);g:#fff;h:rgba(60%,48%,40%,.08);i:1px solid #fff}\n",
+        },
+        // The arguments of a function stay as they are, except in a
+        // calculation.
+        .{
+            .source =
+            \\$w: white;
+            \\a {
+            \\  b: linear-gradient(to right, $w, transparent 0.5%);
+            \\  c: translate3d(calc(var(--x) * -2), 0, 0.5px);
+            \\  d: calc(0.375em - var(--w, 0.5em) * 2);
+            \\  e: clamp(0.5px, 0.5vw + 1px, 2px);
+            \\  f: rgb(var(--x), 0.1);
+            \\  g: max(0.5px, 0.25px, var(--x));
+            \\}
+            \\
+            ,
+            .css = "a{b:linear-gradient(to right, white, transparent 0.5%);c:translate3d(calc(var(--x) * -2), 0, 0.5px);d:calc(.375em - var(--w, 0.5em)*2);e:clamp(.5px,.5vw + 1px,2px);f:rgb(var(--x), 0.1);g:max(.5px,.25px,var(--x))}\n",
+        },
+        // A value that is a string stays as it is, and a custom property
+        // whose name comes from an interpolation is an ordinary declaration.
+        .{
+            .source =
+            \\@use "sass:string";
+            \\@function s($v) { @return string.unquote("#{$v}"); }
+            \\@mixin v($name, $value) { #{"--" + $name}: #{$value}; }
+            \\a {
+            \\  b: s(0.875rem);
+            \\  d: url(#{"x"}) 0.5em;
+            \\  @include v(e, var(--f));
+            \\  @include v(g, 0.5em transparent);
+            \\  --h: 0.5em;
+            \\  #{"--i"}: 0.5em, white;
+            \\}
+            \\
+            ,
+            .css = "a{b:0.875rem;d:url(x) .5em;--e:var(--f);--g:0.5em transparent;--h: 0.5em;--i:.5em,#fff}\n",
+        },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const css = try compileSourceToCss(arena.allocator(), case.source, "", &.{}, .{ .output_style = .compressed });
+        try std.testing.expectEqualStrings(case.css, css);
+    }
+}
+
+test "api: compressed output writes a token the way its value says" {
+    const cases = [_]struct { source: []const u8, path: []const u8 = "", css: []const u8 }{
+        // A number that was rounded to be written loses its zero after a
+        // minus sign too; one with ten decimals as they are keeps it. A
+        // string in a list is written as it is, and a color in its
+        // shortest form, worked out before its channels are rounded.
+        .{
+            .source =
+            \\@use "sass:color";
+            \\@function shadow($n) {
+            \\  $val: 0px 0px transparent;
+            \\  @for $i from 1 through $n {
+            \\    $val: #{$val}, #{$i * 0.5}px #aaa;
+            \\  }
+            \\  @return $val;
+            \\}
+            \\a {
+            \\  b: (0.3 - 0.375) * 1em 0.0333333333em -0.5em;
+            \\  c: (0.3 - 0.375) * 1em;
+            \\  d: 0.5 + rem 0.5rem;
+            \\  e: shadow(2);
+            \\  f: 1px solid color.mix(#6f42c1, white, 20.3%);
+            \\  g: color.adjust(#26a69a, $lightness: 54.5%);
+            \\  h: center / 0.4rem 0.5rem, 0.5 / 0.4, 0.5em/1foo-bar;
+            \\  i: 0.5rem (0.5 + rem), -0.075em (0.3 - 0.375) * 1em;
+            \\}
+            \\
+            ,
+            .css = "a{b:-.075em 0.0333333333em -0.5em;c:-.075em;d:0.5rem .5rem;e:0px 0px transparent, 0.5px #aaa,1px #aaa;f:1px solid rgb(88.5364705882%,84.9541176471%,95.0643137255%);g:hsl(174.375,62.7450980392%,94.5%);h:center/0.4rem .5rem,.5/.4,.5em/1foo-bar;i:.5rem 0.5rem,-0.075em -.075em}\n",
+        },
+        // In a calculation kept in a variable, a number an interpolation
+        // put there keeps its zero and one written beside it does not. A
+        // string that reads as a comment is text.
+        .{
+            .source =
+            \\$a: 0.375rem;
+            \\$w: var(--w);
+            \\@function add($x, $y) {
+            \\  @return calc(#{$x} + #{$y});
+            \\}
+            \\$t: calc(
+            \\  #{$a} - 1px -
+            \\    #{$w} * 0.25
+            \\);
+            \\a {
+            \\  b: add($a, $w);
+            \\  c: add($a, 0.5px) 0.5em;
+            \\  d: $t 0.75rem;
+            \\  e: calc(#{$w} * 0.75);
+            \\  e2: calc(#{"var(--x)"} * 0.5) calc(0.1234567891px + #{0.5});
+            \\  f: var(--x, "/") #{"/* rtl:"} var(--y) #{"*/"};
+            \\  g: #{"/* x */"};
+            \\  #{"--h"}: #{0.5em} 0.5em, 0.5em;
+            \\}
+            \\
+            ,
+            .css = "a{b:calc(0.375rem + var(--w));c:calc(0.375rem + 0.5px) .5em;d:calc(0.375rem - 1px - var(--w)*.25) .75rem;e:calc(var(--w)*.75);e2:calc(var(--x)*.5) calc(0.1234567891px + 0.5);f:var(--x, \"/\") /* rtl: var(--y) */;g:/* x */;--h:0.5em .5em,.5em}\n",
+        },
+        // A string and the arguments of a function that is not a
+        // calculation are left alone inside one. An item in brackets is
+        // told apart from a string that reads the same.
+        .{
+            .source =
+            \\$c: calc(#{"var(--w)"} * 0.5 + var(--x, "\\0.5", 0.5px));
+            \\a {
+            \\  b: $c;
+            \\  c: [0.5 0.3] unquote("0.5"), 0.5em/1\26, [0.5/2];
+            \\}
+            \\
+            ,
+            .css = "a{b:calc(var(--w)*.5 + var(--x, \"\\\\0.5\", 0.5px));c:[.5 .3] 0.5,.5em/1\\&,[.5/2]}\n",
+        },
+        // A comment kept as text is copied whole, a color is told apart
+        // from a string that reads the same, and the spaces of a string
+        // inside a calculation do not hide it from its override.
+        .{
+            .source =
+            \\$c: calc(#{0.5px} + var(--x, "a  b") * 0.25);
+            \\a {
+            \\  b: #{"/* ( */"};
+            \\  c: 0.5em rgba(0, 0, 0, 0.5) unquote("rgba(0, 0, 0, 0.5)");
+            \\  c2: white unquote("white") transparent unquote("transparent");
+            \\  d: $c;
+            \\}
+            \\
+            ,
+            .css = "a{b:/* ( */;c:.5em rgba(0,0,0,.5) rgba(0, 0, 0, 0.5);c2:#fff white rgba(0,0,0,0) transparent;d:calc(0.5px + var(--x, \"a  b\")*.25)}\n",
+        },
+        // In plain CSS a hex color with an alpha channel is a color, an
+        // `rgba()` of the stylesheet is not, and a number with ten
+        // decimals keeps its zero.
+        .{
+            .source =
+            \\a {
+            \\  b: #00000040 #abcd;
+            \\  c: 0.1428571429em 0.142857142em;
+            \\  d: rgba(0, 0, 0, 0.25) white;
+            \\}
+            \\
+            ,
+            .path = "plain.css",
+            .css = "a{b:rgba(0,0,0,.2509803922) rgba(170,187,204,.8666666667);c:0.1428571429em .142857142em;d:rgba(0, 0, 0, 0.25) white}\n",
+        },
+    };
+    const alloc = std.testing.allocator;
+    for (cases) |case| {
+        const css = try compileSourceToCss(alloc, case.source, case.path, &.{}, .{ .output_style = .compressed });
+        defer alloc.free(css);
+        try std.testing.expectEqualStrings(case.css, css);
+        // Expanded output never shows what is passed along for it.
+        const expanded = try compileSourceToCss(alloc, case.source, case.path, &.{}, .{});
+        defer alloc.free(expanded);
+        try std.testing.expect(std.mem.indexOfAny(u8, expanded, &.{ 0x01, 0x02, 0x03, 0x04 }) == null);
+    }
+}
+
 test "api: compressed output keeps a comment that is text" {
     const alloc = std.testing.allocator;
     const source =

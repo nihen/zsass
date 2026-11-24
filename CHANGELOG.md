@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- Compressed output keeps `/*!` comments, and a stylesheet does not end
+  with a semicolon.
+- Compressed output leaves the prelude of an at-rule as it is, apart from
+  a media query list: `@layer a, b`, `@supports (a: b) or (c: d)`, and
+  `@container` keep their spaces. `@import` has no space before its URL,
+  and `(width >= 64rem)` keeps the spaces around `>=`.
+- Compressed output writes a color in the shorter of `rgb()` and `hsl()`
+  whichever form it had, as the official CLI does: `hsl(40, 70%, 30%)` is
+  `rgb(51%,37%,9%)`, and `rgba(204, 204, 204, 0.5)` is
+  `hsla(0,0%,80%,.5)`.
+- Compressed output keeps the arguments of a function as they are
+  (`linear-gradient(to right, white, transparent 0.5%)`), except in
+  `calc()` and the other calculations, where numbers lose their leading
+  zero and commas their space. `:nth-child(2n + 1)` keeps its spaces.
+- Compressed output leaves a value that is one unquoted string as it is,
+  shortens a number beside an interpolation, treats a custom property whose
+  name comes from an interpolation (`#{$name}: $value`) as an ordinary
+  declaration, and in plain CSS keeps color names and `rgb()` calls.
+- Compressed output drops the zero of a number that was rounded to be
+  written, after a minus sign as well (`-.075em`), and keeps the zero of
+  one with ten decimals as they are (`0.0333333333em`).
+- Compressed output leaves an unquoted string in a list as it is, and the
+  parts of a value joined by `/` when one of them is not a number
+  (`center/0.4rem`). A string made by an interpolation stays when it
+  reads as a comment.
+- In a calculation kept in a variable or returned by a function, compressed
+  output keeps the zero of a number an interpolation put there
+  (`calc(0.375rem + var(--w))`) and drops the zero of one written beside it.
+- Compressed output picks the shorter of `rgb()` and `hsl()` from the
+  channels of a color before they are rounded, so the last digit matches.
+- In plain CSS, compressed output shortens the `rgba()` a hex color with an
+  alpha channel becomes.
 - `@extend` with the target repeated in a selector leaves out a result
   that another result covers (`.g .f .f:hover` next to `.g .f .f`), as the
   official CLI does after each `@extend` rule for a list of up to 100

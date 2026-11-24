@@ -1896,6 +1896,21 @@ fn isCssCalculationFunctionName(name: []const u8) bool {
 
 /// Check if a value string contains CSS calculation functions (calc, min, max, clamp)
 /// that should not be evaluated as Sass expressions.
+/// Functions whose arguments are a calculation. Compressed output
+/// shortens these; the arguments of any other function are kept as they
+/// are written in expanded output.
+pub fn isCalculationFunctionName(name: []const u8) bool {
+    const names = [_][]const u8{
+        "calc",  "clamp", "min",  "max",  "round", "mod",   "rem", "sin",
+        "cos",   "tan",   "asin", "acos", "atan",  "atan2", "pow", "sqrt",
+        "hypot", "log",   "exp",  "abs",  "sign",
+    };
+    for (names) |candidate| {
+        if (std.ascii.eqlIgnoreCase(name, candidate)) return true;
+    }
+    return false;
+}
+
 pub fn containsCalcFunction(text: []const u8) bool {
     // A calculation function requires `name(`; no parenthesis, no match.
     if (std.mem.findScalar(u8, text, '(') == null) return false;
