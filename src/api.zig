@@ -2280,3 +2280,31 @@ test "api: @extend leaves out a result its original covers" {
         \\
     , css);
 }
+
+test "api: @extend keeps an extender that is more specific than what covers it" {
+    const alloc = std.testing.allocator;
+    // `.d.g` extends `.d`, which extends `.f`. `.d` covers `.d.g` but is
+    // less specific than the extender, so both stay. `.e.d` is as specific
+    // as `.d.g`, so `.e.d.g` goes.
+    const source =
+        \\.f {x: 0}
+        \\.d.g {@extend .d}
+        \\.d {@extend .f}
+        \\.h.e {y: 1}
+        \\.i.k {@extend .i}
+        \\.i {@extend .h}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.f, .d, .d.g {
+        \\  x: 0;
+        \\}
+        \\
+        \\.h.e, .e.i {
+        \\  y: 1;
+        \\}
+        \\
+    , css);
+}

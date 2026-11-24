@@ -3618,6 +3618,11 @@ pub const ApplyState = struct {
             for (all_generated_applied_exts.items) |*applied| applied.deinit(self.allocator);
             all_generated_applied_exts.deinit(self.allocator);
         }
+        // For every generated selector, the most specific of the extenders
+        // that went into it. The official CLI removes a selector another
+        // one covers only when that one is at least as specific as this.
+        var all_generated_source_spec: std.ArrayList(specificity.Specificity) = .empty;
+        defer all_generated_source_spec.deinit(self.allocator);
 
         // Per-original generated selectors (to preserve insertion order).
         // generated_per_orig[i] holds generated selectors for selector_list[i].
@@ -4462,6 +4467,20 @@ pub const ApplyState = struct {
                 else
                     try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, self.extensions.items.len);
                 try all_generated_applied_exts.append(self.allocator, applied);
+                var source_spec: specificity.Specificity = .{ .a = 0, .b = 0, .c = 0 };
+                var applied_it = applied.iterator(.{});
+                while (applied_it.next()) |applied_i| {
+                    if (applied_i >= self.extensions.items.len) continue;
+                    // Which of its extenders went in is not kept; the
+                    // least specific one is sure to be no more than that.
+                    var least: ?specificity.Specificity = null;
+                    for (self.extensions.items[applied_i].extender.selectors.items) |*extender| {
+                        const extender_spec = specificity.complexSpecificity(extender);
+                        if (least == null or !specificityGte(extender_spec, least.?)) least = extender_spec;
+                    }
+                    if (least) |spec| source_spec = specificityMax(source_spec, spec);
+                }
+                try all_generated_source_spec.append(self.allocator, source_spec);
             }
 
             // Historical ordering rule: preserve append-at-end by default, but keep branch-local
@@ -4735,6 +4754,7 @@ pub const ApplyState = struct {
             &all_generated_first_pass,
             &all_generated_orig_group,
             &all_generated_eval_orders,
+            &all_generated_source_spec,
         );
 
         var fp_i: usize = all_generated.items.len;
@@ -4765,6 +4785,7 @@ pub const ApplyState = struct {
                 var removed = all_generated.orderedRemove(fp_i);
                 removed.deinit();
                 _ = all_generated_first_pass.orderedRemove(fp_i);
+                if (fp_i < all_generated_source_spec.items.len) _ = all_generated_source_spec.orderedRemove(fp_i);
                 if (fp_i < all_generated_orig_group.items.len) _ = all_generated_orig_group.orderedRemove(fp_i);
                 if (fp_i < all_generated_eval_orders.items.len) _ = all_generated_eval_orders.orderedRemove(fp_i);
                 if (fp_i < all_generated_applied_exts.items.len) {
@@ -4795,6 +4816,10 @@ pub const ApplyState = struct {
                     if (complexOnlyAddsNotPseudos(other, gen)) continue;
                     if (complexFirstCompoundSpecificityCarrierKeepsGenerated(other, gen)) continue;
                     if (narrowerKeepsFinalTrimStatefulExtras(other, gen)) continue;
+                    // Not for one less specific than what it came from.
+                    if (gen_i < all_generated_source_spec.items.len and gen.components.items.len == 1 and
+                        !specificityGte(complexSpecificity(other), all_generated_source_spec.items[gen_i]) and
+                        selector_mod.complexIsSuperSelector(other, gen)) continue;
                     remove_gen = true;
                     break;
                 }
@@ -4802,6 +4827,7 @@ pub const ApplyState = struct {
                     var removed = all_generated.orderedRemove(gen_i);
                     removed.deinit();
                     _ = all_generated_first_pass.orderedRemove(gen_i);
+                    if (gen_i < all_generated_source_spec.items.len) _ = all_generated_source_spec.orderedRemove(gen_i);
                     if (gen_i < all_generated_orig_group.items.len) _ = all_generated_orig_group.orderedRemove(gen_i);
                     if (gen_i < all_generated_eval_orders.items.len) _ = all_generated_eval_orders.orderedRemove(gen_i);
                     if (gen_i < all_generated_applied_exts.items.len) {

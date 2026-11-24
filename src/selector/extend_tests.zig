@@ -914,7 +914,7 @@ test "trimWithMetadata keeps cross-group first-pass single-compound focus varian
     try orig_groups.append(allocator, 1);
     try eval_orders.append(allocator, 0);
 
-    try trimWithMetadata(allocator, &list, &first_pass, &orig_groups, &eval_orders);
+    try trimWithMetadata(allocator, &list, &first_pass, &orig_groups, &eval_orders, null);
 
     try std.testing.expectEqual(@as(usize, 2), list.items.len);
     const css = try complexSelectorToCss(allocator, &list.items[0]);
@@ -953,7 +953,7 @@ test "trimWithMetadata trims cross-group first-pass descendant focus variant" {
     try orig_groups.append(allocator, 1);
     try eval_orders.append(allocator, 0);
 
-    try trimWithMetadata(allocator, &list, &first_pass, &orig_groups, &eval_orders);
+    try trimWithMetadata(allocator, &list, &first_pass, &orig_groups, &eval_orders, null);
 
     try std.testing.expectEqual(@as(usize, 1), list.items.len);
     const css = try complexSelectorToCss(allocator, &list.items[0]);
@@ -992,7 +992,7 @@ test "trimWithMetadata keeps cross-group first-pass descendant focus when leadin
     try orig_groups.append(allocator, 1);
     try eval_orders.append(allocator, 0);
 
-    try trimWithMetadata(allocator, &list, &first_pass, &orig_groups, &eval_orders);
+    try trimWithMetadata(allocator, &list, &first_pass, &orig_groups, &eval_orders, null);
 
     try std.testing.expectEqual(@as(usize, 2), list.items.len);
 }

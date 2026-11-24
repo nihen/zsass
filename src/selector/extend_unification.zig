@@ -1862,9 +1862,15 @@ pub fn trimWithMetadata(
     is_first_pass_list: ?*std.ArrayList(bool),
     orig_groups_list: ?*std.ArrayList(usize),
     eval_orders_list: ?*std.ArrayList(u32),
+    /// For every selector, the most specific of what it came from, or
+    /// nothing. A selector is not removed for one that covers it but is
+    /// less specific than that: the official CLI keeps `.d.g` beside `.d`
+    /// when `.d.g` is an extender.
+    source_specs_list: ?*std.ArrayList(specificity.Specificity),
 ) !void {
     _ = allocator;
     if (selectors.items.len <= 1) return;
+    const source_specs: []const specificity.Specificity = if (source_specs_list) |list| list.items else &.{};
     const is_first_pass = if (is_first_pass_list) |list| list.items else &.{};
     const orig_groups = if (orig_groups_list) |list| list.items else &.{};
     const eval_orders = if (eval_orders_list) |list| list.items else &.{};
@@ -1879,6 +1885,14 @@ pub fn trimWithMetadata(
         if (removal_reason[i] != .none) continue;
         for (0..len) |j| {
             if (i == j or removal_reason[j] != .none) continue;
+            // Only where `j` covers `i` the way the official CLI sees it;
+            // the other removals below go by their own notions of broader.
+            // This is applied to a selector of one compound, where what
+            // went into it is plain to see.
+            const j_specific_enough = i >= source_specs.len or
+                selectors.items[i].components.items.len != 1 or
+                specificityGte(complexSpecificity(&selectors.items[j]), source_specs[i]) or
+                !selector_mod.complexIsSuperSelector(&selectors.items[j], &selectors.items[i]);
             // Remove exact duplicates (keep the first occurrence)
             if (complexSelectorEql(&selectors.items[i], &selectors.items[j])) {
                 if (i < eval_orders.len and j < eval_orders.len and eval_orders[i] != eval_orders[j]) {
@@ -1913,7 +1927,7 @@ pub fn trimWithMetadata(
                 const same_group_both_fp = both_first_pass and
                     i < orig_groups.len and j < orig_groups.len and
                     orig_groups[i] == orig_groups[j];
-                if (!cross_group and !same_group_both_fp and
+                if (j_specific_enough and !cross_group and !same_group_both_fp and
                     complexIsSupersededBy(&selectors.items[i], &selectors.items[j]))
                 {
                     if ((complexHasSiblingCombinator(&selectors.items[j]) or
@@ -1930,7 +1944,7 @@ pub fn trimWithMetadata(
             // Remove i if j is a broader (more general) selector than i.
             // Exception: keep i when its last compound has extra pseudo-classes
             // that j's doesn't (preserves specificity for stateful matching).
-            if (complexIsBroaderThan(&selectors.items[j], &selectors.items[i])) {
+            if (j_specific_enough and complexIsBroaderThan(&selectors.items[j], &selectors.items[i])) {
                 const both_first_pass = blk_bfp: {
                     if (i >= is_first_pass.len or j >= is_first_pass.len) break :blk_bfp false;
                     break :blk_bfp is_first_pass[i] and is_first_pass[j];
@@ -2062,6 +2076,9 @@ pub fn trimWithMetadata(
         idx -= 1;
         if (removal_reason[idx] != .none) {
             var removed = selectors.orderedRemove(idx);
+            if (source_specs_list) |list| {
+                if (idx < list.items.len) _ = list.orderedRemove(idx);
+            }
             removed.deinit();
             if (is_first_pass_list) |list| {
                 _ = list.orderedRemove(idx);
@@ -2103,6 +2120,7 @@ pub fn trim(
         selectors,
         if (is_first_pass_copy) |*list| list else null,
         if (orig_groups_copy) |*list| list else null,
+        null,
         null,
     );
 }

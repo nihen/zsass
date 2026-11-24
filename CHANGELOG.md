@@ -78,6 +78,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `@extend` leaves out a result that its original selector covers when the
   extender has the target itself and is no more specific than the original:
   `b.c {@extend .c}` adds nothing to `:focus.c`.
+- `@extend` keeps an extender of one compound that another result covers
+  when that result is less specific than the extender: with
+  `.d.g {@extend .d}` and `.d {@extend .f}`, `.f` becomes `.f, .d, .d.g`.
 
 ## 0.4.2 (2026-11-23)
 
