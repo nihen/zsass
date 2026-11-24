@@ -2190,6 +2190,46 @@ test "api: @extend is not applied again to what it produced" {
     , css);
 }
 
+test "api: is-superselector follows the official CLI on :not(), :is(), and the universal selector" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\@use "sass:selector";
+        \\@function s($a, $b) {
+        \\  @return selector.is-superselector($a, $b);
+        \\}
+        \\a {
+        \\  not: s(":not(.c)", ".d .e") s(":not(.c)", "b:not(.c)") s(":not(.c.d)", ":not(.c)") s(":not(.c, .d)", ":not(.c)") s(":not(.c, .d)", ":not(.c):not(.d)") s(":not(a)", "b") s(":not(.c)", ":not(.c)::before");
+        \\  is: s(":is(.c)", ":any(.c)") s(":is(.c, .d)", ":any(.c, .d)") s(":is(.c, .d)", ".e:is(.c, .d)") s(".c", ":is(.c, .d)") s(".c", ":is(.c.d, .c.e)") s(".d", ":is(.c .d)") s("a", ":is(a.c)");
+        \\  nth: s(".c", ":nth-child(2n of .c.d)") s(".c", ":nth-child(2n of .c, .d)");
+        \\  universal: s("*", ".c") s("*.c", ".c") s("*.c", "a.c") s("*.c", ".c.d") s("*:is(.c)", ".c") s("*:hover", ":hover");
+        \\  namespace: s(":not(*|a)", "a") s(":not(ns|*)", "ns|a") s(":not(#i)", "#j");
+        \\}
+        \\.a .a {
+        \\  x: y;
+        \\}
+        \\.c, :is(.c, .d) {
+        \\  @extend .a;
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\a {
+        \\  not: false true true false true true false;
+        \\  is: true false true false true true true;
+        \\  nth: true false;
+        \\  universal: true false true true true false;
+        \\  namespace: true false true;
+        \\}
+        \\
+        \\.a .a, :is(.c, .d) .a, .a :is(.c, .d), :is(.c, .d) :is(.c, .d) {
+        \\  x: y;
+        \\}
+        \\
+    , css);
+}
+
 test "api: @extend leaves out a result its original covers" {
     const alloc = std.testing.allocator;
     // An extender that has the target itself only adds to the compound.
