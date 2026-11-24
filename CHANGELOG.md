@@ -56,6 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never freed. Each compile now runs in an arena of its own on top of the
   given allocator, as the CLI does, and only the result is allocated with
   the allocator itself.
+- `selector.is-superselector()` follows the official CLI on `:not()`
+  (`:not(.c.d)` covers `:not(.c)`, `:not(a)` covers `b`, nothing without a
+  `:not()` of its own is covered otherwise), on `:is()` and its kin (a list
+  is covered only when every selector in it is; two of different names are
+  not compared list against list), and on `*` beside other selectors
+  (`*.c` covers `a.c`, not `.c`).
 
 ## 0.4.2 (2026-11-23)
 

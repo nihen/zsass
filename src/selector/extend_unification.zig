@@ -1990,7 +1990,12 @@ pub fn trimWithMetadata(
                     // of i. Applies to both single-compound and multi-compound
                     // selectors (e.g. `.b:focus` supersedes `.b:focus:not(:hover)`
                     // generated from different original selector list members).
-                    if (selector_mod.complexIsSuperSelector(&selectors.items[j], &selectors.items[i])) {
+                    const covers = covers: {
+                        selector_mod.not_covers_by_overlap = true;
+                        defer selector_mod.not_covers_by_overlap = false;
+                        break :covers selector_mod.complexIsSuperSelector(&selectors.items[j], &selectors.items[i]);
+                    };
+                    if (covers) {
                         removal_reason[i] = .broader;
                         break;
                     }

@@ -2276,16 +2276,13 @@ pub fn isSuperSelector(super_sel: *const SelectorList, sub: *const SelectorList)
 }
 
 pub fn complexIsSuperSelector(super_sel: *const ComplexSelector, sub: *const ComplexSelector) bool {
-    if (complexNotIsSuperSelector(super_sel, sub)) |result| {
-        return result;
-    }
-
     if (transparentPseudoPairIsSuperSelector(super_sel, sub)) |result| {
         return result;
     }
 
+    // Otherwise the compounds are still compared.
     if (subSelectorSubsetPseudo(super_sel, sub)) |result| {
-        return result;
+        if (result) return true;
     }
 
     if (transparentPseudoSelector(super_sel, sub)) |ps| {
@@ -2294,7 +2291,8 @@ pub fn complexIsSuperSelector(super_sel: *const ComplexSelector, sub: *const Com
                 if (complexIsSuperSelector(&inner, sub)) return true;
             }
         }
-        return false;
+        // The compounds are still compared: one of the same name in the
+        // other selector is covered list against list.
     }
 
     const super_parts = decomposeComplexSelector(super_sel) orelse return false;
@@ -2338,31 +2336,11 @@ pub fn complexIsSuperSelector(super_sel: *const ComplexSelector, sub: *const Com
 fn transparentPseudoPairIsSuperSelector(super_sel: *const ComplexSelector, sub: *const ComplexSelector) ?bool {
     const super_ps = transparentPseudoOnly(super_sel) orelse return null;
     const sub_ps = transparentPseudoOnly(sub) orelse return null;
-    if (!transparentSelectorPseudoNamesComparableForSuperselector(super_ps.name, sub_ps.name)) {
-        // Both complexes are only :is/:where/:matches/:any. Without this early
-        // answer, compound matching would spuriously relate :is() to :any().
-        return false;
-    }
+    // Two of the same name are compared list against list. Two of
+    // different names go the ordinary way: `:is(.c)` covers `:any(.c)`
+    // because `.c` does, and `:is(.c, .d)` does not cover `:any(.c, .d)`.
+    if (!std.ascii.eqlIgnoreCase(super_ps.name, sub_ps.name)) return null;
     return isSuperSelector(super_ps.selector.?, sub_ps.selector.?);
-}
-
-/// True when both sides are the same pseudo name, or both are unprefixed
-/// :is / :where / :matches (matching semantics align; specificity is ignored).
-/// Vendor-prefixed names only pair with an identical string; :any is excluded
-/// so :is and :any are not treated as interchangeable here.
-fn transparentSelectorPseudoNamesComparableForSuperselector(a: []const u8, b: []const u8) bool {
-    if (std.ascii.eqlIgnoreCase(a, b)) return true;
-    const ba = pseudoBaseName(a);
-    const bb = pseudoBaseName(b);
-    if (!std.mem.eql(u8, a, ba)) return false;
-    if (!std.mem.eql(u8, b, bb)) return false;
-    return isCanonicalTransparentSelectorPseudoBase(ba) and isCanonicalTransparentSelectorPseudoBase(bb);
-}
-
-fn isCanonicalTransparentSelectorPseudoBase(base: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(base, "is") or
-        std.ascii.eqlIgnoreCase(base, "where") or
-        std.ascii.eqlIgnoreCase(base, "matches");
 }
 
 fn transparentPseudoSelector(super_sel: *const ComplexSelector, sub: *const ComplexSelector) ?PseudoSelector {
@@ -2423,87 +2401,6 @@ fn isTransparentSelectorPseudo(name: []const u8) bool {
         std.ascii.eqlIgnoreCase(base, "where") or
         std.ascii.eqlIgnoreCase(base, "matches") or
         std.ascii.eqlIgnoreCase(base, "any");
-}
-
-const NotCompoundInfo = struct {
-    name: []const u8,
-    selectors: SelectorList,
-
-    fn deinit(self: *NotCompoundInfo) void {
-        self.selectors.deinit();
-    }
-};
-
-fn complexNotIsSuperSelector(super_sel: *const ComplexSelector, sub: *const ComplexSelector) ?bool {
-    const super_not = aggregateNotCompound(std.heap.page_allocator, super_sel) catch return null;
-    if (super_not == null) return null;
-    var super_info = super_not.?;
-    defer super_info.deinit();
-
-    const sub_not = aggregateNotCompound(std.heap.page_allocator, sub) catch return false;
-    if (sub_not) |info| {
-        var sub_info = info;
-        defer sub_info.deinit();
-        if (!std.mem.eql(u8, super_info.name, sub_info.name)) return false;
-        return isSuperSelector(&sub_info.selectors, &super_info.selectors);
-    }
-
-    return !complexCouldMatchAnyNotSelector(&super_info.selectors, sub);
-}
-
-fn aggregateNotCompound(allocator: std.mem.Allocator, complex: *const ComplexSelector) !?NotCompoundInfo {
-    if (complex.components.items.len != 1) return null;
-    const compound = switch (complex.components.items[0]) {
-        .compound => |c| c,
-        .combinator => return null,
-    };
-    if (compound.simple_selectors.items.len == 0) return null;
-
-    var result = SelectorList.init(allocator);
-    errdefer result.deinit();
-
-    var not_name: ?[]const u8 = null;
-    for (compound.simple_selectors.items) |simple| {
-        const pseudo = switch (simple) {
-            .pseudo_class => |ps| ps,
-            else => return null,
-        };
-        if (!std.ascii.eqlIgnoreCase(pseudoBaseName(pseudo.name), "not")) return null;
-        const inner = pseudo.selector orelse return null;
-
-        if (not_name == null) {
-            not_name = pseudo.name;
-        } else if (!std.mem.eql(u8, not_name.?, pseudo.name)) {
-            return null;
-        }
-
-        for (inner.selectors.items) |inner_complex| {
-            try result.selectors.append(allocator, try inner_complex.clone(allocator));
-        }
-    }
-
-    return .{
-        .name = not_name.?,
-        .selectors = result,
-    };
-}
-
-fn complexCouldMatchAnyNotSelector(not_selectors: *const SelectorList, sub: *const ComplexSelector) bool {
-    for (not_selectors.selectors.items) |excluded| {
-        if (complexIsSuperSelector(&excluded, sub) or complexIsSuperSelector(sub, &excluded)) {
-            return true;
-        }
-        if (complexesCouldOverlap(&excluded, sub)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-fn complexesCouldOverlap(a: *const ComplexSelector, b: *const ComplexSelector) bool {
-    const a_compound = singleCompoundFromComplex(a) orelse return false;
-    const b_compound = singleCompoundFromComplex(b) orelse return false;
-    return compoundsCouldOverlap(a_compound, b_compound);
 }
 
 fn compoundsCouldOverlap(a: CompoundSelector, b: CompoundSelector) bool {
@@ -2678,12 +2575,20 @@ pub fn compoundIsSuperSelector(super_sel: CompoundSelector, sub: CompoundSelecto
         )) return false;
     }
 
+    // `*` alone covers any compound. With something else beside it, it is
+    // a simple selector the other compound has to have as well.
+    if (super_sel.simple_selectors.items.len == 1 and super_sel.simple_selectors.items[0] == .universal) return true;
+
     // Super selectors before and after a pseudo-element must stay on the same
     // side of that pseudo-element in the sub selector.
     const super_split = super_pseudo.index orelse super_sel.simple_selectors.items.len;
     const sub_split = sub_pseudo.index orelse sub.simple_selectors.items.len;
 
     for (super_sel.simple_selectors.items[0..super_split]) |super_ss| {
+        if (super_ss == .universal) {
+            if (!universalHasSimpleOfItsOwn(super_sel.simple_selectors.items[0..super_split], sub.simple_selectors.items[0..sub_split])) return false;
+            continue;
+        }
         if (!compoundContainsSuperSimpleInRange(super_ss, sub, 0, sub_split)) return false;
     }
 
@@ -2695,6 +2600,33 @@ pub fn compoundIsSuperSelector(super_sel: CompoundSelector, sub: CompoundSelecto
     return true;
 }
 
+/// `*` beside other simple selectors covers a compound that has a simple
+/// selector left for it, one that none of the others is matched with
+/// directly: `*.c` covers `a.c` and `.c.d`, not `.c`. A pseudo-class that
+/// takes a selector looks at the whole compound and takes none.
+fn universalHasSimpleOfItsOwn(super_simples: []const SimpleSelector, sub_simples: []const SimpleSelector) bool {
+    for (sub_simples) |sub_ss| {
+        var taken = false;
+        for (super_simples) |other| {
+            switch (other) {
+                .universal => continue,
+                .pseudo_class => |ps| if (ps.selector != null) continue,
+                else => {},
+            }
+            const matched = if (other == .type_selector)
+                sub_ss == .type_selector and typeSelectorIsSuper(other.type_selector, sub_ss.type_selector)
+            else
+                simpleSelectorEqlForSuper(other, sub_ss);
+            if (matched) {
+                taken = true;
+                break;
+            }
+        }
+        if (!taken) return true;
+    }
+    return false;
+}
+
 fn compoundContainsSuperSimple(super_ss: SimpleSelector, sub: CompoundSelector) bool {
     return compoundContainsSuperSimpleInRange(super_ss, sub, 0, sub.simple_selectors.items.len);
 }
@@ -2702,6 +2634,14 @@ fn compoundContainsSuperSimple(super_ss: SimpleSelector, sub: CompoundSelector) 
 fn compoundContainsSuperSimpleInRange(super_ss: SimpleSelector, sub: CompoundSelector, start: usize, end: usize) bool {
     if (transparentPseudoSimple(super_ss)) |ps| {
         if (transparentSuperSimpleMatchesRange(ps, sub, start, end)) return true;
+        // One of the same name in the compound, list against list.
+        for (sub.simple_selectors.items[start..end]) |sub_ss| {
+            const sub_ps = transparentPseudoSimple(sub_ss) orelse continue;
+            if (!std.ascii.eqlIgnoreCase(ps.name, sub_ps.name)) continue;
+            if (isSuperSelector(ps.selector.?, sub_ps.selector.?)) return true;
+        }
+        // Reading the same is not enough under another name.
+        return false;
     }
 
     if (super_ss == .pseudo_class) {
@@ -2711,33 +2651,50 @@ fn compoundContainsSuperSimpleInRange(super_ss: SimpleSelector, sub: CompoundSel
         }
     }
 
-    switch (super_ss) {
-        .universal => return true,
-        .type_selector => |super_name| {
-            const super_ns = parseNs(super_name);
-            if (super_ns.kind == .any and std.mem.eql(u8, super_ns.name, "*")) {
-                return true;
-            }
-            for (sub.simple_selectors.items[start..end]) |sub_ss| {
-                switch (sub_ss) {
-                    .type_selector => |sub_name| {
-                        if (typeSelectorIsSuper(super_name, sub_name)) return true;
-                    },
-                    else => {},
-                }
-            }
-            return false;
-        },
-        else => {
-            for (sub.simple_selectors.items[start..end]) |sub_ss| {
-                if (simpleSelectorEqlForSuper(super_ss, sub_ss)) return true;
-                if (transparentPseudoSimple(sub_ss)) |ps| {
-                    if (transparentSubSimpleMatches(super_ss, ps)) return true;
-                }
-            }
-            return false;
-        },
+    for (sub.simple_selectors.items[start..end]) |sub_ss| {
+        switch (super_ss) {
+            // Among the simple selectors of a compound,
+            // `compoundIsSuperSelector` sees to `*`.
+            .universal => return true,
+            .type_selector => |super_name| {
+                const super_ns = parseNs(super_name);
+                if (super_ns.kind == .any and std.mem.eql(u8, super_ns.name, "*")) return true;
+                if (sub_ss == .type_selector and typeSelectorIsSuper(super_name, sub_ss.type_selector)) return true;
+            },
+            else => if (simpleSelectorEqlForSuper(super_ss, sub_ss)) return true,
+        }
+        // A selector the compound takes as an argument narrows it down:
+        // `.c` covers `:is(.c.d)` and `:nth-child(2n of .c)`.
+        if (subselectorPseudoSimple(sub_ss)) |ps| {
+            if (transparentSubSimpleMatches(super_ss, ps)) return true;
+        }
     }
+    return false;
+}
+
+/// `:is()` and its kin, and `:nth-child()` with a selector after `of`.
+fn subselectorPseudoSimple(ss: SimpleSelector) ?PseudoSelector {
+    return switch (ss) {
+        .pseudo_class => |ps| if (ps.selector != null and (isTransparentSelectorPseudo(ps.name) or isNthWithOfPseudo(ps.name))) ps else null,
+        else => null,
+    };
+}
+
+/// Set while the selectors `@extend` made are thinned out in
+/// `extend_unification`: that step was shaped around an older reading of
+/// `:not()`, which asks whether the compound could match what `:not()`
+/// excludes, and removes too much with the reading of the official CLI.
+pub threadlocal var not_covers_by_overlap: bool = false;
+
+fn notSuperSimpleMatchesRangeByOverlap(super_ps: PseudoSelector, sub: CompoundSelector, start: usize, end: usize) bool {
+    const selectors = super_ps.selector orelse return false;
+    var sub_range = cloneCompoundRange(std.heap.page_allocator, sub, start, end) catch return false;
+    defer sub_range.deinit();
+    for (selectors.selectors.items) |inner_complex| {
+        const inner_compound = singleCompoundFromComplex(&inner_complex) orelse return false;
+        if (compoundsCouldOverlap(inner_compound, sub_range)) return false;
+    }
+    return true;
 }
 
 fn notSuperSimpleMatchesRange(
@@ -2746,13 +2703,40 @@ fn notSuperSimpleMatchesRange(
     start: usize,
     end: usize,
 ) bool {
+    // `:not(L)` covers a compound when, for every selector of L, the
+    // compound has a `:not()` of its own with a selector that covers it:
+    // `:not(.c.d)` covers `:not(.c)`, and `:not(.c, .d)` covers
+    // `:not(.c):not(.d)` but not `:not(.c)`. What else the compound has
+    // does not count, as in the official CLI.
+    // A type selector or an id the compound has rules out a different
+    // one: `:not(a)` covers `b`.
+    if (not_covers_by_overlap) return notSuperSimpleMatchesRangeByOverlap(super_ps, sub, start, end);
     const selectors = super_ps.selector orelse return false;
-    var sub_range = cloneCompoundRange(std.heap.page_allocator, sub, start, end) catch return false;
-    defer sub_range.deinit();
-
-    for (selectors.selectors.items) |inner_complex| {
-        const inner_compound = singleCompoundFromComplex(&inner_complex) orelse return false;
-        if (compoundsCouldOverlap(inner_compound, sub_range)) return false;
+    for (selectors.selectors.items) |*inner_complex| {
+        var covered = false;
+        if (singleCompoundFromComplex(inner_complex)) |inner_compound| {
+            for (inner_compound.simple_selectors.items) |inner_ss| {
+                for (sub.simple_selectors.items[start..end]) |sub_ss| {
+                    const same_kind = (inner_ss == .type_selector and sub_ss == .type_selector) or (inner_ss == .id and sub_ss == .id);
+                    if (same_kind and !simpleSelectorEqlForSuper(inner_ss, sub_ss)) covered = true;
+                }
+            }
+        }
+        if (covered) continue;
+        for (sub.simple_selectors.items[start..end]) |sub_ss| {
+            if (sub_ss != .pseudo_class) continue;
+            const sub_ps = sub_ss.pseudo_class;
+            if (!std.ascii.eqlIgnoreCase(pseudoBaseName(sub_ps.name), "not")) continue;
+            const sub_selectors = sub_ps.selector orelse continue;
+            for (sub_selectors.selectors.items) |*sub_complex| {
+                if (complexIsSuperSelector(sub_complex, inner_complex)) {
+                    covered = true;
+                    break;
+                }
+            }
+            if (covered) break;
+        }
+        if (!covered) return false;
     }
     return true;
 }
@@ -2782,12 +2766,16 @@ fn transparentSuperSimpleMatchesRange(
 }
 
 fn transparentSubSimpleMatches(super_ss: SimpleSelector, sub_ps: PseudoSelector) bool {
+    // Every selector of the list has to be covered: `.c` covers `:is(.c)`
+    // and `:is(.c.d)`, not `:is(.c, .d)`.
     const selectors = sub_ps.selector orelse return false;
+    if (selectors.selectors.items.len == 0) return false;
     for (selectors.selectors.items) |inner_complex| {
-        const inner_compound = singleCompoundFromComplex(&inner_complex) orelse continue;
-        if (compoundContainsSuperSimple(super_ss, inner_compound)) return true;
+        const parts = decomposeComplexSelector(&inner_complex) orelse return false;
+        if (parts.compound_count == 0) return false;
+        if (!compoundContainsSuperSimple(super_ss, parts.compounds[parts.compound_count - 1])) return false;
     }
-    return false;
+    return true;
 }
 
 fn cloneCompoundRange(
