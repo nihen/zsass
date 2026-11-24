@@ -8018,6 +8018,12 @@ pub const Parser = struct {
                 }
                 if (depth != 0) return error.SyntaxError;
             } else if (next.tag == .ident or next.tag == .number) {
+                // A signed number is the right side of `+` or `-`, as
+                // after an interpolation: `x+1` is `x1`.
+                if (next.tag == .number) {
+                    const number_text = next.slice(self.source);
+                    if (number_text.len > 0 and (number_text[0] == '+' or number_text[0] == '-')) break;
+                }
                 span_end = next.span.end;
                 self.advance();
             } else {

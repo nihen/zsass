@@ -1571,6 +1571,28 @@ test "api: compressed output writes a token the way its value says" {
             ,
             .css = "a{b:/* ( */;c:.5em rgba(0,0,0,.5) rgba(0, 0, 0, 0.5);c2:#fff white rgba(0,0,0,0) transparent;d:calc(0.5px + var(--x, \"a  b\")*.25)}\n",
         },
+        // A string given to a calculation function is written as it is,
+        // and so is what an interpolation put into a calculation written
+        // in the declaration itself, whatever parentheses and spaces the
+        // declaration ends up with.
+        .{
+            .source =
+            \\$a: 0.375rem;
+            \\$s: #{0.875}rem;
+            \\@mixin c($w) {
+            \\  left: calc(50% - (#{$w} * 0.5));
+            \\}
+            \\a {
+            \\  b: clamp(13px, $s, 22px) min($s, 0.5px);
+            \\  c: calc(#{$a}*2 + 0.5px);
+            \\  d: calc(0.5px + #{$a}) 0.5em;
+            \\  e: clamp(0.5px, 0.5vw + 1px, 2px);
+            \\  @include c(1em);
+            \\}
+            \\
+            ,
+            .css = "a{b:clamp(13px,0.875rem,22px) min(0.875rem,.5px);c:calc(0.375rem*2 + .5px);d:calc(.5px + 0.375rem) .5em;e:clamp(.5px,.5vw + 1px,2px);left:calc(50% - 1em*.5)}\n",
+        },
         // In plain CSS a hex color with an alpha channel is a color, an
         // `rgba()` of the stylesheet is not, and a number with ten
         // decimals keeps its zero.
@@ -1677,6 +1699,60 @@ test "api: compressed output drops an empty rule without its enclosing block" {
     const css = try compileSourceToCss(alloc, src, "", &.{}, .{ .output_style = .compressed });
     defer alloc.free(css);
     try std.testing.expectEqualStrings("@media print{.w a{b:c}}@media print{a{b:c}}e{f:g}k{l:url(a;b);n:o}\n", css);
+}
+
+test "api: numbers written with a slash follow the parentheses the official CLI sees" {
+    const alloc = std.testing.allocator;
+    // Inside parentheses `1/2` is a division; a call and brackets pass
+    // that on. The second item of a space-separated list ends it for the
+    // rest of the parentheses, and the list is read again from its first
+    // item when that item was simple.
+    const source =
+        \\a {
+        \\  b: foo(1/2/x) (foo(1/2/x)) (foo(1/2/x) b);
+        \\  c: (a 1/2/x) (1/2/x a) (1/2/x a 1/2/y);
+        \\  d: (1/2/x foo(1/2/y)) (1+2 foo(1/2/y));
+        \\  e: (a (1/2/x)) (a (b 1/2/x)) ((a 1/2/x) 1/2/y);
+        \\  f: [1/2/x] ([1/2/x]) (a [1/2/x]);
+        \\  g: (a b, 1/2/x) (1/2/x, 1/2/y);
+        \\  h: (nth(1/2/x 1, 1) b) (if(true, 1/2/x, 0) b);
+        \\  i: (1/2/x, foo(1/2/y) b) (1/x foo(1/2/y));
+        \\  j: (a), 1/2/x;
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\a {
+        \\  b: foo(1/2/x) foo(0.5/x) foo(1/2/x) b;
+        \\  c: a 1/2/x 0.5/x a 0.5/x a 1/2/y;
+        \\  d: 0.5/x foo(0.5/y) 3 foo(0.5/y);
+        \\  e: a 0.5/x a b 1/2/x a 1/2/x 1/2/y;
+        \\  f: [1/2/x] [0.5/x] a [1/2/x];
+        \\  g: a b, 1/2/x 0.5/x, 0.5/y;
+        \\  h: 0.5/x b 1/2/x b;
+        \\  i: 0.5/x, foo(1/2/y) b 1/x foo(1/2/y);
+        \\  j: a, 1/2/x;
+        \\}
+        \\
+    , css);
+}
+
+test "api: nested lists in parentheses are followed once each" {
+    const alloc = std.testing.allocator;
+    // Every level is read again when its second item comes; what is
+    // nested in it is not followed anew each time.
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(alloc);
+    try source.appendSlice(alloc, "a {b: ");
+    try source.appendNTimes(alloc, '(', 40);
+    try source.appendSlice(alloc, "foo(1/2/x)");
+    for (0..40) |_| try source.appendSlice(alloc, " b)");
+    try source.appendSlice(alloc, "}\n");
+    const css = try compileSourceToCss(alloc, source.items, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expect(std.mem.startsWith(u8, css, "a {\n  b: foo(1/2/x) b b"));
 }
 
 test "api: numbers written with a slash stay that text in front of something else" {
@@ -2027,6 +2103,36 @@ test "api: an extender with ancestors and a sibling joins a repeated @extend tar
     try std.testing.expectEqualStrings(
         \\.x .p .a .a, .x .p .f + .g .a, .x .p .a .f + .g, .x .p .f + .g .f + .g {
         \\  x: y;
+        \\}
+        \\
+    , css);
+}
+
+test "api: a signed number right after a word is added to it" {
+    const alloc = std.testing.allocator;
+    // `x+1` is `x` plus 1, not one word. A unicode range stays as it is.
+    const source =
+        \\$v: 2;
+        \\a {
+        \\  b: x+1 x+1px 2 x+0.4rem;
+        \\  c: x+y+1 a, b+1;
+        \\  d: n+1 2n+1 -n+1;
+        \\  e: x-1 x+$v $v+1 1+x;
+        \\  f: U+26 u+1F;
+        \\  g: x+1 !important;
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\a {
+        \\  b: x1 x1px 2 x0.4rem;
+        \\  c: xy1 a, b1;
+        \\  d: n1 3n -n1;
+        \\  e: x-1 x2 3 1x;
+        \\  f: U+26 u+1F;
+        \\  g: x1 !important;
         \\}
         \\
     , css);

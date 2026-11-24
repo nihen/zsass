@@ -54,6 +54,10 @@ pub const BuiltinContext = struct {
     /// Set with `ListSidecarSetter.from(vm)` during construction. test via `dummy_vm` is null
     /// (vm is a fake pointer such as `@ptrFromInt(1)`, so it will never be dispatched).
     list_parent_sel_none_hook: ?ListSidecarHook = null,
+    /// Called with the text of a calculation a built-in function leaves
+    /// as CSS and with where in it the arguments are that were strings.
+    /// Compressed output writes those as they are.
+    calc_text_args_hook: ?CalcTextArgsHook = null,
     /// list_handle is "a map with only a naive string key (no calc-marker / no named-color / no escape)"
     /// If it is determined, the hash index of the first index of that key bytes  ->  pair is retained.
     /// Replace linear scan of `map.get` / `map.has-key` with O(1) for hot
@@ -274,6 +278,8 @@ pub fn maybeNoteListParentSelNoneHook(
     const hook = ctx.list_parent_sel_none_hook orelse return;
     hook(ctx.vm, handle, items) catch return error.OutOfMemory;
 }
+
+pub const CalcTextArgsHook = *const fn (*anyopaque, InternId, []const u8, []const [2]usize) std.mem.Allocator.Error!void;
 
 pub const ListSidecarHook = *const fn (*anyopaque, u32, []const Value) std.mem.Allocator.Error!void;
 

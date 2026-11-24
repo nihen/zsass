@@ -747,6 +747,12 @@ pub const VM = struct {
         return vm;
     }
 
+    /// Set as `BuiltinContext.calc_text_args_hook`.
+    pub fn builtinCalcTextArgsHook(vm_opaque: *anyopaque, id: InternId, text: []const u8, value_spans: []const [2]usize) std.mem.Allocator.Error!void {
+        const self: *VM = @ptrCast(@alignCast(vm_opaque));
+        self.noteCalcZeroForm(id, text, value_spans) catch return error.OutOfMemory;
+    }
+
     /// sidecar bitset configuration hook entity called from builtin. `BuiltinContext.vm`
     /// Cast (`*anyopaque`) to VM and delegate to sidecar inspection method.
     /// fn pointer to set on `BuiltinContext.list_parent_sel_none_hook`.
@@ -4543,6 +4549,8 @@ pub const VM = struct {
                         self.rule_ir.hintLastDecl(rule_ir_mod.decl_hint_plain_css);
                     } else if (inst.opcode() == .emit_raw_decl and (inst.arg_a & opcode_mod.emit_raw_decl_flag_value_single_interp) != 0) {
                         self.rule_ir.hintLastDecl(rule_ir_mod.decl_hint_string_value);
+                    } else {
+                        try self.noteLastDeclTokens(val);
                     }
                 }
             },
@@ -5756,8 +5764,9 @@ pub const VM = struct {
                     const short = self.calc_zero_forms.get(val.stringIntern());
                     if (short == .none) return;
                     // The declaration has the calculation on one line.
-                    const written = try singleLineCalcText(self.allocator, text);
-                    defer self.allocator.free(written);
+                    const single_line = try singleLineCalcText(self.allocator, text);
+                    defer self.allocator.free(single_line);
+                    if (std.mem.indexOfAny(u8, single_line, &.{ 0x01, 0x02, 0x03 }) != null) return;
                     var replacement: std.ArrayListUnmanaged(u8) = .empty;
                     defer replacement.deinit(self.allocator);
                     try replacement.appendSlice(self.allocator, rule_ir_mod.decl_token_keeps_zeros);
@@ -5767,7 +5776,15 @@ pub const VM = struct {
                             if (ch.* == '\n' or ch.* == '\r' or ch.* == '\t') ch.* = ' ';
                         }
                     }
-                    try appendDeclToken(self.allocator, tokens, written, replacement.items);
+                    // The declaration may have it as it is or with a space
+                    // around every operator; the one it has is found.
+                    const spaced = try calc_utils.normalizeCalcInDeclValueNoFlatten(self.allocator, single_line);
+                    defer if (spaced.ptr != single_line.ptr) self.allocator.free(spaced);
+                    const flat = try calc_utils.normalizeCalcInDeclValue(self.allocator, single_line);
+                    defer if (flat.ptr != single_line.ptr) self.allocator.free(flat);
+                    try appendDeclToken(self.allocator, tokens, single_line, replacement.items);
+                    if (!std.mem.eql(u8, spaced, single_line)) try appendDeclToken(self.allocator, tokens, spaced, replacement.items);
+                    if (!std.mem.eql(u8, flat, single_line) and !std.mem.eql(u8, flat, spaced)) try appendDeclToken(self.allocator, tokens, flat, replacement.items);
                     return;
                 }
                 // A token that starts with a quote is copied as a string.
