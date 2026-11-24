@@ -659,11 +659,12 @@ fn divValues(env: anytype, a: Value, b: Value, lhs_written_as_slash: bool) Error
 
     if (try calcBinaryIfMarked(env, lhs, rhs, "/")) |v| return v;
     // Numbers written with a slash between them (`1/2`) are still that
-    // text when what follows is not a number: `1/2/x`. A quoted string or
-    // a list is written differently here than at run time, so with those
-    // the division stays as it was.
+    // text when what follows is not a number: `1/2/x`. A list is written
+    // differently here than at run time, and so is a quoted string that
+    // needs escaping; with those the division stays as it was.
+    const rhs_quoted = rhs.kind() == .string and rhs.stringQuoted(env.stringFlagsPool().items);
     const rhs_plain = switch (rhs.kind()) {
-        .string => !rhs.stringQuoted(env.stringFlagsPool().items),
+        .string => !rhs_quoted or std.mem.indexOfAny(u8, env.pool().get(rhs.stringIntern()), "\"\\\n\r\x0c") == null,
         .boolean, .nil => true,
         else => false,
     };
@@ -677,7 +678,11 @@ fn divValues(env: anytype, a: Value, b: Value, lhs_written_as_slash: bool) Error
     else
         try simplifySlashOperandText(env.pool(), env.numberPool(), env.allocator(), sa_raw);
     defer env.allocator().free(sa);
-    const sb = try simplifySlashOperandText(env.pool(), env.numberPool(), env.allocator(), sb_raw);
+    // Run time writes a quoted string with its quotes.
+    const sb = if (lhs_written_slash and rhs_quoted)
+        try std.fmt.allocPrint(env.allocator(), "\"{s}\"", .{sb_raw})
+    else
+        try simplifySlashOperandText(env.pool(), env.numberPool(), env.allocator(), sb_raw);
     defer env.allocator().free(sb);
     const merged = try std.fmt.allocPrint(env.allocator(), "{s}/{s}", .{ sa, sb });
     defer env.allocator().free(merged);

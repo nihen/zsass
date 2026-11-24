@@ -1421,6 +1421,11 @@ test "api: numbers written with a slash stay that text in front of something els
         \\    k: l;
         \\  }
         \\}
+        \\@if 1/2/"x" == '1/2/"x"' {
+        \\  m {
+        \\    n: 1/2/"x";
+        \\  }
+        \\}
         \\
     ;
     const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
@@ -1440,6 +1445,10 @@ test "api: numbers written with a slash stay that text in front of something els
         \\
         \\j {
         \\  k: l;
+        \\}
+        \\
+        \\m {
+        \\  n: 1/2/"x";
         \\}
         \\
     , css);
