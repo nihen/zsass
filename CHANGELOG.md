@@ -87,6 +87,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   70%; selectors the official CLI writes are no longer missing, and
   stylesheets that made the old implementation loop (a target repeated in
   its own extender, such as `.c .c .c {@extend .c}`) now compile.
+- `@extend` keeps the selectors that come of an extender extended by
+  itself: with `.d {…}`, `.f.c > .k {@extend .d}`, and
+  `.d .m.f {@extend .f}`, the rule gains
+  `.f.c > .k .c.m.f > .k .c.m.f > .k` as with the official CLI.
 - `selector.extend()` and `selector.replace()` use the same implementation.
 - `selector.is-superselector()` matches front to back as the official CLI
   does: `.a .x` does not cover `.a.e + .a.b .x`, and `::foo` covers
