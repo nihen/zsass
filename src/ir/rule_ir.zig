@@ -5466,6 +5466,16 @@ pub const RuleIR = struct {
         return digits == 10 and text[9] != '0';
     }
 
+    /// The length of the escape that starts with the backslash at `pos`:
+    /// up to six hex digits and the space that ends them, or one character.
+    fn escapeLen(text: []const u8, pos: usize) usize {
+        var end = pos + 1;
+        while (end < text.len and end - pos <= 6 and std.ascii.isHex(text[end])) end += 1;
+        if (end == pos + 1) return @min(2, text.len - pos);
+        if (end < text.len and text[end] == ' ') end += 1;
+        return end - pos;
+    }
+
     fn isNumberText(text: []const u8) bool {
         var pos: usize = 0;
         if (pos < text.len and (text[pos] == '-' or text[pos] == '+')) pos += 1;
@@ -5481,7 +5491,7 @@ pub const RuleIR = struct {
             const ch = text[pos];
             if (ch == '\\') {
                 // An escaped character is part of the unit.
-                pos += 1;
+                pos += escapeLen(text, pos) - 1;
             } else if (!std.ascii.isAlphanumeric(ch) and ch != '-' and ch != '_' and ch < 0x80) {
                 return false;
             }
@@ -5500,6 +5510,8 @@ pub const RuleIR = struct {
         var operand_start: usize = 0;
         var slashes: usize = 0;
         var has_text = false;
+        // The items of a bracketed list are looked at one by one.
+        if (text.len != 0 and text[0] == '[') return 0;
         while (pos < text.len) : (pos += 1) {
             const ch = text[pos];
             if (quote != 0) {
@@ -5511,14 +5523,14 @@ pub const RuleIR = struct {
                 continue;
             }
             switch (ch) {
-                '\\' => pos += 1,
+                '\\' => pos += escapeLen(text, pos) - 1,
                 '"', '\'' => quote = ch,
                 '(' => depth += 1,
                 ')' => {
                     if (depth == 0) break;
                     depth -= 1;
                 },
-                ' ', ',', ';', '}', '!' => if (depth == 0) break,
+                ' ', ',', ';', '}', '!', ']' => if (depth == 0) break,
                 '/' => if (depth == 0) {
                     if (pos == operand_start) return 0;
                     if (!isNumberText(text[operand_start..pos])) has_text = true;
@@ -5749,7 +5761,11 @@ pub const RuleIR = struct {
                 zero_form = std.mem.trimStart(u8, zero_form, " ");
                 if (zero_form.len != 0 and zero_form[0] == first.items[i]) {
                     zero_form = zero_form[1..];
-                } else if (first.items[i] == '0') {
+                    // What a backslash escapes is not looked at below.
+                    if (first.items[i] == '\\' and i + 1 < first.items.len) {
+                        zero_form = if (zero_form.len != 0 and zero_form[0] == first.items[i + 1]) zero_form[1..] else "";
+                    }
+                } else if (first.items[i] == '0' and in_string == 0) {
                     continue;
                 } else {
                     // The text is not the one the short form was made of.
@@ -5899,7 +5915,8 @@ pub const RuleIR = struct {
                 }
             }
             if (!raw and in_decl_value and paren_depth == 0 and c != ':' and value_context) {
-                const operand_len = textSlashOperandsLen(first.items[i..]);
+                // After the space that ends an escape the token goes on.
+                const operand_len = if (css_utils.endsWithEscapeWhitespace(out.items)) 0 else textSlashOperandsLen(first.items[i..]);
                 if (operand_len != 0) {
                     try out.appendSlice(allocator, first.items[i .. i + operand_len]);
                     i += operand_len - 1;

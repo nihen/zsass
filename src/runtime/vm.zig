@@ -5631,12 +5631,20 @@ pub const VM = struct {
                 short.appendAssumeCapacity(text[at]);
                 continue;
             }
+            if (ch == '\\' and at + 1 < text.len) {
+                // An escaped character is neither a quote nor a parenthesis.
+                short.appendAssumeCapacity(ch);
+                at += 1;
+                short.appendAssumeCapacity(text[at]);
+                continue;
+            }
             switch (ch) {
                 '"', '\'' => quote = ch,
                 '(' => {
                     depth += 1;
                     var name_start = short.items.len;
-                    while (name_start > 0 and (std.ascii.isAlphanumeric(short.items[name_start - 1]) or short.items[name_start - 1] == '-' or short.items[name_start - 1] == '_')) name_start -= 1;
+                    while (name_start > 0 and (std.ascii.isAlphanumeric(short.items[name_start - 1]) or short.items[name_start - 1] == '-' or
+                        short.items[name_start - 1] == '_' or short.items[name_start - 1] >= 0x80)) name_start -= 1;
                     const name = short.items[name_start..];
                     if (text_depth == 0 and name.len != 0 and !css_utils.isCalculationFunctionName(name)) text_depth = depth;
                 },

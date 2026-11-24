@@ -1511,14 +1511,14 @@ test "api: compressed output writes a token the way its value says" {
         // told apart from a string that reads the same.
         .{
             .source =
-            \\$c: calc(#{"var(--w)"} * 0.5 + var(--x, "0.5", 0.5px));
+            \\$c: calc(#{"var(--w)"} * 0.5 + var(--x, "\\0.5", 0.5px));
             \\a {
             \\  b: $c;
-            \\  c: [0.5 0.3] unquote("0.5"), 0.5em/1\26;
+            \\  c: [0.5 0.3] unquote("0.5"), 0.5em/1\26, [0.5/2];
             \\}
             \\
             ,
-            .css = "a{b:calc(var(--w)*.5 + var(--x, \"0.5\", 0.5px));c:[.5 .3] 0.5,.5em/1\\&}\n",
+            .css = "a{b:calc(var(--w)*.5 + var(--x, \"\\\\0.5\", 0.5px));c:[.5 .3] 0.5,.5em/1\\&,[.5/2]}\n",
         },
         // In plain CSS a hex color with an alpha channel is a color, an
         // `rgba()` of the stylesheet is not, and a number with ten
