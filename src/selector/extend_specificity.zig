@@ -437,6 +437,13 @@ pub fn complexSpecificity(sel: *const ComplexSelector) Specificity {
     return spec;
 }
 
+fn isLegacyPseudoElementName(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "before") or
+        std.ascii.eqlIgnoreCase(name, "after") or
+        std.ascii.eqlIgnoreCase(name, "first-line") or
+        std.ascii.eqlIgnoreCase(name, "first-letter");
+}
+
 fn compoundSpecificity(compound: *const CompoundSelector) Specificity {
     var spec = Specificity{ .a = 0, .b = 0, .c = 0 };
     for (compound.simple_selectors.items) |ss| {
@@ -446,6 +453,14 @@ fn compoundSpecificity(compound: *const CompoundSelector) Specificity {
             .pseudo_class => |ps| {
                 // `:where()` adds nothing, whatever it holds.
                 if (std.ascii.eqlIgnoreCase(ps.name, "where")) continue;
+                // `:before` and its kin are pseudo-elements written with
+                // one colon.
+                if (ps.selector == null and isLegacyPseudoElementName(ps.name)) {
+                    spec.c += 1;
+                    continue;
+                }
+                // `:nth-child(2n of S)` counts itself and `S`.
+                if (ps.selector != null and selector_mod.isNthWithOfPseudo(ps.name)) spec.b += 1;
                 if (ps.selector) |sel_list| {
                     //:not(), :is(), :has() etc. -- specificity of most specific argument
                     var max_inner = Specificity{ .a = 0, .b = 0, .c = 0 };
