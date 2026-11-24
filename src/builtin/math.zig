@@ -884,6 +884,9 @@ fn buildCssMathCall(ctx: *BuiltinContext, name: []const u8, args: []const Value)
     if (text_arg_count != 0 and text_arg_count <= text_args.len) {
         if (ctx.calc_text_args_hook) |hook| {
             hook(ctx.vm, id, text.items, text_args[0..text_arg_count]) catch return error.OutOfMemory;
+            // The record goes by the text; the flag keeps it to this
+            // value, apart from a calculation that reads the same.
+            return Value.string(id, false).withPreserveLiteralText();
         }
     }
     return Value.string(id, false);

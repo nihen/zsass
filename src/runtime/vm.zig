@@ -5758,11 +5758,10 @@ pub const VM = struct {
                 const text = calc_utils.stripCalcArgMarker(stored);
                 // What an interpolation put into a calculation is text
                 // there, and mostly it is the numbers.
-                const calc_record = if (startsWithCalculationCall(text)) self.calc_zero_forms.get(val.stringIntern()) else null;
-                if ((calc_record != null or val.stringPreserveLiteralText(self.string_flags_pool.items)) and startsWithCalculationCall(text)) {
+                if (val.stringPreserveLiteralText(self.string_flags_pool.items) and startsWithCalculationCall(text)) {
                     // Without a record the text was put together some
                     // other way, and all of it is a string.
-                    const short = calc_record;
+                    const short = self.calc_zero_forms.get(val.stringIntern());
                     if (short == .none) return;
                     // The declaration has the calculation on one line.
                     const single_line = try singleLineCalcText(self.allocator, text);
