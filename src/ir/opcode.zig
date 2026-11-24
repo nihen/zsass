@@ -268,6 +268,9 @@ pub const emit_raw_decl_flag_custom_property_leading_space: u16 = 1 << 1;
 /// For emit_raw_decl, the value came from interpolation and compressed
 /// minification must preserve its decimal surface text.
 pub const emit_raw_decl_flag_value_has_interp: u16 = 1 << 2;
+/// For emit_raw_decl, the whole value is one interpolation (`#{$value}`),
+/// which compressed output writes as it is.
+pub const emit_raw_decl_flag_value_single_interp: u16 = 1 << 3;
 /// resolver -> compiler For internal transmission. emit_decl ignores it, emit_raw_decl
 /// Copy to `emit_raw_decl_flag_custom_property_leading_space`.
 pub const emit_decl_flag_custom_property_leading_space: u16 = 1 << 5;
@@ -277,6 +280,26 @@ pub const emit_decl_flag_value_source_multiline: u16 = 1 << 6;
 /// For emit_decl, the value subtree contains Sass interpolation. The writer
 /// preserves decimal surface text through compressed minification.
 pub const emit_decl_flag_value_has_interp: u16 = 1 << 7;
+/// For emit_decl_dynamic. The property name is written with interpolation
+/// and does not start with `--` in the source (`#{$name}: $value`). When it
+/// turns out to be a custom property, its value is still an ordinary
+/// SassScript value, which compressed output shortens.
+pub const emit_decl_flag_prop_source_not_custom: u16 = 1 << 8;
+/// The value has a number written with a leading zero (`0.5em`) outside its
+/// interpolations. That number is shortened in compressed output, so the
+/// declaration is not marked as text an interpolation produced.
+pub const emit_decl_flag_zero_decimal_outside_interp: u16 = 1 << 10;
+/// The value is written as one variable, one interpolation, or one function
+/// call. Only then can the whole value be a string in the official CLI; a
+/// value of several tokens is a list, whatever it is stored as here.
+pub const emit_decl_flag_value_single_dynamic: u16 = 1 << 11;
+/// The value is written as one interpolation, so it is a string even when
+/// it reads as a color name.
+pub const emit_decl_flag_value_single_interp: u16 = 1 << 12;
+/// The value is plain CSS in which a hex color with an alpha channel was
+/// written out as `rgba()`. That one is a color, unlike an `rgba()` the
+/// stylesheet has itself.
+pub const emit_decl_flag_hex_alpha_expanded: u16 = 1 << 13;
 
 /// Internal marker prepended to raw multiline custom-property values by the
 /// resolver. It carries the declaration line's source column, which remains

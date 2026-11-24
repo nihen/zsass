@@ -4455,6 +4455,178 @@ fn leadingIndentColumns(line: []const u8) usize {
     return cols;
 }
 
+/// How a declaration value is written when it is a single dynamic term:
+/// `$x` or `ns.$x`, `#{...}`, or `name(...)`.
+fn valueSourceSingleDynamicKind(value_source: []const u8) enum { none, interpolation, other } {
+    var trimmed = std.mem.trim(u8, value_source, " \t\r\n");
+    // Parentheses around the whole value group it and change nothing.
+    while (trimmed.len >= 2 and trimmed[0] == '(' and matchingParenthesis(trimmed) == trimmed.len - 1) {
+        trimmed = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], " \t\r\n");
+    }
+    if (trimmed.len == 0) return .none;
+    if (std.mem.startsWith(u8, trimmed, "#{")) {
+        return if (valueSourceMixesInterpolation(trimmed)) .none else .interpolation;
+    }
+    var i: usize = 0;
+    while (i < trimmed.len and (std.ascii.isAlphanumeric(trimmed[i]) or trimmed[i] == '-' or trimmed[i] == '_' or trimmed[i] == '.' or trimmed[i] == '$')) i += 1;
+    if (i == trimmed.len) return if (std.mem.indexOfScalar(u8, trimmed, '$') != null) .other else .none;
+    if (i == 0 or trimmed[i] != '(') return .none;
+    // The call's closing parenthesis has to end the value.
+    var depth: usize = 0;
+    var in_string: u8 = 0;
+    while (i < trimmed.len) : (i += 1) {
+        const c = trimmed[i];
+        if (c == '\\') {
+            i += 1;
+            continue;
+        }
+        if (in_string != 0) {
+            if (c == in_string) in_string = 0;
+            continue;
+        }
+        switch (c) {
+            '"', '\'' => in_string = c,
+            '(' => depth += 1,
+            ')' => {
+                depth -|= 1;
+                if (depth == 0) return if (i + 1 == trimmed.len) .other else .none;
+            },
+            else => {},
+        }
+    }
+    return .none;
+}
+
+/// The index of the `)` that closes the `(` `text` starts with.
+fn matchingParenthesis(text: []const u8) ?usize {
+    var depth: usize = 0;
+    var in_string: u8 = 0;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (c == '\\') {
+            i += 1;
+            continue;
+        }
+        if (in_string != 0) {
+            if (c == in_string) in_string = 0;
+            continue;
+        }
+        switch (c) {
+            '"', '\'' => in_string = c,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// Whether a declaration value has an interpolation and something else
+/// beside it. A value that is one interpolation (`#{$value}`) does not.
+fn valueSourceMixesInterpolation(value_source: []const u8) bool {
+    const trimmed = std.mem.trim(u8, value_source, " \t\r\n");
+    const first = std.mem.indexOf(u8, trimmed, "#{") orelse return false;
+    if (first != 0) return true;
+    const end = interpolationEnd(trimmed, 2) orelse return true;
+    return end + 1 != trimmed.len;
+}
+
+/// The index of the `}` that closes the interpolation whose content starts
+/// at `start`. A brace in a string or a `/* */` comment inside it is text.
+fn interpolationEnd(source: []const u8, start: usize) ?usize {
+    var depth: usize = 1;
+    var in_string: u8 = 0;
+    var i = start;
+    while (i < source.len) : (i += 1) {
+        const c = source[i];
+        if (c == '\\') {
+            i += 1;
+            continue;
+        }
+        if (in_string != 0) {
+            if (c == in_string) in_string = 0;
+            continue;
+        }
+        switch (c) {
+            '"', '\'' => in_string = c,
+            // `//` is left alone: it is part of a URL more often than
+            // it starts a comment here.
+            '/' => if (i + 1 < source.len and source[i + 1] == '*') {
+                i = (std.mem.indexOfPos(u8, source, i + 2, "*/") orelse return null) + 1;
+            },
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// Whether a number such as `0.5` is written outside every `#{...}` and
+/// outside strings and function arguments.
+fn valueSourceHasZeroDecimalOutsideInterpolation(value_source: []const u8) bool {
+    // The depth inside functions other than calculations; a number there
+    // is not shortened.
+    var paren_depth: usize = 0;
+    var calc_depth: usize = 0;
+    var in_string: u8 = 0;
+    var i: usize = 0;
+    while (i < value_source.len) : (i += 1) {
+        const c = value_source[i];
+        if (c == '\\') {
+            i += 1;
+            continue;
+        }
+        if (c == '#' and i + 1 < value_source.len and value_source[i + 1] == '{') {
+            i = interpolationEnd(value_source, i + 2) orelse return false;
+            continue;
+        }
+        if (in_string != 0) {
+            if (c == in_string) in_string = 0;
+            continue;
+        }
+        switch (c) {
+            '"', '\'' => in_string = c,
+            '(' => {
+                var name_start = i;
+                while (name_start > 0 and (std.ascii.isAlphanumeric(value_source[name_start - 1]) or value_source[name_start - 1] == '-')) name_start -= 1;
+                const name = value_source[name_start..i];
+                if (paren_depth == 0 and (css_utils.isCalculationFunctionName(name) or (name.len == 0 and calc_depth != 0))) {
+                    calc_depth += 1;
+                } else {
+                    paren_depth += 1;
+                }
+            },
+            ')' => if (paren_depth != 0) {
+                paren_depth -= 1;
+            } else {
+                calc_depth -|= 1;
+            },
+            '0' => if (paren_depth == 0 and i + 2 < value_source.len and value_source[i + 1] == '.' and
+                std.ascii.isDigit(value_source[i + 2]) and
+                (i == 0 or !(std.ascii.isAlphanumeric(value_source[i - 1]) or value_source[i - 1] == '.' or value_source[i - 1] == '_' or value_source[i - 1] == '-')))
+            {
+                return true;
+            },
+            // `.5` is written `0.5` in expanded output.
+            '.' => if (paren_depth == 0 and i + 1 < value_source.len and std.ascii.isDigit(value_source[i + 1]) and
+                (i == 0 or !(std.ascii.isAlphanumeric(value_source[i - 1]) or value_source[i - 1] == '_' or value_source[i - 1] == '-')))
+            {
+                return true;
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
 fn sourceSliceHasTopLevelComma(text: []const u8) bool {
     var paren_depth: u32 = 0;
     var bracket_depth: u32 = 0;
@@ -7252,7 +7424,7 @@ fn parsePropertyNamespaceSelector(
     ctx: *Ctx,
     selector_text: []const u8,
     span: Span,
-) ?struct { prefix: InternId, prefix_expr: ExprIndex, value_expr: ?ExprIndex } {
+) ?struct { prefix: InternId, prefix_expr: ExprIndex, value_expr: ?ExprIndex, value_flags: u16 } {
     const trimmed = std.mem.trim(u8, selector_text, " \t\r\n");
     if (trimmed.len == 0) return null;
 
@@ -7302,6 +7474,11 @@ fn parsePropertyNamespaceSelector(
         .prefix = prefix_intern,
         .prefix_expr = prefix_expr,
         .value_expr = value_expr,
+        .value_flags = (switch (valueSourceSingleDynamicKind(value_text)) {
+            .none => @as(u16, 0),
+            .interpolation => opcode_mod.emit_decl_flag_value_single_dynamic | opcode_mod.emit_decl_flag_value_single_interp,
+            .other => opcode_mod.emit_decl_flag_value_single_dynamic,
+        }) | (if (has_interp and !std.mem.startsWith(u8, prefix_text, "--")) opcode_mod.emit_decl_flag_prop_source_not_custom else @as(u16, 0)),
     };
 }
 
@@ -7510,6 +7687,7 @@ fn resolveSelectorRuleData(ctx: *Ctx, sel_node: NodeIndex, span: Span) ResolveEr
             .prop_namespace_prefix = if (prop_ns) |v| v.prefix else .none,
             .prop_namespace_prefix_expr = if (prop_ns) |v| v.prefix_expr else null,
             .prop_namespace_value_expr = if (prop_ns) |v| v.value_expr else null,
+            .prop_namespace_value_flags = if (prop_ns) |v| v.value_flags else 0,
             .dynamic_parts_start = 0,
             .dynamic_parts_count = 0,
             .body_direct = &.{},
@@ -7538,6 +7716,7 @@ fn resolveSelectorRuleData(ctx: *Ctx, sel_node: NodeIndex, span: Span) ResolveEr
             .prop_namespace_prefix = if (prop_ns) |v| v.prefix else .none,
             .prop_namespace_prefix_expr = if (prop_ns) |v| v.prefix_expr else null,
             .prop_namespace_value_expr = if (prop_ns) |v| v.value_expr else null,
+            .prop_namespace_value_flags = if (prop_ns) |v| v.value_flags else 0,
             .dynamic_parts_start = 0,
             .dynamic_parts_count = 0,
             .body_direct = &.{},
@@ -7555,6 +7734,7 @@ fn resolveSelectorRuleData(ctx: *Ctx, sel_node: NodeIndex, span: Span) ResolveEr
         .prop_namespace_prefix = if (prop_ns) |v| v.prefix else .none,
         .prop_namespace_prefix_expr = if (prop_ns) |v| v.prefix_expr else null,
         .prop_namespace_value_expr = if (prop_ns) |v| v.value_expr else null,
+        .prop_namespace_value_flags = if (prop_ns) |v| v.value_flags else 0,
         .dynamic_parts_start = stored.start,
         .dynamic_parts_count = stored.count,
         .body_direct = &.{},
@@ -7973,6 +8153,7 @@ fn resolvePlainCssDeclarationStmtFast(
 
     const prop_intern: InternId = @enumFromInt(prop_ast.payload);
 
+    var hex_alpha_expanded = false;
     const raw_id: InternId = if (is_custom_property)
         try ctx.pool.intern(raw_val)
     else if (plainCssValueNeedsNoNormalize(raw_val))
@@ -7984,6 +8165,7 @@ fn resolvePlainCssDeclarationStmtFast(
         defer ctx.a.free(zero_filled);
         const hex_expanded = try value_format.expandHexAlphaColors(ctx.a, zero_filled);
         defer ctx.a.free(hex_expanded);
+        hex_alpha_expanded = !std.mem.eql(u8, hex_expanded, zero_filled);
         break :id try ctx.pool.intern(hex_expanded);
     };
 
@@ -7995,6 +8177,7 @@ fn resolvePlainCssDeclarationStmtFast(
 
     const important = (n.flags & 2) != 0;
     var emit_decl_flags: u16 = 0;
+    if (hex_alpha_expanded) emit_decl_flags |= opcode_mod.emit_decl_flag_hex_alpha_expanded;
     if (sourceSliceHasTopLevelComma(raw_val)) {
         emit_decl_flags |= opcode_mod.emit_decl_flag_has_explicit_top_level_comma;
     }
@@ -8129,6 +8312,7 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
     const source_has_legacy_plus_important = declarationSourceHasLegacyPlusImportant(ctx.ast.source, span);
     const legacy_plus_important_expr = try resolveLegacyPlusImportantValue(ctx, value_source, .{ .start = val_ast.span_start, .end = val_ast.span_end });
     const important = (n.flags & 2) != 0 or source_has_legacy_plus_important or legacy_plus_important_expr != null;
+    var hex_alpha_expanded = false;
     const base_val_e = if (legacy_plus_important_expr) |expr_idx|
         expr_idx
     else if (in_plain_css_module) blk: {
@@ -8145,6 +8329,7 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
             defer ctx.a.free(zero_filled);
             const hex_expanded = try value_format.expandHexAlphaColors(ctx.a, zero_filled);
             defer ctx.a.free(hex_expanded);
+            hex_alpha_expanded = !std.mem.eql(u8, hex_expanded, zero_filled);
             break :id try ctx.pool.intern(hex_expanded);
         };
         break :blk try appendExpr(ctx.prog, ctx.a, .{
@@ -8171,6 +8356,7 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
         break :blk try appendListExprFromElems(ctx, &elems, .space, false, false, false, span);
     } else base_val_e;
     var emit_decl_flags: u16 = 0;
+    if (hex_alpha_expanded) emit_decl_flags |= opcode_mod.emit_decl_flag_hex_alpha_expanded;
     if (sourceSliceHasTopLevelComma(value_source)) {
         emit_decl_flags |= opcode_mod.emit_decl_flag_has_explicit_top_level_comma;
     }
@@ -8193,6 +8379,19 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
         declarationSourceHasHorizontalWhitespaceAfterColon(ctx.ast.source, span);
     if ((prop_source_is_custom or pd.prop_kind == .dynamic) and custom_source_has_leading_space) {
         emit_decl_flags |= opcode_mod.emit_decl_flag_custom_property_leading_space;
+    }
+    if (pd.prop_kind == .dynamic and !prop_source_is_custom) {
+        emit_decl_flags |= opcode_mod.emit_decl_flag_prop_source_not_custom;
+    }
+    switch (valueSourceSingleDynamicKind(value_source)) {
+        .none => {},
+        .interpolation => emit_decl_flags |= opcode_mod.emit_decl_flag_value_single_dynamic | opcode_mod.emit_decl_flag_value_single_interp,
+        .other => emit_decl_flags |= opcode_mod.emit_decl_flag_value_single_dynamic,
+    }
+    if (valueSourceMixesInterpolation(value_source)) {
+        if (valueSourceHasZeroDecimalOutsideInterpolation(value_source)) {
+            emit_decl_flags |= opcode_mod.emit_decl_flag_zero_decimal_outside_interp;
+        }
     }
     const raw_value_source_intern: InternId = if (prop_source_is_custom and
         std.mem.indexOfAny(u8, value_source, "\n\r") != null and

@@ -3019,7 +3019,7 @@ fn compilePropertyNamespaceRule(ctx: CompileCtx, si: StmtIndex) CompileError!voi
     if (rule.prop_namespace_value_expr) |base_expr| {
         try compileExpr(ctx, prefix_expr);
         try compileExpr(ctx, base_expr);
-        try ctx.cb.emit(.emit_decl_dynamic, 0, 0);
+        try ctx.cb.emit(.emit_decl_dynamic, rule.prop_namespace_value_flags, 0);
     }
 
     try compileExpr(ctx, prefix_expr);
@@ -3123,9 +3123,14 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                         // Pure literals strip source `/* */`; interpolation
                         // preserves the authored comment text.
                         var flag: u16 = if (!raw_info.has_interp) opcode_mod.emit_raw_decl_flag_strip_source_comments else 0;
-                        if (raw_info.has_interp) flag |= opcode_mod.emit_raw_decl_flag_value_has_interp;
+                        if (raw_info.has_interp and (d.emit_decl_flags & opcode_mod.emit_decl_flag_zero_decimal_outside_interp) == 0) {
+                            flag |= opcode_mod.emit_raw_decl_flag_value_has_interp;
+                        }
                         if ((d.emit_decl_flags & opcode_mod.emit_decl_flag_custom_property_leading_space) != 0) {
                             flag |= opcode_mod.emit_raw_decl_flag_custom_property_leading_space;
+                        }
+                        if (raw_info.has_interp and (d.emit_decl_flags & opcode_mod.emit_decl_flag_value_single_interp) != 0) {
+                            flag |= opcode_mod.emit_raw_decl_flag_value_single_interp;
                         }
                         try ctx.cb.emit(.emit_raw_decl, flag, @intFromEnum(d.prop_intern));
                         return;
@@ -3142,7 +3147,7 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                     // `/* */` comments are plain CSS comments and may be stripped.
                     if (!exprContainsInterp(resolved, d.value_expr)) {
                         emit_decl_flags |= opcode_mod.emit_decl_flag_strip_source_comments;
-                    } else {
+                    } else if ((d.emit_decl_flags & opcode_mod.emit_decl_flag_zero_decimal_outside_interp) == 0) {
                         emit_decl_flags |= opcode_mod.emit_decl_flag_value_has_interp;
                     }
                     // If the source file is `.css` (plain CSS), nested calc literals
@@ -6022,6 +6027,12 @@ pub fn parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
 
     var parser = parser_mod.Parser.init(sa, pool, tokens, source);
     parser.is_indented_syntax = is_indented_syntax;
+    parser.is_plain_css = if (syntax_override_mod.get()) |over|
+        over == .css
+    else if (source_path) |p|
+        std.mem.endsWith(u8, p, ".css")
+    else
+        false;
     parser.no_interpolation = !lexer.saw_interpolation;
     defer parser.deinit();
     var ast = parser.parse() catch |err| {

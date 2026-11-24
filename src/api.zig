@@ -182,6 +182,9 @@ pub const CompileCssWithSourceMapResult = struct {
 };
 
 /// SCSS source  ->  expanded CSS. The return value comes from `alloc` and caller `alloc.free`.
+/// The compile itself runs in an arena on top of `alloc`, which is returned
+/// when the call ends; only the result is copied out. An `alloc` that cannot
+/// give memory back, such as another arena, keeps both until it is reset.
 /// The error set returned is a union of parser / resolver / compiler / VM / writer.
 /// If you need to grep them individually, use a separate wrapper.
 ///
@@ -196,10 +199,28 @@ pub fn compileSourceToCss(
     load_paths: []const []const u8,
     opts: CompileOptions,
 ) anyerror![]u8 {
+    // The compiler keeps what it allocates for the whole compile and gives
+    // it back in one go, as the CLI does. Values made along the way, such
+    // as the lists built-in functions return, have no other owner.
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    // Declared after the arena so it runs first: the message may point into
+    // memory the compile allocated. It also covers the copy below.
+    errdefer |err| reportFinalErrorDiagnostic(err, file_path, opts);
+    const css = try compileSourceToCssInArena(arena.allocator(), source, file_path, load_paths, opts);
+    return try alloc.dupe(u8, css);
+}
+
+fn compileSourceToCssInArena(
+    alloc: std.mem.Allocator,
+    source: []const u8,
+    file_path: []const u8,
+    load_paths: []const []const u8,
+    opts: CompileOptions,
+) anyerror![]u8 {
     error_format_mod.clearContextMessage();
     const prev_diag = pushDiagnosticSink(opts);
     defer restoreDiagnosticSink(prev_diag);
-    errdefer |err| reportFinalErrorDiagnostic(err, file_path, opts);
     var r = try compiler_mod.parseResolveCompileWithPath(alloc, source, file_path, load_paths);
     defer r.pool.deinit(alloc);
     defer r.color_pool.deinit(alloc);
@@ -244,10 +265,26 @@ pub fn compileSourceToCssWithSourceMap(
     source_map_output_css_path: ?[]const u8,
     opts: CompileOptions,
 ) anyerror!CompileCssWithSourceMapResult {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    errdefer |err| reportFinalErrorDiagnostic(err, file_path, opts);
+    const result = try compileSourceToCssWithSourceMapInArena(arena.allocator(), source, file_path, load_paths, source_map_output_css_path, opts);
+    const css = try alloc.dupe(u8, result.css);
+    errdefer alloc.free(css);
+    return .{ .css = css, .source_map_json = try alloc.dupe(u8, result.source_map_json) };
+}
+
+fn compileSourceToCssWithSourceMapInArena(
+    alloc: std.mem.Allocator,
+    source: []const u8,
+    file_path: []const u8,
+    load_paths: []const []const u8,
+    source_map_output_css_path: ?[]const u8,
+    opts: CompileOptions,
+) anyerror!CompileCssWithSourceMapResult {
     error_format_mod.clearContextMessage();
     const prev_diag = pushDiagnosticSink(opts);
     defer restoreDiagnosticSink(prev_diag);
-    errdefer |err| reportFinalErrorDiagnostic(err, file_path, opts);
     var r = try compiler_mod.parseResolveCompileWithPath(alloc, source, file_path, load_paths);
     defer r.pool.deinit(alloc);
     defer r.color_pool.deinit(alloc);
@@ -1242,8 +1279,6 @@ test "api: a lone escaped hyphen stays escaped in a selector" {
 }
 
 test "api: the space that ends a hex escape is kept apart from what follows" {
-    // Lists a built-in function returns live until the allocator is torn
-    // down, so these compiles run in an arena.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1307,6 +1342,263 @@ test "api: compressed output reads strings and parentheses when it looks for a s
     try std.testing.expectEqualStrings("@supports selector([x=\";\"]:is(.a, .b)){a{x:y}}[x=\";\"]:is(.a,.b){--c: \"d;e\" f g}\n", css);
 }
 
+test "api: compressed output follows the official CLI" {
+    const cases = [_]struct { source: []const u8, css: []const u8 }{
+        // A `/*!` comment stays, without the indentation of its block.
+        .{
+            .source =
+            \\/*! a
+            \\ * b */
+            \\.x { b: c; /*! d */ }
+            \\/* gone */
+            \\@media screen { /*! e */ .y { f: g; } }
+            \\
+            ,
+            .css = "/*! a\n * b */.x{b:c;/*! d */}@media screen{/*! e */.y{f:g}}\n",
+        },
+        // Only a media query list is shortened among at-rule preludes.
+        .{
+            .source =
+            \\@import "b.css" screen and (min-width: 10px);
+            \\@layer a, b;
+            \\@media (width >= 64rem) and (height < 3px), print { a { b: c; } }
+            \\@supports (a: b) or (c: d) { a { b: c; } }
+            \\@container sidebar (min-width: 400px) and (max-width: 700px) { a { b: c; } }
+            \\a:nth-of-type(10n + 1) > b { c: d; }
+            \\@font-face { font-family: x; }
+            \\
+            ,
+            .css = "@import\"b.css\"screen and (min-width: 10px);@layer a, b;@media(width >= 64rem)and (height < 3px),print{a{b:c}}@supports(a: b) or (c: d){a{b:c}}@container sidebar (min-width: 400px) and (max-width: 700px){a{b:c}}a:nth-of-type(10n + 1)>b{c:d}@font-face{font-family:x}\n",
+        },
+        // A value that is one interpolation stays as written in front of
+        // nested properties and after a name made by interpolation.
+        .{
+            .source =
+            \\$color: white;
+            \\$v: calc(0.5px + 1%);
+            \\a {
+            \\  b: #{$color} { c: 1px; }
+            \\  #{"d"}: #{$v};
+            \\}
+            \\
+            ,
+            .css = "a{b:white;b-c:1px;d:calc(0.5px + 1%)}\n",
+        },
+        // A value that is one interpolation stays as written whatever it
+        // holds, and a brace in a comment does not end the interpolation.
+        .{
+            .source =
+            \\$v: 1px, 2px;
+            \\a {
+            \\  b: #{$v};
+            \\  c: #{white};
+            \\  d: #{/* } */ 0.5em};
+            \\  e: #{url(http://a/b), white};
+            \\  f: (#{"0.5em"});
+            \\}
+            \\
+            ,
+            .css = "a{b:1px, 2px;c:white;d:0.5em;e:url(http://a/b), white;f:0.5em}\n",
+        },
+        // The space that ends an escape stays in an import URL.
+        .{
+            .source = "@import url(a\\ );\n@import url(  b.css  );\n",
+            .css = "@import\"a\\ \";@import\"b.css\"\n",
+        },
+        // Comments on one line, and a comment in a custom property whose
+        // name came from interpolation.
+        .{
+            .source =
+            \\@use "sass:string";
+            \\@function s($v) { @return string.unquote("#{$v}"); }
+            \\x {
+            \\  /*! c */ /*! d */
+            \\  y: s(0.5rem);
+            \\}
+            \\a { #{"--x"}: #{"a/*keep*/b"}; }
+            \\
+            ,
+            .css = "x{/*! c *//*! d */y:0.5rem}a{--x:a/*keep*/b}\n",
+        },
+        // A color is written in the shorter of its forms, whichever it had.
+        .{
+            .source =
+            \\@use "sass:color";
+            \\a {
+            \\  b: hsl(40, 70%, 30%);
+            \\  c: rgb(15%, 15%, 15%);
+            \\  d: color.adjust(#abc, $lightness: -7%);
+            \\  e: rgba(204, 204, 204, 0.5);
+            \\  f: rgba(255, 255, 255, 0.2);
+            \\  g: hsl(0, 0%, 100%);
+            \\  h: hsla(24, 20%, 50%, 0.08);
+            \\  i: 1px solid white;
+            \\}
+            \\
+            ,
+            .css = "a{b:rgb(51%,37%,9%);c:hsl(0,0%,15%);d:hsl(210,25%,66.3333333333%);e:hsla(0,0%,80%,.5);f:rgba(255,255,255,.2);g:#fff;h:rgba(60%,48%,40%,.08);i:1px solid #fff}\n",
+        },
+        // The arguments of a function stay as they are, except in a
+        // calculation.
+        .{
+            .source =
+            \\$w: white;
+            \\a {
+            \\  b: linear-gradient(to right, $w, transparent 0.5%);
+            \\  c: translate3d(calc(var(--x) * -2), 0, 0.5px);
+            \\  d: calc(0.375em - var(--w, 0.5em) * 2);
+            \\  e: clamp(0.5px, 0.5vw + 1px, 2px);
+            \\  f: rgb(var(--x), 0.1);
+            \\  g: max(0.5px, 0.25px, var(--x));
+            \\}
+            \\
+            ,
+            .css = "a{b:linear-gradient(to right, white, transparent 0.5%);c:translate3d(calc(var(--x) * -2), 0, 0.5px);d:calc(.375em - var(--w, 0.5em)*2);e:clamp(.5px,.5vw + 1px,2px);f:rgb(var(--x), 0.1);g:max(.5px,.25px,var(--x))}\n",
+        },
+        // A value that is a string stays as it is, and a custom property
+        // whose name comes from an interpolation is an ordinary declaration.
+        .{
+            .source =
+            \\@use "sass:string";
+            \\@function s($v) { @return string.unquote("#{$v}"); }
+            \\@mixin v($name, $value) { #{"--" + $name}: #{$value}; }
+            \\a {
+            \\  b: s(0.875rem);
+            \\  d: url(#{"x"}) 0.5em;
+            \\  @include v(e, var(--f));
+            \\  @include v(g, 0.5em transparent);
+            \\  --h: 0.5em;
+            \\  #{"--i"}: 0.5em, white;
+            \\}
+            \\
+            ,
+            .css = "a{b:0.875rem;d:url(x) .5em;--e:var(--f);--g:0.5em transparent;--h: 0.5em;--i:.5em,#fff}\n",
+        },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const css = try compileSourceToCss(arena.allocator(), case.source, "", &.{}, .{ .output_style = .compressed });
+        try std.testing.expectEqualStrings(case.css, css);
+    }
+}
+
+test "api: compressed output writes a token the way its value says" {
+    const cases = [_]struct { source: []const u8, path: []const u8 = "", css: []const u8 }{
+        // A number that was rounded to be written loses its zero after a
+        // minus sign too; one with ten decimals as they are keeps it. A
+        // string in a list is written as it is, and a color in its
+        // shortest form, worked out before its channels are rounded.
+        .{
+            .source =
+            \\@use "sass:color";
+            \\@function shadow($n) {
+            \\  $val: 0px 0px transparent;
+            \\  @for $i from 1 through $n {
+            \\    $val: #{$val}, #{$i * 0.5}px #aaa;
+            \\  }
+            \\  @return $val;
+            \\}
+            \\a {
+            \\  b: (0.3 - 0.375) * 1em 0.0333333333em -0.5em;
+            \\  c: (0.3 - 0.375) * 1em;
+            \\  d: 0.5 + rem 0.5rem;
+            \\  e: shadow(2);
+            \\  f: 1px solid color.mix(#6f42c1, white, 20.3%);
+            \\  g: color.adjust(#26a69a, $lightness: 54.5%);
+            \\  h: center / 0.4rem 0.5rem, 0.5 / 0.4, 0.5em/1foo-bar;
+            \\  i: 0.5rem (0.5 + rem), -0.075em (0.3 - 0.375) * 1em;
+            \\}
+            \\
+            ,
+            .css = "a{b:-.075em 0.0333333333em -0.5em;c:-.075em;d:0.5rem .5rem;e:0px 0px transparent, 0.5px #aaa,1px #aaa;f:1px solid rgb(88.5364705882%,84.9541176471%,95.0643137255%);g:hsl(174.375,62.7450980392%,94.5%);h:center/0.4rem .5rem,.5/.4,.5em/1foo-bar;i:.5rem 0.5rem,-0.075em -.075em}\n",
+        },
+        // In a calculation kept in a variable, a number an interpolation
+        // put there keeps its zero and one written beside it does not. A
+        // string that reads as a comment is text.
+        .{
+            .source =
+            \\$a: 0.375rem;
+            \\$w: var(--w);
+            \\@function add($x, $y) {
+            \\  @return calc(#{$x} + #{$y});
+            \\}
+            \\$t: calc(
+            \\  #{$a} - 1px -
+            \\    #{$w} * 0.25
+            \\);
+            \\a {
+            \\  b: add($a, $w);
+            \\  c: add($a, 0.5px) 0.5em;
+            \\  d: $t 0.75rem;
+            \\  e: calc(#{$w} * 0.75);
+            \\  e2: calc(#{"var(--x)"} * 0.5) calc(0.1234567891px + #{0.5});
+            \\  f: var(--x, "/") #{"/* rtl:"} var(--y) #{"*/"};
+            \\  g: #{"/* x */"};
+            \\  #{"--h"}: #{0.5em} 0.5em, 0.5em;
+            \\}
+            \\
+            ,
+            .css = "a{b:calc(0.375rem + var(--w));c:calc(0.375rem + 0.5px) .5em;d:calc(0.375rem - 1px - var(--w)*.25) .75rem;e:calc(var(--w)*.75);e2:calc(var(--x)*.5) calc(0.1234567891px + 0.5);f:var(--x, \"/\") /* rtl: var(--y) */;g:/* x */;--h:0.5em .5em,.5em}\n",
+        },
+        // A string and the arguments of a function that is not a
+        // calculation are left alone inside one. An item in brackets is
+        // told apart from a string that reads the same.
+        .{
+            .source =
+            \\$c: calc(#{"var(--w)"} * 0.5 + var(--x, "\\0.5", 0.5px));
+            \\a {
+            \\  b: $c;
+            \\  c: [0.5 0.3] unquote("0.5"), 0.5em/1\26, [0.5/2];
+            \\}
+            \\
+            ,
+            .css = "a{b:calc(var(--w)*.5 + var(--x, \"\\\\0.5\", 0.5px));c:[.5 .3] 0.5,.5em/1\\&,[.5/2]}\n",
+        },
+        // A comment kept as text is copied whole, a color is told apart
+        // from a string that reads the same, and the spaces of a string
+        // inside a calculation do not hide it from its override.
+        .{
+            .source =
+            \\$c: calc(#{0.5px} + var(--x, "a  b") * 0.25);
+            \\a {
+            \\  b: #{"/* ( */"};
+            \\  c: 0.5em rgba(0, 0, 0, 0.5) unquote("rgba(0, 0, 0, 0.5)");
+            \\  c2: white unquote("white") transparent unquote("transparent");
+            \\  d: $c;
+            \\}
+            \\
+            ,
+            .css = "a{b:/* ( */;c:.5em rgba(0,0,0,.5) rgba(0, 0, 0, 0.5);c2:#fff white rgba(0,0,0,0) transparent;d:calc(0.5px + var(--x, \"a  b\")*.25)}\n",
+        },
+        // In plain CSS a hex color with an alpha channel is a color, an
+        // `rgba()` of the stylesheet is not, and a number with ten
+        // decimals keeps its zero.
+        .{
+            .source =
+            \\a {
+            \\  b: #00000040 #abcd;
+            \\  c: 0.1428571429em 0.142857142em;
+            \\  d: rgba(0, 0, 0, 0.25) white;
+            \\}
+            \\
+            ,
+            .path = "plain.css",
+            .css = "a{b:rgba(0,0,0,.2509803922) rgba(170,187,204,.8666666667);c:0.1428571429em .142857142em;d:rgba(0, 0, 0, 0.25) white}\n",
+        },
+    };
+    const alloc = std.testing.allocator;
+    for (cases) |case| {
+        const css = try compileSourceToCss(alloc, case.source, case.path, &.{}, .{ .output_style = .compressed });
+        defer alloc.free(css);
+        try std.testing.expectEqualStrings(case.css, css);
+        // Expanded output never shows what is passed along for it.
+        const expanded = try compileSourceToCss(alloc, case.source, case.path, &.{}, .{});
+        defer alloc.free(expanded);
+        try std.testing.expect(std.mem.indexOfAny(u8, expanded, &.{ 0x01, 0x02, 0x03, 0x04 }) == null);
+    }
+}
+
 test "api: compressed output keeps a comment that is text" {
     const alloc = std.testing.allocator;
     const source =
@@ -1344,8 +1636,6 @@ test "api: compressed output leaves string contents alone and resets after an em
 }
 
 test "api: a hex escape gets its space only where a selector name ends" {
-    // Lists a built-in function returns live until the allocator is torn
-    // down, so this compile runs in an arena.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1359,8 +1649,6 @@ test "api: a hex escape gets its space only where a selector name ends" {
 }
 
 test "api: selector.nest returns a selector list" {
-    // Lists a built-in function returns live until the allocator is torn
-    // down, so these compiles run in an arena.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1454,9 +1742,81 @@ test "api: numbers written with a slash stay that text in front of something els
     , css);
 }
 
+test "api: lists made by built-in functions are freed" {
+    // `std.testing.allocator` reports what is still allocated at the end.
+    const alloc = std.testing.allocator;
+    const source =
+        \\@use "sass:list";
+        \\@use "sass:map";
+        \\@use "sass:selector";
+        \\@use "sass:string";
+        \\@use "sass:color";
+        \\$m: map.merge((a: 1), (b: 2));
+        \\a {
+        \\  b: list.append(1 2, 3);
+        \\  c: list.join(1 2, 3 4);
+        \\  d: list.zip(1 2, 3 4);
+        \\  e: map.keys($m);
+        \\  f: map.values(map.remove($m, a));
+        \\  g: selector.nest(".a", ".b");
+        \\  h: selector.parse(".a .b, .c");
+        \\  i: string.split("a b", " ");
+        \\  j: list.set-nth(1 2 3, 2, 4);
+        \\  k: list.slash(1, 2);
+        \\  l: color.to-space(#abc, hsl);
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expect(std.mem.indexOf(u8, css, "b: 1 2 3;") != null);
+
+    var mapped = try compileSourceToCssWithSourceMap(alloc, source, "", &.{}, null, .{});
+    defer mapped.deinit(alloc);
+    try std.testing.expectEqualStrings(css, mapped.css);
+}
+
+test "api: a failed copy of the result is reported as an error diagnostic" {
+    const Counter = struct {
+        fn sink(diag: *const Diagnostic, ctx: ?*anyopaque) void {
+            const errors: *usize = @ptrCast(@alignCast(ctx.?));
+            if (diag.level == .err) errors.* += 1;
+        }
+    };
+    const source = "a { b: c; }\n";
+
+    // The copy handed back to the caller is the last allocation of a
+    // compile, so failing that one leaves the compile itself intact.
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const css = try compileSourceToCss(counting.allocator(), source, "", &.{}, .{});
+    counting.allocator().free(css);
+    const map_start = counting.alloc_index;
+    const mapped = try compileSourceToCssWithSourceMap(counting.allocator(), source, "", &.{}, null, .{});
+    const map_allocs = counting.alloc_index - map_start;
+    counting.allocator().free(mapped.css);
+    counting.allocator().free(mapped.source_map_json);
+
+    var errors: usize = 0;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = map_start - 1 });
+    try std.testing.expectError(error.OutOfMemory, compileSourceToCss(failing.allocator(), source, "", &.{}, .{
+        .diagnostic_sink = Counter.sink,
+        .diagnostic_ctx = &errors,
+    }));
+    try std.testing.expectEqual(@as(usize, 1), errors);
+
+    // The CSS copy and the source map copy are the last two allocations.
+    for ([_]usize{ map_allocs - 2, map_allocs - 1 }) |fail_index| {
+        errors = 0;
+        var failing_map = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, compileSourceToCssWithSourceMap(failing_map.allocator(), source, "", &.{}, null, .{
+            .diagnostic_sink = Counter.sink,
+            .diagnostic_ctx = &errors,
+        }));
+        try std.testing.expectEqual(@as(usize, 1), errors);
+    }
+}
+
 test "api: @extend covers every combination of a repeated target" {
-    // Lists a built-in function returns live until the allocator is torn
-    // down, so this compile runs in an arena.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1520,6 +1880,152 @@ test "api: a repeated @extend target leaves out covered extenders and keeps sibl
         \\}
         \\
         \\.c .c, .i .c, #j.i .c, .c .i, .i .i, #j.i .i, .c #j.i, .i #j.i {
+        \\  x: y;
+        \\}
+        \\
+    , css);
+}
+
+test "api: a repeated @extend target leaves out results another result covers" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\.a .a { x: y; }
+        \\.f:hover, .g .f { @extend .a; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    defer alloc.free(css);
+    // `.g .f .f:hover` and `.g .f:hover .f` are covered by `.g .f .f`.
+    try std.testing.expectEqualStrings(
+        \\.a .a, .f:hover .a, .g .f .a, .a .f:hover, .f:hover .f:hover, .a .g .f, .g .a .f, .f:hover .g .f, .g .f .f {
+        \\  x: y;
+        \\}
+        \\
+    , css);
+}
+
+test "api: a covered @extend result is judged by the extensions applied to it" {
+    const alloc = std.testing.allocator;
+    // `#q` comes with a later rule, so it does not keep `.g .f .f:hover`.
+    const source =
+        \\.a .a { x: y; }
+        \\.f:hover, .g .f { @extend .a; }
+        \\#q { @extend .a; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.a .a, #q .a, .a #q, #q #q, .f:hover .a, .f:hover #q, .g .f .a, .g .f #q, .a .f:hover, #q .f:hover, .f:hover .f:hover, .a .g .f, #q .g .f, .g .a .f, .g #q .f, .f:hover .g .f, .g .f .f {
+        \\  x: y;
+        \\}
+        \\
+    , css);
+}
+
+test "api: covered @extend results are left out after each extension" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { source: []const u8, selectors: usize, covered_kept: bool }{
+        // One extension, 109 results: too many to compare.
+        .{
+            .source =
+            \\.a .a { x: y; }
+            \\.f:hover, .g .f, .h1, .h2, .h3, .h4, .h5, .h6, .h7 { @extend .a; }
+            \\
+            ,
+            .selectors = 109,
+            .covered_kept = true,
+        },
+        // The first extension makes 9 results and loses two of them.
+        .{
+            .source =
+            \\.a .a { x: y; }
+            \\.f:hover, .g .f { @extend .a; }
+            \\.h1, .h2, .h3, .h4, .h5, .h6, .h7 { @extend .a; }
+            \\
+            ,
+            .selectors = 107,
+            .covered_kept = false,
+        },
+        // The second extension brings the list to 109 results.
+        .{
+            .source =
+            \\.a .a { x: y; }
+            \\.h1, .h2, .h3, .h4, .h5, .h6, .h7 { @extend .a; }
+            \\.f:hover, .g .f { @extend .a; }
+            \\
+            ,
+            .selectors = 109,
+            .covered_kept = true,
+        },
+    };
+    for (cases) |case| {
+        const css = try compileSourceToCss(alloc, case.source, "", &.{}, .{});
+        defer alloc.free(css);
+        const prelude = css[0 .. std.mem.indexOf(u8, css, " {") orelse return error.TestUnexpectedResult];
+        try std.testing.expectEqual(case.selectors, std.mem.count(u8, prelude, ", ") + 1);
+        try std.testing.expectEqual(case.covered_kept, std.mem.indexOf(u8, prelude, ", .g .f .f:hover,") != null);
+    }
+}
+
+test "api: a covered @extend result stays where covering is not a plain match" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { source: []const u8, kept: []const u8 }{
+        // A child combinator.
+        .{ .source = ".a .a { x: y; }\n.k .f > a, .f { @extend .a; }\n", .kept = ", .k .f > a .f > a," },
+        // `*` leaves no trace in what it is unified with.
+        .{ .source = ".a.b .a.b { x: y; }\n.f:hover, #x *.f:hover { @extend .a; }\n", .kept = ", #x .b.f:hover .b.f:hover," },
+        .{ .source = "div.a div.a { x: y; }\n.f:hover, #x *|div.f:hover { @extend .a; }\n", .kept = ", #x div.f:hover div.f:hover," },
+        // Unifying with `.a.f` and `.a.g` makes compounds that cover others.
+        .{ .source = ".a.f .a.g { x: y; }\n.f .g { @extend .a; }\n", .kept = ", .f .f.g .a.g," },
+        // The ancestor `.f` of one extender is what another one ends with.
+        .{ .source = ".a .a .a { x: y; }\n.f :hover, .f, .g.h, .f.k { @extend .a; }\n", .kept = ", .a .a .f :hover," },
+        // The ancestors `.g` and `.f.g.k` of two extenders cover each other.
+        .{ .source = ".a .a { x: y; }\n.f.g.k .h, .g .h, .x .h { @extend .a; }\n", .kept = ", .x .h .f.g.k .h," },
+        // With three places not every combination is made.
+        .{ .source = ".a .a .a { x: y; }\nspan, .k :hover, .d span { @extend .a; }\n", .kept = ", .d .k :hover span .a," },
+        // `:where()` adds no specificity.
+        .{ .source = ".a .a { x: y; }\n.f:hover, .g :where(.f) { @extend .a; }\n", .kept = ", .g :where(.f) .f:hover," },
+    };
+    for (cases) |case| {
+        const css = try compileSourceToCss(alloc, case.source, "", &.{}, .{});
+        defer alloc.free(css);
+        try std.testing.expect(std.mem.indexOf(u8, css, case.kept) != null);
+    }
+}
+
+test "api: an ancestor the extender's last compound matches is not shared" {
+    const alloc = std.testing.allocator;
+    const css = try compileSourceToCss(alloc, ".a .a { x: y; }\ndiv .f + div { @extend .a; }\n", "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expect(std.mem.indexOf(u8, css, ", div .f + div .f + div") == null);
+}
+
+test "api: an extender's ancestors are not shared past a sibling combinator" {
+    const alloc = std.testing.allocator;
+    const css = try compileSourceToCss(alloc, ".p + .a .a { x: y; }\n.x .f + .g ~ .h { @extend .a; }\n", "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".x .f .g ~ .p + .h .f + .g ~ .h") == null);
+}
+
+test "api: an extender's ancestors are shared only when it is the sole extender" {
+    const alloc = std.testing.allocator;
+    const css = try compileSourceToCss(alloc, ".a .a { x: y; }\n.g { @extend .a; }\n.x .f + .g { @extend .a; }\n", "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".x .f + .g .f + .g") == null);
+}
+
+test "api: an extender with ancestors and a sibling joins a repeated @extend target" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\.x .p .a .a { x: y; }
+        \\.x .f + .g { @extend .a; }
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.x .p .a .a, .x .p .f + .g .a, .x .p .a .f + .g, .x .p .f + .g .f + .g {
         \\  x: y;
         \\}
         \\

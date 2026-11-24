@@ -106,6 +106,7 @@ pub fn resolveUserModule(self: *ModuleResolver, from_path: []const u8, url: []co
     };
     var parser = parser_mod.Parser.init(sa, self.pool, tokens, source);
     parser.is_indented_syntax = is_indented_syntax;
+    parser.is_plain_css = is_plain_css_source;
     parser.no_interpolation = !lexer.saw_interpolation;
     defer parser.deinit();
     var ast = parser.parse() catch return error.UsermoduleParseFailure;
