@@ -659,19 +659,15 @@ fn divValues(env: anytype, a: Value, b: Value, lhs_written_as_slash: bool) Error
 
     if (try calcBinaryIfMarked(env, lhs, rhs, "/")) |v| return v;
     // Numbers written with a slash between them (`1/2`) are still that
-    // text when what follows is not a number: `1/2/x`.
-    const lhs_written_slash = lhs_written_as_slash and a.kind() == .list and lhs.kind() == .number and rhs.kind() != .number;
-    // The text made here drops the quotes of a string, which the result
-    // keeps at run time.
-    if (lhs_written_slash and rhs.kind() == .string and rhs.stringQuoted(env.stringFlagsPool().items)) return error.NonStaticExpr;
-    const sa_raw = try valueToArithmeticOperandText(env, if (lhs_written_slash) a else lhs);
+    // text when what follows is not a number: `1/2/x`. The text made here
+    // differs from the one made at run time, which keeps the quotes of a
+    // string, so that case is left to it.
+    if (lhs_written_as_slash and a.kind() == .list and lhs.kind() == .number and rhs.kind() != .number) return error.NonStaticExpr;
+    const sa_raw = try valueToArithmeticOperandText(env, lhs);
     defer env.allocator().free(sa_raw);
     const sb_raw = try valueToArithmeticOperandText(env, rhs);
     defer env.allocator().free(sb_raw);
-    const sa = if (lhs_written_slash)
-        try env.allocator().dupe(u8, sa_raw)
-    else
-        try simplifySlashOperandText(env.pool(), env.numberPool(), env.allocator(), sa_raw);
+    const sa = try simplifySlashOperandText(env.pool(), env.numberPool(), env.allocator(), sa_raw);
     defer env.allocator().free(sa);
     const sb = try simplifySlashOperandText(env.pool(), env.numberPool(), env.allocator(), sb_raw);
     defer env.allocator().free(sb);
