@@ -1448,6 +1448,90 @@ test "api: compressed output follows the official CLI" {
     }
 }
 
+test "api: compressed output writes a token the way its value says" {
+    const cases = [_]struct { source: []const u8, path: []const u8 = "", css: []const u8 }{
+        // A number that was rounded to be written loses its zero after a
+        // minus sign too; one with ten decimals as they are keeps it. A
+        // string in a list is written as it is, and a color in its
+        // shortest form, worked out before its channels are rounded.
+        .{
+            .source =
+            \\@use "sass:color";
+            \\@function shadow($n) {
+            \\  $val: 0px 0px transparent;
+            \\  @for $i from 1 through $n {
+            \\    $val: #{$val}, #{$i * 0.5}px #aaa;
+            \\  }
+            \\  @return $val;
+            \\}
+            \\a {
+            \\  b: (0.3 - 0.375) * 1em 0.0333333333em -0.5em;
+            \\  c: (0.3 - 0.375) * 1em;
+            \\  d: 0.5 + rem 0.5rem;
+            \\  e: shadow(2);
+            \\  f: 1px solid color.mix(#6f42c1, white, 20.3%);
+            \\  g: color.adjust(#26a69a, $lightness: 54.5%);
+            \\  h: center / 0.4rem 0.5rem, 0.5 / 0.4;
+            \\}
+            \\
+            ,
+            .css = "a{b:-.075em 0.0333333333em -0.5em;c:-.075em;d:0.5rem .5rem;e:0px 0px transparent, 0.5px #aaa,1px #aaa;f:1px solid rgb(88.5364705882%,84.9541176471%,95.0643137255%);g:hsl(174.375,62.7450980392%,94.5%);h:center/0.4rem .5rem,.5/.4}\n",
+        },
+        // In a calculation kept in a variable, a number an interpolation
+        // put there keeps its zero and one written beside it does not. A
+        // string that reads as a comment is text.
+        .{
+            .source =
+            \\$a: 0.375rem;
+            \\$w: var(--w);
+            \\@function add($x, $y) {
+            \\  @return calc(#{$x} + #{$y});
+            \\}
+            \\$t: calc(
+            \\  #{$a} - 1px -
+            \\    #{$w} * 0.25
+            \\);
+            \\a {
+            \\  b: add($a, $w);
+            \\  c: add($a, 0.5px) 0.5em;
+            \\  d: $t 0.75rem;
+            \\  e: calc(#{$w} * 0.75);
+            \\  f: var(--x, "/") #{"/* rtl:"} var(--y) #{"*/"};
+            \\  g: #{"/* x */"};
+            \\  #{"--h"}: #{0.5em} 0.5em, 0.5em;
+            \\}
+            \\
+            ,
+            .css = "a{b:calc(0.375rem + var(--w));c:calc(0.375rem + 0.5px) .5em;d:calc(0.375rem - 1px - var(--w)*.25) .75rem;e:calc(var(--w)*.75);f:var(--x, \"/\") /* rtl: var(--y) */;g:/* x */;--h:0.5em .5em,.5em}\n",
+        },
+        // In plain CSS a hex color with an alpha channel is a color, an
+        // `rgba()` of the stylesheet is not, and a number with ten
+        // decimals keeps its zero.
+        .{
+            .source =
+            \\a {
+            \\  b: #00000040 #abcd;
+            \\  c: 0.1428571429em 0.142857142em;
+            \\  d: rgba(0, 0, 0, 0.25) white;
+            \\}
+            \\
+            ,
+            .path = "plain.css",
+            .css = "a{b:rgba(0,0,0,.2509803922) rgba(170,187,204,.8666666667);c:0.1428571429em .142857142em;d:rgba(0, 0, 0, 0.25) white}\n",
+        },
+    };
+    const alloc = std.testing.allocator;
+    for (cases) |case| {
+        const css = try compileSourceToCss(alloc, case.source, case.path, &.{}, .{ .output_style = .compressed });
+        defer alloc.free(css);
+        try std.testing.expectEqualStrings(case.css, css);
+        // Expanded output never shows what is passed along for it.
+        const expanded = try compileSourceToCss(alloc, case.source, case.path, &.{}, .{});
+        defer alloc.free(expanded);
+        try std.testing.expect(std.mem.indexOfAny(u8, expanded, &.{ 0x01, 0x02, 0x03, 0x04 }) == null);
+    }
+}
+
 test "api: compressed output keeps a comment that is text" {
     const alloc = std.testing.allocator;
     const source =

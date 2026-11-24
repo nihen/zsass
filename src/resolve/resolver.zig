@@ -8106,6 +8106,7 @@ fn resolvePlainCssDeclarationStmtFast(
 
     const prop_intern: InternId = @enumFromInt(prop_ast.payload);
 
+    var hex_alpha_expanded = false;
     const raw_id: InternId = if (is_custom_property)
         try ctx.pool.intern(raw_val)
     else if (plainCssValueNeedsNoNormalize(raw_val))
@@ -8117,6 +8118,7 @@ fn resolvePlainCssDeclarationStmtFast(
         defer ctx.a.free(zero_filled);
         const hex_expanded = try value_format.expandHexAlphaColors(ctx.a, zero_filled);
         defer ctx.a.free(hex_expanded);
+        hex_alpha_expanded = !std.mem.eql(u8, hex_expanded, zero_filled);
         break :id try ctx.pool.intern(hex_expanded);
     };
 
@@ -8128,6 +8130,7 @@ fn resolvePlainCssDeclarationStmtFast(
 
     const important = (n.flags & 2) != 0;
     var emit_decl_flags: u16 = 0;
+    if (hex_alpha_expanded) emit_decl_flags |= opcode_mod.emit_decl_flag_hex_alpha_expanded;
     if (sourceSliceHasTopLevelComma(raw_val)) {
         emit_decl_flags |= opcode_mod.emit_decl_flag_has_explicit_top_level_comma;
     }
@@ -8262,6 +8265,7 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
     const source_has_legacy_plus_important = declarationSourceHasLegacyPlusImportant(ctx.ast.source, span);
     const legacy_plus_important_expr = try resolveLegacyPlusImportantValue(ctx, value_source, .{ .start = val_ast.span_start, .end = val_ast.span_end });
     const important = (n.flags & 2) != 0 or source_has_legacy_plus_important or legacy_plus_important_expr != null;
+    var hex_alpha_expanded = false;
     const base_val_e = if (legacy_plus_important_expr) |expr_idx|
         expr_idx
     else if (in_plain_css_module) blk: {
@@ -8278,6 +8282,7 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
             defer ctx.a.free(zero_filled);
             const hex_expanded = try value_format.expandHexAlphaColors(ctx.a, zero_filled);
             defer ctx.a.free(hex_expanded);
+            hex_alpha_expanded = !std.mem.eql(u8, hex_expanded, zero_filled);
             break :id try ctx.pool.intern(hex_expanded);
         };
         break :blk try appendExpr(ctx.prog, ctx.a, .{
@@ -8304,6 +8309,7 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
         break :blk try appendListExprFromElems(ctx, &elems, .space, false, false, false, span);
     } else base_val_e;
     var emit_decl_flags: u16 = 0;
+    if (hex_alpha_expanded) emit_decl_flags |= opcode_mod.emit_decl_flag_hex_alpha_expanded;
     if (sourceSliceHasTopLevelComma(value_source)) {
         emit_decl_flags |= opcode_mod.emit_decl_flag_has_explicit_top_level_comma;
     }
