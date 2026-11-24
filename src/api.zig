@@ -1394,9 +1394,8 @@ test "api: compressed output drops an empty rule without its enclosing block" {
 test "api: numbers written with a slash stay that text in front of something else" {
     const alloc = std.testing.allocator;
     // Outside parentheses `1/2` is still `1/2` when what it is divided by
-    // is not a number. In parentheses, and through a variable, it is 0.5;
-    // after the second item of a space-separated list the parentheses no
-    // longer count.
+    // is not a number. In parentheses, on the right of an operator, and
+    // through a variable it is 0.5.
     const source =
         \\@use "sass:map";
         \\@function f() {
@@ -1411,10 +1410,10 @@ test "api: numbers written with a slash stay that text in front of something els
         \\  c: 1/2/3/x 1px/2px/"y", -1/2/x;
         \\  d: 1.0/2.50/x 6/3/x/2/4;
         \\  e: (1/2/x) (1/2)/x $v/x;
-        \\  f: (1/2/x, 1/2/y) (a 1/2/x, 1/2/y);
-        \\  g: f() foo(1/2/x) foo((1/2/x));
-        \\  h: map.get((k: 1/2/x), k) [1/2/x];
-        \\  i: 1/2/3 1/2 + x;
+        \\  f: (1/2/x, 1/2/y) foo((1/2/x));
+        \\  g: f() [1/2/x] 1/2/x + y;
+        \\  h: map.get((k: 1/2/x), k) y + 1/2/x;
+        \\  i: 1/2/3 1/2 + x "0.5/x" == 1/2/x;
         \\  @include m(1/2/x);
         \\}
         \\@if 1/2/x == "1/2/x" {
@@ -1432,10 +1431,10 @@ test "api: numbers written with a slash stay that text in front of something els
         \\  c: 1/2/3/x 1px/2px/"y", -1/2/x;
         \\  d: 1/2.5/x 6/3/x/2/4;
         \\  e: 0.5/x 0.5/x 0.5/x;
-        \\  f: 0.5/x, 0.5/y a 1/2/x, 1/2/y;
-        \\  g: 1/2/x foo(1/2/x) foo(0.5/x);
-        \\  h: 0.5/x [1/2/x];
-        \\  i: 1/2/3 0.5x;
+        \\  f: 0.5/x, 0.5/y foo(0.5/x);
+        \\  g: 1/2/x [1/2/x] 1/2/xy;
+        \\  h: 0.5/x y0.5/x;
+        \\  i: 1/2/3 0.5x true;
         \\  m: 1/2/x;
         \\}
         \\

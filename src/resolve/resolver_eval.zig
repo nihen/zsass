@@ -661,6 +661,9 @@ fn divValues(env: anytype, a: Value, b: Value, lhs_written_as_slash: bool) Error
     // Numbers written with a slash between them (`1/2`) are still that
     // text when what follows is not a number: `1/2/x`.
     const lhs_written_slash = lhs_written_as_slash and a.kind() == .list and lhs.kind() == .number and rhs.kind() != .number;
+    // The text made here drops the quotes of a string, which the result
+    // keeps at run time.
+    if (lhs_written_slash and rhs.kind() == .string and rhs.stringQuoted(env.stringFlagsPool().items)) return error.NonStaticExpr;
     const sa_raw = try valueToArithmeticOperandText(env, if (lhs_written_slash) a else lhs);
     defer env.allocator().free(sa_raw);
     const sb_raw = try valueToArithmeticOperandText(env, rhs);

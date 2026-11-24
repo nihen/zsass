@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Numbers written with a slash between them stay that text when they are
   divided by something that is not a number: `grid-area: 1 / 2 / auto` is
-  `1/2/auto`, not `0.5/auto`. In parentheses and through a variable the
-  division still happens.
+  `1/2/auto`, not `0.5/auto`. In parentheses, on the right of an operator,
+  and through a variable the division still happens.
 
 ## 0.4.2 (2026-11-23)
 

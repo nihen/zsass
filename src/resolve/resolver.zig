@@ -508,8 +508,10 @@ const Ctx = struct {
     /// Whether declaration value is being resolved.
     /// Used to determine the declaration context of slash ambiguity (`/`).
     in_declaration_value: bool = false,
-    /// How many parentheses enclose the expression being resolved. Inside
-    /// them `1/2` is a division.
+    /// How many parentheses enclose the expression being resolved, those
+    /// of a function call included and the right side of an operator
+    /// counting as one. Inside them `1/2` is a division, as it has been;
+    /// the official CLI keeps the text in some of these places too.
     slash_paren_depth: u32 = 0,
     /// Declaration value validation in plain-CSS context. custom CSS `@function --*`
     /// Set it to false in the immediate body to maintain CSS text compatibility rules.
@@ -3238,6 +3240,8 @@ fn resolveExprSlashExpr(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: S
             });
         }
     }
+    // Resolving the operands can change the count.
+    const outside_parens = ctx.slash_paren_depth == 0;
     const li = try resolveExpr(ast, ctx, lhs);
     const ri = try resolveExpr(ast, ctx, rhs);
     const lhs_calc_like = nodeIsCalcFunctionCall(ast, ctx, lhs);
@@ -3306,7 +3310,7 @@ fn resolveExprSlashExpr(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: S
         }
     }
 
-    const lhs_written_slash = ctx.slash_paren_depth == 0 and isSlashListExpr(ctx.prog, li) and
+    const lhs_written_slash = outside_parens and isSlashListExpr(ctx.prog, li) and
         ctx.prog.list_exprs.items[ctx.prog.exprs.items[li].payload].slash_coercible;
     const bidx: u32 = @intCast(ctx.prog.binary_exprs.items.len);
     try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = .div, .lhs_written_slash = lhs_written_slash });
@@ -3559,6 +3563,9 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
             const saved_in_declaration_value = ctx.in_declaration_value;
             ctx.in_declaration_value = false;
             defer ctx.in_declaration_value = saved_in_declaration_value;
+            const saved_slash_paren_depth = ctx.slash_paren_depth;
+            ctx.slash_paren_depth = saved_slash_paren_depth + 1;
+            defer ctx.slash_paren_depth = saved_slash_paren_depth;
             const saved_allow_unknown_var = ctx.allow_unknown_var_literal;
             ctx.allow_unknown_var_literal = saved_allow_unknown_var or allow_unknown_var_for_calc_if;
             defer ctx.allow_unknown_var_literal = saved_allow_unknown_var;
@@ -3585,6 +3592,9 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
         const saved_in_declaration_value = ctx.in_declaration_value;
         ctx.in_declaration_value = false;
         defer ctx.in_declaration_value = saved_in_declaration_value;
+        const saved_slash_paren_depth = ctx.slash_paren_depth;
+        ctx.slash_paren_depth = saved_slash_paren_depth + 1;
+        defer ctx.slash_paren_depth = saved_slash_paren_depth;
         const saved_allow_unknown_var = ctx.allow_unknown_var_literal;
         ctx.allow_unknown_var_literal = saved_allow_unknown_var or allow_unknown_var_for_calc_if;
         defer ctx.allow_unknown_var_literal = saved_allow_unknown_var;
@@ -3943,7 +3953,14 @@ fn resolveExpr(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ResolveErro
                 }
             }
             const li = try resolveExpr(ast, ctx, lhs);
-            const ri = try resolveExpr(ast, ctx, rhs);
+            // On the right of an operator `1/2` is a division, as it is
+            // inside parentheses.
+            const ri = ri: {
+                const saved_slash_paren_depth = ctx.slash_paren_depth;
+                ctx.slash_paren_depth = saved_slash_paren_depth + 1;
+                defer ctx.slash_paren_depth = saved_slash_paren_depth;
+                break :ri try resolveExpr(ast, ctx, rhs);
+            };
             const bidx: u32 = @intCast(ctx.prog.binary_exprs.items.len);
             try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = mapBinOp(op) });
             return try appendExpr(ctx.prog, ctx.a, .{ .kind = .binary, .payload = bidx, .span = span });
@@ -4561,11 +4578,7 @@ fn resolveList(
     var elems: std.ArrayListUnmanaged(ExprIndex) = .empty;
     defer elems.deinit(ctx.a);
     try elems.ensureTotalCapacity(ctx.a, children.len);
-    // Once a space-separated list in parentheses has a second item, what
-    // follows up to the closing parenthesis no longer counts as inside
-    // them as far as `1/2` is concerned: `(a 1/2/x, 1/2/y)` keeps both.
-    for (children, 0..) |ch, child_index| {
-        if (separator == .space and child_index != 0) ctx.slash_paren_depth = 0;
+    for (children) |ch| {
         try elems.append(ctx.a, try resolveExpr(ast, ctx, ch));
     }
     var effective_separator = separator;
