@@ -858,17 +858,38 @@ fn buildCssMathCall(ctx: *BuiltinContext, name: []const u8, args: []const Value)
     var text: std.ArrayListUnmanaged(u8) = .empty;
     defer text.deinit(ctx.allocator);
 
+    // Where the arguments are that were strings rather than numbers.
+    const text_args = try ctx.allocator.alloc([2]usize, args.len);
+    defer ctx.allocator.free(text_args);
+    var text_arg_count: usize = 0;
+
     try text.appendSlice(ctx.allocator, name);
     try text.append(ctx.allocator, '(');
     for (args, 0..) |arg, i| {
         if (i != 0) try text.appendSlice(ctx.allocator, ", ");
         const rendered = try renderCssMathArg(ctx, arg);
         defer ctx.allocator.free(rendered);
+        // A string an interpolation made, not a calculation kept as one.
+        if (arg.kind() == .string and !arg.stringQuoted(ctx.string_flags_pool.items) and
+            arg.stringPreserveLiteralText(ctx.string_flags_pool.items) and
+            ctx.intern_pool.get(arg.stringIntern()).len != 0 and ctx.intern_pool.get(arg.stringIntern())[0] != 0x01)
+        {
+            text_args[text_arg_count] = .{ text.items.len, text.items.len + rendered.len };
+            text_arg_count += 1;
+        }
         try text.appendSlice(ctx.allocator, rendered);
     }
     try text.append(ctx.allocator, ')');
 
     const id = try internString(ctx, text.items);
+    if (text_arg_count != 0) {
+        if (ctx.calc_text_args_hook) |hook| {
+            hook(ctx.vm, id, text.items, text_args[0..text_arg_count]) catch return error.OutOfMemory;
+            // The record goes by the text; the flag keeps it to this
+            // value, apart from a calculation that reads the same.
+            return Value.string(id, false).withPreserveLiteralText();
+        }
+    }
     return Value.string(id, false);
 }
 
