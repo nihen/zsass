@@ -1529,11 +1529,12 @@ test "api: compressed output writes a token the way its value says" {
             \\a {
             \\  b: #{"/* ( */"};
             \\  c: 0.5em rgba(0, 0, 0, 0.5) unquote("rgba(0, 0, 0, 0.5)");
+            \\  c2: white unquote("white") transparent unquote("transparent");
             \\  d: $c;
             \\}
             \\
             ,
-            .css = "a{b:/* ( */;c:.5em rgba(0,0,0,.5) rgba(0, 0, 0, 0.5);d:calc(0.5px + var(--x, \"a  b\")*.25)}\n",
+            .css = "a{b:/* ( */;c:.5em rgba(0,0,0,.5) rgba(0, 0, 0, 0.5);c2:#fff white rgba(0,0,0,0) transparent;d:calc(0.5px + var(--x, \"a  b\")*.25)}\n",
         },
         // In plain CSS a hex color with an alpha channel is a color, an
         // `rgba()` of the stylesheet is not, and a number with ten

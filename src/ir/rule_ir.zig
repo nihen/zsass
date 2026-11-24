@@ -5610,6 +5610,8 @@ pub const RuleIR = struct {
                     if (std.mem.eql(u8, override.replacement, expanded[i .. i + override.len])) {
                         try first.appendSlice(allocator, override.replacement);
                         i += override.len - 1;
+                        // The next one is looked for after this one.
+                        first_tokens = tokens;
                         continue;
                     }
                 }

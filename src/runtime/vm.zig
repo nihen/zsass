@@ -5769,16 +5769,27 @@ pub const VM = struct {
                     try appendDeclToken(self.allocator, tokens, written, replacement.items);
                     return;
                 }
-                if (depth == 0) return;
                 // A token that starts with a quote is copied as a string.
                 if (text.len == 0 or text[0] == '"' or text[0] == '\'') return;
                 var plain_word = true;
                 for (text) |ch| {
                     if (!std.ascii.isAlphanumeric(ch) and ch != '-' and ch != '_') plain_word = false;
                 }
-                // A word reads the same either way. A calculation is stored
-                // as a string, and so is a color written by name.
-                if (plain_word or startsWithCalculationCall(text)) return;
+                // A whole value is covered by a hint, which does not keep
+                // a word from being read as the name of a color.
+                if (depth == 0 and !plain_word) return;
+                // A calculation is stored as a string, and so is a color
+                // written by name, which is listed to keep it apart from a
+                // string that reads the same. Any other word reads the same
+                // either way, unless it is the name of a color.
+                if (startsWithCalculationCall(text)) return;
+                if (plain_word) {
+                    if (color_mod.lookupNamedColor(text) == null and !std.ascii.eqlIgnoreCase(text, "transparent")) return;
+                    if (val.stringNamedColorLiteral(self.string_flags_pool.items)) {
+                        if (list_plain_numbers) try appendDeclToken(self.allocator, tokens, text, rule_ir_mod.decl_token_as_usual);
+                        return;
+                    }
+                }
                 try appendDeclToken(self.allocator, tokens, text, text);
             },
             else => {},
