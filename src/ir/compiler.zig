@@ -456,7 +456,7 @@ const ChunkBuilder = struct {
 
     fn emit(cb: *ChunkBuilder, op: Opcode, arg_a: u16, arg_b: u32) !void {
         try cb.code.append(cb.alloc, Instruction.make(op, arg_a, arg_b));
-        const origin_id = if (cb.current_origin.isValid()) cb.current_origin else @as(OriginId, @enumFromInt(cb.module_id + 1));
+        const origin_id = if (cb.current_origin.isValid()) cb.current_origin else @as(OriginId, @fromBackingInt(@intCast(cb.module_id + 1)));
         try cb.code_origin.append(cb.alloc, origin_id);
         try cb.source_locs.append(cb.alloc, .{
             .module_id = cb.module_id,
@@ -1597,7 +1597,7 @@ fn tryCompileDeclSpaceListRawBypass(ctx: CompileCtx, prop_intern: InternId, valu
     try compileExpr(ctx, tail_expr);
     try ctx.cb.emit(.make_selector, 3, 0);
     try ctx.cb.noteIntern(prop_intern);
-    try ctx.cb.emit(.emit_raw_decl, 0, @intFromEnum(prop_intern));
+    try ctx.cb.emit(.emit_raw_decl, 0, @backingInt(prop_intern));
     return true;
 }
 
@@ -1985,7 +1985,7 @@ fn compileParamDefaultLeafBuiltinCallExpr(ctx: CompileCtx, payload: u32) Compile
         .argc = @intCast(call.arg_count),
         // SAFETY: slots 0..argc are assigned in the following loop; only those slots are ever read.
         .args = undefined,
-        .arg_names = [_]InternId{.none} ** Chunk.max_param_default_call_args,
+        .arg_names = @splat(.none),
     };
 
     var i: u32 = 0;
@@ -2016,7 +2016,7 @@ fn compileParamDefaultLeafCallExpr(ctx: CompileCtx, payload: u32) CompileError!?
         .argc = @intCast(call.arg_count),
         // SAFETY: slots 0..argc are assigned in the following loop; only those slots are ever read.
         .args = undefined,
-        .arg_names = [_]InternId{.none} ** Chunk.max_param_default_call_args,
+        .arg_names = @splat(.none),
     };
 
     var i: u32 = 0;
@@ -2105,7 +2105,7 @@ fn compileParamDefaultBuiltinCall(ctx: CompileCtx, payload: u32) CompileError!?C
         .argc = @intCast(call.arg_count),
         // SAFETY: slots 0..argc are assigned in the following loop; only those slots are ever read.
         .args = undefined,
-        .arg_names = [_]InternId{.none} ** Chunk.max_param_default_call_args,
+        .arg_names = @splat(.none),
     };
 
     var i: u32 = 0;
@@ -2136,7 +2136,7 @@ fn compileParamDefaultCall(ctx: CompileCtx, payload: u32) CompileError!?Chunk.Pa
         .argc = @intCast(call.arg_count),
         // SAFETY: slots 0..argc are assigned in the following loop; only those slots are ever read.
         .args = undefined,
-        .arg_names = [_]InternId{.none} ** Chunk.max_param_default_call_args,
+        .arg_names = @splat(.none),
     };
 
     var i: u32 = 0;
@@ -2821,7 +2821,7 @@ fn compileAtRuleBody(
         arg_flags |= opcode_mod.at_rule_flag_plain_css_preserve;
     }
     if (retained_body_direct.len == 0 and !had_block) {
-        try ctx.cb.emit(.emit_at_rule_simple, arg_flags, @intFromEnum(name_intern));
+        try ctx.cb.emit(.emit_at_rule_simple, arg_flags, @backingInt(name_intern));
         return;
     }
 
@@ -2830,7 +2830,7 @@ fn compileAtRuleBody(
         const at_rule_name = ctx.pool.get(name_intern);
         break :blk if (shouldPreserveEmptyConditionalAtRule(at_rule_name)) 0x8000 else 0;
     };
-    try ctx.cb.emit(.emit_at_rule_begin, keep_empty_flag | arg_flags, @intFromEnum(name_intern));
+    try ctx.cb.emit(.emit_at_rule_begin, keep_empty_flag | arg_flags, @backingInt(name_intern));
     const child_ctx = CompileCtx{
         .resolved = ctx.resolved,
         .cb = ctx.cb,
@@ -3035,10 +3035,10 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
     const st = resolved.stmts.items[si];
     if (st.origin_id.isValid()) {
         const import_base: u32 = @intCast(ctx.modules.len + 1);
-        const local_import_id: u32 = @intFromEnum(st.origin_id);
-        ctx.cb.current_origin = @enumFromInt(import_base + local_import_id);
+        const local_import_id: u32 = @backingInt(st.origin_id);
+        ctx.cb.current_origin = @fromBackingInt(@intCast(import_base + local_import_id));
     } else {
-        ctx.cb.current_origin = @enumFromInt(ctx.module_id + 1);
+        ctx.cb.current_origin = @fromBackingInt(@intCast(ctx.module_id + 1));
     }
     const prev_span = ctx.cb.current_span;
     defer ctx.cb.current_span = prev_span;
@@ -3069,7 +3069,7 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                 try ctx.cb.emit(.emit_comment_dynamic, col_arg, 0);
             } else {
                 try ctx.cb.noteIntern(c.text_intern);
-                try ctx.cb.emit(.emit_comment, col_arg, @intFromEnum(c.text_intern));
+                try ctx.cb.emit(.emit_comment, col_arg, @backingInt(c.text_intern));
             }
         },
         .module_dep => {
@@ -3097,7 +3097,7 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                             }
                             try ctx.cb.noteIntern(d.prop_intern);
                             try ctx.cb.emit(.load_const, 0, raw_const);
-                            try ctx.cb.emit(.emit_raw_decl, raw_flags, @intFromEnum(d.prop_intern));
+                            try ctx.cb.emit(.emit_raw_decl, raw_flags, @backingInt(d.prop_intern));
                             return;
                         }
                         if (staticLiteralStringPayload(resolved, d.value_expr)) |payload| {
@@ -3110,7 +3110,7 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                                 }
                                 try ctx.cb.noteIntern(d.prop_intern);
                                 try ctx.cb.emit(.load_const, 0, raw_const);
-                                try ctx.cb.emit(.emit_raw_decl, raw_flags, @intFromEnum(d.prop_intern));
+                                try ctx.cb.emit(.emit_raw_decl, raw_flags, @backingInt(d.prop_intern));
                                 return;
                             }
                         }
@@ -3132,7 +3132,7 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                         if (raw_info.has_interp and (d.emit_decl_flags & opcode_mod.emit_decl_flag_value_single_interp) != 0) {
                             flag |= opcode_mod.emit_raw_decl_flag_value_single_interp;
                         }
-                        try ctx.cb.emit(.emit_raw_decl, flag, @intFromEnum(d.prop_intern));
+                        try ctx.cb.emit(.emit_raw_decl, flag, @backingInt(d.prop_intern));
                         return;
                     }
                     // `arg_a = 1` tells the VM to preserve a slash list value
@@ -3156,7 +3156,7 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                     if (moduleIsPlainCss(ctx)) {
                         emit_decl_flags |= opcode_mod.emit_decl_flag_plain_css_origin;
                     }
-                    try ctx.cb.emit(.emit_decl, emit_decl_flags, @intFromEnum(d.prop_intern));
+                    try ctx.cb.emit(.emit_decl, emit_decl_flags, @backingInt(d.prop_intern));
                 },
                 .dynamic => {
                     var is_custom_prop = false;
@@ -3230,9 +3230,9 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                         r.literal_intern;
                     try ctx.cb.noteIntern(selector_intern);
                     if (use_push_only) {
-                        try ctx.cb.emit(.push_selector_scope, 0, @intFromEnum(selector_intern));
+                        try ctx.cb.emit(.push_selector_scope, 0, @backingInt(selector_intern));
                     } else {
-                        try ctx.cb.emit(.emit_rule_begin, 0, @intFromEnum(selector_intern));
+                        try ctx.cb.emit(.emit_rule_begin, 0, @backingInt(selector_intern));
                     }
                 },
                 .dynamic => {
@@ -3911,7 +3911,7 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                 flags |= 0x4;
                 try ctx.cb.emit(.record_extend, flags, 0);
             } else {
-                try ctx.cb.emit(.record_extend, flags, @intFromEnum(e.target_selector));
+                try ctx.cb.emit(.record_extend, flags, @backingInt(e.target_selector));
             }
         },
         .return_stmt => {
@@ -3986,9 +3986,9 @@ fn emitRuleOpen(ctx: CompileCtx, r: RuleData, use_push_only: bool) CompileError!
         .literal => {
             try ctx.cb.noteIntern(r.literal_intern);
             if (use_push_only) {
-                try ctx.cb.emit(.push_selector_scope, flags, @intFromEnum(r.literal_intern));
+                try ctx.cb.emit(.push_selector_scope, flags, @backingInt(r.literal_intern));
             } else {
-                try ctx.cb.emit(.emit_rule_begin, flags, @intFromEnum(r.literal_intern));
+                try ctx.cb.emit(.emit_rule_begin, flags, @backingInt(r.literal_intern));
             }
         },
         .dynamic => {
@@ -4310,7 +4310,7 @@ fn compilePlainCssRule(ctx: CompileCtx, r: RuleData) CompileError!void {
             const at_rule_name = ctx.pool.get(ar.name_intern);
             break :blk if (shouldPreserveEmptyConditionalAtRule(at_rule_name)) 0x8000 else 0;
         };
-        try ctx.cb.emit(.emit_at_rule_begin, keep_empty_flag | arg_flags, @intFromEnum(ar.name_intern));
+        try ctx.cb.emit(.emit_at_rule_begin, keep_empty_flag | arg_flags, @backingInt(ar.name_intern));
         if (ar.body_direct.len > 0) {
             try emitRuleOpen(child_ctx, .{
                 .selector_kind = r.selector_kind,
@@ -5696,7 +5696,7 @@ fn buildOrigins(arena: std.mem.Allocator, bundle: *const ResolvedBundle) Compile
     const import_base: u32 = @intCast(bundle.modules.len + 1);
     for (bundle.import_origins, 0..) |origin, i| {
         const parent_import_origin = if (origin.parent_import_origin.isValid())
-            @as(OriginId, @enumFromInt(import_base + @intFromEnum(origin.parent_import_origin)))
+            @as(OriginId, @fromBackingInt(@intCast(import_base + @backingInt(origin.parent_import_origin))))
         else
             OriginId.invalid;
         origins[bundle.modules.len + 1 + i] = .{

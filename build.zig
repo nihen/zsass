@@ -48,9 +48,7 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run zsass compiler");
     const run_cmd = addRunArtifact(b, exe, &.{}, true);
     run_step.dependOn(&run_cmd.step);
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     // CLI sample step: compiles the repo's sample.scss into zig-out/examples/
     const cli_sample_css = b.pathJoin(&.{ "zig-out", "examples", "sample.css" });
@@ -143,8 +141,6 @@ pub fn build(b: *std.Build) void {
     run_api_files_example_quick.step.dependOn(&run_api_file_example_quick.step);
     quickstart_step.dependOn(&run_api_files_example_quick.step);
 
-    const installed_zsass = b.getInstallPath(.bin, "zsass");
-
     const realworld_step = b.step(
         "realworld",
         "Run external real-world suite checks (defaults to all suites under ../zsass-realworld-fixtures; uses --jobs 4 for stability); pass runner args after `--` (for help: `zig build realworld -- --help`)",
@@ -152,14 +148,13 @@ pub fn build(b: *std.Build) void {
     const realworld = b.addSystemCommand(&[_][]const u8{
         "scripts/realworld_suite.sh",
         "--zsass-bin",
-        installed_zsass,
-        "--jobs",
-        "4",
     });
+    // The compiler as it was built: the install prefix is not known while
+    // the build graph is made.
+    realworld.addArtifactArg(exe);
+    realworld.addArgs(&.{ "--jobs", "4" });
     realworld.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        realworld.addArgs(args);
-    }
+    realworld.addPassthruArgs();
     realworld_step.dependOn(&realworld.step);
 
     // Shell completions: generate ready-to-source files under zig-out/completions
@@ -209,9 +204,7 @@ pub fn build(b: *std.Build) void {
     spec_runner_step.dependOn(&install_spec_runner_artifact.step);
 
     const run_spec = addRunArtifact(b, spec_exe, &.{}, false);
-    if (b.args) |args| {
-        run_spec.addArgs(args);
-    }
+    run_spec.addPassthruArgs();
     spec_step.dependOn(&run_spec.step);
 
     // Include sass-spec in `zig build test` (quiet mode, runs after unit tests)

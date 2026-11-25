@@ -34,14 +34,14 @@ pub fn astTextNodeHasInterpolation(ast: *const ast_flat.Ast, node: NodeIndex) bo
 pub fn astTextNodeStaticText(ast: *const ast_flat.Ast, pool: *InternPool, node: NodeIndex) ?[]const u8 {
     const n = ast.getNode(node);
     return switch (n.tag) {
-        .expr_unquoted_ident => pool.get(@enumFromInt(n.payload)),
-        .expr_string_literal => pool.get(@enumFromInt(ast.getExtraU32(n.payload))),
+        .expr_unquoted_ident => pool.get(@fromBackingInt(@intCast(n.payload))),
+        .expr_string_literal => pool.get(@fromBackingInt(@intCast(ast.getExtraU32(n.payload)))),
         .expr_string_interp => blk: {
             const off: ExtraIndex = n.payload;
             const part_count = ast.getExtraU32(off);
             if (part_count != 1) break :blk null;
             if (ast.getExtraU32(off + 1) != 0) break :blk null;
-            break :blk pool.get(@enumFromInt(ast.getExtraU32(off + 2)));
+            break :blk pool.get(@fromBackingInt(@intCast(ast.getExtraU32(off + 2))));
         },
         .expr_text_template => blk: {
             const off: ExtraIndex = n.payload;
@@ -49,7 +49,7 @@ pub fn astTextNodeStaticText(ast: *const ast_flat.Ast, pool: *InternPool, node: 
             if (part_count == 0) break :blk "";
             if (part_count != 1) break :blk null;
             if (ast.getExtraU32(off + 1) != 0) break :blk null;
-            break :blk pool.get(@enumFromInt(ast.getExtraU32(off + 2)));
+            break :blk pool.get(@fromBackingInt(@intCast(ast.getExtraU32(off + 2))));
         },
         else => null,
     };
@@ -64,9 +64,9 @@ fn appendAstTextNodeRaw(
 ) !void {
     const n = ast.getNode(node);
     switch (n.tag) {
-        .expr_unquoted_ident => try out.appendSlice(allocator, pool.get(@enumFromInt(n.payload))),
+        .expr_unquoted_ident => try out.appendSlice(allocator, pool.get(@fromBackingInt(@intCast(n.payload)))),
         .expr_string_literal => {
-            const id: InternId = @enumFromInt(ast.getExtraU32(n.payload));
+            const id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(n.payload)));
             try out.appendSlice(allocator, pool.get(id));
         },
         .expr_string_interp => {
@@ -79,9 +79,9 @@ fn appendAstTextNodeRaw(
                 const val = ast.getExtraU32(p + 1);
                 p += 2;
                 if (kind == 0) {
-                    try out.appendSlice(allocator, pool.get(@enumFromInt(val)));
+                    try out.appendSlice(allocator, pool.get(@fromBackingInt(@intCast(val))));
                 } else {
-                    const inner: NodeIndex = @enumFromInt(val);
+                    const inner: NodeIndex = @fromBackingInt(@intCast(val));
                     const inner_node = ast.getNode(inner);
                     try out.appendSlice(allocator, "#{");
                     try out.appendSlice(allocator, ast.source[inner_node.span_start..inner_node.span_end]);
@@ -99,9 +99,9 @@ fn appendAstTextNodeRaw(
                 const val = ast.getExtraU32(p + 1);
                 p += 2;
                 if (kind == 0) {
-                    try out.appendSlice(allocator, pool.get(@enumFromInt(val)));
+                    try out.appendSlice(allocator, pool.get(@fromBackingInt(@intCast(val))));
                 } else {
-                    const inner: NodeIndex = @enumFromInt(val);
+                    const inner: NodeIndex = @fromBackingInt(@intCast(val));
                     const inner_node = ast.getNode(inner);
                     try out.appendSlice(allocator, "#{");
                     try out.appendSlice(allocator, ast.source[inner_node.span_start..inner_node.span_end]);
@@ -149,7 +149,7 @@ pub fn parseForwardNameList(
     var q: ExtraIndex = extra + 1;
     var i: u32 = 0;
     while (i < count) : (i += 1) {
-        const id: InternId = @enumFromInt(ast.getExtraU32(q));
+        const id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(q)));
         q += 1;
         out[i] = pool.get(id);
     }

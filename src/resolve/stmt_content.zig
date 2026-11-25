@@ -34,7 +34,7 @@ fn parseContentParamList(
     var q: ExtraIndex = params_extra + 2;
     var i: u32 = 0;
     while (i < count) : (i += 1) {
-        const name_id: InternId = @enumFromInt(ctx.ast.getExtraU32(q));
+        const name_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(q)));
         q += 1;
         const def_or_max = ctx.ast.getExtraU32(q);
         q += 1;
@@ -45,7 +45,7 @@ fn parseContentParamList(
         if (is_rest_param or def_or_max == std.math.maxInt(u32)) {
             try out_defaults.append(ctx.a, null);
         } else {
-            try out_defaults.append(ctx.a, try deps.resolveExpr(ctx.ast, ctx, @enumFromInt(def_or_max)));
+            try out_defaults.append(ctx.a, try deps.resolveExpr(ctx.ast, ctx, @fromBackingInt(@intCast(def_or_max))));
         }
     }
 }
@@ -80,7 +80,7 @@ pub fn resolveContentBlock(ctx: anytype, using_extra: u32, body_extra: u32, comp
     defer roots_buf.deinit(ctx.a);
     try roots_buf.ensureTotalCapacity(ctx.a, raw.len);
     for (raw) |u| {
-        const child_idx = try deps.resolveStmt(ctx, @enumFromInt(u));
+        const child_idx = try deps.resolveStmt(ctx, @fromBackingInt(@intCast(u)));
         if (ctx.pending_extra_top.items.len > 0) {
             for (ctx.pending_extra_top.items) |ex| {
                 try roots_buf.append(ctx.a, ex);
@@ -126,11 +126,11 @@ pub fn resolveContentStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: a
     const arg_names_start: ExtraIndex = arg_nodes_start + arg_count;
     var i: u32 = 0;
     while (i < arg_count) : (i += 1) {
-        const an: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(arg_nodes_start + i));
-        const raw_name: InternId = @enumFromInt(ctx.ast.getExtraU32(arg_names_start + i));
+        const an: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(arg_nodes_start + i)));
+        const raw_name: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(arg_names_start + i)));
         const arg_node = ctx.ast.getNode(an);
         if (arg_node.tag == .expr_splat) {
-            const inner: NodeIndex = @enumFromInt(arg_node.payload);
+            const inner: NodeIndex = @fromBackingInt(@intCast(arg_node.payload));
             try args.append(ctx.a, try deps.resolveExpr(ctx.ast, ctx, inner));
             try arg_names.append(ctx.a, call_arg_splat_sentinel);
             continue;
@@ -159,7 +159,7 @@ pub fn stmtListContainsContentCall(ast: *const ast_flat.Ast, body_extra: u32) bo
     if (body_extra == std.math.maxInt(u32)) return false;
     const raw = readChildList(ast, body_extra);
     for (raw) |u| {
-        if (stmtContainsContentCall(ast, @enumFromInt(u))) return true;
+        if (stmtContainsContentCall(ast, @fromBackingInt(@intCast(u)))) return true;
     }
     return false;
 }

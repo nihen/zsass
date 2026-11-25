@@ -40,8 +40,8 @@ pub const DeprecationKind = enum {
             normalized[i] = if (c == '-') '_' else std.ascii.toLower(c);
         }
         const norm = normalized[0..name.len];
-        inline for (@typeInfo(DeprecationKind).@"enum".fields) |field| {
-            if (std.mem.eql(u8, norm, field.name)) return @field(DeprecationKind, field.name);
+        inline for (@typeInfo(DeprecationKind).@"enum".field_names) |field_name| {
+            if (std.mem.eql(u8, norm, field_name)) return @field(DeprecationKind, field_name);
         }
         return null;
     }
@@ -134,8 +134,8 @@ const known_deprecations = [_]KnownDeprecation{
 comptime {
     std.debug.assert(known_deprecations.len <= 64);
     // Every reported kind must be an id the official CLI knows.
-    for (@typeInfo(DeprecationKind).@"enum".fields) |field| {
-        const kind: DeprecationKind = @enumFromInt(field.value);
+    for (@typeInfo(DeprecationKind).@"enum".field_values) |field_value| {
+        const kind: DeprecationKind = @fromBackingInt(@intCast(field_value));
         std.debug.assert(lookupKnownDeprecation(kind.kindName()) != null);
     }
 }
@@ -418,8 +418,8 @@ pub fn finalizeDeprecationOpts(opts: *DeprecationOpts) ParseDeprecationError!voi
     }
     opts.fatal_excluded = 0;
 
-    inline for (@typeInfo(DeprecationKind).@"enum".fields) |field| {
-        const kind: DeprecationKind = @field(DeprecationKind, field.name);
+    inline for (@typeInfo(DeprecationKind).@"enum".field_names) |field_name| {
+        const kind: DeprecationKind = @field(DeprecationKind, field_name);
         if (opts.fatal.contains(kind) and opts.silenced.contains(kind)) {
             printDeprecationOptionMessage(
                 "WARNING: Ignoring setting to silence {s} deprecation, since it has also been made fatal.\n",

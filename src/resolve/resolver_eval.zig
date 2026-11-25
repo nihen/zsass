@@ -43,7 +43,7 @@ const LiteralStringPayload = struct {
 
 fn unpackLiteralStringPayload(payload: u32) LiteralStringPayload {
     return .{
-        .id = @enumFromInt(payload & ~literal_string_flag_mask),
+        .id = @fromBackingInt(@intCast(payload & ~literal_string_flag_mask)),
         .quoted = (payload & literal_string_quoted_bit) != 0,
         .named_color_literal = (payload & literal_string_named_color_bit) != 0,
         .raw_text = (payload & literal_string_raw_text_bit) != 0,

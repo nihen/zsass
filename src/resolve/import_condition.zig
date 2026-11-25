@@ -258,7 +258,7 @@ pub fn normalizeImportConditionText(allocator: std.mem.Allocator, cond: []const 
     if (media_normalized.ptr != work.ptr and !(work.ptr == cond.ptr and work.len == cond.len)) allocator.free(work);
     work = media_normalized;
 
-    if (std.ascii.indexOfIgnoreCase(work, "supports(") == null) return work;
+    if (std.ascii.findIgnoreCase(work, "supports(") == null) return work;
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);

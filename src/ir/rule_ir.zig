@@ -65,16 +65,16 @@ pub fn foldMediaContext(
     const parent_text: MediaContextText = switch (parent) {
         media_context_none => .none,
         media_context_unknown => .unknown,
-        else => .{ .text = pool.get(@enumFromInt(parent)) },
+        else => .{ .text = pool.get(@fromBackingInt(@intCast(parent))) },
     };
-    const folded = try foldMediaContextText(allocator, parent_text, pool.get(@enumFromInt(prelude_id)));
+    const folded = try foldMediaContextText(allocator, parent_text, pool.get(@fromBackingInt(@intCast(prelude_id))));
     return switch (folded) {
         .none => media_context_none,
         .unknown => media_context_unknown,
         .text => |text| blk: {
             const owned = parent_text == .text;
             defer if (owned) allocator.free(text);
-            break :blk @intFromEnum(try pool.intern(text));
+            break :blk @backingInt(try pool.intern(text));
         },
     };
 }
@@ -1159,8 +1159,8 @@ pub const RuleIR = struct {
         span: Span,
     ) !void {
         const extra_off: u32 = @intCast(self.extra.items.len);
-        try self.extra.append(allocator, @intFromEnum(name_intern));
-        try self.extra.append(allocator, if (prelude_intern) |p| @intFromEnum(p) else std.math.maxInt(u32));
+        try self.extra.append(allocator, @backingInt(name_intern));
+        try self.extra.append(allocator, if (prelude_intern) |p| @backingInt(p) else std.math.maxInt(u32));
         try self.extra.append(allocator, 0);
         try self.nodes.append(allocator, .{
             .kind = .at_rule_simple,
@@ -1217,7 +1217,7 @@ pub const RuleIR = struct {
                     },
                     .at_rule_simple => {
                         const name_id = self.extra.items[node.payload];
-                        const name = pool.get(@enumFromInt(name_id));
+                        const name = pool.get(@fromBackingInt(@intCast(name_id)));
                         if (isImportAtRuleName(name) or isCharsetAtRuleName(name)) {
                             saw_top_level_import = true;
                         } else {
@@ -1249,7 +1249,7 @@ pub const RuleIR = struct {
                     .comment, .stmt_gap, .group_boundary, .sourcemap_gap => {},
                     .at_rule_simple => {
                         const name_id = self.extra.items[node.payload];
-                        const name = pool.get(@enumFromInt(name_id));
+                        const name = pool.get(@fromBackingInt(@intCast(name_id)));
                         return isImportAtRuleName(name) or isCharsetAtRuleName(name);
                     },
                     .rule_begin,
@@ -1295,8 +1295,8 @@ pub const RuleIR = struct {
         span: Span,
     ) !void {
         const extra_off: u32 = @intCast(self.extra.items.len);
-        try self.extra.append(allocator, @intFromEnum(name_intern));
-        try self.extra.append(allocator, if (prelude_intern) |p| @intFromEnum(p) else std.math.maxInt(u32));
+        try self.extra.append(allocator, @backingInt(name_intern));
+        try self.extra.append(allocator, if (prelude_intern) |p| @backingInt(p) else std.math.maxInt(u32));
         try self.extra.append(allocator, 0);
 
         const node: Node = .{
@@ -1383,8 +1383,8 @@ pub const RuleIR = struct {
     ) !void {
         const extra_off: u32 = @intCast(self.extra.items.len);
         try self.extra.appendSlice(allocator, &[_]u32{
-            @intFromEnum(name_intern),
-            if (prelude_intern) |p| @intFromEnum(p) else std.math.maxInt(u32),
+            @backingInt(name_intern),
+            if (prelude_intern) |p| @backingInt(p) else std.math.maxInt(u32),
             nest_depth,
             if (keep_empty_block) 1 else 0,
             0,
@@ -1455,7 +1455,7 @@ pub const RuleIR = struct {
         leading_same_line: bool,
     ) !void {
         const extra_off: u32 = @intCast(self.extra.items.len);
-        try self.extra.append(allocator, @intFromEnum(text_intern));
+        try self.extra.append(allocator, @backingInt(text_intern));
         try self.extra.append(allocator, source_col);
         try self.extra.append(allocator, if (leading_same_line) 1 else 0);
         try self.nodes.append(allocator, .{
@@ -1674,7 +1674,7 @@ pub const RuleIR = struct {
         for (self.extend_edges.items) |edge| {
             const ctx = self.extendRelationMediaContext(edge.source_module, edge.relation_id);
             if (ctx == media_context_none or ctx == media_context_unknown) continue;
-            const key = (@as(u64, @intFromEnum(edge.extending_selector)) << 32) | @intFromEnum(edge.target_selector);
+            const key = (@as(u64, @backingInt(edge.extending_selector)) << 32) | @backingInt(edge.target_selector);
             const gop = try seen.getOrPut(temp, key);
             if (!gop.found_existing) {
                 gop.value_ptr.* = ctx;
@@ -1898,7 +1898,7 @@ pub const RuleIR = struct {
 
                     const end_after = self.findMatchingBlockEnd(i) orelse return error.SassError;
                     const selector_ptr = &self.extra.items[self.nodes.items[i].payload];
-                    const selector_text = intern_pool.get(@enumFromInt(selector_ptr.*));
+                    const selector_text = intern_pool.get(@fromBackingInt(@intCast(selector_ptr.*)));
 
                     if (selectorMatchesRemovalMode(selector_text, mode)) {
                         const removed = end_after - i + 1;
@@ -1919,7 +1919,7 @@ pub const RuleIR = struct {
                         }
 
                         const filtered_id = try intern_pool.intern(filtered);
-                        selector_ptr.* = @intFromEnum(filtered_id);
+                        selector_ptr.* = @backingInt(filtered_id);
                     }
 
                     i = end_after + 1;
@@ -2283,7 +2283,7 @@ pub const RuleIR = struct {
     fn bubbleMaskForAtRuleNode(self: *const RuleIR, pool: *const InternPool, node: Node) u8 {
         if (node.kind != .at_rule_begin) return 0;
         if (node.payload >= self.extra.items.len) return 0;
-        const name_id: InternId = @enumFromInt(self.extra.items[node.payload]);
+        const name_id: InternId = @fromBackingInt(@intCast(self.extra.items[node.payload]));
         const full_name = pool.get(name_id);
         const raw_name = if (full_name.len > 0 and full_name[0] == '@') full_name[1..] else full_name;
         if (std.mem.eql(u8, raw_name, "media")) return at_root_bubble_media_mask;
@@ -2521,7 +2521,7 @@ pub const RuleIR = struct {
     fn nodeIsMediaBlock(self: *const RuleIR, pool: *const InternPool, node: Node) bool {
         if (node.kind != .at_rule_begin) return false;
         if (node.payload >= self.extra.items.len) return false;
-        const name_id: InternId = @enumFromInt(self.extra.items[node.payload]);
+        const name_id: InternId = @fromBackingInt(@intCast(self.extra.items[node.payload]));
         return isMediaAtRuleName(pool.get(name_id));
     }
 
@@ -2533,7 +2533,7 @@ pub const RuleIR = struct {
     fn nodeIsKeyframesBlock(self: *const RuleIR, pool: *const InternPool, node: Node) bool {
         if (node.kind != .at_rule_begin) return false;
         if (node.payload >= self.extra.items.len) return false;
-        const name_id: InternId = @enumFromInt(self.extra.items[node.payload]);
+        const name_id: InternId = @fromBackingInt(@intCast(self.extra.items[node.payload]));
         return isKeyframesAtRuleName(pool.get(name_id));
     }
 
@@ -2559,8 +2559,8 @@ pub const RuleIR = struct {
         const child_prelude_id = self.extra.items[child_node.payload + 1];
         if (parent_prelude_id == std.math.maxInt(u32) or child_prelude_id == std.math.maxInt(u32)) return .keep_nested;
 
-        const parent_raw = pool.get(@enumFromInt(parent_prelude_id));
-        const child_raw = pool.get(@enumFromInt(child_prelude_id));
+        const parent_raw = pool.get(@fromBackingInt(@intCast(parent_prelude_id)));
+        const child_raw = pool.get(@fromBackingInt(@intCast(child_prelude_id)));
         const preserve_case = mediaPreludePreserveCase(parent_raw) or mediaPreludePreserveCase(child_raw);
 
         const merge_result = try media_prelude.mergeMediaQueryLists(
@@ -2583,7 +2583,7 @@ pub const RuleIR = struct {
             }
 
             const merged_id = try pool.intern(merged_text);
-            self.extra.items[child_node.payload + 1] = @intFromEnum(merged_id);
+            self.extra.items[child_node.payload + 1] = @backingInt(merged_id);
             return .moved;
         }
 
@@ -2859,8 +2859,8 @@ pub const RuleIR = struct {
         parent_selector_intern: u32,
         child_selector_intern: u32,
     ) error{ OutOfMemory, SassError }!u32 {
-        const parent_raw = pool.get(@enumFromInt(parent_selector_intern));
-        const child_raw = pool.get(@enumFromInt(child_selector_intern));
+        const parent_raw = pool.get(@fromBackingInt(@intCast(parent_selector_intern)));
+        const child_raw = pool.get(@fromBackingInt(@intCast(child_selector_intern)));
 
         var parent_list = selector_mod.parse(allocator, parent_raw) catch return error.SassError;
         defer parent_list.deinit();
@@ -2873,7 +2873,7 @@ pub const RuleIR = struct {
         const css = try selector_mod.toCss(allocator, &resolved);
         defer allocator.free(css);
         const combined_id = try pool.intern(css);
-        return @intFromEnum(combined_id);
+        return @backingInt(combined_id);
     }
 
     fn flushWrappedHoistedMediaPending(
@@ -3201,7 +3201,7 @@ pub const RuleIR = struct {
     fn isTopLevelCssImportItem(self: *const RuleIR, pool: *const InternPool, item: TopLevelItem) bool {
         if (item.kind != .at_rule_simple) return false;
         const name_id = self.extra.items[self.nodes.items[item.start].payload];
-        return isImportAtRuleName(pool.get(@enumFromInt(name_id)));
+        return isImportAtRuleName(pool.get(@fromBackingInt(@intCast(name_id))));
     }
 
     fn isStyleOrAtRuleItemKind(kind: NodeKind) bool {
@@ -3401,7 +3401,7 @@ pub const RuleIR = struct {
                 .comment => {},
                 .at_rule_simple => {
                     const name_id = self.extra.items[self.nodes.items[i].payload];
-                    if (isImportAtRuleName(pool.get(@enumFromInt(name_id)))) {
+                    if (isImportAtRuleName(pool.get(@fromBackingInt(@intCast(name_id))))) {
                         saw_top_level_import = true;
                     } else if (saw_top_level_import) {
                         return;
@@ -3823,7 +3823,7 @@ pub const RuleIR = struct {
             const selector_id = self.extra.items[node.payload];
             if (try selectorCouldMatchPotentialExtends(
                 intern_pool,
-                intern_pool.get(@enumFromInt(selector_id)),
+                intern_pool.get(@fromBackingInt(@intCast(selector_id))),
                 potential_extend_targets,
             )) {
                 return true;
@@ -3987,16 +3987,16 @@ pub const RuleIR = struct {
         }
 
         var subset: RuleIR = .{
-            .nodes = .{ .items = range_nodes, .capacity = range_nodes.len },
-            .node_source_files = .{ .items = range_source_files, .capacity = range_source_files.len },
-            .extra = .{ .items = @constCast(self.extra.items), .capacity = self.extra.items.len },
-            .strings = .{ .items = @constCast(self.strings.items), .capacity = self.strings.items.len },
+            .nodes = .{ .items = range_nodes, .capacity = range_nodes.len, .pointer_stability = .{} },
+            .node_source_files = .{ .items = range_source_files, .capacity = range_source_files.len, .pointer_stability = .{} },
+            .extra = .{ .items = @constCast(self.extra.items), .capacity = self.extra.items.len, .pointer_stability = .{} },
+            .strings = .{ .items = @constCast(self.strings.items), .capacity = self.strings.items.len, .pointer_stability = .{} },
             .extend_edges = range_extend_edges,
             .extend_relation_media = self.extend_relation_media,
             .module_visibility_matrix = self.module_visibility_matrix,
             .module_visibility_n = self.module_visibility_n,
-            .flushed_chunks = .{ .items = @constCast(self.flushed_chunks.items), .capacity = self.flushed_chunks.items.len },
-            .decl_token_sets = .{ .items = @constCast(self.decl_token_sets.items), .capacity = self.decl_token_sets.items.len },
+            .flushed_chunks = .{ .items = @constCast(self.flushed_chunks.items), .capacity = self.flushed_chunks.items.len, .pointer_stability = .{} },
+            .decl_token_sets = .{ .items = @constCast(self.decl_token_sets.items), .capacity = self.decl_token_sets.items.len, .pointer_stability = .{} },
         };
 
         var buf: std.ArrayList(u8) = .empty;
@@ -4560,7 +4560,7 @@ pub const RuleIR = struct {
             const idx: usize = @intCast(node_idx_u32);
             const node = self_ir.nodes.items[idx];
             const selector_id = self_ir.extra.items[node.payload];
-            const selector_intern: InternId = @enumFromInt(selector_id);
+            const selector_intern: InternId = @fromBackingInt(@intCast(selector_id));
             const selector_raw = intern_pool.get(selector_intern);
             try collectRawSelectorSimplePresence(allocator, &presence, selector_raw);
             const parsed = getOrParseNormalizedCached(
@@ -4818,11 +4818,11 @@ pub const RuleIR = struct {
                                 if (renderedNeedsCharset(sel_text)) saw_charset = true;
                             },
                             .at_rule_begin => {
-                                const name = intern_pool.get(@enumFromInt(self.extra.items[node.payload]));
+                                const name = intern_pool.get(@fromBackingInt(@intCast(self.extra.items[node.payload])));
                                 if (renderedNeedsCharset(name)) saw_charset = true;
                                 const prelude_id = self.extra.items[node.payload + 1];
                                 if (prelude_id != std.math.maxInt(u32)) {
-                                    const prelude = intern_pool.get(@enumFromInt(prelude_id));
+                                    const prelude = intern_pool.get(@fromBackingInt(@intCast(prelude_id)));
                                     if (renderedNeedsCharset(prelude)) saw_charset = true;
                                 }
                             },
@@ -4860,7 +4860,7 @@ pub const RuleIR = struct {
                     if (!blk.has_content) {
                         const begin_node = self.nodes.items[blk.idx];
                         const name_id = self.extra.items[begin_node.payload];
-                        const name = intern_pool.get(@enumFromInt(name_id));
+                        const name = intern_pool.get(@fromBackingInt(@intCast(name_id)));
                         const keep_empty = blk.keep_empty_block or !isConditionalAtRuleName(name);
                         if (!keep_empty) {
                             skip[blk.idx] = true;
@@ -4883,15 +4883,15 @@ pub const RuleIR = struct {
                     switch (node.kind) {
                         .decl => {
                             const prop_id = self.extra.items[node.payload];
-                            const prop = intern_pool.get(@enumFromInt(prop_id));
+                            const prop = intern_pool.get(@fromBackingInt(@intCast(prop_id)));
                             if (renderedNeedsCharset(prop)) saw_charset = true;
                             const value_id = self.extra.items[node.payload + 1];
-                            const value = intern_pool.get(@enumFromInt(value_id));
+                            const value = intern_pool.get(@fromBackingInt(@intCast(value_id)));
                             if (renderedDeclValueNeedsCharset(value, output_style)) saw_charset = true;
                         },
                         .decl_raw => {
                             const prop_id = self.extra.items[node.payload];
-                            const prop = intern_pool.get(@enumFromInt(prop_id));
+                            const prop = intern_pool.get(@fromBackingInt(@intCast(prop_id)));
                             if (renderedNeedsCharset(prop)) saw_charset = true;
                             const raw_idx = self.extra.items[node.payload + 1];
                             const value = self.strings.items[raw_idx];
@@ -4899,7 +4899,7 @@ pub const RuleIR = struct {
                         },
                         .comment => {
                             const text_id = self.extra.items[node.payload];
-                            const text = intern_pool.get(@enumFromInt(text_id));
+                            const text = intern_pool.get(@fromBackingInt(@intCast(text_id)));
                             if (renderedNeedsCharset(text)) saw_charset = true;
                         },
                         .stream_chunk => {
@@ -4913,11 +4913,11 @@ pub const RuleIR = struct {
                     }
                     if (node.kind == .at_rule_simple) {
                         const name_id = self.extra.items[node.payload];
-                        const name = intern_pool.get(@enumFromInt(name_id));
+                        const name = intern_pool.get(@fromBackingInt(@intCast(name_id)));
                         if (renderedNeedsCharset(name)) saw_charset = true;
                         const prelude_id = self.extra.items[node.payload + 1];
                         if (prelude_id != std.math.maxInt(u32)) {
-                            const prelude = intern_pool.get(@enumFromInt(prelude_id));
+                            const prelude = intern_pool.get(@fromBackingInt(@intCast(prelude_id)));
                             if (renderedNeedsCharset(prelude)) saw_charset = true;
                         }
                         if (std.ascii.eqlIgnoreCase(name, "charset")) {
@@ -6482,7 +6482,7 @@ pub const RuleIR = struct {
             /// eval2_import_prelude.normalizePlainCssImportConditionText
             /// Minimally ported supports(...) part to writer.
             fn normalizeSupportsInImportPrelude(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
-                if (std.ascii.indexOfIgnoreCase(text, "supports(") == null) return text;
+                if (std.ascii.findIgnoreCase(text, "supports(") == null) return text;
 
                 var out: std.ArrayListUnmanaged(u8) = .empty;
                 errdefer out.deinit(allocator);
@@ -7339,10 +7339,10 @@ pub const RuleIR = struct {
                 allocator: std.mem.Allocator,
                 text: []const u8,
             ) ![]const u8 {
-                if (std.ascii.indexOfIgnoreCase(text, "nth-of-type") == null and
-                    std.ascii.indexOfIgnoreCase(text, "nth-last-of-type") == null and
-                    std.ascii.indexOfIgnoreCase(text, "nth-child") == null and
-                    std.ascii.indexOfIgnoreCase(text, "nth-last-child") == null)
+                if (std.ascii.findIgnoreCase(text, "nth-of-type") == null and
+                    std.ascii.findIgnoreCase(text, "nth-last-of-type") == null and
+                    std.ascii.findIgnoreCase(text, "nth-child") == null and
+                    std.ascii.findIgnoreCase(text, "nth-last-child") == null)
                 {
                     return text;
                 }
@@ -9933,7 +9933,7 @@ pub const RuleIR = struct {
                 .at_rule_begin => {
                     empty_at_rule_end[node_idx] = std.math.maxInt(u32);
                     const name_id = self.extra.items[node.payload];
-                    const name_str = intern_pool.get(@enumFromInt(name_id));
+                    const name_str = intern_pool.get(@fromBackingInt(@intCast(name_id)));
                     const is_media = isMediaAtRuleName(name_str);
                     const is_keyframes = isKeyframesAtRuleName(name_str);
                     at_rule_media_stack.appendAssumeCapacity(is_media);
@@ -9950,7 +9950,7 @@ pub const RuleIR = struct {
                     else if (prelude_id == std.math.maxInt(u32))
                         MediaContextText.unknown
                     else
-                        try foldMediaContextText(temp, outer_context, intern_pool.get(@enumFromInt(prelude_id))));
+                        try foldMediaContextText(temp, outer_context, intern_pool.get(@fromBackingInt(@intCast(prelude_id)))));
                 },
                 .at_rule_end => {
                     if (media_context_stack.items.len != 0) _ = media_context_stack.pop();
@@ -9980,7 +9980,7 @@ pub const RuleIR = struct {
             selector_visible[i] = false;
 
             const sel_id = self.extra.items[node.payload];
-            const selector_raw = intern_pool.get(@enumFromInt(sel_id));
+            const selector_raw = intern_pool.get(@fromBackingInt(@intCast(sel_id)));
             var selector_text = selector_raw;
             var selector_owned: ?[]const u8 = null;
             defer if (selector_owned) |owned| temp.free(owned);
@@ -10135,7 +10135,7 @@ pub const RuleIR = struct {
                         const extend_context = self.extendRelationMediaContext(edge.source_module, edge.relation_id);
                         if (extend_context == media_context_none or extend_context == media_context_unknown) continue;
                         const same_context = switch (rule_media_context[i]) {
-                            .text => |text| std.mem.eql(u8, text, intern_pool.get(@enumFromInt(extend_context))),
+                            .text => |text| std.mem.eql(u8, text, intern_pool.get(@fromBackingInt(@intCast(extend_context)))),
                             else => false,
                         };
                         if (!same_context) {
@@ -10312,7 +10312,7 @@ pub const RuleIR = struct {
                     const node_module: u32 = if (node_idx < self.node_source_files.items.len) self.node_source_files.items[node_idx] else 0;
                     if (node_module != target_module) continue;
                     const sel_id = self.extra.items[node.payload];
-                    const selector_raw = intern_pool.get(@enumFromInt(sel_id));
+                    const selector_raw = intern_pool.get(@fromBackingInt(@intCast(sel_id)));
                     if (selectorRawContainsPseudoTarget(selector_raw, target_raw)) {
                         edge_matched[edge_idx] = true;
                         break;
@@ -10325,7 +10325,7 @@ pub const RuleIR = struct {
                 const node_idx: usize = @intCast(node_idx_u32);
                 const node = self.nodes.items[node_idx];
                 const sel_id = self.extra.items[node.payload];
-                const selector_raw = intern_pool.get(@enumFromInt(sel_id));
+                const selector_raw = intern_pool.get(@fromBackingInt(@intCast(sel_id)));
                 if (selectorRawContainsPseudoTarget(selector_raw, target_raw)) {
                     edge_matched[edge_idx] = true;
                     break;
@@ -10534,8 +10534,8 @@ pub const RuleIR = struct {
                 try emit_ctx.markNode(source_file_id, node);
                 const prop_id = self_ir.extra.items[node.payload];
                 const val_id = self_ir.extra.items[node.payload + 1];
-                const prop_str = intern_pool_.get(@enumFromInt(prop_id));
-                const val_str = intern_pool_.get(@enumFromInt(val_id));
+                const prop_str = intern_pool_.get(@fromBackingInt(@intCast(prop_id)));
+                const val_str = intern_pool_.get(@fromBackingInt(@intCast(val_id)));
                 const is_custom_property_early = std.mem.startsWith(u8, prop_str, "--");
                 const val_for_leak = if (is_custom_property_early) val_str else stripCalcDeclMarker(val_str);
                 if (!is_custom_property_early and declarationValueEmptyAfterLeadingMarkers(val_for_leak)) {
@@ -10719,7 +10719,7 @@ pub const RuleIR = struct {
                 try emit_ctx.markNode(source_file_id, node);
                 const prop_id = self_ir.extra.items[node.payload];
                 const str_idx = self_ir.extra.items[node.payload + 1];
-                const prop_str = intern_pool_.get(@enumFromInt(prop_id));
+                const prop_str = intern_pool_.get(@fromBackingInt(@intCast(prop_id)));
                 const is_custom_property = std.mem.startsWith(u8, prop_str, "--");
                 var val_str = self_ir.strings.items[str_idx];
                 const marked_interp_decl = std.mem.startsWith(u8, val_str, interp_decl_marker);
@@ -10906,7 +10906,7 @@ pub const RuleIR = struct {
                 try consumeStandardPendingBlank(emit_ctx, state);
                 try emit_ctx.markNode(source_file_id, node);
                 const text_id = self_ir.extra.items[node.payload];
-                const raw_text = intern_pool_.get(@enumFromInt(text_id));
+                const raw_text = intern_pool_.get(@fromBackingInt(@intCast(text_id)));
                 const text = try normalizeCommentTextForEmit(temp_alloc, raw_text);
                 if (WriterHelpers.isSourceMapCommentText(text)) {
                     if (!state.has_output and state.indent_level == 0) {
@@ -11215,7 +11215,7 @@ pub const RuleIR = struct {
                         if (prev_idx >= self.node_source_files.items.len) break :blk false;
                         const prev_begin = self.findMatchingRuleBeginBackward(0, prev_idx) orelse break :blk false;
                         const prev_begin_node = self.nodes.items[prev_begin];
-                        const prev_sel = intern_pool.get(@enumFromInt(self.extra.items[prev_begin_node.payload]));
+                        const prev_sel = intern_pool.get(@fromBackingInt(@intCast(self.extra.items[prev_begin_node.payload])));
                         // Same-source user-written top-level rules still get official Sass CLI's
                         // normal blank.  The same-source exception here is only for
                         // generated reopens whose previous selector list still carries a
@@ -11232,7 +11232,7 @@ pub const RuleIR = struct {
                         const prev_begin = self.findMatchingRuleBeginBackward(0, prev_idx) orelse break :blk false;
                         const prev_begin_node = self.nodes.items[prev_begin];
                         if (prev_begin_node.payload >= self.extra.items.len) break :blk false;
-                        const prev_sel = intern_pool.get(@enumFromInt(self.extra.items[prev_begin_node.payload]));
+                        const prev_sel = intern_pool.get(@fromBackingInt(@intCast(self.extra.items[prev_begin_node.payload])));
                         if (self.node_source_files.items[prev_idx] == source_file_id and
                             std.mem.findScalar(u8, prev_sel, '%') == null) break :blk false;
                         if (std.mem.eql(u8, std.mem.trim(u8, prev_sel, " \t\r\n"), std.mem.trim(u8, sel_str, " \t\r\n"))) break :blk false;
@@ -11440,7 +11440,7 @@ pub const RuleIR = struct {
                 .at_rule_simple => {
                     perf.note(.codegen_at_rule);
                     const at_simple_name_id = self.extra.items[node.payload];
-                    const at_simple_name = intern_pool.get(@enumFromInt(at_simple_name_id));
+                    const at_simple_name = intern_pool.get(@fromBackingInt(@intCast(at_simple_name_id)));
                     const is_top_import = emit_state.indent_level == 0 and std.ascii.eqlIgnoreCase(at_simple_name, "import");
                     // The official Sass CLI always suppresses trailing blank if the
                     // immediately preceding visible node is a simple at-rule.
@@ -11466,14 +11466,14 @@ pub const RuleIR = struct {
                     try emit.markNode(source_file_id, node);
                     const name_id = self.extra.items[node.payload];
                     const prelude_id = self.extra.items[node.payload + 1];
-                    const name = intern_pool.get(@enumFromInt(name_id));
+                    const name = intern_pool.get(@fromBackingInt(@intCast(name_id)));
                     if (isMediaAtRuleName(name)) {
                         if (prelude_id == std.math.maxInt(u32)) continue;
-                        const media_prelude_text = stripMediaPreludePreserveCaseMarker(intern_pool.get(@enumFromInt(prelude_id)));
+                        const media_prelude_text = stripMediaPreludePreserveCaseMarker(intern_pool.get(@fromBackingInt(@intCast(prelude_id))));
                         if (std.mem.findAny(u8, media_prelude_text, "\n\r\x0c") != null) continue;
                     }
                     if (prelude_id != std.math.maxInt(u32) and isSupportsAtRuleName(name)) {
-                        const prelude = intern_pool.get(@enumFromInt(prelude_id));
+                        const prelude = intern_pool.get(@fromBackingInt(@intCast(prelude_id)));
                         if (try WriterHelpers.emitLeakedAtRuleSimple(&emit, temp, name, prelude, emit_state.indent_level)) {
                             emit_state.has_output = true;
                             continue;
@@ -11487,7 +11487,7 @@ pub const RuleIR = struct {
                     try emit.writeAll(name);
                     if (isSupportsAtRuleName(name) and prelude_id == std.math.maxInt(u32)) return error.SassError;
                     if (prelude_id != std.math.maxInt(u32)) {
-                        const prelude_raw = intern_pool.get(@enumFromInt(prelude_id));
+                        const prelude_raw = intern_pool.get(@fromBackingInt(@intCast(prelude_id)));
                         const preserve_media_case = isMediaAtRuleName(name) and mediaPreludePreserveCase(prelude_raw);
                         const prelude_base = stripMediaPreludePreserveCaseMarker(prelude_raw);
                         const normalized = try WriterHelpers.normalizeAtRulePreludeForEmit(
@@ -11520,7 +11520,7 @@ pub const RuleIR = struct {
                     const hoist_exit_force_blank = emit_state.prev_visible_is_at_root_hoist and
                         !is_at_root_hoist and emit_state.has_output and emit_state.indent_level == 0 and
                         !emit_state.prev_visible_is_comment and !emit_state.prev_visible_is_at_rule_block;
-                    const name = intern_pool.get(@enumFromInt(name_id));
+                    const name = intern_pool.get(@fromBackingInt(@intCast(name_id)));
                     const is_container_or_layer = std.mem.eql(u8, name, "container") or std.mem.eql(u8, name, "layer");
                     const suppress_fallback = explicit_suppress or
                         emit_state.prev_visible_is_comment or
@@ -11553,7 +11553,7 @@ pub const RuleIR = struct {
                     try emit.writeAll(name);
                     if (isSupportsAtRuleName(name) and prelude_id == std.math.maxInt(u32)) return error.SassError;
                     if (prelude_id != std.math.maxInt(u32)) {
-                        const prelude_raw = intern_pool.get(@enumFromInt(prelude_id));
+                        const prelude_raw = intern_pool.get(@fromBackingInt(@intCast(prelude_id)));
                         const preserve_media_case = isMediaAtRuleName(name) and mediaPreludePreserveCase(prelude_raw);
                         const prelude_base = stripMediaPreludePreserveCaseMarker(prelude_raw);
                         const normalized = try WriterHelpers.normalizeAtRulePreludeForEmit(
@@ -11697,7 +11697,7 @@ pub const RuleIR = struct {
                                                     inner_depth -= 1;
                                                     if (inner_depth == 0) {
                                                         const sel_id = self.extra.items[self.nodes.items[b].payload];
-                                                        break :blk @enumFromInt(sel_id);
+                                                        break :blk @fromBackingInt(@intCast(sel_id));
                                                     }
                                                 },
                                                 .at_rule_begin => {
@@ -11719,7 +11719,7 @@ pub const RuleIR = struct {
                                 if (self.nodes.items[next_idx].kind == .rule_begin and
                                     self.getOriginReopenAt(next_idx))
                                 {
-                                    const next_sel_id: InternId = @enumFromInt(self.extra.items[self.nodes.items[next_idx].payload]);
+                                    const next_sel_id: InternId = @fromBackingInt(@intCast(self.extra.items[self.nodes.items[next_idx].payload]));
                                     if (next_sel_id == parent_id) {
                                         preserve_following = false;
                                     }
@@ -12044,7 +12044,7 @@ pub const RuleIR = struct {
             return null;
         }
         const text_id = self_ir.extra.items[next_node.payload];
-        const raw_text = intern_pool_.get(@enumFromInt(text_id));
+        const raw_text = intern_pool_.get(@fromBackingInt(@intCast(text_id)));
         const text = try normalizeCommentTextForEmit(allocator, raw_text);
         const trimmed = std.mem.trim(u8, text, " \t\r\n");
         if (trimmed.len >= 4 and std.mem.startsWith(u8, trimmed, "/*") and std.mem.endsWith(u8, trimmed, "*/")) {
@@ -12089,7 +12089,7 @@ pub const RuleIR = struct {
         if (!leading_same_line) return null;
 
         const text_id = self_ir.extra.items[next_node.payload];
-        const raw_text = intern_pool_.get(@enumFromInt(text_id));
+        const raw_text = intern_pool_.get(@fromBackingInt(@intCast(text_id)));
         const text = try normalizeCommentTextForEmit(allocator, raw_text);
         const trimmed = std.mem.trim(u8, text, " \t\r\n");
         if (trimmed.len >= 4 and std.mem.startsWith(u8, trimmed, "/*") and std.mem.endsWith(u8, trimmed, "*/")) {
@@ -12223,7 +12223,7 @@ pub const RuleIR = struct {
                 const idx: usize = @intCast(node_idx_u32);
                 const node = self_ir.nodes.items[idx];
                 const selector_id = self_ir.extra.items[node.payload];
-                const selector_intern: InternId = @enumFromInt(selector_id);
+                const selector_intern: InternId = @fromBackingInt(@intCast(selector_id));
                 const parsed = getOrParseNormalizedCached(normalized_parse_cache, allocator, intern_pool, selector_intern) orelse continue;
                 const matched = selectorListContainsTargetCompound(parsed, target);
                 if (dump_debug) {
@@ -12250,7 +12250,7 @@ pub const RuleIR = struct {
                 }
             }
             const selector_id = self_ir.extra.items[node.payload];
-            const selector_intern: InternId = @enumFromInt(selector_id);
+            const selector_intern: InternId = @fromBackingInt(@intCast(selector_id));
             const parsed = getOrParseNormalizedCached(normalized_parse_cache, allocator, intern_pool, selector_intern) orelse continue;
             const matched = selectorListContainsTargetCompound(parsed, target);
             if (dump_debug) {
@@ -12288,7 +12288,7 @@ pub const RuleIR = struct {
             const node_module: u32 = if (idx < node_source_files.len) node_source_files[idx] else 0;
             if (node_module != edge.target_module) continue;
             const selector_id = extra[node.payload];
-            const selector_raw = intern_pool.get(@enumFromInt(selector_id));
+            const selector_raw = intern_pool.get(@fromBackingInt(@intCast(selector_id)));
             if (selectorRawContainsPseudoTarget(selector_raw, target_raw)) return true;
             if (target_compound_opt) |target_compound| {
                 if (selectorRawContainsTargetCompound(allocator, selector_raw, &target_compound)) return true;
@@ -12525,7 +12525,7 @@ pub const RuleIR = struct {
             if (selector_override[node_idx]) |sel| return sel;
         }
         const node = self_ir.nodes.items[node_idx];
-        return intern_pool.get(@enumFromInt(self_ir.extra.items[node.payload]));
+        return intern_pool.get(@fromBackingInt(@intCast(self_ir.extra.items[node.payload])));
     }
 
     fn isSimplePlaceholderSelector(sel: []const u8) bool {
@@ -12689,8 +12689,8 @@ test "rule_ir minimal build + serialize" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 4 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 5, .end = 15 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 4 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 5, .end = 15 });
     try ir.appendRuleEnd(allocator, .{ .start = 15, .end = 16 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -12719,8 +12719,8 @@ test "rule_ir writer drops explicit charset when output is ASCII only" {
     defer ir.deinit(allocator);
 
     try ir.appendAtRuleSimple(allocator, charset_name, utf8, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -12746,8 +12746,8 @@ test "rule_ir writer emits charset for non-ascii declaration names" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -12773,8 +12773,8 @@ test "rule_ir writer collapses repeated top-level selector spaces" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -12800,8 +12800,8 @@ test "rule_ir writer spaces selector-list pseudo arguments" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -12827,8 +12827,8 @@ test "rule_ir writer preserves multiline selector-list pseudo arguments" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -12854,8 +12854,8 @@ test "rule_ir writer compacts nth-child An+B spacing" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -12956,9 +12956,9 @@ test "rule_ir writer normalizes multiline comment indentation" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
     try ir.appendComment(allocator, comment, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -12999,9 +12999,9 @@ test "rule_ir writer strips source indentation from nested multiline comment" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
     try ir.appendComment(allocator, comment, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -13036,7 +13036,7 @@ test "rule_ir writer recovers leaked indented declaration property into block" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendDecl(allocator, @intFromEnum(leaked_prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(leaked_prop), @backingInt(val), .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
@@ -13187,8 +13187,8 @@ test "rule_ir appendAtRuleSimpleMaybeHoisted hoists top-level import before rule
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendAtRuleSimpleMaybeHoisted(allocator, &pool, import_name, import_prelude, .{ .start = 0, .end = 0 });
 
@@ -13223,8 +13223,8 @@ test "rule_ir writer drops empty selector list entries from multiline raw select
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -13256,8 +13256,8 @@ test "rule_ir writer rejects invalid attribute selector modifier" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -13332,9 +13332,9 @@ test "rule_ir writer decl_raw custom property preserves colon spacing from raw v
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDeclRaw(allocator, @intFromEnum(prop_no_space), "value", .{ .start = 0, .end = 0 });
-    try ir.appendDeclRaw(allocator, @intFromEnum(prop_with_space), " value", .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDeclRaw(allocator, @backingInt(prop_no_space), "value", .{ .start = 0, .end = 0 });
+    try ir.appendDeclRaw(allocator, @backingInt(prop_with_space), " value", .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -13374,8 +13374,8 @@ test "rule_ir writer uses marked source column for imported multiline custom pro
     defer ir.deinit(allocator);
 
     try ir.appendAtRuleBegin(allocator, media, prelude, 0, false, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDeclRaw(allocator, @intFromEnum(prop), value, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDeclRaw(allocator, @backingInt(prop), value, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendAtRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
@@ -13415,9 +13415,9 @@ test "rule_ir writer dedents imported custom property continuation at declaratio
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDeclRaw(allocator, @intFromEnum(prop), value, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(try pool.intern("margin")), @intFromEnum(try pool.intern("0")), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDeclRaw(allocator, @backingInt(prop), value, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(try pool.intern("margin")), @backingInt(try pool.intern("0")), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -13456,11 +13456,11 @@ test "rule_ir writer normalizes declaration value whitespace and special functio
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(p1), @intFromEnum(v1), .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(p2), @intFromEnum(v2), .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(p3), @intFromEnum(v3), .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(p4), @intFromEnum(v4), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(p1), @backingInt(v1), .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(p2), @backingInt(v2), .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(p3), @backingInt(v3), .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(p4), @backingInt(v4), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -13494,8 +13494,8 @@ test "rule_ir writer strips selector comments before emit" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -13522,8 +13522,8 @@ test "rule_ir writer keeps decl trailing comment inline" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendComment(allocator, comment, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
@@ -13558,10 +13558,10 @@ test "rule_ir writer keeps comment between declarations on its own line" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop1), @intFromEnum(val1), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop1), @backingInt(val1), .{ .start = 0, .end = 0 });
     try ir.appendComment(allocator, comment, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop2), @intFromEnum(val2), .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop2), @backingInt(val2), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -13596,12 +13596,12 @@ test "rule_ir writer inserts blank before top-level loud comment after style rul
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_a), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_a), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendComment(allocator, comment, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_b), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_b), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -13640,12 +13640,12 @@ test "rule_ir writer keeps loud comment compact after nested emitted rule" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_a), 1, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_a), 1, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendComment(allocator, comment, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_b), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_b), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -13682,13 +13682,13 @@ test "rule_ir writer suppresses blank before compiler reopen rule" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_after), 1, .{ .start = 0, .end = 0, .file_id = 1 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0, .file_id = 1 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_after), 1, .{ .start = 0, .end = 0, .file_id = 1 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0, .file_id = 1 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0, .file_id = 1 });
     try ir.appendStmtGap(allocator, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_a), 0, .{ .start = 0, .end = 0, .file_id = 2 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_a), 0, .{ .start = 0, .end = 0, .file_id = 2 });
     ir.setOriginReopenAt(ir.nodes.items.len - 1, true);
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -13722,11 +13722,11 @@ test "rule_ir writer merges adjacent comment-only reopen rules" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
     ir.setOriginReopenAt(ir.nodes.items.len - 1, true);
     try ir.appendComment(allocator, comment_a, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
     ir.setOriginReopenAt(ir.nodes.items.len - 1, true);
     try ir.appendComment(allocator, comment_b, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
@@ -13765,8 +13765,8 @@ test "rule_ir writer keeps at-rule open-block comment before nested rule on its 
 
     try ir.appendAtRuleBegin(allocator, at_name, prelude, 0, false, .{ .start = 0, .end = 0 });
     try ir.appendComment(allocator, comment, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 1, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 1, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendAtRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
@@ -13800,7 +13800,7 @@ test "rule_ir writer keeps non-empty comment-only rule multiline" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
     try ir.appendComment(allocator, comment, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
@@ -13833,9 +13833,9 @@ test "rule_ir writer keeps leading rule comment before decl multiline" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
     try ir.appendComment(allocator, comment, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -13866,7 +13866,7 @@ test "rule_ir writer keeps empty-comment-only rule multiline" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
     try ir.appendComment(allocator, comment, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
@@ -13918,7 +13918,7 @@ test "rule_ir writer keeps plain comment closer aligned in nested block" {
 
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
     try ir.appendComment(allocator, comment, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
@@ -13950,7 +13950,7 @@ test "rule_ir writer strips tab-indented block comment continuation without addi
 
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
     try ir.appendCommentWithCol(allocator, comment, .{ .start = 0, .end = 0 }, 4);
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
@@ -13984,8 +13984,8 @@ test "rule_ir writer keeps selector attribute quotes when no @extend edges" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -14081,8 +14081,8 @@ test "rule_ir writer strips source map comments and keeps leading blank gap" {
     defer ir.deinit(allocator);
 
     try ir.appendComment(allocator, comment, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -14117,8 +14117,8 @@ test "rule_ir writer preserves prepared media prelude" {
     defer ir.deinit(allocator);
 
     try ir.appendAtRuleBegin(allocator, media, prelude, 0, false, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 1, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 1, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendAtRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
@@ -14161,8 +14161,8 @@ test "rule_ir normalizeNestedMediaRuleIR merges nested media preludes" {
     try ir.appendAtRuleBegin(allocator, media, p1, 0, false, .{ .start = 0, .end = 0 });
     try ir.appendAtRuleBegin(allocator, media, p2, 0, false, .{ .start = 0, .end = 0 });
     try ir.appendAtRuleBegin(allocator, media, p3, 0, false, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 1, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 1, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendAtRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendAtRuleEnd(allocator, .{ .start = 0, .end = 0 });
@@ -14172,8 +14172,8 @@ test "rule_ir normalizeNestedMediaRuleIR merges nested media preludes" {
 
     try ir.appendAtRuleBegin(allocator, media, p4, 0, false, .{ .start = 0, .end = 0 });
     try ir.appendAtRuleBegin(allocator, media, p5, 0, false, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 1, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 1, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendAtRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendAtRuleEnd(allocator, .{ .start = 0, .end = 0 });
@@ -14225,14 +14225,14 @@ test "rule_ir normalizeNestedMediaRuleIR emits outer declarations before nested 
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_parent), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_parent), 0, .{ .start = 0, .end = 0 });
     try ir.appendAtRuleBegin(allocator, media, min_width, 1, false, .{ .start = 0, .end = 0 });
     try ir.appendAtRuleBegin(allocator, media, min_height, 0, false, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop_x), @intFromEnum(val_y), .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop_x), @backingInt(val_y), .{ .start = 0, .end = 0 });
     try ir.appendAtRuleEnd(allocator, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop_z), @intFromEnum(val_w), .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_child), 1, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop_q), @intFromEnum(val_r), .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop_z), @backingInt(val_w), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_child), 1, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop_q), @backingInt(val_r), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendAtRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
@@ -14305,14 +14305,14 @@ test "rule_ir merge extend: direct + transitive" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_bar), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_bar), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_foo), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_foo), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_baz), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_baz), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     try ir.appendExtendRelation(allocator, &pool, sel_foo, sel_bar, false, false);
@@ -14342,11 +14342,11 @@ test "rule_ir merge extend: placeholder target stays hidden" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_placeholder), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_placeholder), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_bar), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_bar), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     try ir.appendExtendRelation(allocator, &pool, sel_bar, sel_placeholder, false, true);
@@ -14376,8 +14376,8 @@ test "rule_ir merge extend: compound replacement" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_compound), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_compound), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     try ir.appendExtendRelation(allocator, &pool, sel_ext, sel_target, false, false);
@@ -14409,8 +14409,8 @@ test "rule_ir merge extend: compound cross-product includes transitive unify bra
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_rule), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_rule), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     try ir.appendExtendRelation(allocator, &pool, sel_x, sel_a, false, false);
@@ -14453,13 +14453,13 @@ test "rule_ir merge extend: cycle remains finite and includes transitive selecto
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_a), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_a), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_b), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_b), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_c), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_c), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     try ir.appendExtendRelation(allocator, &pool, sel_a, sel_b, false, false);
@@ -14523,8 +14523,8 @@ test "rule_ir append extend relation: unresolved interpolation target is deferre
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_extending), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_extending), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     try ir.appendExtendRelation(allocator, &pool, sel_extending, sel_interp_target, false, false);
@@ -14603,8 +14603,8 @@ test "rule_ir append extend relation: bogus extender selector is ignored" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_a), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_a), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     try ir.appendExtendRelation(allocator, &pool, sel_bogus, sel_a, false, false);
@@ -14639,13 +14639,13 @@ test "rule_ir merge extend: :is pseudo keeps direct + transitive variants" {
     try ir.appendExtendRelation(allocator, &pool, sel_is_midstream, sel_upstream, false, false);
     try ir.appendExtendRelation(allocator, &pool, sel_downstream, sel_midstream, false, false);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_upstream), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_upstream), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_is_midstream), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_is_midstream), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_downstream), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_downstream), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -14678,13 +14678,13 @@ test "rule_ir merge extend: :where pseudo keeps direct + transitive variants" {
     try ir.appendExtendRelation(allocator, &pool, sel_where_midstream, sel_upstream, false, false);
     try ir.appendExtendRelation(allocator, &pool, sel_downstream, sel_midstream, false, false);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_upstream), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_upstream), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_where_midstream), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_where_midstream), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_downstream), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_downstream), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -14713,13 +14713,13 @@ test "rule_ir merge extend: :not pseudo keeps direct + transitive variants" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_upstream), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_upstream), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_not_midstream), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_not_midstream), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_downstream), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_downstream), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     try ir.appendExtendRelation(allocator, &pool, sel_not_midstream, sel_upstream, false, false);
@@ -14756,12 +14756,12 @@ test "rule_ir merge extend: result of :not extend remains extendable" {
     try ir.appendExtendRelation(allocator, &pool, sel_a, sel_not_b, false, false);
     try ir.appendExtendRelation(allocator, &pool, sel_b, sel_c, false, false);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_a), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_a), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_b), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_b), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_not_c), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_not_c), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -14788,11 +14788,11 @@ test "rule_ir merge extend: pseudo selector with placeholder stays suppressed" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_placeholder), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_placeholder), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_is_placeholder), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_is_placeholder), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     try ir.appendExtendRelation(allocator, &pool, sel_is_placeholder, sel_placeholder, false, true);
@@ -14819,8 +14819,8 @@ test "rule_ir writeToWithSourceMap emits v3 mappings" {
 
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 2, .file_id = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 5, .end = 15, .file_id = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 2, .file_id = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 5, .end = 15, .file_id = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 16, .end = 17, .file_id = 0 });
 
     const line_starts = [_]u32{0};
@@ -14859,7 +14859,7 @@ fn expectNodeKindsForTest(ir: *const RuleIR, expected: []const NodeKind) !void {
 fn findRuleBeginIndexForTest(ir: *const RuleIR, pool: *const InternPool, selector: []const u8) ?usize {
     for (ir.nodes.items, 0..) |node, idx| {
         if (node.kind != .rule_begin) continue;
-        const selector_id: InternId = @enumFromInt(ir.extra.items[node.payload]);
+        const selector_id: InternId = @fromBackingInt(@intCast(ir.extra.items[node.payload]));
         if (std.mem.eql(u8, pool.get(selector_id), selector)) return idx;
     }
     return null;
@@ -14878,8 +14878,8 @@ test "rule_ir hoistTopLevelCssImportsRuleIR hoists import and inserts group boun
 
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendStmtGap(allocator, .{ .start = 0, .end = 0 });
     try ir.appendAtRuleSimple(allocator, import_name, import_prelude, .{ .start = 0, .end = 0 });
@@ -14942,8 +14942,8 @@ test "rule_ir appendAtRuleSimpleMaybeHoisted keeps current-file leading comments
     try ir.appendComment(allocator, after_b, .{ .start = 0, .end = 0, .file_id = 2 });
     try ir.appendComment(allocator, before_c, .{ .start = 0, .end = 0, .file_id = 3 });
     try ir.appendAtRuleSimpleMaybeHoisted(allocator, &pool, import_name, import_c, .{ .start = 0, .end = 0, .file_id = 3 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0, .file_id = 3 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0, .file_id = 3 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0, .file_id = 3 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0, .file_id = 3 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0, .file_id = 3 });
 
     var buf: std.ArrayList(u8) = .empty;
@@ -14987,7 +14987,7 @@ test "rule_ir suppressLeadingBlankAfterTopLevelImportsRuleIR marks first top-lev
     defer ir.deinit(allocator);
     try ir.appendAtRuleSimple(allocator, import_name, import_prelude, .{ .start = 0, .end = 0 });
     try ir.appendGroupBoundary(allocator, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     ir.suppressLeadingBlankAfterTopLevelImportsRuleIR(&pool);
@@ -15009,8 +15009,8 @@ test "rule_ir normalizeTopLevelGroupBoundariesRuleIR preserves sourcemap gaps an
     defer ir.deinit(allocator);
     try ir.appendGroupBoundary(allocator, .{ .start = 0, .end = 0 });
     try ir.appendSourcemapGap(allocator, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendGroupBoundary(allocator, .{ .start = 0, .end = 0 });
     try ir.appendSourcemapGap(allocator, .{ .start = 0, .end = 0 });
@@ -15050,11 +15050,11 @@ test "rule_ir propagateStmtGapSuppressionRuleIR propagates across style-only seg
 
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_a), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_a), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
     const a_idx = findRuleBeginIndexForTest(&ir, &pool, ".a") orelse return error.TestUnexpectedResult;
     ir.setSuppressFollowingStmtGapBlankAt(a_idx, true);
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_b), 0, .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_b), 0, .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
     try ir.appendStmtGap(allocator, .{ .start = 0, .end = 0 });
 
@@ -15078,15 +15078,15 @@ test "rule_ir stripTopLevelGroupBoundariesRuleIR removes separators and propagat
 
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_a), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val_a), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_a), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val_a), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
     const a_idx = findRuleBeginIndexForTest(&ir, &pool, ".a") orelse return error.TestUnexpectedResult;
     ir.setSuppressFollowingStmtGapBlankAt(a_idx, true);
     try ir.appendStmtGap(allocator, .{ .start = 0, .end = 0 });
     try ir.appendGroupBoundary(allocator, .{ .start = 0, .end = 0 });
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_b), 0, .{ .start = 0, .end = 0 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val_b), .{ .start = 0, .end = 0 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_b), 0, .{ .start = 0, .end = 0 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val_b), .{ .start = 0, .end = 0 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0 });
 
     ir.stripTopLevelGroupBoundariesRuleIR();
@@ -15119,8 +15119,8 @@ test "rule_ir renderFlushRange preserves cross-module extend visibility" {
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_target), 0, .{ .start = 0, .end = 0, .file_id = 1 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val), .{ .start = 0, .end = 0, .file_id = 1 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_target), 0, .{ .start = 0, .end = 0, .file_id = 1 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val), .{ .start = 0, .end = 0, .file_id = 1 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0, .file_id = 1 });
 
     try ir.appendExtendRelationScoped(allocator, &pool, sel_a, sel_target, false, false, 0, 1, 1, null);
@@ -15175,13 +15175,13 @@ test "rule_ir renderFlushRange ignores unrelated extend groups outside flushed r
     var ir = RuleIR.init();
     defer ir.deinit(allocator);
 
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_target), 0, .{ .start = 0, .end = 0, .file_id = 1 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val_red), .{ .start = 0, .end = 0, .file_id = 1 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_target), 0, .{ .start = 0, .end = 0, .file_id = 1 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val_red), .{ .start = 0, .end = 0, .file_id = 1 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0, .file_id = 1 });
 
     const second_rule_start = ir.nodes.items.len;
-    try ir.appendRuleBegin(allocator, @intFromEnum(sel_item), 0, .{ .start = 0, .end = 0, .file_id = 2 });
-    try ir.appendDecl(allocator, @intFromEnum(prop), @intFromEnum(val_blue), .{ .start = 0, .end = 0, .file_id = 2 });
+    try ir.appendRuleBegin(allocator, @backingInt(sel_item), 0, .{ .start = 0, .end = 0, .file_id = 2 });
+    try ir.appendDecl(allocator, @backingInt(prop), @backingInt(val_blue), .{ .start = 0, .end = 0, .file_id = 2 });
     try ir.appendRuleEnd(allocator, .{ .start = 0, .end = 0, .file_id = 2 });
 
     try ir.appendExtendRelationScoped(allocator, &pool, sel_a, sel_target, false, false, 1, 1, 1, null);

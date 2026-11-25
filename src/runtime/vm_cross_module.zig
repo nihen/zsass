@@ -512,7 +512,7 @@ pub fn wrapRuleIrTopLevelAmpRulesWithParent(self: anytype, start_idx: usize, par
         if (end_idx >= self.rule_ir.nodes.items.len) break;
 
         const selector_u = self.rule_ir.extra.items[node.payload];
-        const selector_id: InternId = @enumFromInt(selector_u);
+        const selector_id: InternId = @fromBackingInt(@intCast(selector_u));
         const selector_raw = self.intern_pool.get(selector_id);
         if (std.mem.indexOfScalar(u8, selector_raw, '&') != null) {
             try ranges.append(self.allocator, .{
@@ -548,7 +548,7 @@ pub fn wrapRuleIrTopLevelAmpRulesWithParent(self: anytype, start_idx: usize, par
 
         const extra_off: u32 = @intCast(self.rule_ir.extra.items.len);
         try self.rule_ir.extra.appendSlice(self.allocator, &[_]u32{
-            @intFromEnum(parent_selector),
+            @backingInt(parent_selector),
             wrapper_nest_depth,
             0,
         });
@@ -622,12 +622,12 @@ pub fn prefixRuleIrRangeTopLevelRules(self: anytype, start_idx: usize, parent_se
             .rule_begin => {
                 if (rule_depth == 0 and keyframes_depth == 0) {
                     const selector_u = self.rule_ir.extra.items[node.payload];
-                    const selector_id: InternId = @enumFromInt(selector_u);
+                    const selector_id: InternId = @fromBackingInt(@intCast(selector_u));
                     const selector_raw = self.intern_pool.get(selector_id);
                     const combined = try self.combineNestedRuleSelectorForSelectorResolve(parent_raw, selector_raw);
                     defer self.allocator.free(combined);
                     const combined_id = try self.intern_pool.intern(combined);
-                    self.rule_ir.extra.items[node.payload] = @intFromEnum(combined_id);
+                    self.rule_ir.extra.items[node.payload] = @backingInt(combined_id);
                 }
                 rule_depth += 1;
             },
@@ -635,7 +635,7 @@ pub fn prefixRuleIrRangeTopLevelRules(self: anytype, start_idx: usize, parent_se
                 if (rule_depth > 0) rule_depth -= 1;
             },
             .at_rule_begin => {
-                const name_id: InternId = @enumFromInt(self.rule_ir.extra.items[node.payload]);
+                const name_id: InternId = @fromBackingInt(@intCast(self.rule_ir.extra.items[node.payload]));
                 const name = self.intern_pool.get(name_id);
                 const kind: AtRuleKind = if (isKeyframesAtRuleName(name))
                     .keyframes
@@ -694,7 +694,7 @@ pub fn prefixRuleIrRangeTopLevelRules(self: anytype, start_idx: usize, parent_se
                 if (rule_depth > 0) rule_depth -= 1;
             },
             .at_rule_begin => {
-                const name_id: InternId = @enumFromInt(self.rule_ir.extra.items[node.payload]);
+                const name_id: InternId = @fromBackingInt(@intCast(self.rule_ir.extra.items[node.payload]));
                 const kind: AtRuleKind = if (isStyleRuleGroupAtRuleName(self.intern_pool.get(name_id))) .style_group else .other;
                 at_rule_stack.appendAssumeCapacity(kind);
             },
@@ -727,7 +727,7 @@ pub fn prefixRuleIrRangeTopLevelRules(self: anytype, start_idx: usize, parent_se
         const starts_wrap = open_wrap == null;
         if (starts_wrap) {
             const extra_off: u32 = @intCast(self.rule_ir.extra.items.len);
-            self.rule_ir.extra.appendSliceAssumeCapacity(&[_]u32{ @intFromEnum(parent_selector), 1, 0, extend_snapshot });
+            self.rule_ir.extra.appendSliceAssumeCapacity(&[_]u32{ @backingInt(parent_selector), 1, 0, extend_snapshot });
             self.rule_ir.nodes.appendAssumeCapacity(.{
                 .kind = .rule_begin,
                 .payload = extra_off,

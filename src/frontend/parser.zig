@@ -201,15 +201,19 @@ pub const Parser = struct {
     /// stream, and patch the root's payload with the resulting child
     /// list once parsing is done.
     pub fn parse(self: *Parser) ParseError!Ast {
-        var ast = Ast.init(self.allocator, self.source, .none);
-        errdefer ast.deinit();
         // CLI-FIX-E Step 2b: When parse error occurs, record the span of the most recent token in thread-local.
         // Points to source_end for EOF token. If it is already set in a deep frame, it will not be overwritten.
-        errdefer |err| {
+        return self.parseUnrecorded() catch |err| {
             const span = self.currentTokenSpan();
             error_format.recordErrorSpanIfUnset(span.start, span.end, 0);
             error_format.recordErrorTag(err);
-        }
+            return err;
+        };
+    }
+
+    fn parseUnrecorded(self: *Parser) ParseError!Ast {
+        var ast = Ast.init(self.allocator, self.source, .none);
+        errdefer ast.deinit();
 
         const source_end: u32 = @intCast(self.source.len);
 
@@ -851,7 +855,7 @@ pub const Parser = struct {
         const sel_node = try ast.addNode(.{
             .tag = .expr_unquoted_ident,
             .flags = 0,
-            .payload = @intFromEnum(sel_id),
+            .payload = @backingInt(sel_id),
             .span_start = sel_span.start,
             .span_end = sel_span.end,
         });
@@ -1082,7 +1086,7 @@ pub const Parser = struct {
         const sel_node = try ast.addNode(.{
             .tag = .expr_unquoted_ident,
             .flags = 0,
-            .payload = @intFromEnum(sel_id),
+            .payload = @backingInt(sel_id),
             .span_start = start,
             .span_end = last_significant_end,
         });
@@ -1204,7 +1208,7 @@ pub const Parser = struct {
         const prop_node = try ast.addNode(.{
             .tag = .expr_unquoted_ident,
             .flags = 0,
-            .payload = @intFromEnum(prop_id),
+            .payload = @backingInt(prop_id),
             .span_start = prop_start,
             .span_end = prop_end,
         });
@@ -2488,7 +2492,7 @@ pub const Parser = struct {
         const sel_node = try ast.addNode(.{
             .tag = .expr_unquoted_ident,
             .flags = 0,
-            .payload = @intFromEnum(sel_id),
+            .payload = @backingInt(sel_id),
             .span_start = start,
             .span_end = last_significant_end,
         });
@@ -2553,7 +2557,7 @@ pub const Parser = struct {
                 const sel_node = try ast.addNode(.{
                     .tag = .expr_unquoted_ident,
                     .flags = 0,
-                    .payload = @intFromEnum(sel_id),
+                    .payload = @backingInt(sel_id),
                     .span_start = sel_span.start,
                     .span_end = sel_span.end,
                 });
@@ -2823,7 +2827,7 @@ pub const Parser = struct {
         const extra_off = try ast.appendExtraU32(@intCast(names.items.len));
         _ = try ast.appendExtraU32(if (has_splat) @as(u32, 1) else 0);
         for (names.items, defaults.items) |n, d| {
-            _ = try ast.appendExtraU32(@intFromEnum(n));
+            _ = try ast.appendExtraU32(@backingInt(n));
             _ = try ast.appendExtraU32(d);
         }
         return extra_off;
@@ -2856,7 +2860,7 @@ pub const Parser = struct {
 
         const body = try self.parseBlockBody(ast);
 
-        const extra_off = try ast.appendExtraU32(@intFromEnum(name_id));
+        const extra_off = try ast.appendExtraU32(@backingInt(name_id));
         _ = try ast.appendExtraU32(params_extra);
         _ = try ast.appendExtraU32(body.extra);
 
@@ -2894,7 +2898,7 @@ pub const Parser = struct {
 
         const body = try self.parseBlockBody(ast);
 
-        const extra_off = try ast.appendExtraU32(@intFromEnum(name_id));
+        const extra_off = try ast.appendExtraU32(@backingInt(name_id));
         _ = try ast.appendExtraU32(params_extra);
         _ = try ast.appendExtraU32(body.extra);
 
@@ -3008,8 +3012,8 @@ pub const Parser = struct {
             return error.SyntaxError;
         }
 
-        const outer_off = try ast.appendExtraU32(@intFromEnum(name_id));
-        _ = try ast.appendExtraU32(@intFromEnum(namespace_id));
+        const outer_off = try ast.appendExtraU32(@backingInt(name_id));
+        _ = try ast.appendExtraU32(@backingInt(namespace_id));
         _ = try ast.appendExtraU32(args_extra);
         _ = try ast.appendExtraU32(using_extra);
         _ = try ast.appendExtraU32(body_extra);
@@ -3072,7 +3076,7 @@ pub const Parser = struct {
 
         const body = try self.parseBlockBody(ast);
 
-        const extra_off = try ast.appendExtraU32(@intFromEnum(name_id));
+        const extra_off = try ast.appendExtraU32(@backingInt(name_id));
         _ = try ast.appendExtraU32(params_extra);
         _ = try ast.appendExtraU32(body.extra);
 
@@ -3233,8 +3237,8 @@ pub const Parser = struct {
             }
         }
 
-        const outer_off = try ast.appendExtraU32(@intFromEnum(name_id));
-        _ = try ast.appendExtraU32(@intFromEnum(namespace_id));
+        const outer_off = try ast.appendExtraU32(@backingInt(name_id));
+        _ = try ast.appendExtraU32(@backingInt(namespace_id));
         _ = try ast.appendExtraU32(args_extra);
         _ = try ast.appendExtraU32(using_extra);
         _ = try ast.appendExtraU32(body_extra);
@@ -3525,7 +3529,7 @@ pub const Parser = struct {
             self.advance();
         }
 
-        const extra_off = try ast.appendExtraU32(@intFromEnum(name_id));
+        const extra_off = try ast.appendExtraU32(@backingInt(name_id));
         _ = try ast.appendExtraU32(prelude_slot);
         _ = try ast.appendExtraU32(body_extra);
 
@@ -3586,7 +3590,7 @@ pub const Parser = struct {
         if (text.len == 0) return;
         const id = try self.intern_pool.intern(text);
         try parts.append(self.allocator, 0);
-        try parts.append(self.allocator, @intFromEnum(id));
+        try parts.append(self.allocator, @backingInt(id));
     }
 
     fn flushPendingTextLiteral(
@@ -3970,7 +3974,7 @@ pub const Parser = struct {
                 break;
             }
 
-            try entries.append(self.allocator, @intFromEnum(name_id));
+            try entries.append(self.allocator, @backingInt(name_id));
             try entries.append(self.allocator, value_node.toU32());
             try entries.append(self.allocator, flags);
             count += 1;
@@ -4050,7 +4054,7 @@ pub const Parser = struct {
 
         const extra_off = try ast.appendExtraU32(@intCast(ids.items.len));
         for (ids.items) |id| {
-            _ = try ast.appendExtraU32(@intFromEnum(id));
+            _ = try ast.appendExtraU32(@backingInt(id));
         }
         return extra_off;
     }
@@ -4124,8 +4128,8 @@ pub const Parser = struct {
             self.advance();
         }
 
-        const outer_off = try ast.appendExtraU32(@intFromEnum(url_id));
-        _ = try ast.appendExtraU32(@intFromEnum(namespace_id));
+        const outer_off = try ast.appendExtraU32(@backingInt(url_id));
+        _ = try ast.appendExtraU32(@backingInt(namespace_id));
         _ = try ast.appendExtraU32(config_extra);
 
         var flags: u8 = 0;
@@ -4239,8 +4243,8 @@ pub const Parser = struct {
             self.advance();
         }
 
-        const outer_off = try ast.appendExtraU32(@intFromEnum(url_id));
-        _ = try ast.appendExtraU32(@intFromEnum(prefix_id));
+        const outer_off = try ast.appendExtraU32(@backingInt(url_id));
+        _ = try ast.appendExtraU32(@backingInt(prefix_id));
         _ = try ast.appendExtraU32(show_extra);
         _ = try ast.appendExtraU32(hide_extra);
         _ = try ast.appendExtraU32(config_extra);
@@ -4591,7 +4595,7 @@ pub const Parser = struct {
             _ = try ast.appendExtraU32(n.toU32());
         }
         for (arg_names.items) |id| {
-            _ = try ast.appendExtraU32(@intFromEnum(id));
+            _ = try ast.appendExtraU32(@backingInt(id));
         }
 
         return try ast.addNode(.{
@@ -4971,7 +4975,7 @@ pub const Parser = struct {
 
         const extra_off = try ast.appendExtraU32(@intCast(vars.items.len));
         for (vars.items) |id| {
-            _ = try ast.appendExtraU32(@intFromEnum(id));
+            _ = try ast.appendExtraU32(@backingInt(id));
         }
         _ = try ast.appendExtraU32(list_node.toU32());
         _ = try ast.appendExtraU32(body.extra);
@@ -5266,7 +5270,7 @@ pub const Parser = struct {
         self.skipWhitespaceAndComments();
         const body = try self.parseBlockBodyAnchored(ast, at_tok.span.start);
 
-        const extra_off = try ast.appendExtraU32(@intFromEnum(var_id));
+        const extra_off = try ast.appendExtraU32(@backingInt(var_id));
         _ = try ast.appendExtraU32(from_node.toU32());
         _ = try ast.appendExtraU32(to_node.toU32());
         _ = try ast.appendExtraU32(body.extra);
@@ -5541,7 +5545,7 @@ pub const Parser = struct {
             }
         }
 
-        const extra_off = try ast.appendExtraU32(@intFromEnum(name_id));
+        const extra_off = try ast.appendExtraU32(@backingInt(name_id));
         _ = try ast.appendExtraU32(value_node.toU32());
         _ = try ast.appendExtraU32(flags_u32);
 
@@ -6194,7 +6198,7 @@ pub const Parser = struct {
         return try ast.addNode(.{
             .tag = .expr_unquoted_ident,
             .flags = 0,
-            .payload = @intFromEnum(id),
+            .payload = @backingInt(id),
             .span_start = bang_tok.span.start,
             .span_end = ident_tok.span.end,
         });
@@ -6720,7 +6724,7 @@ pub const Parser = struct {
                     self.advance();
                     const id = try self.intern_pool.intern(tok.slice(self.source));
                     try parts.append(self.allocator, 0);
-                    try parts.append(self.allocator, @intFromEnum(id));
+                    try parts.append(self.allocator, @backingInt(id));
                     prev_end = tok.span.end;
                     span_end = tok.span.end;
                 },
@@ -6746,10 +6750,10 @@ pub const Parser = struct {
                         // for source-map purposes.
                         const dash_id = try self.intern_pool.intern(num_text[0..1]);
                         try parts.append(self.allocator, 0);
-                        try parts.append(self.allocator, @intFromEnum(dash_id));
+                        try parts.append(self.allocator, @backingInt(dash_id));
                         const digits_id = try self.intern_pool.intern(num_text[1..]);
                         try parts.append(self.allocator, 0);
-                        try parts.append(self.allocator, @intFromEnum(digits_id));
+                        try parts.append(self.allocator, @backingInt(digits_id));
                         self.advance();
                         prev_end = tok.span.end;
                         span_end = tok.span.end;
@@ -6758,7 +6762,7 @@ pub const Parser = struct {
                     self.advance();
                     const id = try self.intern_pool.intern(num_text);
                     try parts.append(self.allocator, 0);
-                    try parts.append(self.allocator, @intFromEnum(id));
+                    try parts.append(self.allocator, @backingInt(id));
                     prev_end = tok.span.end;
                     span_end = tok.span.end;
                 },
@@ -6786,7 +6790,7 @@ pub const Parser = struct {
                         self.advance();
                         const id = try self.intern_pool.intern(tok.slice(self.source));
                         try parts.append(self.allocator, 0);
-                        try parts.append(self.allocator, @intFromEnum(id));
+                        try parts.append(self.allocator, @backingInt(id));
                         prev_end = tok.span.end;
                         span_end = tok.span.end;
                         break;
@@ -6817,7 +6821,7 @@ pub const Parser = struct {
                     self.advance();
                     const id = try self.intern_pool.intern(tok.slice(self.source));
                     try parts.append(self.allocator, 0);
-                    try parts.append(self.allocator, @intFromEnum(id));
+                    try parts.append(self.allocator, @backingInt(id));
                     prev_end = tok.span.end;
                     span_end = tok.span.end;
                 },
@@ -6891,7 +6895,7 @@ pub const Parser = struct {
         return try ast.addNode(.{
             .tag = .expr_unquoted_ident,
             .flags = 0,
-            .payload = @intFromEnum(id),
+            .payload = @backingInt(id),
             .span_start = tok.span.start,
             .span_end = tok.span.end,
         });
@@ -6905,7 +6909,7 @@ pub const Parser = struct {
         return try ast.addNode(.{
             .tag = .expr_unquoted_ident,
             .flags = 0,
-            .payload = @intFromEnum(id),
+            .payload = @backingInt(id),
             .span_start = tok.span.start,
             .span_end = tok.span.end,
         });
@@ -7034,7 +7038,7 @@ pub const Parser = struct {
             return try ast.addNode(.{
                 .tag = .expr_unquoted_ident,
                 .flags = 0,
-                .payload = @intFromEnum(id),
+                .payload = @backingInt(id),
                 .span_start = open_tok.span.start,
                 .span_end = span_end_total,
             });
@@ -7071,18 +7075,18 @@ pub const Parser = struct {
 
         switch (n.tag) {
             .expr_interp, .expr_paren => {
-                const child: NodeIndex = @enumFromInt(n.payload);
+                const child: NodeIndex = @fromBackingInt(@intCast(n.payload));
                 unquoteNodeForInterpolation(self, ast, child);
             },
             .expr_unary_op => {
                 const off: ExtraIndex = n.payload;
-                const child: NodeIndex = @enumFromInt(ast.getExtraU32(off));
+                const child: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
                 unquoteNodeForInterpolation(self, ast, child);
             },
             .expr_binary_op, .expr_slash_expr => {
                 const off: ExtraIndex = n.payload;
-                const lhs: NodeIndex = @enumFromInt(ast.getExtraU32(off));
-                const rhs: NodeIndex = @enumFromInt(ast.getExtraU32(off + 1));
+                const lhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+                const rhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
                 unquoteNodeForInterpolation(self, ast, lhs);
                 unquoteNodeForInterpolation(self, ast, rhs);
             },
@@ -7091,7 +7095,7 @@ pub const Parser = struct {
                 const count = ast.getExtraU32(off);
                 var i: u32 = 0;
                 while (i < count) : (i += 1) {
-                    const child: NodeIndex = @enumFromInt(ast.getExtraU32(off + 1 + i));
+                    const child: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1 + i)));
                     unquoteNodeForInterpolation(self, ast, child);
                 }
             },
@@ -7102,8 +7106,8 @@ pub const Parser = struct {
                 const val_start: ExtraIndex = key_start + pair_count;
                 var i: u32 = 0;
                 while (i < pair_count) : (i += 1) {
-                    const key_node: NodeIndex = @enumFromInt(ast.getExtraU32(key_start + i));
-                    const val_node: NodeIndex = @enumFromInt(ast.getExtraU32(val_start + i));
+                    const key_node: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(key_start + i)));
+                    const val_node: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(val_start + i)));
                     unquoteNodeForInterpolation(self, ast, key_node);
                     unquoteNodeForInterpolation(self, ast, val_node);
                 }
@@ -7128,7 +7132,7 @@ pub const Parser = struct {
 
         switch (n.tag) {
             .expr_string_literal => {
-                const id: InternId = @enumFromInt(ast.getExtraU32(n.payload));
+                const id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(n.payload)));
                 return std.mem.findScalar(u8, self.intern_pool.get(id), '\\') != null;
             },
             .expr_string_interp => {
@@ -7139,28 +7143,28 @@ pub const Parser = struct {
                     const kind = ast.getExtraU32(off + 1 + i * 2);
                     const val = ast.getExtraU32(off + 2 + i * 2);
                     if (kind == 0) {
-                        const id: InternId = @enumFromInt(val);
+                        const id: InternId = @fromBackingInt(@intCast(val));
                         if (std.mem.findScalar(u8, self.intern_pool.get(id), '\\') != null) return true;
                     } else if (kind == 1) {
-                        const child: NodeIndex = @enumFromInt(val);
+                        const child: NodeIndex = @fromBackingInt(@intCast(val));
                         if (self.nodeContainsStringBackslash(ast, child)) return true;
                     }
                 }
                 return false;
             },
             .expr_interp, .expr_paren => {
-                const child: NodeIndex = @enumFromInt(n.payload);
+                const child: NodeIndex = @fromBackingInt(@intCast(n.payload));
                 return self.nodeContainsStringBackslash(ast, child);
             },
             .expr_unary_op => {
                 const off: ExtraIndex = n.payload;
-                const child: NodeIndex = @enumFromInt(ast.getExtraU32(off));
+                const child: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
                 return self.nodeContainsStringBackslash(ast, child);
             },
             .expr_binary_op, .expr_slash_expr => {
                 const off: ExtraIndex = n.payload;
-                const lhs: NodeIndex = @enumFromInt(ast.getExtraU32(off));
-                const rhs: NodeIndex = @enumFromInt(ast.getExtraU32(off + 1));
+                const lhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+                const rhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
                 return self.nodeContainsStringBackslash(ast, lhs) or self.nodeContainsStringBackslash(ast, rhs);
             },
             .expr_comma_list, .expr_space_list, .expr_bracketed_list => {
@@ -7168,7 +7172,7 @@ pub const Parser = struct {
                 const count = ast.getExtraU32(off);
                 var i: u32 = 0;
                 while (i < count) : (i += 1) {
-                    const child: NodeIndex = @enumFromInt(ast.getExtraU32(off + 1 + i));
+                    const child: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1 + i)));
                     if (self.nodeContainsStringBackslash(ast, child)) return true;
                 }
                 return false;
@@ -7180,8 +7184,8 @@ pub const Parser = struct {
                 const val_start: ExtraIndex = key_start + pair_count;
                 var i: u32 = 0;
                 while (i < pair_count) : (i += 1) {
-                    const key: NodeIndex = @enumFromInt(ast.getExtraU32(key_start + i));
-                    const val: NodeIndex = @enumFromInt(ast.getExtraU32(val_start + i));
+                    const key: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(key_start + i)));
+                    const val: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(val_start + i)));
                     if (self.nodeContainsStringBackslash(ast, key) or self.nodeContainsStringBackslash(ast, val)) return true;
                 }
                 return false;
@@ -7192,7 +7196,7 @@ pub const Parser = struct {
                 const arg_nodes_start: ExtraIndex = off + 3;
                 var i: u32 = 0;
                 while (i < arg_count) : (i += 1) {
-                    const arg_node: NodeIndex = @enumFromInt(ast.getExtraU32(arg_nodes_start + i));
+                    const arg_node: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start + i)));
                     if (self.nodeContainsStringBackslash(ast, arg_node)) return true;
                 }
                 return false;
@@ -7502,7 +7506,7 @@ pub const Parser = struct {
 
         // extra pool: [f64 lo, f64 hi, unit_id u32]
         const extra_off = try ast.appendExtraF64(value);
-        _ = try ast.appendExtraU32(@intFromEnum(unit_id));
+        _ = try ast.appendExtraU32(@backingInt(unit_id));
 
         return try ast.addNode(.{
             .tag = .expr_number_literal,
@@ -7540,7 +7544,7 @@ pub const Parser = struct {
 
         const value = std.fmt.parseFloat(f64, num_text[1..]) catch return error.SyntaxError;
         const extra_off = try ast.appendExtraF64(value);
-        _ = try ast.appendExtraU32(@intFromEnum(unit_id));
+        _ = try ast.appendExtraU32(@backingInt(unit_id));
 
         return try ast.addNode(.{
             .tag = .expr_number_literal,
@@ -7574,7 +7578,7 @@ pub const Parser = struct {
             }
 
             const str_id = try self.intern_pool.intern(content);
-            const extra_off = try ast.appendExtraU32(@intFromEnum(str_id));
+            const extra_off = try ast.appendExtraU32(@backingInt(str_id));
             var flags: u8 = 0;
             if (quoted) flags |= 0b0000_0001; // bit 0 = quoted
 
@@ -7651,7 +7655,7 @@ pub const Parser = struct {
                     const lit_bytes = content[lit_start..i];
                     const lit_id = try self.intern_pool.intern(lit_bytes);
                     try parts.append(self.allocator, 0); // kind = literal
-                    try parts.append(self.allocator, @intFromEnum(lit_id));
+                    try parts.append(self.allocator, @backingInt(lit_id));
                 }
 
                 // Scan for the matching `}`, tracking nested braces
@@ -7724,7 +7728,7 @@ pub const Parser = struct {
             const lit_bytes = content[lit_start..clen];
             const lit_id = try self.intern_pool.intern(lit_bytes);
             try parts.append(self.allocator, 0);
-            try parts.append(self.allocator, @intFromEnum(lit_id));
+            try parts.append(self.allocator, @backingInt(lit_id));
         }
 
         // If every `#{...}` in the source turned out to be escaped,
@@ -7732,7 +7736,7 @@ pub const Parser = struct {
         // `indexOf("#{")` cannot distinguish escaped vs real starts).
         if (!saw_interp) {
             const lit_id = try self.intern_pool.intern(content);
-            const fallback_off = try ast.appendExtraU32(@intFromEnum(lit_id));
+            const fallback_off = try ast.appendExtraU32(@backingInt(lit_id));
             var lit_flags: u8 = 0;
             if (quoted) lit_flags |= 0b0000_0001;
             return try ast.addNode(.{
@@ -7832,7 +7836,7 @@ pub const Parser = struct {
                 return try ast.addNode(.{
                     .tag = .expr_unquoted_ident,
                     .flags = 0,
-                    .payload = @intFromEnum(id),
+                    .payload = @backingInt(id),
                     .span_start = tok.span.start,
                     .span_end = tok.span.end,
                 });
@@ -7901,7 +7905,7 @@ pub const Parser = struct {
             return try ast.addNode(.{
                 .tag = .expr_unquoted_ident,
                 .flags = 0,
-                .payload = @intFromEnum(id),
+                .payload = @backingInt(id),
                 .span_start = tok.span.start,
                 .span_end = tok.span.end,
             });
@@ -7927,8 +7931,8 @@ pub const Parser = struct {
                     const name_id = try self.internVariableName(var_text[1..]);
                     self.advance(); // consume dollar_ident
 
-                    const extra_off = try ast.appendExtraU32(@intFromEnum(ns_id));
-                    _ = try ast.appendExtraU32(@intFromEnum(name_id));
+                    const extra_off = try ast.appendExtraU32(@backingInt(ns_id));
+                    _ = try ast.appendExtraU32(@backingInt(name_id));
 
                     return try ast.addNode(.{
                         .tag = .expr_namespaced_var,
@@ -7968,7 +7972,7 @@ pub const Parser = struct {
                     return try ast.addNode(.{
                         .tag = .expr_unquoted_ident,
                         .flags = 0,
-                        .payload = @intFromEnum(id),
+                        .payload = @backingInt(id),
                         .span_start = tok.span.start,
                         .span_end = after.span.end,
                     });
@@ -8051,7 +8055,7 @@ pub const Parser = struct {
         return try ast.addNode(.{
             .tag = .expr_unquoted_ident,
             .flags = 0,
-            .payload = @intFromEnum(id),
+            .payload = @backingInt(id),
             .span_start = tok.span.start,
             .span_end = span_end,
         });
@@ -8409,7 +8413,7 @@ pub const Parser = struct {
                         const prefix_node = try ast.addNode(.{
                             .tag = .expr_unquoted_ident,
                             .flags = 0,
-                            .payload = @intFromEnum(prefix_id),
+                            .payload = @backingInt(prefix_id),
                             .span_start = key_tok.span.start,
                             .span_end = eq_tok.span.end,
                         });
@@ -8475,7 +8479,7 @@ pub const Parser = struct {
                         const empty_node = try ast.addNode(.{
                             .tag = .expr_unquoted_ident,
                             .flags = 0,
-                            .payload = @intFromEnum(empty_id),
+                            .payload = @backingInt(empty_id),
                             .span_start = empty_start,
                             .span_end = empty_start,
                         });
@@ -8621,14 +8625,14 @@ pub const Parser = struct {
             else => return err,
         };
 
-        const extra_off = try ast.appendExtraU32(@intFromEnum(name_id));
-        _ = try ast.appendExtraU32(@intFromEnum(namespace_id));
+        const extra_off = try ast.appendExtraU32(@backingInt(name_id));
+        _ = try ast.appendExtraU32(@backingInt(namespace_id));
         _ = try ast.appendExtraU32(@intCast(arg_nodes.items.len));
         for (arg_nodes.items) |n| {
             _ = try ast.appendExtraU32(n.toU32());
         }
         for (arg_names.items) |id| {
-            _ = try ast.appendExtraU32(@intFromEnum(id));
+            _ = try ast.appendExtraU32(@backingInt(id));
         }
 
         return try ast.addNode(.{
@@ -8666,7 +8670,7 @@ pub const Parser = struct {
         return try ast.addNode(.{
             .tag = .expr_variable,
             .flags = 0,
-            .payload = @intFromEnum(name_id),
+            .payload = @backingInt(name_id),
             .span_start = tok.span.start,
             .span_end = tok.span.end,
         });
@@ -8710,7 +8714,7 @@ pub const Parser = struct {
             return try ast.addNode(.{
                 .tag = .expr_unquoted_ident,
                 .flags = 0,
-                .payload = @intFromEnum(id),
+                .payload = @backingInt(id),
                 .span_start = tok.span.start,
                 .span_end = tok.span.end,
             });
@@ -8869,7 +8873,7 @@ fn emitBinaryOp(
 
     const extra_off = try ast.appendExtraU32(lhs.toU32());
     _ = try ast.appendExtraU32(rhs.toU32());
-    _ = try ast.appendExtraU32(@as(u32, @intFromEnum(op)));
+    _ = try ast.appendExtraU32(@as(u32, @backingInt(op)));
 
     return try ast.addNode(.{
         .tag = .expr_binary_op,
@@ -8889,7 +8893,7 @@ fn emitUnaryOp(
     span_end: u32,
 ) !NodeIndex {
     const extra_off = try ast.appendExtraU32(operand.toU32());
-    _ = try ast.appendExtraU32(@as(u32, @intFromEnum(op)));
+    _ = try ast.appendExtraU32(@as(u32, @backingInt(op)));
 
     return try ast.addNode(.{
         .tag = .expr_unary_op,
@@ -9041,7 +9045,7 @@ test "parse: block comment at top level becomes one stmt_comment child" {
     const root = ast.getNode(ast.root);
     try std.testing.expectEqual(AstTag.stylesheet_root, root.tag);
     try std.testing.expectEqual(@as(u32, 1), ast.getExtraU32(root.payload));
-    const child: NodeIndex = @enumFromInt(ast.getExtraU32(root.payload + 1));
+    const child: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(root.payload + 1)));
     try std.testing.expectEqual(AstTag.stmt_comment, ast.getNode(child).tag);
 }
 
@@ -9240,7 +9244,7 @@ test "parsePrimary: unitless integer number" {
     // extra: [f64 lo, f64 hi, unit_id]
     const value = ctx.ast.getExtraF64(n.payload);
     try std.testing.expectApproxEqAbs(@as(f64, 42.0), value, 0.0);
-    const unit_id: InternId = @enumFromInt(ctx.ast.getExtraU32(n.payload + 2));
+    const unit_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(n.payload + 2)));
     try std.testing.expectEqual(InternId.none, unit_id);
 }
 
@@ -9279,7 +9283,7 @@ test "parsePrimary: number with px unit" {
 
     const value = ctx.ast.getExtraF64(n.payload);
     try std.testing.expectApproxEqAbs(@as(f64, 3.0), value, 0.0);
-    const unit_id: InternId = @enumFromInt(ctx.ast.getExtraU32(n.payload + 2));
+    const unit_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(n.payload + 2)));
     try std.testing.expect(unit_id != .none);
     try std.testing.expectEqualStrings("px", pool.get(unit_id));
 }
@@ -9300,7 +9304,7 @@ test "parsePrimary: number with percent unit" {
     try std.testing.expectEqual(@as(u32, 0), n.span_start);
     try std.testing.expectEqual(@as(u32, 3), n.span_end);
 
-    const unit_id: InternId = @enumFromInt(ctx.ast.getExtraU32(n.payload + 2));
+    const unit_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(n.payload + 2)));
     try std.testing.expect(unit_id != .none);
     try std.testing.expectEqualStrings("%", pool.get(unit_id));
 }
@@ -9320,7 +9324,7 @@ test "parsePrimary: double-quoted string literal" {
     try std.testing.expectEqual(AstTag.expr_string_literal, n.tag);
     try std.testing.expectEqual(@as(u8, 1), n.flags); // bit 0 = quoted
 
-    const str_id: InternId = @enumFromInt(ctx.ast.getExtraU32(n.payload));
+    const str_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(n.payload)));
     try std.testing.expectEqualStrings("hello", pool.get(str_id));
 }
 
@@ -9339,7 +9343,7 @@ test "parsePrimary: single-quoted string literal" {
     try std.testing.expectEqual(AstTag.expr_string_literal, n.tag);
     try std.testing.expectEqual(@as(u8, 1), n.flags);
 
-    const str_id: InternId = @enumFromInt(ctx.ast.getExtraU32(n.payload));
+    const str_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(n.payload)));
     try std.testing.expectEqualStrings("world", pool.get(str_id));
 }
 
@@ -9381,7 +9385,7 @@ test "parsePrimary: unquoted identifier" {
 
     const n = ctx.ast.getNode(ctx.node);
     try std.testing.expectEqual(AstTag.expr_unquoted_ident, n.tag);
-    const id: InternId = @enumFromInt(n.payload);
+    const id: InternId = @fromBackingInt(@intCast(n.payload));
     try std.testing.expectEqualStrings("solid", pool.get(id));
 }
 
@@ -9398,7 +9402,7 @@ test "parsePrimary: variable reference strips leading $" {
 
     const n = ctx.ast.getNode(ctx.node);
     try std.testing.expectEqual(AstTag.expr_variable, n.tag);
-    const id: InternId = @enumFromInt(n.payload);
+    const id: InternId = @fromBackingInt(@intCast(n.payload));
     try std.testing.expectEqualStrings("color", pool.get(id));
 }
 
@@ -9474,9 +9478,9 @@ fn readBinary(ast: *const Ast, node: NodeIndex) BinaryPayload {
     const n = ast.getNode(node);
     std.debug.assert(n.tag == .expr_binary_op);
     return .{
-        .lhs = @enumFromInt(ast.getExtraU32(n.payload + 0)),
-        .rhs = @enumFromInt(ast.getExtraU32(n.payload + 1)),
-        .op = @enumFromInt(@as(u8, @truncate(ast.getExtraU32(n.payload + 2)))),
+        .lhs = @fromBackingInt(@intCast(ast.getExtraU32(n.payload + 0))),
+        .rhs = @fromBackingInt(@intCast(ast.getExtraU32(n.payload + 1))),
+        .op = @fromBackingInt(@intCast(@as(u8, @truncate(ast.getExtraU32(n.payload + 2))))),
     };
 }
 
@@ -9489,8 +9493,8 @@ fn readUnary(ast: *const Ast, node: NodeIndex) UnaryPayload {
     const n = ast.getNode(node);
     std.debug.assert(n.tag == .expr_unary_op);
     return .{
-        .operand = @enumFromInt(ast.getExtraU32(n.payload + 0)),
-        .op = @enumFromInt(@as(u8, @truncate(ast.getExtraU32(n.payload + 1)))),
+        .operand = @fromBackingInt(@intCast(ast.getExtraU32(n.payload + 0))),
+        .op = @fromBackingInt(@intCast(@as(u8, @truncate(ast.getExtraU32(n.payload + 1))))),
     };
 }
 
@@ -9500,8 +9504,8 @@ fn readSlash(ast: *const Ast, node: NodeIndex) SlashPayload {
     const n = ast.getNode(node);
     std.debug.assert(n.tag == .expr_slash_expr);
     return .{
-        .lhs = @enumFromInt(ast.getExtraU32(n.payload + 0)),
-        .rhs = @enumFromInt(ast.getExtraU32(n.payload + 1)),
+        .lhs = @fromBackingInt(@intCast(ast.getExtraU32(n.payload + 0))),
+        .rhs = @fromBackingInt(@intCast(ast.getExtraU32(n.payload + 1))),
     };
 }
 
@@ -9774,8 +9778,8 @@ fn readFuncCall(ast: *const Ast, node: NodeIndex) FuncCallPayload {
     const n = ast.getNode(node);
     std.debug.assert(n.tag == .expr_func_call);
     const off = n.payload;
-    const name_id: InternId = @enumFromInt(ast.getExtraU32(off + 0));
-    const ns_id: InternId = @enumFromInt(ast.getExtraU32(off + 1));
+    const name_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off + 0)));
+    const ns_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
     const count = ast.getExtraU32(off + 2);
     return .{
         .name_id = name_id,
@@ -9822,10 +9826,10 @@ test "parseFuncCall: foo(1) \u{2014} single positional arg" {
     const fc = readFuncCall(&ctx.ast, ctx.node);
     try std.testing.expectEqual(@as(u32, 1), fc.arg_count);
 
-    const arg0: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(fc.arg_nodes_start));
+    const arg0: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(fc.arg_nodes_start)));
     try expectNumberValue(&ctx.ast, arg0, 1.0);
 
-    const name0: InternId = @enumFromInt(ctx.ast.getExtraU32(fc.arg_names_start));
+    const name0: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(fc.arg_names_start)));
     try std.testing.expectEqual(InternId.none, name0);
 }
 
@@ -9843,13 +9847,13 @@ test "parseFuncCall: foo(1, 2) \u{2014} two positional args" {
     const fc = readFuncCall(&ctx.ast, ctx.node);
     try std.testing.expectEqual(@as(u32, 2), fc.arg_count);
 
-    const a0: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(fc.arg_nodes_start));
-    const a1: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(fc.arg_nodes_start + 1));
+    const a0: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(fc.arg_nodes_start)));
+    const a1: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(fc.arg_nodes_start + 1)));
     try expectNumberValue(&ctx.ast, a0, 1.0);
     try expectNumberValue(&ctx.ast, a1, 2.0);
 
-    const n0: InternId = @enumFromInt(ctx.ast.getExtraU32(fc.arg_names_start));
-    const n1: InternId = @enumFromInt(ctx.ast.getExtraU32(fc.arg_names_start + 1));
+    const n0: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(fc.arg_names_start)));
+    const n1: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(fc.arg_names_start + 1)));
     try std.testing.expectEqual(InternId.none, n0);
     try std.testing.expectEqual(InternId.none, n1);
 }
@@ -9868,10 +9872,10 @@ test "parseFuncCall: foo($x: 1) \u{2014} single named arg" {
     const fc = readFuncCall(&ctx.ast, ctx.node);
     try std.testing.expectEqual(@as(u32, 1), fc.arg_count);
 
-    const v0: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(fc.arg_nodes_start));
+    const v0: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(fc.arg_nodes_start)));
     try expectNumberValue(&ctx.ast, v0, 1.0);
 
-    const name0: InternId = @enumFromInt(ctx.ast.getExtraU32(fc.arg_names_start));
+    const name0: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(fc.arg_names_start)));
     try std.testing.expect(name0 != .none);
     try std.testing.expectEqualStrings("x", pool.get(name0));
 }
@@ -9890,13 +9894,13 @@ test "parseFuncCall: foo(1, $y: 2) \u{2014} mixed positional + named" {
     const fc = readFuncCall(&ctx.ast, ctx.node);
     try std.testing.expectEqual(@as(u32, 2), fc.arg_count);
 
-    const v0: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(fc.arg_nodes_start));
-    const v1: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(fc.arg_nodes_start + 1));
+    const v0: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(fc.arg_nodes_start)));
+    const v1: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(fc.arg_nodes_start + 1)));
     try expectNumberValue(&ctx.ast, v0, 1.0);
     try expectNumberValue(&ctx.ast, v1, 2.0);
 
-    const n0: InternId = @enumFromInt(ctx.ast.getExtraU32(fc.arg_names_start));
-    const n1: InternId = @enumFromInt(ctx.ast.getExtraU32(fc.arg_names_start + 1));
+    const n0: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(fc.arg_names_start)));
+    const n1: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(fc.arg_names_start + 1)));
     try std.testing.expectEqual(InternId.none, n0);
     try std.testing.expect(n1 != .none);
     try std.testing.expectEqualStrings("y", pool.get(n1));
@@ -9934,7 +9938,7 @@ test "parseFuncCall: arg can contain a binary expression" {
     const fc = readFuncCall(&ctx.ast, ctx.node);
     try std.testing.expectEqual(@as(u32, 1), fc.arg_count);
 
-    const arg0: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(fc.arg_nodes_start));
+    const arg0: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(fc.arg_nodes_start)));
     try std.testing.expectEqual(AstTag.expr_binary_op, ctx.ast.getNode(arg0).tag);
 }
 
@@ -9952,8 +9956,8 @@ test "parseNamespacedVar: colors.$primary" {
     const n = ctx.ast.getNode(ctx.node);
     try std.testing.expectEqual(AstTag.expr_namespaced_var, n.tag);
 
-    const ns_id: InternId = @enumFromInt(ctx.ast.getExtraU32(n.payload));
-    const name_id: InternId = @enumFromInt(ctx.ast.getExtraU32(n.payload + 1));
+    const ns_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(n.payload)));
+    const name_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(n.payload + 1)));
     try std.testing.expectEqualStrings("colors", pool.get(ns_id));
     try std.testing.expectEqualStrings("primary", pool.get(name_id));
 }
@@ -9990,14 +9994,14 @@ test "parseIdent: ns.name inside function-call arg stays joined unquoted_ident" 
     try std.testing.expectEqual(AstTag.expr_func_call, n.tag);
     // payload = extra_off  ->  [name_id, namespace_id, arg_count, arg0, ...]
     const extra_off = n.payload;
-    const name_id: InternId = @enumFromInt(ctx.ast.getExtraU32(extra_off));
+    const name_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(extra_off)));
     try std.testing.expectEqualStrings("url", pool.get(name_id));
     const arg_count = ctx.ast.getExtraU32(extra_off + 2);
     try std.testing.expectEqual(@as(u32, 1), arg_count);
     const arg_idx_raw = ctx.ast.getExtraU32(extra_off + 3);
-    const arg_node = ctx.ast.getNode(@enumFromInt(arg_idx_raw));
+    const arg_node = ctx.ast.getNode(@fromBackingInt(@intCast(arg_idx_raw)));
     try std.testing.expectEqual(AstTag.expr_unquoted_ident, arg_node.tag);
-    const arg_id: InternId = @enumFromInt(arg_node.payload);
+    const arg_id: InternId = @fromBackingInt(@intCast(arg_node.payload));
     try std.testing.expectEqualStrings("blah.css", pool.get(arg_id));
 }
 
@@ -10049,7 +10053,7 @@ test "parseIdent: whitespace between ident and `(` breaks function-call adjacenc
     try std.testing.expectEqual(AstTag.expr_space_list, n.tag);
     const list = readList(&ast, node);
     try std.testing.expectEqual(@as(u32, 2), list.len);
-    const first: NodeIndex = @enumFromInt(ast.getExtraU32(list.items_off + 0));
+    const first: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(list.items_off + 0)));
     try std.testing.expectEqual(AstTag.expr_unquoted_ident, ast.getNode(first).tag);
 }
 
@@ -10088,7 +10092,7 @@ test "parseParen: single element wraps in expr_paren" {
     try std.testing.expectEqual(@as(u32, 0), n.span_start);
     try std.testing.expectEqual(@as(u32, 4), n.span_end);
 
-    const inner: NodeIndex = @enumFromInt(n.payload);
+    const inner: NodeIndex = @fromBackingInt(@intCast(n.payload));
     try expectNumberValue(&ctx.ast, inner, 42.0);
 }
 
@@ -10125,9 +10129,9 @@ test "parseParen: comma list (1, 2, 3)" {
     const list = readList(&ctx.ast, ctx.node);
     try std.testing.expectEqual(@as(u32, 3), list.len);
 
-    const v0: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(list.items_off + 0));
-    const v1: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(list.items_off + 1));
-    const v2: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(list.items_off + 2));
+    const v0: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(list.items_off + 0)));
+    const v1: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(list.items_off + 1)));
+    const v2: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(list.items_off + 2)));
     try expectNumberValue(&ctx.ast, v0, 1.0);
     try expectNumberValue(&ctx.ast, v1, 2.0);
     try expectNumberValue(&ctx.ast, v2, 3.0);
@@ -10148,7 +10152,7 @@ test "parseParen: space list (1 2 3)" {
     // single expression -- the space_list -- via expr_paren.
     const n = ctx.ast.getNode(ctx.node);
     try std.testing.expectEqual(AstTag.expr_paren, n.tag);
-    const inner: NodeIndex = @enumFromInt(n.payload);
+    const inner: NodeIndex = @fromBackingInt(@intCast(n.payload));
     try std.testing.expectEqual(AstTag.expr_space_list, ctx.ast.getNode(inner).tag);
     const list = readList(&ctx.ast, inner);
     try std.testing.expectEqual(@as(u32, 3), list.len);
@@ -10172,10 +10176,10 @@ test "parseMap: (a: 1, b: 2)" {
     try std.testing.expectEqual(@as(u32, 2), len);
 
     // Layout: [len, key_0, key_1, val_0, val_1]
-    const k0: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(n.payload + 1));
-    const k1: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(n.payload + 2));
-    const v0: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(n.payload + 3));
-    const v1: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(n.payload + 4));
+    const k0: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(n.payload + 1)));
+    const k1: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(n.payload + 2)));
+    const v0: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(n.payload + 3)));
+    const v1: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(n.payload + 4)));
 
     try std.testing.expectEqual(AstTag.expr_unquoted_ident, ctx.ast.getNode(k0).tag);
     try std.testing.expectEqual(AstTag.expr_unquoted_ident, ctx.ast.getNode(k1).tag);
@@ -10285,8 +10289,8 @@ test "parseExpression: `1 + 2, 3 * 4` \u{2014} comma wraps two binary exprs" {
     const list = readList(&ctx.ast, ctx.node);
     try std.testing.expectEqual(@as(u32, 2), list.len);
 
-    const lhs_item: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(list.items_off + 0));
-    const rhs_item: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(list.items_off + 1));
+    const lhs_item: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(list.items_off + 0)));
+    const rhs_item: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(list.items_off + 1)));
     try std.testing.expectEqual(AstTag.expr_binary_op, ctx.ast.getNode(lhs_item).tag);
     try std.testing.expectEqual(AstTag.expr_binary_op, ctx.ast.getNode(rhs_item).tag);
 }
@@ -10308,8 +10312,8 @@ test "parseFuncCall still uses space-list args after R.2c.2d refactor" {
     const fc = readFuncCall(&ctx.ast, ctx.node);
     try std.testing.expectEqual(@as(u32, 2), fc.arg_count);
 
-    const a0: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(fc.arg_nodes_start + 0));
-    const a1: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(fc.arg_nodes_start + 1));
+    const a0: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(fc.arg_nodes_start + 0)));
+    const a1: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(fc.arg_nodes_start + 1)));
     // Each arg is a 2-item space_list.
     try std.testing.expectEqual(AstTag.expr_space_list, ctx.ast.getNode(a0).tag);
     try std.testing.expectEqual(AstTag.expr_space_list, ctx.ast.getNode(a1).tag);
@@ -10373,7 +10377,7 @@ test "parseStandaloneInterp: #{42}" {
     try std.testing.expectEqual(@as(u32, 0), n.span_start);
     try std.testing.expectEqual(@as(u32, 5), n.span_end);
 
-    const inner: NodeIndex = @enumFromInt(n.payload);
+    const inner: NodeIndex = @fromBackingInt(@intCast(n.payload));
     try expectNumberValue(&ctx.ast, inner, 42.0);
 }
 
@@ -10390,7 +10394,7 @@ test "parseStandaloneInterp: #{$x + 1} with binary expression" {
 
     const n = ctx.ast.getNode(ctx.node);
     try std.testing.expectEqual(AstTag.expr_interp, n.tag);
-    const inner: NodeIndex = @enumFromInt(n.payload);
+    const inner: NodeIndex = @fromBackingInt(@intCast(n.payload));
     try std.testing.expectEqual(AstTag.expr_binary_op, ctx.ast.getNode(inner).tag);
 }
 
@@ -10407,7 +10411,7 @@ test "parseStandaloneInterp: #{\"quoted\"} unquotes nested string literal" {
 
     const n = ctx.ast.getNode(ctx.node);
     try std.testing.expectEqual(AstTag.expr_interp, n.tag);
-    const inner: NodeIndex = @enumFromInt(n.payload);
+    const inner: NodeIndex = @fromBackingInt(@intCast(n.payload));
     const inner_n = ctx.ast.getNode(inner);
     try std.testing.expectEqual(AstTag.expr_string_literal, inner_n.tag);
     try std.testing.expectEqual(@as(u8, 0), inner_n.flags & 0b0000_0001);
@@ -10477,17 +10481,17 @@ test "parseString: \"hello #{$x} world\" splits into literal + interp + literal"
 
     // Part 0: literal "hello "
     try std.testing.expectEqual(@as(u32, 0), kind0);
-    const lit0: InternId = @enumFromInt(val0);
+    const lit0: InternId = @fromBackingInt(@intCast(val0));
     try std.testing.expectEqualStrings("hello ", pool.get(lit0));
 
     // Part 1: interp  ->  expr_variable($x)
     try std.testing.expectEqual(@as(u32, 1), kind1);
-    const node1: NodeIndex = @enumFromInt(val1);
+    const node1: NodeIndex = @fromBackingInt(@intCast(val1));
     try std.testing.expectEqual(AstTag.expr_variable, ctx.ast.getNode(node1).tag);
 
     // Part 2: literal " world"
     try std.testing.expectEqual(@as(u32, 0), kind2);
-    const lit2: InternId = @enumFromInt(val2);
+    const lit2: InternId = @fromBackingInt(@intCast(val2));
     try std.testing.expectEqualStrings(" world", pool.get(lit2));
 }
 
@@ -10546,7 +10550,7 @@ test "parseString: \"a#{ (1 + 2) * 3 }b\" \u{2014} interp with nested parens" {
     // Part 1 should be the interp node: a multiplication.
     const kind1 = ctx.ast.getExtraU32(n.payload + 3);
     try std.testing.expectEqual(@as(u32, 1), kind1);
-    const node1: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(n.payload + 4));
+    const node1: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(n.payload + 4)));
     try std.testing.expectEqual(AstTag.expr_binary_op, ctx.ast.getNode(node1).tag);
     const bin = readBinary(&ctx.ast, node1);
     try std.testing.expectEqual(BinOp.mul, bin.op);
@@ -10570,7 +10574,7 @@ test "parseString: interpolation body string is unquoted" {
 
     const interp_kind = ctx.ast.getExtraU32(n.payload + 1);
     try std.testing.expectEqual(@as(u32, 1), interp_kind);
-    const interp_node: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(n.payload + 2));
+    const interp_node: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(n.payload + 2)));
     const interp_inner = ctx.ast.getNode(interp_node);
     try std.testing.expectEqual(AstTag.expr_string_literal, interp_inner.tag);
     try std.testing.expectEqual(@as(u8, 0), interp_inner.flags & 0b0000_0001);
@@ -10590,11 +10594,11 @@ test "parseFuncCall: foo($args...) \u{2014} splat wraps a variable" {
     const fc = readFuncCall(&ctx.ast, ctx.node);
     try std.testing.expectEqual(@as(u32, 1), fc.arg_count);
 
-    const arg0: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(fc.arg_nodes_start));
+    const arg0: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(fc.arg_nodes_start)));
     try std.testing.expectEqual(AstTag.expr_splat, ctx.ast.getNode(arg0).tag);
 
     // The wrapped inner expression is expr_variable.
-    const inner: NodeIndex = @enumFromInt(ctx.ast.getNode(arg0).payload);
+    const inner: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getNode(arg0).payload));
     try std.testing.expectEqual(AstTag.expr_variable, ctx.ast.getNode(inner).tag);
 }
 
@@ -10615,7 +10619,7 @@ test "parseSpaceList: #{$x} is a valid atom in a space list" {
     const list = readList(&ctx.ast, ctx.node);
     try std.testing.expectEqual(@as(u32, 3), list.len);
 
-    const mid: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(list.items_off + 1));
+    const mid: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(list.items_off + 1)));
     try std.testing.expectEqual(AstTag.expr_interp, ctx.ast.getNode(mid).tag);
 }
 
@@ -10655,7 +10659,7 @@ fn parseFullSourceWithSyntax(
 fn rootChild(ast: *const Ast, i: u32) NodeIndex {
     const root = ast.getNode(ast.root);
     std.debug.assert(root.tag == .stylesheet_root);
-    return @enumFromInt(ast.getExtraU32(root.payload + 1 + i));
+    return @fromBackingInt(@intCast(ast.getExtraU32(root.payload + 1 + i)));
 }
 
 fn rootChildCount(ast: *const Ast) u32 {
@@ -10670,7 +10674,7 @@ fn textTemplateLiteralId(ast: *const Ast, node: NodeIndex) InternId {
     const off: ExtraIndex = n.payload;
     std.debug.assert(ast.getExtraU32(off) == 1);
     std.debug.assert(ast.getExtraU32(off + 1) == 0);
-    return @enumFromInt(ast.getExtraU32(off + 2));
+    return @fromBackingInt(@intCast(ast.getExtraU32(off + 2)));
 }
 
 test "parse: simple variable decl `$x: 1;`" {
@@ -10690,8 +10694,8 @@ test "parse: simple variable decl `$x: 1;`" {
     try std.testing.expectEqual(AstTag.stmt_variable_decl, n.tag);
 
     // Extra layout: [name_id, value_node, flags_u32]
-    const name_id: InternId = @enumFromInt(result.ast.getExtraU32(n.payload + 0));
-    const value_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(n.payload + 1));
+    const name_id: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 0)));
+    const value_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 1)));
     const flags = result.ast.getExtraU32(n.payload + 2);
 
     try std.testing.expectEqualStrings("x", pool.get(name_id));
@@ -10780,7 +10784,7 @@ test "parse: @return expression;" {
     const n = result.ast.getNode(stmt);
     try std.testing.expectEqual(AstTag.stmt_return, n.tag);
 
-    const value: NodeIndex = @enumFromInt(n.payload);
+    const value: NodeIndex = @fromBackingInt(@intCast(n.payload));
     try std.testing.expectEqual(AstTag.expr_binary_op, result.ast.getNode(value).tag);
 }
 
@@ -10797,7 +10801,7 @@ test "parse: @debug \"msg\"" {
 
     const stmt = rootChild(&result.ast, 0);
     try std.testing.expectEqual(AstTag.stmt_debug, result.ast.getNode(stmt).tag);
-    const value: NodeIndex = @enumFromInt(result.ast.getNode(stmt).payload);
+    const value: NodeIndex = @fromBackingInt(@intCast(result.ast.getNode(stmt).payload));
     try std.testing.expectEqual(AstTag.expr_string_literal, result.ast.getNode(value).tag);
 }
 
@@ -10814,7 +10818,7 @@ test "parse: @warn $x;" {
 
     const stmt = rootChild(&result.ast, 0);
     try std.testing.expectEqual(AstTag.stmt_warn, result.ast.getNode(stmt).tag);
-    const value: NodeIndex = @enumFromInt(result.ast.getNode(stmt).payload);
+    const value: NodeIndex = @fromBackingInt(@intCast(result.ast.getNode(stmt).payload));
     try std.testing.expectEqual(AstTag.expr_variable, result.ast.getNode(value).tag);
 }
 
@@ -10911,7 +10915,7 @@ test "parse: variable decl with block comment inside value" {
     defer result.ast.deinit();
 
     const stmt = rootChild(&result.ast, 0);
-    const value: NodeIndex = @enumFromInt(result.ast.getExtraU32(result.ast.getNode(stmt).payload + 1));
+    const value: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(result.ast.getNode(stmt).payload + 1)));
     try std.testing.expectEqual(AstTag.expr_space_list, result.ast.getNode(value).tag);
     const list = readList(&result.ast, value);
     try std.testing.expectEqual(@as(u32, 2), list.len);
@@ -10929,7 +10933,7 @@ test "parse: variable decl value is a comma list" {
     defer result.ast.deinit();
 
     const stmt = rootChild(&result.ast, 0);
-    const value: NodeIndex = @enumFromInt(result.ast.getExtraU32(result.ast.getNode(stmt).payload + 1));
+    const value: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(result.ast.getNode(stmt).payload + 1)));
     try std.testing.expectEqual(AstTag.expr_comma_list, result.ast.getNode(value).tag);
 }
 
@@ -10988,7 +10992,7 @@ test "parse: @if cond { debug cond }" {
     try std.testing.expectEqual(AstTag.stmt_if, n.tag);
 
     // extra: [cond_node, then_extra, elseif_count=0, else_extra=maxInt]
-    const cond_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(n.payload + 0));
+    const cond_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 0)));
     const then_extra = result.ast.getExtraU32(n.payload + 1);
     const elseif_count = result.ast.getExtraU32(n.payload + 2);
     const else_extra = result.ast.getExtraU32(n.payload + 3);
@@ -10999,7 +11003,7 @@ test "parse: @if cond { debug cond }" {
 
     const then_body = readBlockBody(&result.ast, then_extra);
     try std.testing.expectEqual(@as(u32, 1), then_body.len);
-    const debug_idx: NodeIndex = @enumFromInt(result.ast.getExtraU32(then_body.first));
+    const debug_idx: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(then_body.first)));
     try std.testing.expectEqual(AstTag.stmt_debug, result.ast.getNode(debug_idx).tag);
 }
 
@@ -11022,7 +11026,7 @@ test "parse: @if / @else if / @else chain" {
     try std.testing.expectEqual(@as(u32, 1), elseif_count);
 
     // elseif_0 cond_node is at payload + 3, body_extra at payload + 4.
-    const ec0: NodeIndex = @enumFromInt(result.ast.getExtraU32(n.payload + 3));
+    const ec0: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 3)));
     try std.testing.expectEqual(AstTag.expr_variable, result.ast.getNode(ec0).tag);
 
     // else_body_extra is after the elseif pairs: payload + 3 + 2*count
@@ -11096,7 +11100,7 @@ test "parse: indented @if keeps body after single-line condition" {
     const then_body = readBlockBody(&result.ast, then_extra);
     try std.testing.expectEqual(@as(u32, 1), then_body.len);
 
-    const body_stmt: NodeIndex = @enumFromInt(result.ast.getExtraU32(then_body.first));
+    const body_stmt: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(then_body.first)));
     try std.testing.expectEqual(AstTag.stmt_style_rule, result.ast.getNode(body_stmt).tag);
 }
 
@@ -11122,14 +11126,14 @@ test "parse: indented @if multiline condition keeps body" {
     const n = result.ast.getNode(stmt);
     try std.testing.expectEqual(AstTag.stmt_if, n.tag);
 
-    const cond_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(n.payload + 0));
+    const cond_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 0)));
     try std.testing.expectEqual(AstTag.expr_binary_op, result.ast.getNode(cond_node).tag);
 
     const then_extra = result.ast.getExtraU32(n.payload + 1);
     const then_body = readBlockBody(&result.ast, then_extra);
     try std.testing.expectEqual(@as(u32, 1), then_body.len);
 
-    const body_stmt: NodeIndex = @enumFromInt(result.ast.getExtraU32(then_body.first));
+    const body_stmt: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(then_body.first)));
     try std.testing.expectEqual(AstTag.stmt_style_rule, result.ast.getNode(body_stmt).tag);
 }
 
@@ -11152,10 +11156,10 @@ test "parse: @each $color in red, blue { @debug $color; }" {
     const var_count = result.ast.getExtraU32(n.payload + 0);
     try std.testing.expectEqual(@as(u32, 1), var_count);
 
-    const var_id: InternId = @enumFromInt(result.ast.getExtraU32(n.payload + 1));
+    const var_id: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 1)));
     try std.testing.expectEqualStrings("color", pool.get(var_id));
 
-    const list_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(n.payload + 1 + var_count));
+    const list_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 1 + var_count)));
     try std.testing.expectEqual(AstTag.expr_comma_list, result.ast.getNode(list_node).tag);
 
     const body_extra = result.ast.getExtraU32(n.payload + 1 + var_count + 1);
@@ -11181,7 +11185,7 @@ test "parse: @each allows trailing comma before block" {
     const var_count = result.ast.getExtraU32(n.payload + 0);
     try std.testing.expectEqual(@as(u32, 1), var_count);
 
-    const list_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(n.payload + 1 + var_count));
+    const list_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 1 + var_count)));
     try std.testing.expectEqual(AstTag.expr_comma_list, result.ast.getNode(list_node).tag);
 }
 
@@ -11202,8 +11206,8 @@ test "parse: @each $k, $v in $map { body }" {
     const var_count = result.ast.getExtraU32(n.payload + 0);
     try std.testing.expectEqual(@as(u32, 2), var_count);
 
-    const v0: InternId = @enumFromInt(result.ast.getExtraU32(n.payload + 1));
-    const v1: InternId = @enumFromInt(result.ast.getExtraU32(n.payload + 2));
+    const v0: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 1)));
+    const v1: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 2)));
     try std.testing.expectEqualStrings("k", pool.get(v0));
     try std.testing.expectEqualStrings("v", pool.get(v1));
 }
@@ -11251,10 +11255,10 @@ test "parse: @for $i from 1 through 5 { @debug $i; }" {
     try std.testing.expectEqual(AstTag.stmt_for, n.tag);
     try std.testing.expectEqual(@as(u8, 0), n.flags); // `through` = inclusive
 
-    const var_id: InternId = @enumFromInt(result.ast.getExtraU32(n.payload + 0));
+    const var_id: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 0)));
     try std.testing.expectEqualStrings("i", pool.get(var_id));
-    const from_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(n.payload + 1));
-    const to_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(n.payload + 2));
+    const from_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 1)));
+    const to_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 2)));
     try expectNumberValue(&result.ast, from_node, 1.0);
     try expectNumberValue(&result.ast, to_node, 5.0);
 }
@@ -11288,8 +11292,8 @@ test "parse: @for with binary-expr endpoints" {
 
     const stmt = rootChild(&result.ast, 0);
     const n = result.ast.getNode(stmt);
-    const from_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(n.payload + 1));
-    const to_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(n.payload + 2));
+    const from_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 1)));
+    const to_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 2)));
     try std.testing.expectEqual(AstTag.expr_binary_op, result.ast.getNode(from_node).tag);
     try std.testing.expectEqual(AstTag.expr_binary_op, result.ast.getNode(to_node).tag);
 }
@@ -11333,7 +11337,7 @@ test "parse: @while $x > 0 { $x: $x - 1; }" {
     const n = result.ast.getNode(stmt);
     try std.testing.expectEqual(AstTag.stmt_while, n.tag);
 
-    const cond_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(n.payload + 0));
+    const cond_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 0)));
     try std.testing.expectEqual(AstTag.expr_binary_op, result.ast.getNode(cond_node).tag);
     const cond_bin = readBinary(&result.ast, cond_node);
     try std.testing.expectEqual(BinOp.gt, cond_bin.op);
@@ -11341,7 +11345,7 @@ test "parse: @while $x > 0 { $x: $x - 1; }" {
     const body_extra = result.ast.getExtraU32(n.payload + 1);
     const body = readBlockBody(&result.ast, body_extra);
     try std.testing.expectEqual(@as(u32, 1), body.len);
-    const decl_idx: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const decl_idx: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     try std.testing.expectEqual(AstTag.stmt_variable_decl, result.ast.getNode(decl_idx).tag);
 }
 
@@ -11365,7 +11369,7 @@ test "parse: nested @if inside @each" {
     const body_extra = result.ast.getExtraU32(each_n.payload + 1 + var_count + 1);
     const body = readBlockBody(&result.ast, body_extra);
     try std.testing.expectEqual(@as(u32, 1), body.len);
-    const inner_if: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const inner_if: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     try std.testing.expectEqual(AstTag.stmt_if, result.ast.getNode(inner_if).tag);
 }
 
@@ -11441,8 +11445,8 @@ test "parse: @use \"sass:math\";" {
     try std.testing.expectEqual(AstTag.stmt_use, n.tag);
 
     // extra: [url_id, namespace_id, config_extra]
-    const url_id: InternId = @enumFromInt(result.ast.getExtraU32(n.payload + 0));
-    const ns_id: InternId = @enumFromInt(result.ast.getExtraU32(n.payload + 1));
+    const url_id: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 0)));
+    const ns_id: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 1)));
     const config_extra = result.ast.getExtraU32(n.payload + 2);
 
     try std.testing.expectEqualStrings("sass:math", pool.get(url_id));
@@ -11466,7 +11470,7 @@ test "parse: @use \"colors\" as c;" {
     const n = result.ast.getNode(stmt);
     try std.testing.expectEqual(AstTag.stmt_use, n.tag);
 
-    const ns_id: InternId = @enumFromInt(result.ast.getExtraU32(n.payload + 1));
+    const ns_id: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 1)));
     try std.testing.expectEqualStrings("c", pool.get(ns_id));
     try std.testing.expectEqual(@as(u8, 0), n.flags);
 }
@@ -11485,7 +11489,7 @@ test "parse: @use \"colors\" as *;" {
     const stmt = rootChild(&result.ast, 0);
     const n = result.ast.getNode(stmt);
     try std.testing.expectEqual(@as(u8, 1), n.flags); // as_star bit set
-    const ns_id: InternId = @enumFromInt(result.ast.getExtraU32(n.payload + 1));
+    const ns_id: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 1)));
     try std.testing.expectEqual(InternId.none, ns_id);
 }
 
@@ -11508,11 +11512,11 @@ test "parse: @use with ($primary: red, $secondary: blue);" {
     try std.testing.expect(config_extra != std.math.maxInt(u32));
     try std.testing.expectEqual(@as(u32, 2), result.ast.getExtraU32(config_extra + 0));
 
-    const name0: InternId = @enumFromInt(result.ast.getExtraU32(config_extra + 1));
-    const expr0 = result.ast.getNode(@enumFromInt(result.ast.getExtraU32(config_extra + 2)));
+    const name0: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(config_extra + 1)));
+    const expr0 = result.ast.getNode(@fromBackingInt(@intCast(result.ast.getExtraU32(config_extra + 2))));
     const flags0 = result.ast.getExtraU32(config_extra + 3);
-    const name1: InternId = @enumFromInt(result.ast.getExtraU32(config_extra + 4));
-    const expr1 = result.ast.getNode(@enumFromInt(result.ast.getExtraU32(config_extra + 5)));
+    const name1: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(config_extra + 4)));
+    const expr1 = result.ast.getNode(@fromBackingInt(@intCast(result.ast.getExtraU32(config_extra + 5))));
     const flags1 = result.ast.getExtraU32(config_extra + 6);
 
     try std.testing.expectEqualStrings("primary", pool.get(name0));
@@ -11538,10 +11542,10 @@ test "parse: @forward \"colors\";" {
     const n = result.ast.getNode(stmt);
     try std.testing.expectEqual(AstTag.stmt_forward, n.tag);
 
-    const url_id: InternId = @enumFromInt(result.ast.getExtraU32(n.payload + 0));
+    const url_id: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 0)));
     try std.testing.expectEqualStrings("colors", pool.get(url_id));
     // prefix / show / hide / config all absent
-    try std.testing.expectEqual(InternId.none, @as(InternId, @enumFromInt(result.ast.getExtraU32(n.payload + 1))));
+    try std.testing.expectEqual(InternId.none, @as(InternId, @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 1)))));
     try std.testing.expectEqual(std.math.maxInt(u32), result.ast.getExtraU32(n.payload + 2));
     try std.testing.expectEqual(std.math.maxInt(u32), result.ast.getExtraU32(n.payload + 3));
     try std.testing.expectEqual(std.math.maxInt(u32), result.ast.getExtraU32(n.payload + 4));
@@ -11560,7 +11564,7 @@ test "parse: @forward with as prefix-*" {
 
     const stmt = rootChild(&result.ast, 0);
     const n = result.ast.getNode(stmt);
-    const prefix_id: InternId = @enumFromInt(result.ast.getExtraU32(n.payload + 1));
+    const prefix_id: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 1)));
     try std.testing.expect(prefix_id != .none);
     try std.testing.expectEqualStrings("theme-", pool.get(prefix_id));
 }
@@ -11585,14 +11589,14 @@ test "parse: @forward with show / hide clauses" {
 
     // show list: [count, $primary, my-func]
     try std.testing.expectEqual(@as(u32, 2), result.ast.getExtraU32(show_extra));
-    const s0: InternId = @enumFromInt(result.ast.getExtraU32(show_extra + 1));
-    const s1: InternId = @enumFromInt(result.ast.getExtraU32(show_extra + 2));
+    const s0: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(show_extra + 1)));
+    const s1: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(show_extra + 2)));
     try std.testing.expectEqualStrings("$primary", pool.get(s0));
     try std.testing.expectEqualStrings("my-func", pool.get(s1));
 
     // hide list: [count, $hidden]
     try std.testing.expectEqual(@as(u32, 1), result.ast.getExtraU32(hide_extra));
-    const h0: InternId = @enumFromInt(result.ast.getExtraU32(hide_extra + 1));
+    const h0: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(hide_extra + 1)));
     try std.testing.expectEqualStrings("$hidden", pool.get(h0));
 }
 
@@ -11612,8 +11616,8 @@ test "parse: @forward with (...) config" {
     const config_extra = result.ast.getExtraU32(n.payload + 4);
     try std.testing.expect(config_extra != std.math.maxInt(u32));
     try std.testing.expectEqual(@as(u32, 1), result.ast.getExtraU32(config_extra + 0));
-    const name0: InternId = @enumFromInt(result.ast.getExtraU32(config_extra + 1));
-    const expr0 = result.ast.getNode(@enumFromInt(result.ast.getExtraU32(config_extra + 2)));
+    const name0: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(config_extra + 1)));
+    const expr0 = result.ast.getNode(@fromBackingInt(@intCast(result.ast.getExtraU32(config_extra + 2))));
     const flags0 = result.ast.getExtraU32(config_extra + 3);
     try std.testing.expectEqualStrings("primary", pool.get(name0));
     try std.testing.expectEqual(AstTag.expr_unquoted_ident, expr0.tag);
@@ -11635,9 +11639,9 @@ test "parse: @import \"vars\";" {
     const stmt = rootChild(&result.ast, 0);
     const n = result.ast.getNode(stmt);
     try std.testing.expectEqual(AstTag.stmt_import, n.tag);
-    const url_expr = result.ast.getNode(@enumFromInt(result.ast.getExtraU32(n.payload + 0)));
+    const url_expr = result.ast.getNode(@fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 0))));
     try std.testing.expectEqual(AstTag.expr_text_template, url_expr.tag);
-    const url_id = textTemplateLiteralId(&result.ast, @enumFromInt(result.ast.getExtraU32(n.payload + 0)));
+    const url_id = textTemplateLiteralId(&result.ast, @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 0))));
     try std.testing.expectEqualStrings("\"vars\"", pool.get(url_id));
     try std.testing.expectEqual(std.math.maxInt(u32), result.ast.getExtraU32(n.payload + 1));
 }
@@ -11657,9 +11661,9 @@ test "parse: @import url(foo.css);" {
     const stmt = rootChild(&result.ast, 0);
     const n = result.ast.getNode(stmt);
     try std.testing.expectEqual(AstTag.stmt_import, n.tag);
-    const url_expr = result.ast.getNode(@enumFromInt(result.ast.getExtraU32(n.payload + 0)));
+    const url_expr = result.ast.getNode(@fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 0))));
     try std.testing.expectEqual(AstTag.expr_text_template, url_expr.tag);
-    const url_id = textTemplateLiteralId(&result.ast, @enumFromInt(result.ast.getExtraU32(n.payload + 0)));
+    const url_id = textTemplateLiteralId(&result.ast, @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 0))));
     try std.testing.expectEqualStrings("url(\"foo.css\")", pool.get(url_id));
 }
 
@@ -11678,7 +11682,7 @@ test "parse: @import \"a\" screen;" {
     const stmt = rootChild(&result.ast, 0);
     const n = result.ast.getNode(stmt);
     try std.testing.expectEqual(AstTag.stmt_import, n.tag);
-    const cond_idx: NodeIndex = @enumFromInt(result.ast.getExtraU32(n.payload + 1));
+    const cond_idx: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 1)));
     const cond_node = result.ast.getNode(cond_idx);
     try std.testing.expectEqual(AstTag.expr_text_template, cond_node.tag);
     const cond_id = textTemplateLiteralId(&result.ast, cond_idx);
@@ -11705,7 +11709,7 @@ test "parse: multi-URL @import emits one stmt_import per URL" {
     const first = rootChild(&result.ast, 0);
     const first_n = result.ast.getNode(first);
     try std.testing.expectEqual(AstTag.stmt_import, first_n.tag);
-    const first_url_idx: NodeIndex = @enumFromInt(result.ast.getExtraU32(first_n.payload + 0));
+    const first_url_idx: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(first_n.payload + 0)));
     const first_url = result.ast.getNode(first_url_idx);
     try std.testing.expectEqual(AstTag.expr_text_template, first_url.tag);
     const first_id = textTemplateLiteralId(&result.ast, first_url_idx);
@@ -11714,7 +11718,7 @@ test "parse: multi-URL @import emits one stmt_import per URL" {
     const second = rootChild(&result.ast, 1);
     const second_n = result.ast.getNode(second);
     try std.testing.expectEqual(AstTag.stmt_import, second_n.tag);
-    const second_url_idx: NodeIndex = @enumFromInt(result.ast.getExtraU32(second_n.payload + 0));
+    const second_url_idx: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(second_n.payload + 0)));
     const second_url = result.ast.getNode(second_url_idx);
     try std.testing.expectEqual(AstTag.expr_text_template, second_url.tag);
     const second_id = textTemplateLiteralId(&result.ast, second_url_idx);
@@ -11757,11 +11761,11 @@ test "parse: @content(1, $x: 2)" {
     const count = result.ast.getExtraU32(n.payload);
     try std.testing.expectEqual(@as(u32, 2), count);
 
-    const a0: NodeIndex = @enumFromInt(result.ast.getExtraU32(n.payload + 1));
+    const a0: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 1)));
     try expectNumberValue(&result.ast, a0, 1.0);
 
-    const name0: InternId = @enumFromInt(result.ast.getExtraU32(n.payload + 3));
-    const name1: InternId = @enumFromInt(result.ast.getExtraU32(n.payload + 4));
+    const name0: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 3)));
+    const name1: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload + 4)));
     try std.testing.expectEqual(InternId.none, name0);
     try std.testing.expect(name1 != .none);
     try std.testing.expectEqualStrings("x", pool.get(name1));
@@ -11780,7 +11784,7 @@ fn readStyleRule(ast: *const Ast, node: NodeIndex) StyleRulePayload {
     const n = ast.getNode(node);
     std.debug.assert(n.tag == .stmt_style_rule);
     return .{
-        .selector_node = @enumFromInt(ast.getExtraU32(n.payload)),
+        .selector_node = @fromBackingInt(@intCast(ast.getExtraU32(n.payload))),
         .body_extra = ast.getExtraU32(n.payload + 1),
     };
 }
@@ -11802,13 +11806,13 @@ test "parse: simple style rule `.foo { color: red; }`" {
     const sr = readStyleRule(&result.ast, stmt);
     const sel_n = result.ast.getNode(sr.selector_node);
     try std.testing.expectEqual(AstTag.expr_unquoted_ident, sel_n.tag);
-    const sel_id: InternId = @enumFromInt(sel_n.payload);
+    const sel_id: InternId = @fromBackingInt(@intCast(sel_n.payload));
     try std.testing.expectEqualStrings(".foo", pool.get(sel_id));
 
     const body = readBlockBody(&result.ast, sr.body_extra);
     try std.testing.expectEqual(@as(u32, 1), body.len);
 
-    const decl: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const decl: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     try std.testing.expectEqual(AstTag.stmt_declaration, result.ast.getNode(decl).tag);
 }
 
@@ -11826,16 +11830,16 @@ test "parse: declaration property and value" {
     const rule = rootChild(&result.ast, 0);
     const sr = readStyleRule(&result.ast, rule);
     const body = readBlockBody(&result.ast, sr.body_extra);
-    const decl: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const decl: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     const dn = result.ast.getNode(decl);
     try std.testing.expectEqual(AstTag.stmt_declaration, dn.tag);
 
     // extra: [prop_node, value_node]
-    const prop: NodeIndex = @enumFromInt(result.ast.getExtraU32(dn.payload));
-    const val: NodeIndex = @enumFromInt(result.ast.getExtraU32(dn.payload + 1));
+    const prop: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(dn.payload)));
+    const val: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(dn.payload + 1)));
 
     try std.testing.expectEqual(AstTag.expr_unquoted_ident, result.ast.getNode(prop).tag);
-    const prop_id: InternId = @enumFromInt(result.ast.getNode(prop).payload);
+    const prop_id: InternId = @fromBackingInt(@intCast(result.ast.getNode(prop).payload));
     try std.testing.expectEqualStrings("font-size", pool.get(prop_id));
 
     try std.testing.expectEqual(AstTag.expr_number_literal, result.ast.getNode(val).tag);
@@ -11854,7 +11858,7 @@ test "parse: custom property `--accent: red` sets flags bit 0" {
 
     const rule = rootChild(&result.ast, 0);
     const body = readBlockBody(&result.ast, readStyleRule(&result.ast, rule).body_extra);
-    const decl: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const decl: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     try std.testing.expectEqual(@as(u8, 0b01), result.ast.getNode(decl).flags);
 }
 
@@ -11874,7 +11878,7 @@ test "parse: nested style rule inside a style rule" {
 
     const body = readBlockBody(&result.ast, readStyleRule(&result.ast, parent).body_extra);
     try std.testing.expectEqual(@as(u32, 1), body.len);
-    const child: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const child: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     try std.testing.expectEqual(AstTag.stmt_style_rule, result.ast.getNode(child).tag);
 }
 
@@ -11894,7 +11898,7 @@ test "parse: multiple declarations in one style rule" {
     try std.testing.expectEqual(@as(u32, 3), body.len);
     var i: u32 = 0;
     while (i < 3) : (i += 1) {
-        const d: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first + i));
+        const d: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first + i)));
         try std.testing.expectEqual(AstTag.stmt_declaration, result.ast.getNode(d).tag);
     }
 }
@@ -11914,7 +11918,7 @@ test "parse: pseudo-class selector :hover is a style rule" {
     try std.testing.expectEqual(AstTag.stmt_style_rule, result.ast.getNode(rule).tag);
 
     const sel_n = result.ast.getNode(readStyleRule(&result.ast, rule).selector_node);
-    const sel_id: InternId = @enumFromInt(sel_n.payload);
+    const sel_id: InternId = @fromBackingInt(@intCast(sel_n.payload));
     try std.testing.expectEqualStrings("a:hover", pool.get(sel_id));
 }
 
@@ -11977,7 +11981,7 @@ test "parse: parent selector `&`" {
     const outer = rootChild(&result.ast, 0);
     const body = readBlockBody(&result.ast, readStyleRule(&result.ast, outer).body_extra);
     try std.testing.expectEqual(@as(u32, 1), body.len);
-    const inner: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const inner: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     try std.testing.expectEqual(AstTag.stmt_style_rule, result.ast.getNode(inner).tag);
 }
 
@@ -11995,7 +11999,7 @@ test "parse: comma-separated selector list `.a, .b { }`" {
     const rule = rootChild(&result.ast, 0);
     try std.testing.expectEqual(AstTag.stmt_style_rule, result.ast.getNode(rule).tag);
     const sel_n = result.ast.getNode(readStyleRule(&result.ast, rule).selector_node);
-    const sel_id: InternId = @enumFromInt(sel_n.payload);
+    const sel_id: InternId = @fromBackingInt(@intCast(sel_n.payload));
     try std.testing.expectEqualStrings(".a, .b", pool.get(sel_id));
 }
 
@@ -12029,7 +12033,7 @@ test "parse: declaration with interpolation in property name" {
     const rule = rootChild(&result.ast, 0);
     const body = readBlockBody(&result.ast, readStyleRule(&result.ast, rule).body_extra);
     try std.testing.expectEqual(@as(u32, 1), body.len);
-    const decl: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const decl: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     try std.testing.expectEqual(AstTag.stmt_declaration, result.ast.getNode(decl).tag);
 }
 
@@ -12047,7 +12051,7 @@ test "parse: declaration with nested @if" {
     const rule = rootChild(&result.ast, 0);
     const body = readBlockBody(&result.ast, readStyleRule(&result.ast, rule).body_extra);
     try std.testing.expectEqual(@as(u32, 1), body.len);
-    const if_stmt: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const if_stmt: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     try std.testing.expectEqual(AstTag.stmt_if, result.ast.getNode(if_stmt).tag);
 }
 
@@ -12084,14 +12088,14 @@ test "parse: @extend .foo;" {
 
     const rule = rootChild(&result.ast, 0);
     const body = readBlockBody(&result.ast, readStyleRule(&result.ast, rule).body_extra);
-    const ext_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const ext_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     const ext = result.ast.getNode(ext_node);
     try std.testing.expectEqual(AstTag.stmt_extend, ext.tag);
     try std.testing.expectEqual(@as(u8, 0), ext.flags);
 
-    const sel_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(ext.payload));
+    const sel_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(ext.payload)));
     const sel_n = result.ast.getNode(sel_node);
-    const sel_id: InternId = @enumFromInt(sel_n.payload);
+    const sel_id: InternId = @fromBackingInt(@intCast(sel_n.payload));
     try std.testing.expectEqualStrings(".foo", pool.get(sel_id));
 }
 
@@ -12108,13 +12112,13 @@ test "parse: @extend .foo !optional;" {
 
     const rule = rootChild(&result.ast, 0);
     const body = readBlockBody(&result.ast, readStyleRule(&result.ast, rule).body_extra);
-    const ext_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const ext_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     const ext = result.ast.getNode(ext_node);
     try std.testing.expectEqual(AstTag.stmt_extend, ext.tag);
     try std.testing.expectEqual(@as(u8, 0b0000_0001), ext.flags);
 
-    const sel_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(ext.payload));
-    const sel_id: InternId = @enumFromInt(result.ast.getNode(sel_node).payload);
+    const sel_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(ext.payload)));
+    const sel_id: InternId = @fromBackingInt(@intCast(result.ast.getNode(sel_node).payload));
     try std.testing.expectEqualStrings(".foo", pool.get(sel_id));
 }
 
@@ -12136,13 +12140,13 @@ test "parse: indented @extend keeps inline !optional on same line" {
 
     const rule = rootChild(&result.ast, 0);
     const body = readBlockBody(&result.ast, readStyleRule(&result.ast, rule).body_extra);
-    const ext_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const ext_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     const ext = result.ast.getNode(ext_node);
     try std.testing.expectEqual(AstTag.stmt_extend, ext.tag);
     try std.testing.expectEqual(@as(u8, 0b0000_0001), ext.flags);
 
-    const sel_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(ext.payload));
-    const sel_id: InternId = @enumFromInt(result.ast.getNode(sel_node).payload);
+    const sel_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(ext.payload)));
+    const sel_id: InternId = @fromBackingInt(@intCast(result.ast.getNode(sel_node).payload));
     try std.testing.expectEqualStrings(".foo", pool.get(sel_id));
 }
 
@@ -12178,10 +12182,10 @@ test "parse: @extend with compound selector" {
 
     const rule = rootChild(&result.ast, 0);
     const body = readBlockBody(&result.ast, readStyleRule(&result.ast, rule).body_extra);
-    const ext_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const ext_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     const ext = result.ast.getNode(ext_node);
-    const sel_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(ext.payload));
-    const sel_id: InternId = @enumFromInt(result.ast.getNode(sel_node).payload);
+    const sel_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(ext.payload)));
+    const sel_id: InternId = @fromBackingInt(@intCast(result.ast.getNode(sel_node).payload));
     try std.testing.expectEqualStrings(".btn.primary", pool.get(sel_id));
 }
 
@@ -12198,7 +12202,7 @@ test "parse: @at-root { body } with no selector" {
 
     const outer = rootChild(&result.ast, 0);
     const outer_body = readBlockBody(&result.ast, readStyleRule(&result.ast, outer).body_extra);
-    const at_root_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(outer_body.first));
+    const at_root_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(outer_body.first)));
     const at_root = result.ast.getNode(at_root_node);
     try std.testing.expectEqual(AstTag.stmt_at_root, at_root.tag);
 
@@ -12225,15 +12229,15 @@ test "parse: @at-root .foo { ... } with selector" {
 
     const outer = rootChild(&result.ast, 0);
     const outer_body = readBlockBody(&result.ast, readStyleRule(&result.ast, outer).body_extra);
-    const at_root_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(outer_body.first));
+    const at_root_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(outer_body.first)));
     const at_root = result.ast.getNode(at_root_node);
     try std.testing.expectEqual(AstTag.stmt_at_root, at_root.tag);
 
     // Selector is `.foo`
     const sel_slot = result.ast.getExtraU32(at_root.payload);
     try std.testing.expect(sel_slot != std.math.maxInt(u32));
-    const sel_node: NodeIndex = @enumFromInt(sel_slot);
-    const sel_id: InternId = @enumFromInt(result.ast.getNode(sel_node).payload);
+    const sel_node: NodeIndex = @fromBackingInt(@intCast(sel_slot));
+    const sel_id: InternId = @fromBackingInt(@intCast(result.ast.getNode(sel_node).payload));
     try std.testing.expectEqualStrings(".foo", pool.get(sel_id));
 }
 
@@ -12250,7 +12254,7 @@ test "parse: @at-root (with: media) { ... } modifier" {
 
     const outer = rootChild(&result.ast, 0);
     const outer_body = readBlockBody(&result.ast, readStyleRule(&result.ast, outer).body_extra);
-    const at_root_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(outer_body.first));
+    const at_root_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(outer_body.first)));
     const at_root = result.ast.getNode(at_root_node);
     try std.testing.expectEqual(AstTag.stmt_at_root, at_root.tag);
 
@@ -12258,8 +12262,8 @@ test "parse: @at-root (with: media) { ... } modifier" {
     // selector span.
     const sel_slot = result.ast.getExtraU32(at_root.payload);
     try std.testing.expect(sel_slot != std.math.maxInt(u32));
-    const sel_node: NodeIndex = @enumFromInt(sel_slot);
-    const sel_id: InternId = @enumFromInt(result.ast.getNode(sel_node).payload);
+    const sel_node: NodeIndex = @fromBackingInt(@intCast(sel_slot));
+    const sel_id: InternId = @fromBackingInt(@intCast(result.ast.getNode(sel_node).payload));
     try std.testing.expectEqualStrings("(with: media)", pool.get(sel_id));
 }
 
@@ -12281,7 +12285,7 @@ test "parse: @mixin flex { display: flex; }" {
     try std.testing.expectEqual(AstTag.stmt_mixin_decl, n.tag);
 
     // extra: [name_id, params_extra_or_max, body_extra]
-    const name_id: InternId = @enumFromInt(result.ast.getExtraU32(n.payload));
+    const name_id: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload)));
     const params_slot = result.ast.getExtraU32(n.payload + 1);
     const body_extra = result.ast.getExtraU32(n.payload + 2);
 
@@ -12314,9 +12318,9 @@ test "parse: @mixin with positional params" {
     const has_splat = result.ast.getExtraU32(params_slot + 1);
     try std.testing.expectEqual(@as(u32, 0), has_splat);
 
-    const name_0: InternId = @enumFromInt(result.ast.getExtraU32(params_slot + 2));
+    const name_0: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(params_slot + 2)));
     const default_0 = result.ast.getExtraU32(params_slot + 3);
-    const name_1: InternId = @enumFromInt(result.ast.getExtraU32(params_slot + 4));
+    const name_1: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(params_slot + 4)));
     try std.testing.expectEqualStrings("w", pool.get(name_0));
     try std.testing.expectEqual(std.math.maxInt(u32), default_0);
     try std.testing.expectEqualStrings("h", pool.get(name_1));
@@ -12341,13 +12345,13 @@ test "parse: @mixin with default + splat params" {
     try std.testing.expectEqual(@as(u32, 1), has_splat);
 
     // Second param "args" with no default (splat doesn't use default slot).
-    const name_1: InternId = @enumFromInt(result.ast.getExtraU32(params_slot + 4));
+    const name_1: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(params_slot + 4)));
     try std.testing.expectEqualStrings("args", pool.get(name_1));
 
     // First param "cols" has a default expression.
     const default_0 = result.ast.getExtraU32(params_slot + 3);
     try std.testing.expect(default_0 != std.math.maxInt(u32));
-    const def_node: NodeIndex = @enumFromInt(default_0);
+    const def_node: NodeIndex = @fromBackingInt(@intCast(default_0));
     try expectNumberValue(&result.ast, def_node, 3.0);
 }
 
@@ -12394,13 +12398,13 @@ test "parse: @function double($n) { @return $n * 2; }" {
     const n = result.ast.getNode(stmt);
     try std.testing.expectEqual(AstTag.stmt_function_decl, n.tag);
 
-    const name_id: InternId = @enumFromInt(result.ast.getExtraU32(n.payload));
+    const name_id: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload)));
     try std.testing.expectEqualStrings("double", pool.get(name_id));
 
     const body_extra = result.ast.getExtraU32(n.payload + 2);
     const body = readBlockBody(&result.ast, body_extra);
     try std.testing.expectEqual(@as(u32, 1), body.len);
-    const ret_stmt: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const ret_stmt: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     try std.testing.expectEqual(AstTag.stmt_return, result.ast.getNode(ret_stmt).tag);
 }
 
@@ -12417,14 +12421,14 @@ test "parse: @include flex;" {
 
     const rule = rootChild(&result.ast, 0);
     const body = readBlockBody(&result.ast, readStyleRule(&result.ast, rule).body_extra);
-    const inc_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const inc_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     const inc = result.ast.getNode(inc_node);
     try std.testing.expectEqual(AstTag.stmt_include_rule, inc.tag);
 
     // Layout: [name_id, namespace_id, args, using, body]
-    const name_id: InternId = @enumFromInt(result.ast.getExtraU32(inc.payload));
+    const name_id: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(inc.payload)));
     try std.testing.expectEqualStrings("flex", pool.get(name_id));
-    try std.testing.expectEqual(InternId.none, @as(InternId, @enumFromInt(result.ast.getExtraU32(inc.payload + 1))));
+    try std.testing.expectEqual(InternId.none, @as(InternId, @fromBackingInt(@intCast(result.ast.getExtraU32(inc.payload + 1)))));
     try std.testing.expectEqual(std.math.maxInt(u32), result.ast.getExtraU32(inc.payload + 2));
     try std.testing.expectEqual(std.math.maxInt(u32), result.ast.getExtraU32(inc.payload + 3));
     try std.testing.expectEqual(std.math.maxInt(u32), result.ast.getExtraU32(inc.payload + 4));
@@ -12443,7 +12447,7 @@ test "parse: @include box(10px, 20px);" {
 
     const rule = rootChild(&result.ast, 0);
     const body = readBlockBody(&result.ast, readStyleRule(&result.ast, rule).body_extra);
-    const inc_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const inc_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     const inc = result.ast.getNode(inc_node);
     // parser no longer parses include args structurally -- it skips the
     // balanced `(...)` run.  Later-stage include decoding recovers the
@@ -12465,10 +12469,10 @@ test "parse: @include namespaced theme.button;" {
 
     const rule = rootChild(&result.ast, 0);
     const body = readBlockBody(&result.ast, readStyleRule(&result.ast, rule).body_extra);
-    const inc_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const inc_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     const inc = result.ast.getNode(inc_node);
-    const name_id: InternId = @enumFromInt(result.ast.getExtraU32(inc.payload));
-    const ns_id: InternId = @enumFromInt(result.ast.getExtraU32(inc.payload + 1));
+    const name_id: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(inc.payload)));
+    const ns_id: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(inc.payload + 1)));
     try std.testing.expectEqualStrings("button", pool.get(name_id));
     try std.testing.expectEqualStrings("theme", pool.get(ns_id));
 }
@@ -12486,7 +12490,7 @@ test "parse: @include with content block" {
 
     const rule = rootChild(&result.ast, 0);
     const body = readBlockBody(&result.ast, readStyleRule(&result.ast, rule).body_extra);
-    const inc_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const inc_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     const inc = result.ast.getNode(inc_node);
     const body_extra = result.ast.getExtraU32(inc.payload + 4);
     try std.testing.expect(body_extra != std.math.maxInt(u32));
@@ -12507,7 +12511,7 @@ test "parse: @include with `using ($var)` clause" {
 
     const rule = rootChild(&result.ast, 0);
     const body = readBlockBody(&result.ast, readStyleRule(&result.ast, rule).body_extra);
-    const inc_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const inc_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     const inc = result.ast.getNode(inc_node);
     const using_extra = result.ast.getExtraU32(inc.payload + 3);
     try std.testing.expect(using_extra != std.math.maxInt(u32));
@@ -12529,12 +12533,12 @@ test "parse: @media screen and (max-width: 768px) { body }" {
     const n = result.ast.getNode(stmt);
     try std.testing.expectEqual(AstTag.stmt_at_rule, n.tag);
 
-    const name_id: InternId = @enumFromInt(result.ast.getExtraU32(n.payload));
+    const name_id: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload)));
     try std.testing.expectEqualStrings("media", pool.get(name_id));
 
     const prelude_slot = result.ast.getExtraU32(n.payload + 1);
     try std.testing.expect(prelude_slot != std.math.maxInt(u32));
-    const prelude_node: NodeIndex = @enumFromInt(prelude_slot);
+    const prelude_node: NodeIndex = @fromBackingInt(@intCast(prelude_slot));
     try std.testing.expectEqual(AstTag.expr_text_template, result.ast.getNode(prelude_node).tag);
     const prelude_id = textTemplateLiteralId(&result.ast, prelude_node);
     try std.testing.expectEqualStrings("screen and (max-width: 768px)", pool.get(prelude_id));
@@ -12612,7 +12616,7 @@ test "parse: @page :first { margin: 0; } (unknown at-rule via .at_keyword)" {
     const stmt = rootChild(&result.ast, 0);
     const n = result.ast.getNode(stmt);
     try std.testing.expectEqual(AstTag.stmt_at_rule, n.tag);
-    const name_id: InternId = @enumFromInt(result.ast.getExtraU32(n.payload));
+    const name_id: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(n.payload)));
     try std.testing.expectEqualStrings("page", pool.get(name_id));
 }
 
@@ -12752,7 +12756,7 @@ test "parse: leading slash after a colon is unary" {
     var result = try parseFullSourceWithSyntax(alloc, &pool, "$x: /$y;", false);
     defer result.ast.deinit();
     const decl = result.ast.getNode(rootChild(&result.ast, 0));
-    const value_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(decl.payload + 1));
+    const value_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(decl.payload + 1)));
     try std.testing.expectEqual(AstTag.expr_unary_op, result.ast.getNode(value_node).tag);
 }
 
@@ -12769,9 +12773,9 @@ test "parse: trailing percent in declaration keeps raw fallback" {
 
     const rule = rootChild(&result.ast, 0);
     const body = readBlockBody(&result.ast, readStyleRule(&result.ast, rule).body_extra);
-    const decl: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const decl: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     const decl_node = result.ast.getNode(decl);
-    const value_node: NodeIndex = @enumFromInt(result.ast.getExtraU32(decl_node.payload + 1));
+    const value_node: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(decl_node.payload + 1)));
     try std.testing.expectEqual(AstTag.expr_text_template, result.ast.getNode(value_node).tag);
     const lit_id = textTemplateLiteralId(&result.ast, value_node);
     try std.testing.expectEqualStrings("c %", pool.get(lit_id));
@@ -12955,7 +12959,7 @@ test "parseHashAtom: #foo falls back to expr_unquoted_ident" {
 
     const n = ctx.ast.getNode(ctx.node);
     try std.testing.expectEqual(AstTag.expr_unquoted_ident, n.tag);
-    const id: InternId = @enumFromInt(n.payload);
+    const id: InternId = @fromBackingInt(@intCast(n.payload));
     try std.testing.expectEqualStrings("#foo", pool.get(id));
 }
 
@@ -12972,9 +12976,9 @@ test "parse: declaration value with hex colour `color: #abc;`" {
 
     const rule = rootChild(&result.ast, 0);
     const body = readBlockBody(&result.ast, readStyleRule(&result.ast, rule).body_extra);
-    const decl: NodeIndex = @enumFromInt(result.ast.getExtraU32(body.first));
+    const decl: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(body.first)));
     const dn = result.ast.getNode(decl);
-    const val: NodeIndex = @enumFromInt(result.ast.getExtraU32(dn.payload + 1));
+    const val: NodeIndex = @fromBackingInt(@intCast(result.ast.getExtraU32(dn.payload + 1)));
     try std.testing.expectEqual(AstTag.expr_color_hex, result.ast.getNode(val).tag);
 }
 
@@ -12995,7 +12999,7 @@ test "parse: id selector `#foo { ... }` still parses as a style rule" {
     const stmt = rootChild(&result.ast, 0);
     try std.testing.expectEqual(AstTag.stmt_style_rule, result.ast.getNode(stmt).tag);
     const sr = readStyleRule(&result.ast, stmt);
-    const sel_id: InternId = @enumFromInt(result.ast.getNode(sr.selector_node).payload);
+    const sel_id: InternId = @fromBackingInt(@intCast(result.ast.getNode(sr.selector_node).payload));
     try std.testing.expectEqualStrings("#foo", pool.get(sel_id));
 }
 

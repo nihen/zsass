@@ -100,7 +100,7 @@ fn selectorIsBareParentReference(raw_selector: []const u8) bool {
 }
 
 pub fn resolveSelectorInternForStackWithMode(self: anytype, sel_u: u32, mode: anytype) !InternId {
-    const raw_id: InternId = try self.ensureInternTrailingEscapeDelimiter(@enumFromInt(sel_u));
+    const raw_id: InternId = try self.ensureInternTrailingEscapeDelimiter(@fromBackingInt(@intCast(sel_u)));
     const raw = self.intern_pool.get(raw_id);
     switch (mode) {
         .plain_css_preserve => {
@@ -128,11 +128,11 @@ pub fn resolveSelectorInternForStackWithMode(self: anytype, sel_u: u32, mode: an
         },
         .ordinary => {},
     }
-    return resolveSelectorInternForStack(self, @intFromEnum(raw_id));
+    return resolveSelectorInternForStack(self, @backingInt(raw_id));
 }
 
 pub fn resolveSelectorInternForStack(self: anytype, sel_u: u32) !InternId {
-    var out_id: InternId = try self.ensureInternTrailingEscapeDelimiter(@enumFromInt(sel_u));
+    var out_id: InternId = try self.ensureInternTrailingEscapeDelimiter(@fromBackingInt(@intCast(sel_u)));
     const raw = self.intern_pool.get(out_id);
     try self.validateLiteralSelectorForSelectorResolve(raw);
     if (selectorParentForCombination(self, raw)) |parent_id| {

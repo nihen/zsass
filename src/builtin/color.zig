@@ -204,7 +204,7 @@ fn colorToHsl(ctx: *BuiltinContext, c: Value) [3]f64 {
 }
 
 const ColorArgBind = struct {
-    values: [4]?Value = [_]?Value{null} ** 4,
+    values: [4]?Value = @splat(null),
     count: u8 = 0,
 };
 
@@ -370,7 +370,7 @@ fn bindColorArgs(
 ) BuiltinError!ColorArgBind {
     if (slot_names.len == 0 or slot_names.len > 4) return error.BuiltinArity;
 
-    var out: [4]?Value = [_]?Value{null} ** 4;
+    var out: [4]?Value = @splat(null);
     var positional: usize = 0;
 
     for (args, 0..) |arg, i| {

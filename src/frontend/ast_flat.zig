@@ -27,10 +27,10 @@ pub const NodeIndex = enum(u32) {
     _,
 
     pub inline fn toU32(self: NodeIndex) u32 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
     pub inline fn fromU32(v: u32) NodeIndex {
-        return @enumFromInt(v);
+        return @fromBackingInt(@intCast(v));
     }
 };
 
@@ -332,12 +332,12 @@ pub const Ast = struct {
     pub fn addNode(self: *Ast, node: AstNode) !NodeIndex {
         const idx: u32 = @intCast(self.nodes.len);
         try self.nodes.append(self.arena, node);
-        return @enumFromInt(idx);
+        return @fromBackingInt(@intCast(idx));
     }
 
     /// Get a copy of the node at `idx`.
     pub fn getNode(self: *const Ast, idx: NodeIndex) AstNode {
-        return self.nodes.get(@intFromEnum(idx));
+        return self.nodes.get(@backingInt(idx));
     }
 
     /// Overwrite the `payload` column of an existing node in place.
@@ -347,24 +347,24 @@ pub const Ast = struct {
     /// children in `extra`, then patch the parent's payload to the resulting
     /// `ExtraIndex`.
     pub fn setPayload(self: *Ast, idx: NodeIndex, payload: u32) void {
-        self.nodes.items(.payload)[@intFromEnum(idx)] = payload;
+        self.nodes.items(.payload)[@backingInt(idx)] = payload;
     }
 
     /// Overwrite the `tag` column of an existing node in place.
     fn setTag(self: *Ast, idx: NodeIndex, tag: AstTag) void {
-        self.nodes.items(.tag)[@intFromEnum(idx)] = tag;
+        self.nodes.items(.tag)[@backingInt(idx)] = tag;
     }
 
     /// Overwrite the `flags` column of an existing node in place.
     pub fn setFlags(self: *Ast, idx: NodeIndex, flags: u8) void {
-        self.nodes.items(.flags)[@intFromEnum(idx)] = flags;
+        self.nodes.items(.flags)[@backingInt(idx)] = flags;
     }
 
     /// Overwrite the `span_end` column of an existing node in place.
     /// Needed when a block statement's end is only known after all children
     /// have been parsed and emitted.
     pub fn setSpanEnd(self: *Ast, idx: NodeIndex, span_end: u32) void {
-        self.nodes.items(.span_end)[@intFromEnum(idx)] = span_end;
+        self.nodes.items(.span_end)[@backingInt(idx)] = span_end;
     }
 
     // -- extra pool -----------------------------------------------------------
@@ -479,7 +479,7 @@ fn atRuleDecode(node: AstNode, ast: *const Ast) AtRuleDecoded {
     std.debug.assert(node.tag == .stmt_at_rule);
     const extra_off = node.payload;
     return .{
-        .name_id = @enumFromInt(ast.getExtraU32(extra_off)),
+        .name_id = @fromBackingInt(@intCast(ast.getExtraU32(extra_off))),
         .prelude_node = decodeOptionalNodeIndex(ast.getExtraU32(extra_off + 1)),
         .body_extra = decodeOptionalExtraIndex(ast.getExtraU32(extra_off + 2)),
     };
@@ -497,7 +497,7 @@ fn variableDeclDecode(node: AstNode, ast: *const Ast) VariableDeclDecoded {
     const extra_off = node.payload;
     const flags_u32 = ast.getExtraU32(extra_off + 2);
     return .{
-        .name_id = @enumFromInt(ast.getExtraU32(extra_off)),
+        .name_id = @fromBackingInt(@intCast(ast.getExtraU32(extra_off))),
         .value_node = NodeIndex.fromU32(ast.getExtraU32(extra_off + 1)),
         .is_default = (flags_u32 & 0b01) != 0,
         .is_global = (flags_u32 & 0b10) != 0,
@@ -514,7 +514,7 @@ fn mixinDeclDecode(node: AstNode, ast: *const Ast) MixinDeclDecoded {
     std.debug.assert(node.tag == .stmt_mixin_decl);
     const extra_off = node.payload;
     return .{
-        .name_id = @enumFromInt(ast.getExtraU32(extra_off)),
+        .name_id = @fromBackingInt(@intCast(ast.getExtraU32(extra_off))),
         .params_extra = decodeOptionalExtraIndex(ast.getExtraU32(extra_off + 1)),
         .body_extra = ast.getExtraU32(extra_off + 2),
     };
@@ -530,7 +530,7 @@ fn functionDeclDecode(node: AstNode, ast: *const Ast) FunctionDeclDecoded {
     std.debug.assert(node.tag == .stmt_function_decl);
     const extra_off = node.payload;
     return .{
-        .name_id = @enumFromInt(ast.getExtraU32(extra_off)),
+        .name_id = @fromBackingInt(@intCast(ast.getExtraU32(extra_off))),
         .params_extra = decodeOptionalExtraIndex(ast.getExtraU32(extra_off + 1)),
         .body_extra = ast.getExtraU32(extra_off + 2),
     };
@@ -548,8 +548,8 @@ fn includeRuleDecode(node: AstNode, ast: *const Ast) IncludeRuleDecoded {
     std.debug.assert(node.tag == .stmt_include_rule);
     const extra_off = node.payload;
     return .{
-        .name_id = @enumFromInt(ast.getExtraU32(extra_off)),
-        .namespace_id = @enumFromInt(ast.getExtraU32(extra_off + 1)),
+        .name_id = @fromBackingInt(@intCast(ast.getExtraU32(extra_off))),
+        .namespace_id = @fromBackingInt(@intCast(ast.getExtraU32(extra_off + 1))),
         .args_extra = decodeOptionalExtraIndex(ast.getExtraU32(extra_off + 2)),
         .using_extra = decodeOptionalExtraIndex(ast.getExtraU32(extra_off + 3)),
         .body_extra = decodeOptionalExtraIndex(ast.getExtraU32(extra_off + 4)),
@@ -625,7 +625,7 @@ fn eachDecode(node: AstNode, ast: *const Ast) EachDecoded {
 fn eachVarId(ast: *const Ast, extra_off: ExtraIndex, var_index: u32) InternId {
     const var_count = ast.getExtraU32(extra_off);
     std.debug.assert(var_index < var_count);
-    return @enumFromInt(ast.getExtraU32(extra_off + 1 + var_index));
+    return @fromBackingInt(@intCast(ast.getExtraU32(extra_off + 1 + var_index)));
 }
 
 const ForDecoded = struct {
@@ -640,7 +640,7 @@ fn forDecode(node: AstNode, ast: *const Ast) ForDecoded {
     std.debug.assert(node.tag == .stmt_for);
     const extra_off = node.payload;
     return .{
-        .var_id = @enumFromInt(ast.getExtraU32(extra_off)),
+        .var_id = @fromBackingInt(@intCast(ast.getExtraU32(extra_off))),
         .from_node = NodeIndex.fromU32(ast.getExtraU32(extra_off + 1)),
         .to_node = NodeIndex.fromU32(ast.getExtraU32(extra_off + 2)),
         .body_extra = ast.getExtraU32(extra_off + 3),
@@ -729,8 +729,8 @@ fn useDecode(node: AstNode, ast: *const Ast) UseDecoded {
     std.debug.assert(node.tag == .stmt_use);
     const extra_off = node.payload;
     return .{
-        .url_id = @enumFromInt(ast.getExtraU32(extra_off)),
-        .namespace_id = @enumFromInt(ast.getExtraU32(extra_off + 1)),
+        .url_id = @fromBackingInt(@intCast(ast.getExtraU32(extra_off))),
+        .namespace_id = @fromBackingInt(@intCast(ast.getExtraU32(extra_off + 1))),
         .config_extra = ast.getExtraU32(extra_off + 2),
         .as_star = (node.flags & 0b01) != 0,
     };
@@ -748,8 +748,8 @@ fn forwardDecode(node: AstNode, ast: *const Ast) ForwardDecoded {
     std.debug.assert(node.tag == .stmt_forward);
     const extra_off = node.payload;
     return .{
-        .url_id = @enumFromInt(ast.getExtraU32(extra_off)),
-        .prefix_id = @enumFromInt(ast.getExtraU32(extra_off + 1)),
+        .url_id = @fromBackingInt(@intCast(ast.getExtraU32(extra_off))),
+        .prefix_id = @fromBackingInt(@intCast(ast.getExtraU32(extra_off + 1))),
         .show_extra = ast.getExtraU32(extra_off + 2),
         .hide_extra = ast.getExtraU32(extra_off + 3),
         .config_extra = ast.getExtraU32(extra_off + 4),
@@ -765,11 +765,11 @@ fn importDecode(node: AstNode, ast: *const Ast) ImportDecoded {
     std.debug.assert(node.tag == .stmt_import);
     const extra_off = node.payload;
     return .{
-        .url_node = @enumFromInt(ast.getExtraU32(extra_off)),
+        .url_node = @fromBackingInt(@intCast(ast.getExtraU32(extra_off))),
         .conditions = if (ast.getExtraU32(extra_off + 1) == std.math.maxInt(u32))
             null
         else
-            @enumFromInt(ast.getExtraU32(extra_off + 1)),
+            @fromBackingInt(@intCast(ast.getExtraU32(extra_off + 1))),
     };
 }
 
@@ -784,7 +784,7 @@ test "AstTag is u8 (1 byte)" {
 }
 
 test "NodeIndex.none sentinel equals maxInt(u32)" {
-    try std.testing.expectEqual(std.math.maxInt(u32), @intFromEnum(NodeIndex.none));
+    try std.testing.expectEqual(std.math.maxInt(u32), @backingInt(NodeIndex.none));
 }
 
 test "empty Ast init/deinit \u{2014} no leaks" { // Use std.testing.allocator (leak-detecting) wrapped in an ArenaAllocator
@@ -917,7 +917,7 @@ test "BinOp and UnaryOp enums compile and cover expected variants" {
 }
 
 test "AstTag._count fits in u8 \u{2014} fewer than 256 variants" {
-    const count = @intFromEnum(AstTag._count);
+    const count = @backingInt(AstTag._count);
     try std.testing.expect(count < 256);
 }
 
@@ -1040,8 +1040,8 @@ test "reserve-slot-then-patch pattern for stylesheet_root with 2 children" {
     try std.testing.expectEqual(@as(u32, 15), root.span_end);
 
     try std.testing.expectEqual(@as(u32, 2), ast.getExtraU32(extra_off));
-    const a_from_extra: NodeIndex = @enumFromInt(ast.getExtraU32(extra_off + 1));
-    const b_from_extra: NodeIndex = @enumFromInt(ast.getExtraU32(extra_off + 2));
+    const a_from_extra: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(extra_off + 1)));
+    const b_from_extra: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(extra_off + 2)));
     try std.testing.expectEqual(child_a, a_from_extra);
     try std.testing.expectEqual(child_b, b_from_extra);
 }

@@ -747,7 +747,7 @@ fn simpleSelectorStructuralHash(ss: SimpleSelector) u64 {
 fn attrStructuralHash(a: selector_mod.AttributeSelector) u64 {
     var h = fnvHashSeeded(0x10, a.name);
     if (a.op) |op| {
-        h ^= @as(u64, @intFromEnum(op)) *% 0x100000001b3;
+        h ^= @as(u64, @backingInt(op)) *% 0x100000001b3;
     }
     if (a.value) |v| {
         h ^= fnvHashSeeded(0x11, v);
@@ -786,7 +786,7 @@ fn complexStructuralHash(c: *const ComplexSelector) u64 {
                 h ^= compoundMultisetHash(&co);
             },
             .combinator => |comb| {
-                h ^= @as(u64, @intFromEnum(comb)) *% 0x100000001b3;
+                h ^= @as(u64, @backingInt(comb)) *% 0x100000001b3;
             },
         }
         h *%= 0x9e3779b97f4a7c15;

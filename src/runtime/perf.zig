@@ -202,7 +202,7 @@ pub const Counter = enum {
     phase_emit_ns,
 };
 
-const N: usize = @typeInfo(Counter).@"enum".fields.len;
+const N: usize = @typeInfo(Counter).@"enum".field_names.len;
 
 const Slot = struct {
     calls: u64 = 0,
@@ -213,7 +213,7 @@ const Slot = struct {
 /// Thread-local counter array. Each worker thread has its own array. dump at
 /// Aggregate all threads via `registry`.
 // SAFETY: When perf is disabled at comptime, `local` is never read; only the enabled branch uses this storage.
-threadlocal var local: [N]Slot = if (enabled) [_]Slot{.{}} ** N else undefined;
+threadlocal var local: [N]Slot = if (enabled) @splat(.{}) else undefined;
 threadlocal var local_registered: bool = false;
 
 /// Keep the `local` pointers of all threads and aggregate them during dump. worker thread
@@ -223,7 +223,7 @@ threadlocal var local_registered: bool = false;
 const Registry = struct {
     lock: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
     /// Committed (= flushed from workers that have already exited) aggregate value.
-    finalized: [N]Slot = [_]Slot{.{}} ** N,
+    finalized: [N]Slot = @splat(.{}),
     /// `&local` list of currently alive threads. Lick this and add it when dumping.
     live: std.ArrayListUnmanaged(*[N]Slot) = .empty,
 };
@@ -266,7 +266,7 @@ pub fn flushThread() void {
         registry.finalized[i].bytes += slot.bytes;
         registry.finalized[i].ns += slot.ns;
     }
-    local = [_]Slot{.{}} ** N;
+    local = @splat(.{});
     // Exclude yourself from live.
     var idx: usize = 0;
     while (idx < registry.live.items.len) : (idx += 1) {
@@ -282,22 +282,22 @@ pub fn flushThread() void {
 pub inline fn note(comptime c: Counter) void {
     if (comptime !enabled) return;
     registerSelfIfNeeded();
-    local[@intFromEnum(c)].calls += 1;
+    local[@backingInt(c)].calls += 1;
 }
 
 /// 1 measurement + bytes cumulative. When disabled, it disappears completely.
 pub inline fn bump(comptime c: Counter, byte_count: u64) void {
     if (comptime !enabled) return;
     registerSelfIfNeeded();
-    local[@intFromEnum(c)].calls += 1;
-    local[@intFromEnum(c)].bytes += byte_count;
+    local[@backingInt(c)].calls += 1;
+    local[@backingInt(c)].bytes += byte_count;
 }
 
 /// ns cumulative only (does not touch calls/bytes). For phase timer.
 inline fn addNs(comptime c: Counter, ns_delta: u64) void {
     if (comptime !enabled) return;
     registerSelfIfNeeded();
-    local[@intFromEnum(c)].ns += ns_delta;
+    local[@backingInt(c)].ns += ns_delta;
 }
 
 /// Start of interval measurement. Only returns 0 when disabled.
@@ -346,13 +346,13 @@ pub fn dumpAll(writer: anytype) !void {
         }
     }
 
-    const fields = @typeInfo(Counter).@"enum".fields;
+    const field_names = @typeInfo(Counter).@"enum".field_names;
     var entries: [N]Aggregated = undefined;
     var n: usize = 0;
     for (0..N) |i| {
         const s = aggregated[i];
         if (s.calls == 0 and s.bytes == 0 and s.ns == 0) continue;
-        entries[n] = .{ .tag = fields[i].name, .slot = s };
+        entries[n] = .{ .tag = field_names[i], .slot = s };
         n += 1;
     }
     std.mem.sort(Aggregated, entries[0..n], {}, struct {

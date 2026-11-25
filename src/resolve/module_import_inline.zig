@@ -175,7 +175,7 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: 
     const child_raw: []const u32 = child_raw_full;
     const child_first_module_directive: ?usize = blk_first_md: {
         for (child_raw_full, 0..) |u, i| {
-            const tag = child_ast_ptr.getNode(@enumFromInt(u)).tag;
+            const tag = child_ast_ptr.getNode(@fromBackingInt(@intCast(u))).tag;
             if (tag == .stmt_use or tag == .stmt_forward) break :blk_first_md i;
         }
         break :blk_first_md null;

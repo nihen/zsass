@@ -47,8 +47,8 @@ const setCurrentErrorFrameSpan = resolve_error_stack.setCurrentFrameSpan;
 pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: bool, comptime deps: anytype) ResolveError!StmtIndex {
     if (is_top_level_stmt and ctx.module_directive_locked) return error.SassError;
     const off: ExtraIndex = n.payload;
-    const url_id: InternId = @enumFromInt(ctx.ast.getExtraU32(off));
-    const namespace_id: InternId = @enumFromInt(ctx.ast.getExtraU32(off + 1));
+    const url_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
+    const namespace_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off + 1)));
     const config_ex = ctx.ast.getExtraU32(off + 2);
     const has_config = config_ex != std.math.maxInt(u32);
     const config_entries = if (has_config) try deps.parseWithConfigEntries(ctx, config_ex) else &.{};
@@ -183,8 +183,8 @@ fn forwardedInitialConfig(
 pub fn resolveForwardStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: bool, comptime deps: anytype) ResolveError!StmtIndex {
     if (is_top_level_stmt and ctx.module_directive_locked) return error.SassError;
     const off: ExtraIndex = n.payload;
-    const url_id: InternId = @enumFromInt(ctx.ast.getExtraU32(off));
-    const prefix_id: InternId = @enumFromInt(ctx.ast.getExtraU32(off + 1));
+    const url_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
+    const prefix_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off + 1)));
     const show_ex = ctx.ast.getExtraU32(off + 2);
     const hide_ex = ctx.ast.getExtraU32(off + 3);
     const config_ex = ctx.ast.getExtraU32(off + 4);
@@ -266,9 +266,9 @@ pub fn resolveForwardStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stm
 
 pub fn resolveImportStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: anytype) ResolveError!StmtIndex {
     const off: ExtraIndex = n.payload;
-    const url_node: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(off));
+    const url_node: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
     const cond_slot = ctx.ast.getExtraU32(off + 1);
-    const cond_node: ?NodeIndex = if (cond_slot == std.math.maxInt(u32)) null else @enumFromInt(cond_slot);
+    const cond_node: ?NodeIndex = if (cond_slot == std.math.maxInt(u32)) null else @fromBackingInt(@intCast(cond_slot));
 
     const url_raw_storage = try astTextNodeRawAlloc(ctx.a, ctx.ast, ctx.pool, url_node);
     defer ctx.a.free(url_raw_storage);

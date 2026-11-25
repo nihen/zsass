@@ -206,9 +206,14 @@ pub fn compileSourceToCss(
     defer arena.deinit();
     // Declared after the arena so it runs first: the message may point into
     // memory the compile allocated. It also covers the copy below.
-    errdefer |err| reportFinalErrorDiagnostic(err, file_path, opts);
-    const css = try compileSourceToCssInArena(arena.allocator(), source, file_path, load_paths, opts);
-    return try alloc.dupe(u8, css);
+    const css = compileSourceToCssInArena(arena.allocator(), source, file_path, load_paths, opts) catch |err| {
+        reportFinalErrorDiagnostic(err, file_path, opts);
+        return err;
+    };
+    return alloc.dupe(u8, css) catch |err| {
+        reportFinalErrorDiagnostic(err, file_path, opts);
+        return err;
+    };
 }
 
 fn compileSourceToCssInArena(
@@ -267,11 +272,20 @@ pub fn compileSourceToCssWithSourceMap(
 ) anyerror!CompileCssWithSourceMapResult {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
-    errdefer |err| reportFinalErrorDiagnostic(err, file_path, opts);
-    const result = try compileSourceToCssWithSourceMapInArena(arena.allocator(), source, file_path, load_paths, source_map_output_css_path, opts);
-    const css = try alloc.dupe(u8, result.css);
+    const result = compileSourceToCssWithSourceMapInArena(arena.allocator(), source, file_path, load_paths, source_map_output_css_path, opts) catch |err| {
+        reportFinalErrorDiagnostic(err, file_path, opts);
+        return err;
+    };
+    const css = alloc.dupe(u8, result.css) catch |err| {
+        reportFinalErrorDiagnostic(err, file_path, opts);
+        return err;
+    };
     errdefer alloc.free(css);
-    return .{ .css = css, .source_map_json = try alloc.dupe(u8, result.source_map_json) };
+    const source_map_json = alloc.dupe(u8, result.source_map_json) catch |err| {
+        reportFinalErrorDiagnostic(err, file_path, opts);
+        return err;
+    };
+    return .{ .css = css, .source_map_json = source_map_json };
 }
 
 fn compileSourceToCssWithSourceMapInArena(
