@@ -3800,3 +3800,30 @@ fn optimizeModeName() []const u8 {
         .small => "ReleaseSmall",
     };
 }
+
+test "currentLocalTimestamp reads the C library's clock and calendar" {
+    // Runs the hand-declared `time` and `localtime` on every platform
+    // the tests run on: a wrong symbol or field order would show as a
+    // year or a field out of range.
+    var buf: [32]u8 = undefined;
+    const text = currentLocalTimestamp(&buf);
+    try std.testing.expectEqual(@as(usize, 21), text.len);
+    try std.testing.expectEqual(@as(u8, '['), text[0]);
+    try std.testing.expectEqual(@as(u8, ']'), text[20]);
+    for ([_]usize{ 5, 8 }) |at| try std.testing.expectEqual(@as(u8, '-'), text[at]);
+    try std.testing.expectEqual(@as(u8, ' '), text[11]);
+    for ([_]usize{ 14, 17 }) |at| try std.testing.expectEqual(@as(u8, ':'), text[at]);
+
+    const year = try std.fmt.parseInt(u32, text[1..5], 10);
+    const month = try std.fmt.parseInt(u32, text[6..8], 10);
+    const day = try std.fmt.parseInt(u32, text[9..11], 10);
+    const hour = try std.fmt.parseInt(u32, text[12..14], 10);
+    const minute = try std.fmt.parseInt(u32, text[15..17], 10);
+    const second = try std.fmt.parseInt(u32, text[18..20], 10);
+    try std.testing.expect(year >= 2026 and year < 2200);
+    try std.testing.expect(month >= 1 and month <= 12);
+    try std.testing.expect(day >= 1 and day <= 31);
+    try std.testing.expect(hour <= 23);
+    try std.testing.expect(minute <= 59);
+    try std.testing.expect(second <= 60);
+}
