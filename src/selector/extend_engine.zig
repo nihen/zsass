@@ -60,6 +60,12 @@ pub const Source = struct {
     /// Position in the stylesheet's sequence of `@extend`s. A style rule
     /// says how many came before it with the same numbering.
     order: u32,
+    /// The `@extend` to tell when this extender's target is found, when
+    /// that is not the one `order` names.
+    credit: ?u32 = null,
+    /// More `@extend`s to tell the same, when several of them came to
+    /// this one extender.
+    more_credits: []const u32 = &.{},
 };
 
 /// A compound selector whose simple selectors each remember where they
@@ -92,6 +98,17 @@ const Entry = struct {
     pieces: []const Piece,
     complex: ComplexSelector,
     step: u32,
+    /// The step whose `@extend` named this entry's target.
+    owner: u32,
+    /// Other steps that would have made this same entry.
+    also_owners: std.ArrayList(u32) = .empty,
+    /// The entries this one was made from by extending them, when it is
+    /// not an `@extend`'s own: what finds this one finds their targets,
+    /// whichever `@extend`s come to own them later.
+    origins: std.ArrayList(u32) = .empty,
+    /// `Engine.links_version` plus one when this entry's owners were last
+    /// marked as found; zero before.
+    noted_at: u32 = 0,
     /// Made by the `@extend` itself, not by extending an extender.
     direct: bool,
     /// A complex selector of the `@extend`'s rule as it was written.
@@ -115,6 +132,11 @@ const Made = struct {
 const Step = struct {
     order: u32,
     target: SimpleSelector,
+    /// The `@extend` that is told its target was found.
+    credit: u32,
+    more_credits: []const u32 = &.{},
+    /// A selector held the target.
+    found: bool = false,
 };
 
 /// Which entries an extension pass sees.
@@ -181,30 +203,56 @@ pub const Detail = struct {
 
 /// Trim a selector list put together from the results of several engines,
 /// by the rule each engine trims with.
-pub fn trimUnion(list: *SelectorList, details: *std.ArrayList(Detail)) void {
+pub fn trimUnion(allocator: Allocator, list: *SelectorList, details: *std.ArrayList(Detail)) Error!void {
     const selectors = list.selectors.items;
     if (selectors.len > 100) return;
+    const kept = try allocator.alloc(bool, selectors.len);
+    defer allocator.free(kept);
+    @memset(kept, false);
+    var originals_kept: usize = 0;
     var index = selectors.len;
     while (index > 0) {
         index -= 1;
         const detail = details.items[index];
         var covered = false;
-        for (list.selectors.items, 0..) |*other, other_index| {
-            if (other_index == index) continue;
-            if (detail.original) {
-                if (other_index < index and details.items[other_index].original and sameAsWritten(other, &list.selectors.items[index])) covered = true;
-            } else if (spec_mod.specificityGte(spec_mod.complexSpecificity(other), detail.source) and
-                selector_mod.complexIsSuperSelector(other, &list.selectors.items[index]))
-            {
-                covered = true;
+        if (detail.original) {
+            // A repeat among the selectors kept right after this one, as
+            // many of them as written selectors were kept so far, gives
+            // way to this one.
+            var seen: usize = 0;
+            var later = index + 1;
+            while (later < selectors.len and seen < originals_kept) : (later += 1) {
+                if (!kept[later]) continue;
+                seen += 1;
+                if (details.items[later].original and sameAsWritten(&selectors[later], &selectors[index])) {
+                    selectors[index].leading_separator_has_newline = selectors[later].leading_separator_has_newline;
+                    kept[later] = false;
+                    originals_kept -= 1;
+                    break;
+                }
             }
-            if (covered) break;
+            originals_kept += 1;
+        } else {
+            for (selectors, 0..) |*other, other_index| {
+                if (other_index == index) continue;
+                if (other_index > index and !kept[other_index]) continue;
+                if (spec_mod.specificityGte(spec_mod.complexSpecificity(other), detail.source) and
+                    selector_mod.complexIsSuperSelector(other, &selectors[index]))
+                {
+                    covered = true;
+                    break;
+                }
+            }
         }
-        if (covered) {
-            var removed = list.selectors.orderedRemove(index);
-            removed.deinit();
-            _ = details.orderedRemove(index);
-        }
+        kept[index] = !covered;
+    }
+    index = selectors.len;
+    while (index > 0) {
+        index -= 1;
+        if (kept[index]) continue;
+        var removed = list.selectors.orderedRemove(index);
+        removed.deinit();
+        _ = details.orderedRemove(index);
     }
 }
 
@@ -212,6 +260,8 @@ pub const Engine = struct {
     arena: std.heap.ArenaAllocator,
     entries: std.ArrayList(Entry) = .empty,
     steps: std.ArrayList(Step) = .empty,
+    /// Counts the changes to which entry belongs to which `@extend`.
+    links_version: u32 = 0,
     by_target: std.StringHashMapUnmanaged(std.ArrayList(u32)) = .empty,
     steps_by_target: std.StringHashMapUnmanaged(std.ArrayList(u32)) = .empty,
     mode: Mode = .written,
@@ -269,7 +319,7 @@ pub const Engine = struct {
         }
         const extended = if (resolved) items.items else try self.extendItems(a, items.items, .{ .before = std.math.maxInt(u32) });
 
-        try self.steps.append(a, .{ .order = source.order, .target = target });
+        try self.steps.append(a, .{ .order = source.order, .target = target, .credit = source.credit orelse source.order, .more_credits = try a.dupe(u32, source.more_credits) });
         {
             const key = try simpleKey(a, target);
             const gop = try self.steps_by_target.getOrPut(a, key);
@@ -278,7 +328,7 @@ pub const Engine = struct {
         }
 
         const direct_start = self.entries.items.len;
-        for (extended) |item| try self.addEntry(targets, item, step_index, true, item.original);
+        for (extended) |item| try self.addEntry(targets, item, step_index, step_index, null, true, item.original);
 
         // When an earlier extender holds the target, every extender that
         // holds it is extended with the new entries, these new extenders
@@ -288,6 +338,15 @@ pub const Engine = struct {
         // extender.
         var earlier_holds = false;
         if (resolved) return;
+        // The rules of the `@extend`s are rules too: when one of their
+        // selectors holds the target, this one's own included, the target
+        // is found.
+        for (self.entries.items) |*entry| {
+            if (complexHoldsSimple(&entry.complex, target)) {
+                self.steps.items[step_index].found = true;
+                break;
+            }
+        }
         for (self.entries.items[0..direct_start]) |*entry| {
             if (complexHoldsSimple(&entry.complex, target)) {
                 earlier_holds = true;
@@ -309,19 +368,36 @@ pub const Engine = struct {
                 // What comes of a written extender counts as written too:
                 // standing alone it is not trimmed.
                 if (item.original and !sameAsWritten(&item.complex, &entry.complex)) self.entries.items[index].superseded = true;
-                try self.addEntry(entry.targets, item, step_index, false, entry.written);
+                try self.addEntry(entry.targets, item, step_index, entry.owner, @intCast(index), false, entry.written);
             }
         }
     }
 
-    fn addEntry(self: *Engine, targets: []const SimpleSelector, item: Item, step: u32, direct: bool, written: bool) Error!void {
+    fn addEntry(self: *Engine, targets: []const SimpleSelector, item: Item, step: u32, owner: u32, origin: ?u32, direct: bool, written: bool) Error!void {
         const a = self.arena.allocator();
         const first_key = try simpleKey(a, targets[0]);
         if (self.by_target.get(first_key)) |list| {
             for (list.items) |index| {
                 const existing = &self.entries.items[index];
+                // An extendee given twice to a selector function is taken
+                // twice, the second time on what the first left.
+                if (self.byFunction() and existing.step != step) continue;
                 if (existing.targets.len == targets.len and holdsAll(existing.targets, targets) and
-                    spec_mod.complexSelectorEql(&existing.complex, &item.complex)) return;
+                    spec_mod.complexSelectorEql(&existing.complex, &item.complex))
+                {
+                    // The same extender for the same target: one entry,
+                    // and both `@extend`s find their target through it.
+                    if (origin) |from| {
+                        if (from != index) {
+                            try existing.origins.append(a, from);
+                            self.links_version += 1;
+                        }
+                    } else if (existing.owner != owner) {
+                        try existing.also_owners.append(a, owner);
+                        self.links_version += 1;
+                    }
+                    return;
+                }
             }
         }
         const entry_index: u32 = @intCast(self.entries.items.len);
@@ -336,14 +412,75 @@ pub const Engine = struct {
             .pieces = item.pieces,
             .complex = item.complex,
             .step = step,
+            .owner = owner,
             .direct = direct,
-            .written = written and self.mode != .function and self.mode != .replace,
+            .written = written,
         });
+        if (origin) |from| try self.entries.items[entry_index].origins.append(a, from);
     }
 
     /// The extenders registered, in order, each with its target.
     pub fn entryCount(self: *const Engine) usize {
         return self.entries.items.len;
+    }
+
+    /// The `@extend`s an entry's target belongs to: every one that made
+    /// this extender.
+    pub fn appendEntryCredits(self: *const Engine, allocator: Allocator, index: usize, out: *std.ArrayList(u32)) Error!void {
+        var owners: std.ArrayList(u32) = .empty;
+        defer owners.deinit(allocator);
+        const visited = try allocator.alloc(bool, self.entries.items.len);
+        defer allocator.free(visited);
+        @memset(visited, false);
+        try self.appendOwners(allocator, @intCast(index), visited, &owners);
+        for (owners.items) |step_index| try self.appendStepCredits(allocator, step_index, out);
+    }
+
+    /// The steps whose `@extend`s an entry belongs to, those of the entries
+    /// it was made from included. An entry can come of a later one when a
+    /// later extender turns out the same as it, so each is visited once.
+    fn appendOwners(self: *const Engine, allocator: Allocator, index: u32, visited: []bool, out: *std.ArrayList(u32)) Error!void {
+        if (visited[index]) return;
+        visited[index] = true;
+        const entry = &self.entries.items[index];
+        try out.append(allocator, entry.owner);
+        try out.appendSlice(allocator, entry.also_owners.items);
+        for (entry.origins.items) |from| try self.appendOwners(allocator, from, visited, out);
+    }
+
+    fn noteFound(self: *Engine, a: Allocator, index: u32) Error!void {
+        const entry = &self.entries.items[index];
+        // Marked already, and nothing has changed owners since.
+        if (entry.noted_at == self.links_version + 1) return;
+        entry.noted_at = self.links_version + 1;
+        if (entry.origins.items.len == 0) {
+            self.steps.items[entry.owner].found = true;
+            for (entry.also_owners.items) |other| self.steps.items[other].found = true;
+            return;
+        }
+        var owners: std.ArrayList(u32) = .empty;
+        const visited = try a.alloc(bool, self.entries.items.len);
+        @memset(visited, false);
+        try self.appendOwners(a, index, visited, &owners);
+        for (owners.items) |step_index| self.steps.items[step_index].found = true;
+    }
+
+    fn appendStepCredits(self: *const Engine, allocator: Allocator, step_index: u32, out: *std.ArrayList(u32)) Error!void {
+        const step = &self.steps.items[step_index];
+        try out.append(allocator, step.credit);
+        try out.appendSlice(allocator, step.more_credits);
+    }
+
+    /// Mark in `found`, indexed like `Source.order`, every `@extend` whose
+    /// target some selector has held so far.
+    pub fn markFound(self: *const Engine, found: []bool) void {
+        for (self.steps.items) |step| {
+            if (!step.found) continue;
+            if (step.credit < found.len) found[step.credit] = true;
+            for (step.more_credits) |credit| {
+                if (credit < found.len) found[credit] = true;
+            }
+        }
     }
 
     pub fn entrySuperseded(self: *const Engine, index: usize) bool {
@@ -434,7 +571,11 @@ pub const Engine = struct {
                 .step => |step| entry.step == step and spec_mod.simpleSelectorEql(entry.target, self.steps.items[step].target),
                 .step_direct => |step| entry.step == step and entry.direct,
             };
-            if (visible) try out.append(a, entry);
+            if (visible) {
+                try out.append(a, entry);
+                // A selector holds the target: the `@extend` found it.
+                try self.noteFound(a, index);
+            }
         }
     }
 
@@ -454,17 +595,38 @@ pub const Engine = struct {
             }
         }
         if (!changed) return items;
-        if (self.replace) return out.items;
         return trim(a, out.items);
+    }
+
+    fn byFunction(self: *const Engine) bool {
+        return self.mode == .function or self.mode == .replace;
+    }
+
+    /// Note the targets a selector that is left alone holds, those in the
+    /// arguments of its pseudo-classes included.
+    fn noteHeld(self: *Engine, a: Allocator, complex: *const ComplexSelector, view: View) Error!void {
+        var ignored: std.ArrayList(*const Entry) = .empty;
+        for (complex.components.items) |*component| {
+            if (component.* != .compound) continue;
+            for (component.compound.simple_selectors.items) |simple| {
+                try self.entriesFor(a, simple, view, &ignored);
+                const inner = pseudoSelectorOf(simple) orelse continue;
+                for (inner.selectors.items) |*inner_complex| try self.noteHeld(a, inner_complex, view);
+            }
+        }
     }
 
     /// Every combination of the results of the selector's compounds, the
     /// selector itself first. Null when nothing in it is extended.
     fn extendComplex(self: *Engine, a: Allocator, item: *const Item, view: View) Error!?[]Item {
         const pieces = item.pieces;
-        // A selector with two combinators in a row is left alone.
+        // A selector with two combinators in a row is left alone, though
+        // a target in it counts as found.
         for (pieces[0..pieces.len -| 1], pieces[@min(1, pieces.len)..]) |x, y| {
-            if (x == .combinator and y == .combinator) return null;
+            if (x == .combinator and y == .combinator) {
+                try self.noteHeld(a, &item.complex, view);
+                return null;
+            }
         }
         var options: std.ArrayList(?[]const Made) = .empty;
         var any = false;
@@ -495,11 +657,18 @@ pub const Engine = struct {
                 const list = options.items[index] orelse continue;
                 if (choice[index] != 0) all_first = false;
                 if (list[choice[index]].newline) newline = true;
-                if (pieces.len == 1 and list[choice[index]].written_extender) written_extender = true;
+                // In a selector function the extender is protected only
+                // among the results of its compound.
+                // In a replacement the first of them stands as written
+                // whatever the selector it takes the place of was.
+                const protects = self.mode == .written or (self.replace and choice[index] == 0);
+                if (pieces.len == 1 and protects and list[choice[index]].written_extender) written_extender = true;
             }
             const woven = try weaveChoice(a, pieces, options.items, choice);
-            for (woven) |made| {
-                try results.append(a, try makeItem(a, made, (item.original and all_first) or written_extender, newline));
+            for (woven, 0..) |made, woven_index| {
+                // In a replacement the first result stands where the
+                // selector stood.
+                try results.append(a, try makeItem(a, made, (item.original and all_first and woven_index == 0) or written_extender, newline));
             }
 
             // The first position varies fastest.
@@ -569,9 +738,12 @@ pub const Engine = struct {
                     if (self.replace and entries.len != 0) valid = false;
                     continue;
                 }
-                // Every target of the chosen extender goes with it.
+                // Every target of the chosen extender goes with it. Not
+                // in `selector.extend()`: there the compound must hold
+                // all the targets, and each of them is then extended or
+                // left by itself.
                 const entry = entries[choice[index] - 1];
-                if (entry.targets.len == 1) continue;
+                if (entry.targets.len == 1 or self.mode == .function) continue;
                 for (compound.simples, 0..) |simple, other| {
                     if (other == index or !holdsAll(entry.targets, &[_]SimpleSelector{simple})) continue;
                     if (choice[other] == 0 or choices.items[other][choice[other] - 1] != entry) valid = false;
@@ -614,9 +786,11 @@ pub const Engine = struct {
         if (results.items.len == 0) return null;
         var items: std.ArrayList(Item) = .empty;
         for (results.items, 0..) |made, index| {
+            // In a replacement nothing stands for the compound itself:
+            // any result can give way to another.
             try items.append(a, try makeItem(a, made.pieces, (index == 0 and !self.replace) or made.written_extender, made.newline));
         }
-        const kept = if (self.replace or !trim_results) items.items else try trim(a, items.items);
+        const kept = if (!trim_results) items.items else try trim(a, items.items);
         const out = try a.alloc(Made, kept.len);
         for (kept, 0..) |item, index| {
             var written_extender = false;
@@ -721,7 +895,9 @@ fn unifyChosen(
 ) Error!void {
     var newline = false;
     var trailing: ?Combinator = null;
-    const written_extender = base_simples.items.len == 0 and chosen.len == 1 and chosen[0].written;
+    // An extender that takes the place of a compound of one simple
+    // selector stands as it was written.
+    const written_extender = base_simples.items.len == 0 and chosen.len == 1 and chosen[0].targets.len == 1 and chosen[0].written;
     // Parents, each ending with the combinator that binds it to the compound.
     var parents: std.ArrayList([]const Piece) = .empty;
     try parents.append(a, &.{});
@@ -1444,6 +1620,11 @@ fn concat(a: Allocator, x: []const Piece, y: []const Piece) Error![]const Piece 
 /// as the extenders it came from. A written selector goes only when the
 /// same selector, written the same way, comes before it (`.b.c` stays
 /// beside `.c.b`). A long list is not trimmed at all.
+/// A written selector is dropped as a repeat only when the same one is
+/// among the selectors kept right after it, as many of them as written
+/// selectors were kept so far; it then stays in place of that one.
+/// `.c, .c, .a` loses a `.c`; `.c, .a, .c` extended by `.x` for `.a` keeps
+/// both, the `.x` standing between them.
 fn trim(a: Allocator, items: []Item) Error![]Item {
     // The official CLI leaves a list of more than a hundred selectors as
     // it is.
@@ -1452,6 +1633,7 @@ fn trim(a: Allocator, items: []Item) Error![]Item {
     for (items, 0..) |*item, index| specs[index] = spec_mod.complexSpecificity(&item.complex);
     const kept = try a.alloc(bool, items.len);
     @memset(kept, false);
+    var originals_kept: usize = 0;
 
     var index = items.len;
     while (index > 0) {
@@ -1460,15 +1642,21 @@ fn trim(a: Allocator, items: []Item) Error![]Item {
         const source = sourceSpec(item.pieces);
         var covered = false;
         if (item.original) {
-            for (items[0..index]) |*other| {
-                if (other.original and sameAsWritten(&other.complex, &item.complex)) {
-                    // The one that stays is written where this one was
-                    // written: on a line of its own or not.
-                    other.complex.leading_separator_has_newline = item.complex.leading_separator_has_newline;
-                    covered = true;
+            var seen: usize = 0;
+            var later = index + 1;
+            while (later < items.len and seen < originals_kept) : (later += 1) {
+                if (!kept[later]) continue;
+                seen += 1;
+                if (items[later].original and sameAsWritten(&items[later].complex, &item.complex)) {
+                    // This one stays in place of the later one, written
+                    // where that one was: on a line of its own or not.
+                    item.complex.leading_separator_has_newline = items[later].complex.leading_separator_has_newline;
+                    kept[later] = false;
+                    originals_kept -= 1;
                     break;
                 }
             }
+            originals_kept += 1;
         } else {
             for (items, 0..) |*other, other_index| {
                 if (other_index == index) continue;

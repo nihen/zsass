@@ -2457,3 +2457,168 @@ test "api: @extend keeps the results of an extender extended by itself" {
         \\
     , css);
 }
+
+test "api: an @extend finds its target where the extension holds it" {
+    const alloc = std.testing.allocator;
+    // `:is(.a)` is extended by `.y` before `.x` looks for it, so `.x` does
+    // not find it.
+    const missing =
+        \\.x {@extend :is(.a)}
+        \\.y {@extend .a}
+        \\:is(.a) {x: y}
+        \\
+    ;
+    try std.testing.expectError(error.SassError, compileSourceToCss(alloc, missing, "", &.{}, .{ .quiet = true }));
+
+    // Written again as optional in the same rule, it is still mandatory.
+    const repeated =
+        \\.x {@extend :is(.a) !optional; @extend :is(.a)}
+        \\.y {@extend .a}
+        \\:is(.a) {x: y}
+        \\
+    ;
+    try std.testing.expectError(error.SassError, compileSourceToCss(alloc, repeated, "", &.{}, .{ .quiet = true }));
+
+    // A selector with two combinators in a row is left alone, but a
+    // target in it, in a pseudo-class argument too, is found.
+    const left_alone =
+        \\.x {@extend .a}
+        \\:is(.a) > > .b {x: y}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, left_alone, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings("", css);
+}
+
+test "api: selector functions take their extendees one after the other" {
+    const alloc = std.testing.allocator;
+    // Also: the rule of an `@extend` holds its own target, and a selector
+    // written twice is dropped only next to its repeat.
+    const source =
+        \\@use "sass:selector";
+        \\.f .g {@extend .f}
+        \\.a.c, .a.c {x: 0}
+        \\.z {@extend .a}
+        \\a {
+        \\  r1: selector.replace(".a.b.c", ".a.b, .a.c", ".x");
+        \\  r2: selector.replace(".c", ".c", ".x, .c");
+        \\  r3: selector.replace(".c, .c.b", ".a, .b", ".x, .c .y .c");
+        \\  r4: selector.replace(".a.b, .c", ".a", ".c");
+        \\  r5: selector.replace(".a, .a", ".a", ".x, .z");
+        \\  r6: selector.replace(".c.a", ".c, .c", ".y.c > .x + .c");
+        \\  r7: selector.replace(".d > .b.c > .a.d", ".a", ".q, .a ~ .x > .q");
+        \\  e1: selector.extend(".a.b", ".c.b, .a.b", ".x + .x.a");
+        \\  e2: selector.extend(".c, .a, .c", ".a", ".x");
+        \\  e3: selector.extend(".c, .c, .a", ".a", ".x");
+        \\  e4: selector.extend(".d > .b > .a", ".a", ".y ~ .b > .a.z");
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.a.c, .c.z, .a.c {
+        \\  x: 0;
+        \\}
+        \\
+        \\a {
+        \\  r1: .c.x;
+        \\  r2: .x, .c;
+        \\  r3: .c, .c.x;
+        \\  r4: .b.c, .c;
+        \\  r5: .x, .z, .x;
+        \\  r6: .y.c > .x + .y.c > .x + .a.c;
+        \\  r7: .d > .b.c > .d.q;
+        \\  e1: .a.b, .x + .a.x;
+        \\  e2: .c, .a, .x, .c;
+        \\  e3: .c, .a, .x;
+        \\  e4: .d > .b > .a, .d > .y ~ .b > .a.z;
+        \\}
+        \\
+    , css);
+}
+
+test "api: @extend across modules keeps repeats and credits every @extend" {
+    const alloc = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    try writeApiTmpFileAll(&tmp_dir, "_repeats.scss",
+        \\.a.c, .a.c {x: 0}
+        \\.c, .a, .c {x: 1}
+    );
+    try writeApiTmpFileAll(&tmp_dir, "_target.scss",
+        \\.t {x: y}
+    );
+
+    const tmp_path = try zsass_io.realPathAlloc(tmp_dir.dir, ".", alloc);
+    defer alloc.free(tmp_path);
+    const entry_path = try std.fs.path.join(alloc, &.{ tmp_path, "entry.scss" });
+    defer alloc.free(entry_path);
+
+    const repeats = try compileSourceToCss(alloc,
+        \\@use "repeats";
+        \\.z {@extend .a}
+    , entry_path, &.{}, .{ .quiet = true });
+    defer alloc.free(repeats);
+    try std.testing.expectEqualStrings(
+        \\.a.c, .c.z, .a.c {
+        \\  x: 0;
+        \\}
+        \\
+        \\.c, .a, .z, .c {
+        \\  x: 1;
+        \\}
+        \\
+    , repeats);
+
+    // Two `@extend`s whose extenders end up the same both found `.t`,
+    // also through the extender that a later `@extend` makes of it.
+    const credited = try compileSourceToCss(alloc,
+        \\@use "target";
+        \\.b {@extend .a}
+        \\.x:is(.a) {@extend .t}
+        \\.x:is(.a, .b) {@extend .t}
+        \\.c {@extend .a}
+    , entry_path, &.{}, .{ .quiet = true });
+    defer alloc.free(credited);
+    try std.testing.expectEqualStrings(
+        \\.t, .x:is(.a, .c, .b) {
+        \\  x: y;
+        \\}
+        \\
+    , credited);
+
+    // The same when the extender made later is the one written first.
+    const credited_back = try compileSourceToCss(alloc,
+        \\@use "target";
+        \\.x:is(.a, .b) {@extend .t}
+        \\.x:is(.a) {@extend .t}
+        \\.b {@extend .a}
+    , entry_path, &.{}, .{ .quiet = true });
+    defer alloc.free(credited_back);
+    try std.testing.expectEqualStrings(
+        \\.t, .x:is(.a, .b) {
+        \\  x: y;
+        \\}
+        \\
+    , credited_back);
+}
+
+test "api: a selector with an escaped space is extended like any other" {
+    const alloc = std.testing.allocator;
+    const css = try compileSourceToCss(alloc,
+        \\.a.foo\ bar {x: y}
+        \\.x {@extend .a}
+        \\
+    , "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.a.foo\ bar, .foo\ bar.x {
+        \\  x: y;
+        \\}
+        \\
+    , css);
+}

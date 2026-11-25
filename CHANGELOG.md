@@ -91,6 +91,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   itself: with `.d {…}`, `.f.c > .k {@extend .d}`, and
   `.d .m.f {@extend .f}`, the rule gains
   `.f.c > .k .c.m.f > .k .c.m.f > .k` as with the official CLI.
+- A mandatory `@extend` reports "The target selector was not found" by
+  what the extension itself saw. `.x {@extend :is(.a)}` followed by
+  `.y {@extend .a}` and `:is(.a) {…}` is now an error, as with the
+  official CLI; `.f .g {@extend .f}` alone, whose own selector holds the
+  target, now compiles.
+- `selector.replace()` and `selector.extend()` take several extendees one
+  after the other, each on what the one before left:
+  `selector.replace(".a.b.c", ".a.b, .a.c", ".x")` is `.c.x`, and
+  `selector.replace(".c", ".c", ".x, .c")` is `.x, .c`.
+- A selector written twice in one list is dropped only when it stands
+  next to its repeat: `.a.c, .a.c {…}` extended by `.z {@extend .a}` is
+  `.a.c, .c.z, .a.c`.
+- A rule whose selector has an escaped space is extended like any other:
+  `.a.foo\ bar {…}` with `.x {@extend .a}` is `.a.foo\ bar, .foo\ bar.x`.
 - `selector.extend()` and `selector.replace()` use the same implementation.
 - `selector.is-superselector()` matches front to back as the official CLI
   does: `.a .x` does not cover `.a.e + .a.b .x`, and `::foo` covers
