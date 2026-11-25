@@ -183,7 +183,7 @@ pub fn list_index(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
         const cache_key = if (ctx.list_index_cache != null and list_value.kind() == .list and listIndexNeedleIsCacheable(needle))
             ListIndexCacheKey{
                 .list_handle = list_value.listHandle(),
-                .needle_kind = @intFromEnum(needle.kind()),
+                .needle_kind = @backingInt(needle.kind()),
                 .needle_p32 = needle.p32Of(),
                 .needle_p64 = needle.p64Of(),
             }
@@ -566,7 +566,7 @@ test "list.join coerces slash-free rest-like slash lists" {
     const names = [_]InternId{ .none, .none };
     const result = try list_join(&ctx, args[0..], names[0..]);
 
-    try testing.expectEqual(@as(u8, @intFromEnum(ListSeparator.space)), @as(u8, @intFromEnum(result.listSeparator(ctx.list_meta_pool.items))));
+    try testing.expectEqual(@as(u8, @backingInt(ListSeparator.space)), @as(u8, @backingInt(result.listSeparator(ctx.list_meta_pool.items))));
     const out_items = ctx.list_pool.items[result.listHandle()];
     try testing.expectEqual(@as(usize, 2), out_items.len);
     try testing.expectEqual(.number, out_items[0].kind());

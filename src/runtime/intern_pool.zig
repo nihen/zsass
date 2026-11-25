@@ -71,7 +71,7 @@ pub const InternPool = struct {
         // Dupe into arena so the slice is stable, then replace the temporary
         // uninitialized lookup key slot with the owned copy.
         const copy = try self.arena.dupe(u8, s);
-        const new_id: InternId = @enumFromInt(@as(u32, @intCast(self.strings.items.len)));
+        const new_id: InternId = @fromBackingInt(@intCast(@as(u32, @intCast(self.strings.items.len))));
         errdefer self.arena.free(copy);
         try self.strings.ensureUnusedCapacity(self.arena, 1);
         try self.string_meta.ensureUnusedCapacity(self.arena, 1);
@@ -91,7 +91,7 @@ pub const InternPool = struct {
     /// after the id fast path.
     pub fn storeFresh(self: *InternPool, s: []const u8) std.mem.Allocator.Error!InternId {
         const copy = try self.arena.dupe(u8, s);
-        const new_id: InternId = @enumFromInt(@as(u32, @intCast(self.strings.items.len)));
+        const new_id: InternId = @fromBackingInt(@intCast(@as(u32, @intCast(self.strings.items.len))));
         errdefer self.arena.free(copy);
         try self.strings.ensureUnusedCapacity(self.arena, 1);
         try self.string_meta.ensureUnusedCapacity(self.arena, 1);
@@ -103,13 +103,13 @@ pub const InternPool = struct {
     /// Return the string for `id`.  Asserts `id != .none`.
     pub fn get(self: *const InternPool, id: InternId) []const u8 {
         std.debug.assert(id != .none);
-        return self.strings.items[@intFromEnum(id)];
+        return self.strings.items[@backingInt(id)];
     }
 
     /// True when the stored bytes contain `\`.
     pub fn hasBackslash(self: *const InternPool, id: InternId) bool {
         std.debug.assert(id != .none);
-        return (self.string_meta.items[@intFromEnum(id)] & string_meta_has_backslash) != 0;
+        return (self.string_meta.items[@backingInt(id)] & string_meta_has_backslash) != 0;
     }
 
     /// Meta byte with the lazy calc bits guaranteed computed. Test the result
@@ -121,7 +121,7 @@ pub const InternPool = struct {
     /// participate in equality.
     pub inline fn calcMetaByte(self: *InternPool, id: InternId) u8 {
         std.debug.assert(id != .none);
-        const idx: usize = @intFromEnum(id);
+        const idx: usize = @backingInt(id);
         const meta = self.string_meta.items[idx];
         if ((meta & string_meta_calc_scanned) != 0) return meta;
         return self.calcMetaSlow(idx);
@@ -266,7 +266,7 @@ const well_known = struct {
     /// Slot 0 of the pool is the .none sentinel, so ids start at 1.
     /// Works at both comptime and runtime.
     fn id(idx: usize) InternId {
-        return @enumFromInt(@as(u32, @intCast(idx + 1)));
+        return @fromBackingInt(@intCast(@as(u32, @intCast(idx + 1))));
     }
 
     // sigils

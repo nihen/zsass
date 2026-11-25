@@ -29,7 +29,7 @@ fn topLevelAtRuleKeepsModuleDirectiveOpen(ast: *const ast_flat.Ast, pool: *const
     if (n.tag != .stmt_at_rule) return false;
 
     const off: ExtraIndex = n.payload;
-    const name_id: InternId = @enumFromInt(ast.getExtraU32(off));
+    const name_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off)));
     const raw_name = extractRawAtRuleNameText(ast.source, n.span_start, n.span_end) orelse pool.get(name_id);
     if (std.mem.indexOf(u8, raw_name, "#{") != null) return false;
     return cssIdentEquals(atRuleNameRaw(raw_name), "charset");

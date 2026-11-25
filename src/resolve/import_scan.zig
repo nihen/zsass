@@ -11,7 +11,7 @@ fn readChildList(ast: *const ast_flat.Ast, extra_off: ExtraIndex) []const u32 {
 
 pub fn hasBareImportedTopLevelDeclaration(ast: *const ast_flat.Ast, stmts: []const u32) bool {
     for (stmts) |u| {
-        const node = ast.getNode(@enumFromInt(u));
+        const node = ast.getNode(@fromBackingInt(@intCast(u)));
         switch (node.tag) {
             .stmt_declaration => return true,
             .stmt_if => {

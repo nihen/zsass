@@ -61,11 +61,11 @@ pub const PhaseTimer = struct {
 };
 
 pub const OpcodeHistogram = struct {
-    counts: [@intFromEnum(opcode_mod.Opcode._op_count)]u64 = [_]u64{0} ** @intFromEnum(opcode_mod.Opcode._op_count),
+    counts: [@backingInt(opcode_mod.Opcode._op_count)]u64 = @splat(0),
 
     pub inline fn tick(self: *OpcodeHistogram, op: opcode_mod.Opcode) void {
         std.debug.assert(op != ._op_count);
-        self.counts[@intFromEnum(op)] += 1;
+        self.counts[@backingInt(op)] += 1;
     }
 
     pub fn report(self: *const OpcodeHistogram, writer: anytype) !void {
@@ -78,12 +78,12 @@ pub const OpcodeHistogram = struct {
             return;
         }
 
-        const OpCount = @intFromEnum(opcode_mod.Opcode._op_count);
+        const OpCount = @backingInt(opcode_mod.Opcode._op_count);
         const HistEntry = struct { op: opcode_mod.Opcode, count: u64 };
         var scratch: [OpCount]HistEntry = undefined;
         var n: usize = 0;
-        for (0..@intFromEnum(opcode_mod.Opcode._op_count)) |i| {
-            const tag: opcode_mod.Opcode = @enumFromInt(i);
+        for (0..@backingInt(opcode_mod.Opcode._op_count)) |i| {
+            const tag: opcode_mod.Opcode = @fromBackingInt(@intCast(i));
             const c = self.counts[i];
             if (c == 0) continue;
             scratch[n] = .{ .op = tag, .count = c };
@@ -132,13 +132,13 @@ fn disassembleInstruction(
     intern_pool: *const intern_pool_mod.InternPool,
     writer: anytype,
 ) !void {
-    if (inst.op >= @intFromEnum(opcode_mod.Opcode._op_count)) {
+    if (inst.op >= @backingInt(opcode_mod.Opcode._op_count)) {
         try writer.print("  {d:0>4}  (unknown)     op={d} arg_a={d} arg_b={d}\n", .{
             pc, inst.op, inst.arg_a, inst.arg_b,
         });
         return;
     }
-    const op: opcode_mod.Opcode = @enumFromInt(inst.op);
+    const op: opcode_mod.Opcode = @fromBackingInt(@intCast(inst.op));
     var mnem_buf: [72]u8 = undefined;
     const mnem = opcodeMnemonicBuf(op, &mnem_buf);
 
@@ -218,7 +218,7 @@ fn constComment(
             if (idx >= const_pool.len) return tryFmt(buf, "const #{d} (oob)", .{idx});
             return formatValueBrief(const_pool[idx], intern_pool, buf);
         },
-        .make_string => return tryFmt(buf, "\"{s}\"", .{intern_pool.get(@enumFromInt(@as(u32, @truncate(inst.arg_b))))}),
+        .make_string => return tryFmt(buf, "\"{s}\"", .{intern_pool.get(@fromBackingInt(@intCast(@as(u32, @truncate(inst.arg_b)))))}),
         else => return null,
     }
 }

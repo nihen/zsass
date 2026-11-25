@@ -3,7 +3,7 @@
 [![CI](https://github.com/nihen/zsass/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nihen/zsass/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/nihen/zsass?display_name=tag&sort=semver)](https://github.com/nihen/zsass/releases/latest)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Zig 0.16+](https://img.shields.io/badge/zig-0.16%2B-orange.svg)](https://ziglang.org/)
+[![Zig 0.17.1+](https://img.shields.io/badge/zig-0.17.1%2B-orange.svg)](https://ziglang.org/)
 [![sass-spec](https://img.shields.io/badge/sass--spec-14497%2F14497-brightgreen.svg)](https://github.com/sass/sass-spec)
 
 A clean-room Sass compiler written in Zig for native and Zig
@@ -131,7 +131,7 @@ cosign verify-blob \
 workflow. The signing material lives in the public Sigstore Rekor
 transparency log - no secret keys are involved.
 
-### From source (Zig 0.16+)
+### From source (Zig 0.17.1+)
 
 ```bash
 zig build -Doptimize=ReleaseFast        # binary at zig-out/bin/zsass

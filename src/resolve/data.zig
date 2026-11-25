@@ -20,7 +20,7 @@ pub const ExprIndex = u32;
 pub const StmtIndex = u32;
 /// Internal sentinel for `call_arg_names`.
 /// `InternId.none` usually represents a positional arg, so use a different value to distinguish `$args...`.
-pub const call_arg_splat_sentinel: InternId = @enumFromInt(std.math.maxInt(u32));
+pub const call_arg_splat_sentinel: InternId = @fromBackingInt(@intCast(std.math.maxInt(u32)));
 pub const media_prelude_has_interp_flag: u8 = 1;
 pub const media_prelude_interp_at_start_flag: u8 = 2;
 pub const media_prelude_compact_dynamic_feature_colon_flag: u8 = 4;

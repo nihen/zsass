@@ -947,11 +947,11 @@ fn hasFutureTopLevelMixinDecl(ctx: *Ctx, name_slice: []const u8, after_span_star
     if (root_node.tag != .stylesheet_root) return false;
     const root_children = readChildList(ctx.ast, root_node.payload);
     for (root_children) |u| {
-        const child_idx: NodeIndex = @enumFromInt(u);
+        const child_idx: NodeIndex = @fromBackingInt(@intCast(u));
         const child = ctx.ast.getNode(child_idx);
         if (child.tag != .stmt_mixin_decl) continue;
         if (child.span_start <= after_span_start) continue;
-        const child_name_id: InternId = @enumFromInt(ctx.ast.getExtraU32(child.payload));
+        const child_name_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(child.payload)));
         const raw_child_name = ctx.pool.get(child_name_id);
         const unescaped_child_name = try css_utils.unescapeSassIdentifier(ctx.a, raw_child_name);
         defer if (unescaped_child_name.ptr != raw_child_name.ptr) ctx.a.free(unescaped_child_name);
@@ -1519,12 +1519,12 @@ fn markCalcInterpText(ctx: *Ctx, raw: []const u8) ResolveError!InternId {
 fn shouldPreserveCalcParensNode(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) bool {
     const n = ast.getNode(node);
     return switch (n.tag) {
-        .expr_paren => shouldPreserveCalcParensNode(ast, ctx, @enumFromInt(n.payload)),
+        .expr_paren => shouldPreserveCalcParensNode(ast, ctx, @fromBackingInt(@intCast(n.payload))),
         .expr_unquoted_ident, .expr_interp, .expr_string_interp => true,
         .expr_func_call => blk: {
             const off: ExtraIndex = n.payload;
-            const name_id: InternId = @enumFromInt(ast.getExtraU32(off));
-            const ns_id: InternId = @enumFromInt(ast.getExtraU32(off + 1));
+            const name_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const ns_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
             if (ns_id != .none) break :blk false;
             const raw_name = ctx.pool.get(name_id);
             break :blk identifierEq(raw_name, "var") or identifierEq(raw_name, "env");
@@ -1536,11 +1536,11 @@ fn shouldPreserveCalcParensNode(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeI
 fn nodeIsCalcLikeFunctionCall(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) bool {
     const n = ast.getNode(node);
     return switch (n.tag) {
-        .expr_paren => nodeIsCalcLikeFunctionCall(ast, ctx, @enumFromInt(n.payload)),
+        .expr_paren => nodeIsCalcLikeFunctionCall(ast, ctx, @fromBackingInt(@intCast(n.payload))),
         .expr_func_call => blk: {
             const off: ExtraIndex = n.payload;
-            const name_id: InternId = @enumFromInt(ast.getExtraU32(off));
-            const ns_id: InternId = @enumFromInt(ast.getExtraU32(off + 1));
+            const name_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const ns_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
             if (ns_id != .none) break :blk false;
             const raw_name = ctx.pool.get(name_id);
             break :blk identifierEq(raw_name, "calc") or
@@ -1555,11 +1555,11 @@ fn nodeIsCalcLikeFunctionCall(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeInd
 fn nodeIsCalcFunctionCall(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) bool {
     const n = ast.getNode(node);
     return switch (n.tag) {
-        .expr_paren => nodeIsCalcFunctionCall(ast, ctx, @enumFromInt(n.payload)),
+        .expr_paren => nodeIsCalcFunctionCall(ast, ctx, @fromBackingInt(@intCast(n.payload))),
         .expr_func_call => blk: {
             const off: ExtraIndex = n.payload;
-            const name_id: InternId = @enumFromInt(ast.getExtraU32(off));
-            const ns_id: InternId = @enumFromInt(ast.getExtraU32(off + 1));
+            const name_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const ns_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
             if (ns_id != .none) break :blk false;
             const raw_name = ctx.pool.get(name_id);
             break :blk identifierEq(raw_name, "calc");
@@ -1571,23 +1571,23 @@ fn nodeIsCalcFunctionCall(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) 
 fn nodeContainsCalcArgOpaqueCssFunction(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) bool {
     const n = ast.getNode(node);
     return switch (n.tag) {
-        .expr_paren => nodeContainsCalcArgOpaqueCssFunction(ast, ctx, @enumFromInt(n.payload)),
+        .expr_paren => nodeContainsCalcArgOpaqueCssFunction(ast, ctx, @fromBackingInt(@intCast(n.payload))),
         .expr_unary_op => blk: {
             const off: ExtraIndex = n.payload;
-            const operand: NodeIndex = @enumFromInt(ast.getExtraU32(off));
+            const operand: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
             break :blk nodeContainsCalcArgOpaqueCssFunction(ast, ctx, operand);
         },
         .expr_binary_op, .expr_slash_expr => blk: {
             const off: ExtraIndex = n.payload;
-            const lhs: NodeIndex = @enumFromInt(ast.getExtraU32(off));
-            const rhs: NodeIndex = @enumFromInt(ast.getExtraU32(off + 1));
+            const lhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const rhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
             break :blk nodeContainsCalcArgOpaqueCssFunction(ast, ctx, lhs) or
                 nodeContainsCalcArgOpaqueCssFunction(ast, ctx, rhs);
         },
         .expr_func_call => blk: {
             const off: ExtraIndex = n.payload;
-            const name_id: InternId = @enumFromInt(ast.getExtraU32(off));
-            const ns_id: InternId = @enumFromInt(ast.getExtraU32(off + 1));
+            const name_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const ns_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
             if (ns_id != .none) break :blk false;
             const raw_name = ctx.pool.get(name_id);
             break :blk identifierEq(raw_name, "var") or identifierEq(raw_name, "env");
@@ -1668,7 +1668,7 @@ const SlashSim = struct {
     }
 
     fn divides(self: *const SlashSim, node: NodeIndex) bool {
-        return self.divide.contains(@intFromEnum(node));
+        return self.divide.contains(@backingInt(node));
     }
 
     /// Whether following is worth it for the expression at `n`: it has
@@ -1693,13 +1693,13 @@ const SlashSim = struct {
         const children = readChildList(self.ast, n.payload);
         if (n.span_start >= self.ast.source.len or self.ast.source[n.span_start] != '(') return false;
         if (children.len == 0) return true;
-        return self.ast.getNode(@enumFromInt(children[0])).span_start > n.span_start;
+        return self.ast.getNode(@fromBackingInt(@intCast(children[0]))).span_start > n.span_start;
     }
 
     /// Reads what is between two commas: one item, or several separated
     /// by spaces.
     fn readElement(self: *SlashSim, node: NodeIndex) ResolveError!void {
-        const key = (@as(u64, @intFromEnum(node)) << 1) | @intFromBool(self.in_parens);
+        const key = (@as(u64, @backingInt(node)) << 1) | @intFromBool(self.in_parens);
         if (self.read.get(key)) |known| {
             for (self.read_marks.items[known.marks_start..][0..known.marks_len]) |mark| {
                 try self.divide.put(self.allocator, mark, {});
@@ -1721,7 +1721,7 @@ const SlashSim = struct {
 
     fn readElementAnew(self: *SlashSim, node: NodeIndex) ResolveError!void {
         const n = self.ast.getNode(node);
-        const items: []const u32 = if (n.tag == .expr_space_list) readChildList(self.ast, n.payload) else &.{@intFromEnum(node)};
+        const items: []const u32 = if (n.tag == .expr_space_list) readChildList(self.ast, n.payload) else &.{@backingInt(node)};
         const marked_before = self.marked.items.len;
         var again = false;
         while (true) {
@@ -1729,7 +1729,7 @@ const SlashSim = struct {
             var flow: Flow = .done;
             for (items, 0..) |child, index| {
                 var item: Item = .{ .first_part_pending = index != 0, .previous_allows = previous_allows };
-                flow = try self.visit(@enumFromInt(child), &item);
+                flow = try self.visit(@fromBackingInt(@intCast(child)), &item);
                 if (flow == .read_again) break;
                 previous_allows = item.allowsReadingAgain();
             }
@@ -1743,7 +1743,7 @@ const SlashSim = struct {
     }
 
     fn readCommaSeparated(self: *SlashSim, children: []const u32) ResolveError!void {
-        for (children) |child| try self.readElement(@enumFromInt(child));
+        for (children) |child| try self.readElement(@fromBackingInt(@intCast(child)));
     }
 
     /// The first part of an item has been read.
@@ -1760,30 +1760,30 @@ const SlashSim = struct {
         const n = self.ast.getNode(node);
         switch (n.tag) {
             .expr_slash_expr => {
-                const lhs: NodeIndex = @enumFromInt(self.ast.getExtraU32(n.payload));
-                const rhs: NodeIndex = @enumFromInt(self.ast.getExtraU32(n.payload + 1));
+                const lhs: NodeIndex = @fromBackingInt(@intCast(self.ast.getExtraU32(n.payload)));
+                const rhs: NodeIndex = @fromBackingInt(@intCast(self.ast.getExtraU32(n.payload + 1)));
                 if (try self.visit(lhs, item) == .read_again) return .read_again;
                 // The operation on the left is settled when this slash is
                 // read, before what is on its right.
                 if (self.ast.getNode(lhs).tag == .expr_slash_expr and (self.in_parens or item.saw_operator)) {
-                    try self.divide.put(self.allocator, @intFromEnum(lhs), {});
-                    try self.marked.append(self.allocator, @intFromEnum(lhs));
+                    try self.divide.put(self.allocator, @backingInt(lhs), {});
+                    try self.marked.append(self.allocator, @backingInt(lhs));
                 }
                 item.slashes += 1;
                 return try self.visit(rhs, item);
             },
             .expr_binary_op => {
-                const lhs: NodeIndex = @enumFromInt(self.ast.getExtraU32(n.payload));
-                const rhs: NodeIndex = @enumFromInt(self.ast.getExtraU32(n.payload + 1));
+                const lhs: NodeIndex = @fromBackingInt(@intCast(self.ast.getExtraU32(n.payload)));
+                const rhs: NodeIndex = @fromBackingInt(@intCast(self.ast.getExtraU32(n.payload + 1)));
                 if (try self.visit(lhs, item) == .read_again) return .read_again;
                 item.saw_operator = true;
                 return try self.visit(rhs, item);
             },
-            .expr_unary_op => return try self.visit(@enumFromInt(self.ast.getExtraU32(n.payload)), item),
+            .expr_unary_op => return try self.visit(@fromBackingInt(@intCast(self.ast.getExtraU32(n.payload))), item),
             .expr_paren => {
                 const outside = self.in_parens;
                 self.in_parens = true;
-                const inner: NodeIndex = @enumFromInt(n.payload);
+                const inner: NodeIndex = @fromBackingInt(@intCast(n.payload));
                 const inner_node = self.ast.getNode(inner);
                 if (inner_node.tag == .expr_comma_list) {
                     try self.readCommaSeparated(readChildList(self.ast, inner_node.payload));
@@ -1808,28 +1808,28 @@ const SlashSim = struct {
                 const pair_count = self.ast.getExtraU32(n.payload);
                 var index: u32 = 0;
                 while (index < pair_count) : (index += 1) {
-                    try self.readElement(@enumFromInt(self.ast.getExtraU32(n.payload + 1 + index)));
-                    try self.readElement(@enumFromInt(self.ast.getExtraU32(n.payload + 1 + pair_count + index)));
+                    try self.readElement(@fromBackingInt(@intCast(self.ast.getExtraU32(n.payload + 1 + index))));
+                    try self.readElement(@fromBackingInt(@intCast(self.ast.getExtraU32(n.payload + 1 + pair_count + index))));
                 }
                 self.in_parens = outside;
             },
             // An interpolation and a spread are read where they stand.
-            .expr_interp, .expr_splat => try self.readElement(@enumFromInt(n.payload)),
+            .expr_interp, .expr_splat => try self.readElement(@fromBackingInt(@intCast(n.payload))),
             .expr_string_interp, .expr_text_template => {
                 const part_count = self.ast.getExtraU32(n.payload);
                 var index: u32 = 0;
                 while (index < part_count) : (index += 1) {
                     if (self.ast.getExtraU32(n.payload + 1 + index * 2) == 0) continue;
-                    try self.readElement(@enumFromInt(self.ast.getExtraU32(n.payload + 2 + index * 2)));
+                    try self.readElement(@fromBackingInt(@intCast(self.ast.getExtraU32(n.payload + 2 + index * 2))));
                 }
             },
             .expr_bracketed_list => {
                 for (readChildList(self.ast, n.payload)) |child| {
-                    const child_node = self.ast.getNode(@enumFromInt(child));
+                    const child_node = self.ast.getNode(@fromBackingInt(@intCast(child)));
                     if (child_node.tag == .expr_comma_list) {
                         try self.readCommaSeparated(readChildList(self.ast, child_node.payload));
                     } else {
-                        try self.readElement(@enumFromInt(child));
+                        try self.readElement(@fromBackingInt(@intCast(child)));
                     }
                 }
             },
@@ -1837,7 +1837,7 @@ const SlashSim = struct {
                 const arg_count = self.ast.getExtraU32(n.payload + 2);
                 var index: u32 = 0;
                 while (index < arg_count) : (index += 1) {
-                    try self.readElement(@enumFromInt(self.ast.getExtraU32(n.payload + 3 + index)));
+                    try self.readElement(@fromBackingInt(@intCast(self.ast.getExtraU32(n.payload + 3 + index))));
                 }
             },
             else => {},
@@ -1851,15 +1851,15 @@ fn nodeIsLiteralNumberSlashRun(ast: *const ast_flat.Ast, node: NodeIndex) bool {
     const n = ast.getNode(node);
     if (n.tag != .expr_slash_expr) return false;
     const off: ExtraIndex = n.payload;
-    const lhs: NodeIndex = @enumFromInt(ast.getExtraU32(off));
-    const rhs: NodeIndex = @enumFromInt(ast.getExtraU32(off + 1));
+    const lhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+    const rhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
     return isLiteralNumberNode(ast, rhs) and (isLiteralNumberNode(ast, lhs) or nodeIsLiteralNumberSlashRun(ast, lhs));
 }
 
 fn nodeIsSlashLiteralOperand(ast: *const ast_flat.Ast, node: NodeIndex) bool {
     const n = ast.getNode(node);
     return switch (n.tag) {
-        .expr_paren => nodeIsSlashLiteralOperand(ast, @enumFromInt(n.payload)),
+        .expr_paren => nodeIsSlashLiteralOperand(ast, @fromBackingInt(@intCast(n.payload))),
         .expr_color_hex,
         => true,
         else => false,
@@ -1874,8 +1874,8 @@ fn parseWithConfigEntries(ctx: *Ctx, config_extra: ExtraIndex) ResolveError![]Wi
     var p: ExtraIndex = config_extra + 1;
     var i: u32 = 0;
     while (i < count) : (i += 1) {
-        const name_id: InternId = @enumFromInt(ctx.ast.getExtraU32(p));
-        const expr_node: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(p + 1));
+        const name_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(p)));
+        const expr_node: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(p + 1)));
         const flags = ctx.ast.getExtraU32(p + 2);
         p += 3;
 
@@ -2129,7 +2129,7 @@ fn lookupGlobalSlot(prog: *const ResolvedProgram, name: []const u8) ?SlotId {
 }
 
 fn packUserFunctionLookupCacheKey(module_id: u32, name_id: InternId) u64 {
-    return (@as(u64, module_id) << 32) | @as(u64, @intFromEnum(name_id));
+    return (@as(u64, module_id) << 32) | @as(u64, @backingInt(name_id));
 }
 
 fn hasResolvedAssignToSlot(prog: *const ResolvedProgram, slot: SlotId) bool {
@@ -2168,8 +2168,8 @@ fn unquoteCalcLiteralTextId(ast: *const ast_flat.Ast, pool: *InternPool, node: N
     if (call_node.tag != .expr_func_call) return null;
 
     const off: ExtraIndex = call_node.payload;
-    const name_id: InternId = @enumFromInt(ast.getExtraU32(off));
-    const ns_id: InternId = @enumFromInt(ast.getExtraU32(off + 1));
+    const name_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+    const ns_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
     const arg_count = ast.getExtraU32(off + 2);
     if (arg_count != 1) return null;
 
@@ -2180,13 +2180,13 @@ fn unquoteCalcLiteralTextId(ast: *const ast_flat.Ast, pool: *InternPool, node: N
     };
     if (!is_unquote) return null;
 
-    const inner_node: NodeIndex = @enumFromInt(ast.getExtraU32(off + 3));
+    const inner_node: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 3)));
     const inner = ast.getNode(inner_node);
     if (inner.tag != .expr_string_literal) return null;
     if ((inner.flags & 1) == 0) return null;
 
     const inner_off: ExtraIndex = inner.payload;
-    const text_id: InternId = @enumFromInt(ast.getExtraU32(inner_off));
+    const text_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(inner_off)));
     const text = std.mem.trim(u8, pool.get(text_id), " \t\r\n");
     if (!(std.ascii.startsWithIgnoreCase(text, "calc(") and text.len >= 6 and text[text.len - 1] == ')')) return null;
     return text_id;
@@ -2593,7 +2593,7 @@ fn packLiteralStringPayload(id: InternId, quoted: bool, named_color_literal: boo
 }
 
 fn packLiteralStringPayloadEx(id: InternId, quoted: bool, named_color_literal: bool, raw_text: bool) u32 {
-    const raw: u32 = @intFromEnum(id);
+    const raw: u32 = @backingInt(id);
     return (raw & ~literal_string_flag_mask) |
         (if (quoted) literal_string_quoted_bit else 0) |
         (if (named_color_literal) literal_string_named_color_bit else 0) |
@@ -2607,7 +2607,7 @@ pub fn unpackLiteralStringPayload(payload: u32) struct {
     raw_text: bool,
 } {
     return .{
-        .id = @enumFromInt(payload & ~literal_string_flag_mask),
+        .id = @fromBackingInt(@intCast(payload & ~literal_string_flag_mask)),
         .quoted = (payload & literal_string_quoted_bit) != 0,
         .named_color_literal = (payload & literal_string_named_color_bit) != 0,
         .raw_text = (payload & literal_string_raw_text_bit) != 0,
@@ -3234,7 +3234,7 @@ fn resolveExprVariable(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
         }
         return error.SassError;
     }
-    const name_id: InternId = @enumFromInt(n.payload);
+    const name_id: InternId = @fromBackingInt(@intCast(n.payload));
     const raw_name = ctx.pool.get(name_id);
     const local_slot = ctx.lookupScopedSlot(name_id);
     if (lookupBoolFlagInsensitive(&ctx.import_star_vars, raw_name)) |from_import_default| {
@@ -3342,8 +3342,8 @@ fn resolveExprNamespacedVar(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, spa
         return error.SassError;
     }
     const off: ExtraIndex = n.payload;
-    const ns_id: InternId = @enumFromInt(ast.getExtraU32(off));
-    const name_id: InternId = @enumFromInt(ast.getExtraU32(off + 1));
+    const ns_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+    const name_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
     const ns = ctx.pool.get(ns_id);
     const lazy_callable_error = ctx.in_callable and !ctx.resolving_callable_default;
     const binding = lookupUseBindingInContext(ctx, ns) orelse {
@@ -3384,7 +3384,7 @@ fn resolveExprNamespacedVar(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, spa
 }
 
 fn resolveExprUnquotedIdent(ctx: *Ctx, n: AstNode, span: Span) ResolveError!ExprIndex {
-    const id: InternId = @enumFromInt(n.payload);
+    const id: InternId = @fromBackingInt(@intCast(n.payload));
     const text = ctx.pool.get(id);
     if (isCssIfCallText(text)) {
         if (try resolveCssIfSyntaxExpr(ctx, text, span)) |expr_idx| {
@@ -3461,8 +3461,8 @@ fn resolveExprTextTemplate(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex,
 
 fn resolveExprSlashExpr(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Span) ResolveError!ExprIndex {
     const off: ExtraIndex = n.payload;
-    const lhs: NodeIndex = @enumFromInt(ast.getExtraU32(off));
-    const rhs: NodeIndex = @enumFromInt(ast.getExtraU32(off + 1));
+    const lhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+    const rhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
     if (ctx.calc_arg_mode and
         (calcArgCompositeNeedsRuntimeInterpolation(ast, lhs) or calcArgCompositeNeedsRuntimeInterpolation(ast, rhs)))
     {
@@ -3538,7 +3538,7 @@ fn resolveExprSlashExpr(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: S
     if (isSlashListExpr(ctx.prog, li) and ast.getNode(rhs).tag == .expr_func_call) {
         const rhs_call = ast.getNode(rhs);
         const rhs_off: ExtraIndex = rhs_call.payload;
-        const rhs_ns: InternId = @enumFromInt(ast.getExtraU32(rhs_off + 1));
+        const rhs_ns: InternId = @fromBackingInt(@intCast(ast.getExtraU32(rhs_off + 1)));
         if (rhs_ns == .none) {
             const lex = ctx.prog.exprs.items[li];
             const ll = ctx.prog.list_exprs.items[lex.payload];
@@ -3562,7 +3562,7 @@ fn resolveExprSlashExpr(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: S
 }
 
 fn resolveExprParen(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Span) ResolveError!ExprIndex {
-    const inner: NodeIndex = @enumFromInt(n.payload);
+    const inner: NodeIndex = @fromBackingInt(@intCast(n.payload));
     const inner_node = ast.getNode(inner);
     const saved_slash_paren_depth = ctx.slash_paren_depth;
     ctx.slash_paren_depth = saved_slash_paren_depth + 1;
@@ -3611,8 +3611,8 @@ fn resolveExprParen(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Span)
     // yields `0.5` rather than a slash list.
     if (inner_node.tag == .expr_slash_expr) {
         const off: ExtraIndex = inner_node.payload;
-        const lhs: NodeIndex = @enumFromInt(ast.getExtraU32(off));
-        const rhs: NodeIndex = @enumFromInt(ast.getExtraU32(off + 1));
+        const lhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+        const rhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
         const li = try resolveExpr(ast, ctx, lhs);
         const ri = try resolveExpr(ast, ctx, rhs);
         const bidx: u32 = @intCast(ctx.prog.binary_exprs.items.len);
@@ -3663,7 +3663,7 @@ fn resolveExprStringInterp(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span
         const val = ast.getExtraU32(p + 1);
         p += 2;
         if (kind == 0) {
-            const id: InternId = @enumFromInt(val);
+            const id: InternId = @fromBackingInt(@intCast(val));
             const lit_text = ctx.pool.get(id);
             if (quoted and has_interpolated_part) {
                 try appendLiteralExprPartWithQuote(ctx, &resolved_parts, lit_text, span, true);
@@ -3671,7 +3671,7 @@ fn resolveExprStringInterp(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span
                 try appendTextExprParts(ctx, &resolved_parts, lit_text, span, false);
             }
         } else {
-            const inode: NodeIndex = @enumFromInt(val);
+            const inode: NodeIndex = @fromBackingInt(@intCast(val));
             const e = try resolveExpr(ast, ctx, inode);
             try resolved_parts.append(ctx.a, e);
         }
@@ -3687,8 +3687,8 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
         return error.SassError;
     }
     const off: ExtraIndex = n.payload;
-    var name_id: InternId = @enumFromInt(ast.getExtraU32(off));
-    const ns_id: InternId = @enumFromInt(ast.getExtraU32(off + 1));
+    var name_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+    const ns_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
     const arg_count = ast.getExtraU32(off + 2);
     const raw_name_is_interpolated = ns_id == .none and blk: {
         const raw_name = ctx.pool.get(name_id);
@@ -3791,11 +3791,11 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
     const arg_names_start: ExtraIndex = arg_nodes_start + arg_count;
     var ai: u32 = 0;
     while (ai < arg_count) : (ai += 1) {
-        const an: NodeIndex = @enumFromInt(ast.getExtraU32(arg_nodes_start + ai));
-        const raw_name: InternId = @enumFromInt(ast.getExtraU32(arg_names_start + ai));
+        const an: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start + ai)));
+        const raw_name: InternId = @fromBackingInt(@intCast(ast.getExtraU32(arg_names_start + ai)));
         const arg_node = ast.getNode(an);
         if (arg_node.tag == .expr_splat) {
-            const inner: NodeIndex = @enumFromInt(arg_node.payload);
+            const inner: NodeIndex = @fromBackingInt(@intCast(arg_node.payload));
             const saved_calc_arg_mode = ctx.calc_arg_mode;
             const inherit_calc_arg_mode = saved_calc_arg_mode and ns_id == .none and !has_custom_function_binding;
             ctx.calc_arg_mode = inherit_calc_arg_mode or calc_arg_mode;
@@ -4121,10 +4121,14 @@ fn resolveExpr(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ResolveErro
     // Resolver-only diagnostics do not yet carry the module file id here, so
     // this fallback records the entry span. Runtime errors use the VM
     // current_source_span.file_id path for module-specific frames.
-    errdefer |err| {
+    return resolveExprRecorded(ast, ctx, node, n, span) catch |err| {
         error_format.recordErrorSpanIfUnset(span.start, span.end, 0);
         error_format.recordErrorTag(err);
-    }
+        return err;
+    };
+}
+
+fn resolveExprRecorded(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex, n: ast_flat.AstNode, span: Span) ResolveError!ExprIndex {
     switch (n.tag) {
         .expr_number_immediate => {
             const v: f64 = @floatFromInt(@as(i32, @bitCast(n.payload)));
@@ -4134,14 +4138,14 @@ fn resolveExpr(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ResolveErro
             const off: ExtraIndex = n.payload;
             const lo = ast.getExtraU32(off);
             const hi = ast.getExtraU32(off + 1);
-            const unit_id: InternId = @enumFromInt(ast.getExtraU32(off + 2));
+            const unit_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off + 2)));
             const bits: u64 = (@as(u64, hi) << 32) | @as(u64, lo);
             const v: f64 = @bitCast(bits);
             return try appendNumberLiteral(ctx.prog, ctx.a, v, unit_id, span);
         },
         .expr_string_literal => {
             const off: ExtraIndex = n.payload;
-            const id: InternId = @enumFromInt(ast.getExtraU32(off));
+            const id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(off)));
             const quoted = (n.flags & 1) != 0;
             return try appendExpr(ctx.prog, ctx.a, .{
                 .kind = .literal_string,
@@ -4180,10 +4184,10 @@ fn resolveExpr(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ResolveErro
         .expr_text_template => return try resolveExprTextTemplate(ast, ctx, node, span),
         .expr_binary_op => {
             const off: ExtraIndex = n.payload;
-            const lhs: NodeIndex = @enumFromInt(ast.getExtraU32(off));
-            const rhs: NodeIndex = @enumFromInt(ast.getExtraU32(off + 1));
+            const lhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const rhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
             const op_u = ast.getExtraU32(off + 2);
-            const op: AstBinOp = @enumFromInt(@as(u8, @truncate(op_u)));
+            const op: AstBinOp = @fromBackingInt(@intCast(@as(u8, @truncate(op_u))));
             if (ctx.calc_arg_mode and
                 calcArgMathOpText(op) != null and
                 (calcArgNodeNeedsRuntimeInterpolation(ast, lhs) or calcArgNodeNeedsRuntimeInterpolation(ast, rhs)))
@@ -4221,9 +4225,9 @@ fn resolveExpr(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ResolveErro
         },
         .expr_unary_op => {
             const off: ExtraIndex = n.payload;
-            const operand: NodeIndex = @enumFromInt(ast.getExtraU32(off));
+            const operand: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
             const op_u = ast.getExtraU32(off + 1);
-            const op: AstUnaryOp = @enumFromInt(@as(u8, @truncate(op_u)));
+            const op: AstUnaryOp = @fromBackingInt(@intCast(@as(u8, @truncate(op_u))));
             const uop = mapUnaryOp(op);
             const oi = try resolveExpr(ast, ctx, operand);
             const uidx: u32 = @intCast(ctx.prog.unary_exprs.items.len);
@@ -4239,7 +4243,7 @@ fn resolveExpr(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ResolveErro
             defer children.deinit(ctx.a);
             try children.ensureTotalCapacity(ctx.a, raw.len);
             for (raw) |u| {
-                children.appendAssumeCapacity(@enumFromInt(u));
+                children.appendAssumeCapacity(@fromBackingInt(@intCast(u)));
             }
             const separator: ListSeparator = if (n.tag == .expr_comma_list) .comma else .space;
             // A comma-separated list in parentheses has no node for them.
@@ -4257,7 +4261,7 @@ fn resolveExpr(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ResolveErro
             var children: std.ArrayListUnmanaged(NodeIndex) = .empty;
             defer children.deinit(ctx.a);
             for (raw) |u| {
-                try children.append(ctx.a, @enumFromInt(u));
+                try children.append(ctx.a, @fromBackingInt(@intCast(u)));
             }
             const has_trailing_comma = (n.flags & ast_flat.LIST_FLAG_TRAILING_COMMA) != 0;
             const separator: ListSeparator = blk: {
@@ -4285,8 +4289,8 @@ fn resolveExpr(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ResolveErro
             try pair_exprs.ensureTotalCapacity(ctx.a, pair_count * 2);
             var i: u32 = 0;
             while (i < pair_count) : (i += 1) {
-                const kn: NodeIndex = @enumFromInt(ast.getExtraU32(key_start + i));
-                const vn: NodeIndex = @enumFromInt(ast.getExtraU32(val_start + i));
+                const kn: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(key_start + i)));
+                const vn: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(val_start + i)));
                 const ke = try resolveExpr(ast, ctx, kn);
                 const ve = try resolveExpr(ast, ctx, vn);
                 try pair_exprs.append(ctx.a, ke);
@@ -4309,7 +4313,7 @@ fn resolveExpr(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ResolveErro
             });
         },
         .expr_interp => {
-            const inner: NodeIndex = @enumFromInt(n.payload);
+            const inner: NodeIndex = @fromBackingInt(@intCast(n.payload));
             const inner_e = try resolveExpr(ast, ctx, inner);
             const part = [_]ExprIndex{inner_e};
             return try appendInterpExprResolved(ctx, &part, span, false);
@@ -4349,7 +4353,7 @@ fn extractStaticNumberInfo(ast: *const ast_flat.Ast, node: NodeIndex) ?StaticNum
             const bits: u64 = (@as(u64, hi) << 32) | @as(u64, lo);
             break :blk .{
                 .value = @bitCast(bits),
-                .unit_id = @enumFromInt(ast.getExtraU32(off + 2)),
+                .unit_id = @fromBackingInt(@intCast(ast.getExtraU32(off + 2))),
             };
         },
         else => null,
@@ -4419,12 +4423,12 @@ fn extractCalcArgStaticNumberInfo(ast: *const ast_flat.Ast, ctx: *Ctx, node: Nod
 
     const n = ast.getNode(node);
     return switch (n.tag) {
-        .expr_paren => extractCalcArgStaticNumberInfo(ast, ctx, @enumFromInt(n.payload)),
+        .expr_paren => extractCalcArgStaticNumberInfo(ast, ctx, @fromBackingInt(@intCast(n.payload))),
         .expr_unary_op => blk: {
             const off: ExtraIndex = n.payload;
-            const operand: NodeIndex = @enumFromInt(ast.getExtraU32(off));
+            const operand: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
             const op_u = ast.getExtraU32(off + 1);
-            const op: AstUnaryOp = @enumFromInt(@as(u8, @truncate(op_u)));
+            const op: AstUnaryOp = @fromBackingInt(@intCast(@as(u8, @truncate(op_u))));
             const inner = extractCalcArgStaticNumberInfo(ast, ctx, operand) orelse break :blk null;
             break :blk switch (op) {
                 .positive => inner,
@@ -4434,10 +4438,10 @@ fn extractCalcArgStaticNumberInfo(ast: *const ast_flat.Ast, ctx: *Ctx, node: Nod
         },
         .expr_binary_op => blk: {
             const off: ExtraIndex = n.payload;
-            const lhs: NodeIndex = @enumFromInt(ast.getExtraU32(off));
-            const rhs: NodeIndex = @enumFromInt(ast.getExtraU32(off + 1));
+            const lhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const rhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
             const op_u = ast.getExtraU32(off + 2);
-            const op: AstBinOp = @enumFromInt(@as(u8, @truncate(op_u)));
+            const op: AstBinOp = @fromBackingInt(@intCast(@as(u8, @truncate(op_u))));
             const l = extractCalcArgStaticNumberInfo(ast, ctx, lhs) orelse break :blk null;
             const r = extractCalcArgStaticNumberInfo(ast, ctx, rhs) orelse break :blk null;
             break :blk switch (op) {
@@ -4450,8 +4454,8 @@ fn extractCalcArgStaticNumberInfo(ast: *const ast_flat.Ast, ctx: *Ctx, node: Nod
         },
         .expr_slash_expr => blk: {
             const off: ExtraIndex = n.payload;
-            const lhs: NodeIndex = @enumFromInt(ast.getExtraU32(off));
-            const rhs: NodeIndex = @enumFromInt(ast.getExtraU32(off + 1));
+            const lhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const rhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
             const l = extractCalcArgStaticNumberInfo(ast, ctx, lhs) orelse break :blk null;
             const r = extractCalcArgStaticNumberInfo(ast, ctx, rhs) orelse break :blk null;
             break :blk combineStaticDiv(ctx, l, r);
@@ -4538,21 +4542,21 @@ fn calcArgNodeNeedsRuntimeInterpolation(ast: *const ast_flat.Ast, node: NodeInde
         .expr_interp, .expr_string_interp, .expr_text_template => true,
         .expr_unary_op => blk: {
             const off: ExtraIndex = n.payload;
-            const operand: NodeIndex = @enumFromInt(ast.getExtraU32(off));
+            const operand: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
             break :blk calcArgNodeNeedsRuntimeInterpolation(ast, operand);
         },
-        .expr_paren => calcArgNodeNeedsRuntimeInterpolation(ast, @enumFromInt(n.payload)),
+        .expr_paren => calcArgNodeNeedsRuntimeInterpolation(ast, @fromBackingInt(@intCast(n.payload))),
         .expr_binary_op => blk: {
             const off: ExtraIndex = n.payload;
-            const lhs: NodeIndex = @enumFromInt(ast.getExtraU32(off));
-            const rhs: NodeIndex = @enumFromInt(ast.getExtraU32(off + 1));
+            const lhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const rhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
             break :blk calcArgNodeNeedsRuntimeInterpolation(ast, lhs) or
                 calcArgNodeNeedsRuntimeInterpolation(ast, rhs);
         },
         .expr_slash_expr => blk: {
             const off: ExtraIndex = n.payload;
-            const lhs: NodeIndex = @enumFromInt(ast.getExtraU32(off));
-            const rhs: NodeIndex = @enumFromInt(ast.getExtraU32(off + 1));
+            const lhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const rhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
             break :blk calcArgNodeNeedsRuntimeInterpolation(ast, lhs) or
                 calcArgNodeNeedsRuntimeInterpolation(ast, rhs);
         },
@@ -4564,18 +4568,18 @@ fn calcArgCompositeNeedsRuntimeInterpolation(ast: *const ast_flat.Ast, node: Nod
     if (node == .none) return false;
     const n = ast.getNode(node);
     return switch (n.tag) {
-        .expr_paren => calcArgNodeNeedsRuntimeInterpolation(ast, @enumFromInt(n.payload)),
+        .expr_paren => calcArgNodeNeedsRuntimeInterpolation(ast, @fromBackingInt(@intCast(n.payload))),
         .expr_binary_op => blk: {
             const off: ExtraIndex = n.payload;
-            const lhs: NodeIndex = @enumFromInt(ast.getExtraU32(off));
-            const rhs: NodeIndex = @enumFromInt(ast.getExtraU32(off + 1));
+            const lhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const rhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
             break :blk calcArgNodeNeedsRuntimeInterpolation(ast, lhs) or
                 calcArgNodeNeedsRuntimeInterpolation(ast, rhs);
         },
         .expr_slash_expr => blk: {
             const off: ExtraIndex = n.payload;
-            const lhs: NodeIndex = @enumFromInt(ast.getExtraU32(off));
-            const rhs: NodeIndex = @enumFromInt(ast.getExtraU32(off + 1));
+            const lhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const rhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
             break :blk calcArgNodeNeedsRuntimeInterpolation(ast, lhs) or
                 calcArgNodeNeedsRuntimeInterpolation(ast, rhs);
         },
@@ -7891,7 +7895,7 @@ fn resolveSelectorRuleData(ctx: *Ctx, sel_node: NodeIndex, span: Span) ResolveEr
     const sn = ctx.ast.getNode(sel_node);
     const in_plain_css_module = isPlainCssStylesheetPath(ctx.module_path);
     const raw_text = if (sn.tag == .expr_unquoted_ident)
-        ctx.pool.get(@as(InternId, @enumFromInt(sn.payload)))
+        ctx.pool.get(@as(InternId, @fromBackingInt(@intCast(sn.payload))))
     else
         exprNodeSourceText(ctx.ast, sel_node) orelse return error.SassError;
     var stripped_selector_owned: ?[]const u8 = null;
@@ -7991,7 +7995,7 @@ fn resolveDeclPropData(ctx: *Ctx, prop_node: NodeIndex, _: Span) ResolveError!st
 } {
     const pn = ctx.ast.getNode(prop_node);
     const text = if (pn.tag == .expr_unquoted_ident)
-        ctx.pool.get(@as(InternId, @enumFromInt(pn.payload)))
+        ctx.pool.get(@as(InternId, @fromBackingInt(@intCast(pn.payload))))
     else
         exprNodeSourceText(ctx.ast, prop_node) orelse return error.SassError;
     const prop_expr = try resolveExpr(ctx.ast, ctx, prop_node);
@@ -8025,7 +8029,7 @@ fn resolveStmtList(ctx: *Ctx, extra_off: ExtraIndex) ResolveError!ResolvedStmtSl
     const start: StmtIndex = @intCast(ctx.prog.stmts.items.len);
     var last_child_idx: StmtIndex = start;
     for (raw) |u| {
-        last_child_idx = try resolveStmt(ctx, @enumFromInt(u));
+        last_child_idx = try resolveStmt(ctx, @fromBackingInt(@intCast(u)));
         if (ctx.pending_extra_top.items.len > 0) {
             ctx.pending_extra_top.clearRetainingCapacity();
         }
@@ -8060,7 +8064,7 @@ fn appendNoop(ctx: *Ctx, span: Span) !StmtIndex {
 }
 
 fn resolveErrorStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
-    const expr_node: NodeIndex = @enumFromInt(n.payload);
+    const expr_node: NodeIndex = @fromBackingInt(@intCast(n.payload));
     const expr_idx = try resolveExpr(ctx.ast, ctx, expr_node);
     const idx: StmtIndex = @intCast(ctx.prog.stmts.items.len);
     try ctx.prog.stmts.append(ctx.a, .{
@@ -8073,7 +8077,7 @@ fn resolveErrorStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
 }
 
 fn resolveDebugStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
-    const expr_node: NodeIndex = @enumFromInt(n.payload);
+    const expr_node: NodeIndex = @fromBackingInt(@intCast(n.payload));
     const expr_idx = try resolveExpr(ctx.ast, ctx, expr_node);
     const idx: StmtIndex = @intCast(ctx.prog.stmts.items.len);
     try ctx.prog.stmts.append(ctx.a, .{
@@ -8086,7 +8090,7 @@ fn resolveDebugStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
 }
 
 fn resolveWarnStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
-    const expr_node: NodeIndex = @enumFromInt(n.payload);
+    const expr_node: NodeIndex = @fromBackingInt(@intCast(n.payload));
     const expr_idx = try resolveExpr(ctx.ast, ctx, expr_node);
     const idx: StmtIndex = @intCast(ctx.prog.stmts.items.len);
     try ctx.prog.stmts.append(ctx.a, .{
@@ -8127,7 +8131,7 @@ fn parseNamespacedVariableAssign(raw_prop: []const u8) ?NamespacedVariableAssign
 
 fn resolveStyleRuleStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
     const off: ExtraIndex = n.payload;
-    const sel_n: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(off));
+    const sel_n: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
     const body_extra = ctx.ast.getExtraU32(off + 1);
     var rd = try resolveSelectorRuleData(ctx, sel_n, span);
     if (ctx.property_namespace_depth > 0 and rd.prop_namespace_prefix_expr == null) {
@@ -8156,7 +8160,7 @@ fn resolveStyleRuleStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtInde
     }
     try direct.ensureTotalCapacity(ctx.a, raw.len);
     for (raw) |u| {
-        const child_idx = try resolveStmt(ctx, @enumFromInt(u));
+        const child_idx = try resolveStmt(ctx, @fromBackingInt(@intCast(u)));
         if (ctx.pending_extra_top.items.len > 0) {
             try direct.ensureUnusedCapacity(ctx.a, ctx.pending_extra_top.items.len);
             for (ctx.pending_extra_top.items) |ex| {
@@ -8393,7 +8397,7 @@ fn resolvePlainCssDeclarationStmtFast(
         validatePlainCssValue(raw_val) catch return error.SassError;
     }
 
-    const prop_intern: InternId = @enumFromInt(prop_ast.payload);
+    const prop_intern: InternId = @fromBackingInt(@intCast(prop_ast.payload));
 
     var hex_alpha_expanded = false;
     const raw_id: InternId = if (is_custom_property)
@@ -8469,8 +8473,8 @@ fn resolvePlainCssDeclarationStmtFast(
 
 fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module: bool) ResolveError!StmtIndex {
     const off: ExtraIndex = n.payload;
-    const prop_n: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(off));
-    const val_n: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(off + 1));
+    const prop_n: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
+    const val_n: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off + 1)));
     if (in_plain_css_module) {
         const prop_ast_for_fast = ctx.ast.getNode(prop_n);
         if (prop_ast_for_fast.tag == .expr_unquoted_ident) {
@@ -8509,7 +8513,7 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
         }
     }
     if (prop_ast.tag == .expr_unquoted_ident) {
-        const prop_id: InternId = @enumFromInt(prop_ast.payload);
+        const prop_id: InternId = @fromBackingInt(@intCast(prop_ast.payload));
         const raw_prop = ctx.pool.get(prop_id);
         if (parseNamespacedVariableAssign(raw_prop)) |namespaced| {
             const binding = lookupUseBindingInContext(ctx, namespaced.ns) orelse return error.UnknownVar;
@@ -8664,8 +8668,8 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
 
 fn resolveVariableDeclStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
     const off: ExtraIndex = n.payload;
-    const name_id: InternId = @enumFromInt(ctx.ast.getExtraU32(off));
-    const val_n: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(off + 1));
+    const name_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
+    const val_n: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off + 1)));
     const flags_u = ctx.ast.getExtraU32(off + 2);
     const is_default = (flags_u & 1) != 0;
     const is_global = (flags_u & 2) != 0;
@@ -8796,7 +8800,7 @@ fn resolveVariableDeclStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtI
 
 fn resolveReturnStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
     if (ctx.callable_decl_context != .function) return error.Unsupported;
-    const val_n: NodeIndex = @enumFromInt(n.payload);
+    const val_n: NodeIndex = @fromBackingInt(@intCast(n.payload));
     const val_e = try resolveExpr(ctx.ast, ctx, val_n);
     const idx: StmtIndex = @intCast(ctx.prog.stmts.items.len);
     const ridx: u32 = @intCast(ctx.prog.return_stmts.items.len);
@@ -8812,7 +8816,7 @@ fn resolveReturnStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
 
 fn resolveIfStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
     const off: ExtraIndex = n.payload;
-    const cond_n: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(off));
+    const cond_n: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
     const then_body = ctx.ast.getExtraU32(off + 1);
     const elseif_count = ctx.ast.getExtraU32(off + 2);
     // `!global` variable declarations inside flow-control branches must
@@ -8888,7 +8892,7 @@ fn resolveIfStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
             q += 2;
             continue;
         }
-        const ec_n: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(q));
+        const ec_n: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(q)));
         q += 1;
         const eb = ctx.ast.getExtraU32(q);
         q += 1;
@@ -8948,9 +8952,9 @@ fn resolveIfStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
 
 fn resolveForStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
     const off: ExtraIndex = n.payload;
-    const var_id: InternId = @enumFromInt(ctx.ast.getExtraU32(off));
-    const from_n: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(off + 1));
-    const to_n: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(off + 2));
+    const var_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
+    const from_n: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off + 1)));
+    const to_n: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off + 2)));
     const body_ex = ctx.ast.getExtraU32(off + 3);
     const through = (n.flags & 1) == 0;
     try validateStaticForBounds(ctx, from_n, to_n);
@@ -9019,14 +9023,14 @@ fn resolveEachStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
     while (scan_vi < var_count) : (scan_vi += 1) {
         after_vars += 1;
     }
-    const list_n: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(after_vars));
+    const list_n: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(after_vars)));
     const body_ex = ctx.ast.getExtraU32(after_vars + 1);
     const le = try resolveExpr(ctx.ast, ctx, list_n);
 
     q = var_ids_start;
     var vi: u32 = 0;
     while (vi < var_count) : (vi += 1) {
-        const vid: InternId = @enumFromInt(ctx.ast.getExtraU32(q));
+        const vid: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(q)));
         q += 1;
         const s = try ctx.declareLocal(vid);
         try ctx.prog.each_slots.append(ctx.a, s);
@@ -9069,7 +9073,7 @@ fn resolveEachStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
 
 fn resolveWhileStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
     const off: ExtraIndex = n.payload;
-    const cond_n: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(off));
+    const cond_n: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
     const body_ex = ctx.ast.getExtraU32(off + 1);
     const ce = try resolveExpr(ctx.ast, ctx, cond_n);
     ctx.while_body_depth += 1;
@@ -9108,10 +9112,14 @@ fn resolveStmt(ctx: *Ctx, node: NodeIndex) ResolveError!StmtIndex {
     const n = ctx.ast.getNode(node);
     const span = Span{ .start = n.span_start, .end = n.span_end };
     // CLI-FIX-E Step 2: When an error occurs, record the most recent stmt span in thread-local.
-    errdefer |err| {
+    return resolveStmtRecorded(ctx, n, span) catch |err| {
         error_format.recordErrorSpanIfUnset(span.start, span.end, 0);
         error_format.recordErrorTag(err);
-    }
+        return err;
+    };
+}
+
+fn resolveStmtRecorded(ctx: *Ctx, n: ast_flat.AstNode, span: Span) ResolveError!StmtIndex {
     const in_plain_css_module = isPlainCssStylesheetPath(ctx.module_path);
     const is_top_level_stmt = ctx.scopes.items.len == 0 and ctx.nested_stmt_depth == 0;
     if (is_top_level_stmt) {
@@ -9335,7 +9343,7 @@ fn predeclareGlobalSlotsInStmtList(ctx: *Ctx, body_extra: u32) ResolveError!void
     if (body_extra == std.math.maxInt(u32)) return;
     const raw = readChildList(ctx.ast, body_extra);
     for (raw) |u| {
-        try predeclareGlobalSlotsInStmt(ctx, @enumFromInt(u));
+        try predeclareGlobalSlotsInStmt(ctx, @fromBackingInt(@intCast(u)));
     }
 }
 
@@ -9344,7 +9352,7 @@ fn predeclareGlobalSlotsInStmt(ctx: *Ctx, node: NodeIndex) ResolveError!void {
     switch (n.tag) {
         .stmt_variable_decl => {
             const off: ExtraIndex = n.payload;
-            const name_id: InternId = @enumFromInt(ctx.ast.getExtraU32(off));
+            const name_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
             const flags = ctx.ast.getExtraU32(off + 2);
             if ((flags & 0b0000_0010) == 0) return;
             const name = ctx.pool.get(name_id);
@@ -9371,10 +9379,10 @@ fn predeclareGlobalSlotsInStmt(ctx: *Ctx, node: NodeIndex) ResolveError!void {
 
 fn resolveExtendStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
     const off: ExtraIndex = n.payload;
-    const sel_n: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(off));
+    const sel_n: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
     const sel_node = ctx.ast.getNode(sel_n);
     const raw_sel = if (sel_node.tag == .expr_unquoted_ident)
-        std.mem.trim(u8, ctx.pool.get(@as(InternId, @enumFromInt(sel_node.payload))), " \t\r\n")
+        std.mem.trim(u8, ctx.pool.get(@as(InternId, @fromBackingInt(@intCast(sel_node.payload)))), " \t\r\n")
     else blk: {
         const raw = exprNodeSourceText(ctx.ast, sel_n) orelse return error.SassError;
         break :blk std.mem.trim(u8, raw, " \t\r\n");
@@ -9538,11 +9546,11 @@ fn resolveIncludeArgsFromSource(ctx: *Ctx, inner_src: []const u8) ResolveError!R
     const arg_names_start: ExtraIndex = arg_nodes_start + argc;
     var i: u32 = 0;
     while (i < argc) : (i += 1) {
-        const arg_node_index: NodeIndex = @enumFromInt(sub_ast.getExtraU32(arg_nodes_start + i));
-        const raw_name: InternId = @enumFromInt(sub_ast.getExtraU32(arg_names_start + i));
+        const arg_node_index: NodeIndex = @fromBackingInt(@intCast(sub_ast.getExtraU32(arg_nodes_start + i)));
+        const raw_name: InternId = @fromBackingInt(@intCast(sub_ast.getExtraU32(arg_names_start + i)));
         const arg_node = sub_ast.getNode(arg_node_index);
         if (arg_node.tag == .expr_splat) {
-            const inner_node: NodeIndex = @enumFromInt(arg_node.payload);
+            const inner_node: NodeIndex = @fromBackingInt(@intCast(arg_node.payload));
             try args.append(ctx.a, try resolveExprMaybeStaticLiteral(&sub_ast, &sub_ctx, inner_node));
             try arg_names.append(ctx.a, call_arg_splat_sentinel);
             continue;
@@ -9559,8 +9567,8 @@ fn resolveIncludeArgsFromSource(ctx: *Ctx, inner_src: []const u8) ResolveError!R
 
 fn resolveIncludeStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
     const off: ExtraIndex = n.payload;
-    const name_id: InternId = @enumFromInt(ctx.ast.getExtraU32(off));
-    const namespace_id: InternId = @enumFromInt(ctx.ast.getExtraU32(off + 1));
+    const name_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
+    const namespace_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off + 1)));
     const args_extra = ctx.ast.getExtraU32(off + 2);
     const using_extra = ctx.ast.getExtraU32(off + 3);
     const body_extra = ctx.ast.getExtraU32(off + 4);
@@ -9801,7 +9809,7 @@ fn resolveCallableParams(
 
     var i: u32 = 0;
     while (i < count) : (i += 1) {
-        const raw_name_id: InternId = @enumFromInt(ast.getExtraU32(q));
+        const raw_name_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(q)));
         q += 1;
         const def_or_max = ast.getExtraU32(q);
         q += 1;
@@ -9815,7 +9823,7 @@ fn resolveCallableParams(
             try out_default_nodes.append(ctx.a, null);
         } else {
             try out_defaults.append(ctx.a, null);
-            try out_default_nodes.append(ctx.a, @enumFromInt(def_or_max));
+            try out_default_nodes.append(ctx.a, @fromBackingInt(@intCast(def_or_max)));
         }
     }
 }
@@ -10012,7 +10020,7 @@ fn ensureFunctionsLen(ctx: *Ctx, need_len: usize) !void {
 fn resolveMixinDecl(ctx: *Ctx, n: AstNode, span: Span) !void {
     if (ctx.flow_control_depth > 0 or ctx.in_callable) return error.Unsupported;
     const off: ExtraIndex = n.payload;
-    const name_id: InternId = @enumFromInt(ctx.ast.getExtraU32(off));
+    const name_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
     const params_ex = ctx.ast.getExtraU32(off + 1);
     const body_ex = ctx.ast.getExtraU32(off + 2);
 
@@ -10093,7 +10101,7 @@ fn resolveMixinDecl(ctx: *Ctx, n: AstNode, span: Span) !void {
     const raw_body = readChildList(ctx.ast, body_ex);
     const roots_buf = try ctx.prog.arena.allocator().alloc(StmtIndex, raw_body.len);
     for (raw_body, 0..) |u, i| {
-        roots_buf[i] = try resolveStmt(ctx, @enumFromInt(u));
+        roots_buf[i] = try resolveStmt(ctx, @fromBackingInt(@intCast(u)));
     }
     const local_count = ctx.next_local_slot;
     ctx.popScope(ctx.a);
@@ -10125,7 +10133,7 @@ fn resolveMixinDecl(ctx: *Ctx, n: AstNode, span: Span) !void {
 fn resolveFunctionDecl(ctx: *Ctx, n: AstNode, span: Span) !void {
     if (ctx.flow_control_depth > 0 or ctx.in_callable) return error.Unsupported;
     const off: ExtraIndex = n.payload;
-    const name_id: InternId = @enumFromInt(ctx.ast.getExtraU32(off));
+    const name_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
     const params_ex = ctx.ast.getExtraU32(off + 1);
     const body_ex = ctx.ast.getExtraU32(off + 2);
 
@@ -10183,7 +10191,7 @@ fn resolveFunctionDecl(ctx: *Ctx, n: AstNode, span: Span) !void {
     const raw_fn_body = readChildList(ctx.ast, body_ex);
     const fn_roots = try ctx.prog.arena.allocator().alloc(StmtIndex, raw_fn_body.len);
     for (raw_fn_body, 0..) |u, i| {
-        fn_roots[i] = try resolveStmt(ctx, @enumFromInt(u));
+        fn_roots[i] = try resolveStmt(ctx, @fromBackingInt(@intCast(u)));
     }
     const local_count = ctx.next_local_slot;
     ctx.popScope(ctx.a);
@@ -10218,14 +10226,14 @@ const ResolvedModuleTemp = struct {
 
 fn predeclareTopLevelCallables(ctx: *Ctx, raw_children: []const u32) !void {
     for (raw_children) |u| {
-        const n = ctx.ast.getNode(@enumFromInt(u));
+        const n = ctx.ast.getNode(@fromBackingInt(@intCast(u)));
         switch (n.tag) {
             // top-level `meta.variable-exists()`
             // before declaration must observe "not declared yet", even when module is configured via `with`.
             // Predeclare preempting the variable slot breaks this observation, so limit it to callable preregistration only.
             .stmt_variable_decl => {},
             .stmt_mixin_decl => {
-                const name_id: InternId = @enumFromInt(ctx.ast.getExtraU32(n.payload));
+                const name_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(n.payload)));
                 const raw_name = ctx.pool.get(name_id);
                 const unescaped_name = try css_utils.unescapeSassIdentifier(ctx.a, raw_name);
                 const name = if (unescaped_name.ptr == raw_name.ptr)
@@ -10246,7 +10254,7 @@ fn predeclareTopLevelCallables(ctx: *Ctx, raw_children: []const u32) !void {
                 }
             },
             .stmt_function_decl => {
-                const name_id: InternId = @enumFromInt(ctx.ast.getExtraU32(n.payload));
+                const name_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(n.payload)));
                 const raw_name = ctx.pool.get(name_id);
                 const unescaped_name = try css_utils.unescapeSassIdentifier(ctx.a, raw_name);
                 const name = if (unescaped_name.ptr == raw_name.ptr)
@@ -10274,7 +10282,7 @@ fn predeclareTopLevelCallables(ctx: *Ctx, raw_children: []const u32) !void {
 fn importStmtIsCssOnly(ctx: *Ctx, n: AstNode) bool {
     if (n.tag != .stmt_import) return false;
     const off: ExtraIndex = n.payload;
-    const url_node: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(off));
+    const url_node: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
     const cond_slot = ctx.ast.getExtraU32(off + 1);
     const url_static = astTextNodeStaticText(ctx.ast, ctx.pool, url_node) orelse return true;
     const url_raw = std.mem.trim(u8, url_static, " \t\n\r");
@@ -10318,7 +10326,7 @@ fn resolveRootStmtSequence(
 ) ResolveError!void {
     var i: usize = 0;
     while (i < raw.len) {
-        const node: NodeIndex = @enumFromInt(raw[i]);
+        const node: NodeIndex = @fromBackingInt(@intCast(raw[i]));
         const n = ctx.ast.getNode(node);
         if (n.tag != .stmt_import) {
             try appendResolvedRootStmt(ctx, out, node, merge_import_forwards);
@@ -10328,7 +10336,7 @@ fn resolveRootStmtSequence(
 
         var group_end = i + 1;
         while (group_end < raw.len) : (group_end += 1) {
-            const next = ctx.ast.getNode(@enumFromInt(raw[group_end]));
+            const next = ctx.ast.getNode(@fromBackingInt(@intCast(raw[group_end])));
             if (next.tag != .stmt_import or
                 next.span_start != n.span_start or
                 next.span_end != n.span_end)
@@ -10348,7 +10356,7 @@ fn resolveRootStmtSequence(
             const want_css_only = pass == 0;
             var j: usize = i;
             while (j < group_end) : (j += 1) {
-                const import_node: NodeIndex = @enumFromInt(raw[j]);
+                const import_node: NodeIndex = @fromBackingInt(@intCast(raw[j]));
                 const import_stmt = ctx.ast.getNode(import_node);
                 if (importStmtIsCssOnly(ctx, import_stmt) != want_css_only) continue;
                 try appendResolvedRootStmt(ctx, out, import_node, merge_import_forwards);
@@ -10558,50 +10566,50 @@ const preamble_ctx_special = [_][]const u8{
 
 comptime {
     @setEvalBranchQuota(100000);
-    for (@typeInfo(ResolvedProgram).@"struct".fields) |f| {
+    for (@typeInfo(ResolvedProgram).@"struct".field_names) |field_name| {
         var hits: usize = 0;
         for (preamble_prog_skip) |n| {
-            if (std.mem.eql(u8, n, f.name)) hits += 1;
+            if (std.mem.eql(u8, n, field_name)) hits += 1;
         }
         for (preamble_prog_pod_lists) |n| {
-            if (std.mem.eql(u8, n, f.name)) hits += 1;
+            if (std.mem.eql(u8, n, field_name)) hits += 1;
         }
         for (preamble_prog_body_rows) |n| {
-            if (std.mem.eql(u8, n, f.name)) hits += 1;
+            if (std.mem.eql(u8, n, field_name)) hits += 1;
         }
         for (preamble_prog_callable_rows) |n| {
-            if (std.mem.eql(u8, n, f.name)) hits += 1;
+            if (std.mem.eql(u8, n, field_name)) hits += 1;
         }
         for (preamble_prog_string_maps) |entry| {
-            if (std.mem.eql(u8, entry[0], f.name)) hits += 1;
+            if (std.mem.eql(u8, entry[0], field_name)) hits += 1;
         }
         for (preamble_prog_scalars) |n| {
-            if (std.mem.eql(u8, n, f.name)) hits += 1;
+            if (std.mem.eql(u8, n, field_name)) hits += 1;
         }
-        if (std.mem.eql(u8, "use_map", f.name)) hits += 1;
-        if (hits != 1) @compileError("import-preamble checkpoint: missing or duplicate clone policy for ResolvedProgram." ++ f.name);
+        if (std.mem.eql(u8, "use_map", field_name)) hits += 1;
+        if (hits != 1) @compileError("import-preamble checkpoint: missing or duplicate clone policy for ResolvedProgram." ++ field_name);
     }
-    for (@typeInfo(Ctx).@"struct".fields) |f| {
+    for (@typeInfo(Ctx).@"struct".field_names) |field_name| {
         var hits: usize = 0;
         for (preamble_ctx_skip) |n| {
-            if (std.mem.eql(u8, n, f.name)) hits += 1;
+            if (std.mem.eql(u8, n, field_name)) hits += 1;
         }
         for (preamble_ctx_default_only) |n| {
-            if (std.mem.eql(u8, n, f.name)) hits += 1;
+            if (std.mem.eql(u8, n, field_name)) hits += 1;
         }
         for (preamble_ctx_string_maps) |entry| {
-            if (std.mem.eql(u8, entry[0], f.name)) hits += 1;
+            if (std.mem.eql(u8, entry[0], field_name)) hits += 1;
         }
         for (preamble_ctx_auto_maps) |entry| {
-            if (std.mem.eql(u8, entry[0], f.name)) hits += 1;
+            if (std.mem.eql(u8, entry[0], field_name)) hits += 1;
         }
         for (preamble_ctx_scalars) |n| {
-            if (std.mem.eql(u8, n, f.name)) hits += 1;
+            if (std.mem.eql(u8, n, field_name)) hits += 1;
         }
         for (preamble_ctx_special) |n| {
-            if (std.mem.eql(u8, n, f.name)) hits += 1;
+            if (std.mem.eql(u8, n, field_name)) hits += 1;
         }
-        if (hits != 1) @compileError("import-preamble checkpoint: missing or duplicate clone policy for Ctx." ++ f.name);
+        if (hits != 1) @compileError("import-preamble checkpoint: missing or duplicate clone policy for Ctx." ++ field_name);
     }
 }
 
@@ -10867,13 +10875,13 @@ const PreambleFirstImport = struct {
 
 fn preambleEligibleFirstImport(ctx: *Ctx, raw: []const u32) ?PreambleFirstImport {
     if (raw.len == 0) return null;
-    const first_node: NodeIndex = @enumFromInt(raw[0]);
+    const first_node: NodeIndex = @fromBackingInt(@intCast(raw[0]));
     const n = ctx.ast.getNode(first_node);
     if (n.tag != .stmt_import) return null;
     if (raw.len > 1) {
         // A same-span sibling import = multi-URL `@import "a", "b"` group:
         // resolveRootStmtSequence reorders those css-first; excluded.
-        const second = ctx.ast.getNode(@enumFromInt(raw[1]));
+        const second = ctx.ast.getNode(@fromBackingInt(@intCast(raw[1])));
         if (second.tag == .stmt_import and
             second.span_start == n.span_start and
             second.span_end == n.span_end) return null;
@@ -10882,7 +10890,7 @@ fn preambleEligibleFirstImport(ctx: *Ctx, raw: []const u32) ?PreambleFirstImport
     // before the import resolves, making the boundary state tail-dependent;
     // exclude entries with any top-level callable declaration.
     for (raw) |u| {
-        const tag = ctx.ast.getNode(@enumFromInt(u)).tag;
+        const tag = ctx.ast.getNode(@fromBackingInt(@intCast(u))).tag;
         if (tag == .stmt_mixin_decl or tag == .stmt_function_decl) return null;
     }
     if (ctx.initial_config_entries.len != 0) return null;
@@ -10900,7 +10908,7 @@ fn preambleFirstImportKey(
 ) error{OutOfMemory}!?[]const u8 {
     const n = ctx.ast.getNode(first.node);
     const off: ExtraIndex = n.payload;
-    const url_node: NodeIndex = @enumFromInt(ctx.ast.getExtraU32(off));
+    const url_node: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
     const cond_slot = ctx.ast.getExtraU32(off + 1);
     if (cond_slot != std.math.maxInt(u32)) return null;
     if (astTextNodeHasInterpolation(ctx.ast, url_node)) return null;

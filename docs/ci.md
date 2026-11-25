@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0 # matches build.zig.zon .minimum_zig_version
+          version: 0.17.1 # matches build.zig.zon .minimum_zig_version
       - name: Cache compiled artifacts
         uses: actions/cache@v4
         with:

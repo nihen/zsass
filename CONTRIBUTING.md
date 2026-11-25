@@ -24,7 +24,7 @@ will be closed.
 
 ## Toolchain
 
-- **Zig:** 0.16.0 or newer (see `.minimum_zig_version` in
+- **Zig:** 0.17.1 or newer (see `.minimum_zig_version` in
   `build.zig.zon`).
 - **Git submodules:** sass-spec is required for spec tests:
   ```bash

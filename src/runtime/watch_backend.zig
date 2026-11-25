@@ -201,7 +201,7 @@ const LinuxInotify = struct {
         }
 
         // First time we see this directory: register a new inotify watch.
-        const dir_z = try allocator.dupeZ(u8, split.dir);
+        const dir_z = try allocator.dupeSentinel(u8, split.dir, 0);
         defer allocator.free(dir_z);
 
         const mask: u32 = std.os.linux.IN.MODIFY | std.os.linux.IN.CLOSE_WRITE |
@@ -329,7 +329,7 @@ const DarwinKqueue = struct {
             if (e.job_index == job_index and std.mem.eql(u8, e.path, path)) return;
         }
 
-        const path_z = try allocator.dupeZ(u8, path);
+        const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
 
         const fd = std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{

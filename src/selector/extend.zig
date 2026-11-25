@@ -112,7 +112,7 @@ const SsKey = struct {
 
 const SsKeyContext = struct {
     pub fn hash(_: @This(), k: SsKey) u64 {
-        var h = std.hash.Wyhash.init(@intFromEnum(k.tag));
+        var h = std.hash.Wyhash.init(@backingInt(k.tag));
         h.update(k.name);
         return h.final();
     }

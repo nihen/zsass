@@ -34,7 +34,7 @@ pub fn appendCurrentRuleBegin(self: anytype, suppress_top_level_blank: bool) !vo
     self.rule_ir.next_rule_extend_snapshot = self.currentScopeExtendCount();
     try self.rule_ir.appendRuleBegin(
         self.allocator,
-        @intFromEnum(selector_id),
+        @backingInt(selector_id),
         nest_depth,
         self.currentSelectorOwnerSpan(),
     );
@@ -93,7 +93,7 @@ pub fn emitCommentWithRuleWrap(self: anytype, text_id: InternId, source_col: u32
         const parent_depth: usize = self.selector_stack.items.len - 1;
         try self.rule_ir.appendRuleBegin(
             self.allocator,
-            @intFromEnum(selector_id),
+            @backingInt(selector_id),
             saturateNestDepth(parent_depth),
             self.currentSelectorOwnerSpan(),
         );

@@ -227,7 +227,7 @@ use `--version=json`, `--info=json`, `--env-report=json`, or `--dry-run=json`.
 | Command | What it returns |
 | --- | --- |
 | `zsass --version=json` | `{ "name": "zsass", "version": "...", "implementation_name": "zsass", "implementation_version": "..." }` |
-| `zsass --info=json` | `{ "name": "zsass", "version": "...", "zig": "0.16.0", "target": "x86_64-linux-gnu", "optimize": "ReleaseFast", "exe_path": "/home/me/.local/bin/zsass", ... }` |
+| `zsass --info=json` | `{ "name": "zsass", "version": "...", "zig": "0.17.1", "target": "x86_64-linux-gnu", "optimize": "ReleaseFast", "exe_path": "/home/me/.local/bin/zsass", ... }` |
 | `zsass --dry-run=json` | Effective inputs, outputs, style, and load paths |
 | `zsass --list-load-paths` | One effective load path per line |
 

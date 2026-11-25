@@ -224,11 +224,11 @@ pub const Instruction = extern struct {
     arg_b: u32,
 
     pub inline fn make(op: Opcode, arg_a: u16, arg_b: u32) Instruction {
-        return .{ .op = @intFromEnum(op), .arg_a = arg_a, .arg_b = arg_b };
+        return .{ .op = @backingInt(op), .arg_a = arg_a, .arg_b = arg_b };
     }
 
     pub inline fn opcode(self: Instruction) Opcode {
-        return @enumFromInt(self.op);
+        return @fromBackingInt(@intCast(self.op));
     }
 };
 

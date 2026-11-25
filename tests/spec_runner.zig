@@ -22,6 +22,8 @@ const compiler = if (builtin.is_test)
 else
     @import("compiler");
 
+const rule_line = "============================================================";
+
 /// When true, only FAIL lines, a progress counter, and the final summary are printed.
 var quiet_mode: bool = false;
 /// When true, compile-error tags are aggregated and dumped at the end.
@@ -593,9 +595,9 @@ pub fn runSpecTests(
 
     // Print summary
     if (quiet_mode) std.debug.print("\n", .{}); // close \r progress line
-    std.debug.print("\n" ++ "=" ** 60 ++ "\n", .{});
+    std.debug.print("\n" ++ rule_line ++ "\n", .{});
     std.debug.print("sass-spec Test Results\n", .{});
-    std.debug.print("=" ** 60 ++ "\n", .{});
+    std.debug.print(rule_line ++ "\n", .{});
     const effective_total = summary.total - summary.skipped;
     std.debug.print("Total:   {d} ({d} - {d} skipped)\n", .{ effective_total, summary.total, summary.skipped });
     std.debug.print("Passed:  {d}\n", .{summary.passed});
@@ -1881,7 +1883,7 @@ fn printSpecRunnerBuildInfoText() void {
     stdout_writer.interface.print("  version: {s}\n", .{version_string}) catch {};
     stdout_writer.interface.print("  zig: {s}\n", .{builtin.zig_version_string}) catch {};
     stdout_writer.interface.print("  target: {s}\n", .{target}) catch {};
-    stdout_writer.interface.print("  optimize: {s}\n", .{@tagName(builtin.mode)}) catch {};
+    stdout_writer.interface.print("  optimize: {s}\n", .{optimizeModeName()}) catch {};
     stdout_writer.interface.print("  link_libc: {s}\n", .{if (builtin.link_libc) "true" else "false"}) catch {};
     stdout_writer.interface.print("  single_threaded: {s}\n", .{if (builtin.single_threaded) "true" else "false"}) catch {};
     if (exe_path) |path| {
@@ -1902,7 +1904,7 @@ fn printSpecRunnerBuildInfoJson() void {
         .version = version_string,
         .zig = builtin.zig_version_string,
         .target = target,
-        .optimize = @tagName(builtin.mode),
+        .optimize = optimizeModeName(),
         .link_libc = builtin.link_libc,
         .single_threaded = builtin.single_threaded,
         .exe_path = exe_path,
@@ -2349,4 +2351,15 @@ test "hasSupplementaryFiles with prefixed test case" {
     defer archive.deinit();
 
     try std.testing.expect(archive.hasSupplementaryFiles("sub/"));
+}
+
+/// The optimize mode under the name the build option takes
+/// (`-Doptimize=ReleaseFast`), which is what `--info` has always printed.
+fn optimizeModeName() []const u8 {
+    return switch (builtin.mode) {
+        .debug => "Debug",
+        .safe => "ReleaseSafe",
+        .fast => "ReleaseFast",
+        .small => "ReleaseSmall",
+    };
 }

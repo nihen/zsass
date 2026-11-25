@@ -970,7 +970,7 @@ pub const VM = struct {
         for (chunk.code) |inst| {
             if (inst.opcode() != .record_extend) continue;
             const dynamic_target = (inst.arg_a & 0x4) != 0;
-            const target_selector: InternId = @enumFromInt(inst.arg_b);
+            const target_selector: InternId = @fromBackingInt(@intCast(inst.arg_b));
             if (dynamic_target or target_selector == .none) {
                 // Streaming pre-scan only knows static @extend targets.
                 // Interpolated targets are resolved at runtime, so keep flushing disabled.
@@ -2175,8 +2175,8 @@ pub const VM = struct {
     }
 
     fn copyFields(comptime T: type, dst: anytype, src: anytype) void {
-        inline for (std.meta.fields(T)) |field| {
-            @field(dst.*, field.name) = @field(src.*, field.name);
+        inline for (@typeInfo(T).@"struct".field_names) |field_name| {
+            @field(dst.*, field_name) = @field(src.*, field_name);
         }
     }
 
@@ -2185,12 +2185,12 @@ pub const VM = struct {
         var saved: SavedVMState = undefined;
         copyFields(SavedVMState.Scalars, &saved.scalars, self);
         copyFields(SavedVMState.Stacks, &saved.stacks, self);
-        inline for (std.meta.fields(SavedVMState.Stacks)) |field| @field(self, field.name) = .empty;
+        inline for (@typeInfo(SavedVMState.Stacks).@"struct".field_names) |field_name| @field(self, field_name) = .empty;
         return saved;
     }
 
     pub fn restoreState(self: *VM, saved: *const SavedVMState) void {
-        inline for (std.meta.fields(SavedVMState.Stacks)) |field| @field(self, field.name).deinit(self.allocator);
+        inline for (@typeInfo(SavedVMState.Stacks).@"struct".field_names) |field_name| @field(self, field_name).deinit(self.allocator);
         copyFields(SavedVMState.Stacks, self, &saved.stacks);
         copyFields(SavedVMState.Scalars, self, &saved.scalars);
     }
@@ -2246,7 +2246,7 @@ pub const VM = struct {
 
         if (self.program.modules.len == 0) return;
         if (self.program.root_index >= self.program.modules.len) return error.InternalError;
-        self.current_origin = if (self.program.origins.len > 0) @enumFromInt(0) else .invalid;
+        self.current_origin = if (self.program.origins.len > 0) @fromBackingInt(@intCast(0)) else .invalid;
         // The root module is also currently-running track target (re-emit FL active judgment
         // Allow root preamble re-emit when FL = root index).
         if (self.program.root_index < self.module_currently_running.len) {
@@ -3488,13 +3488,13 @@ pub const VM = struct {
     fn stepInnerMake(self: *VM, inst: Instruction) VMError!StepResult {
         switch (inst.opcode()) {
             .make_number_unit => {
-                const unit: InternId = @enumFromInt(inst.arg_b);
+                const unit: InternId = @fromBackingInt(@intCast(inst.arg_b));
                 const bitsv = try self.pop();
                 if (bitsv.kind() != .number) return error.InternalError;
                 try self.push(try Value.number(bitsv.asF64(&self.number_pool), unit, &self.number_pool, self.allocator));
             },
             .make_string => {
-                const id: InternId = @enumFromInt(inst.arg_b);
+                const id: InternId = @fromBackingInt(@intCast(inst.arg_b));
                 const quoted = inst.arg_a != 0;
                 try self.push(Value.string(id, quoted));
             },
@@ -3893,7 +3893,7 @@ pub const VM = struct {
             },
             .call_placeholder => {
                 const target_mod: u32 = inst.arg_a;
-                const target_sel: InternId = @enumFromInt(inst.arg_b);
+                const target_sel: InternId = @fromBackingInt(@intCast(inst.arg_b));
                 const pid = self.findPlaceholderChunk(target_mod, target_sel) orelse return .continue_exec;
                 try self.doCall(target_mod, .{ .placeholder = pid }, 0);
                 return .continue_exec;
@@ -4042,7 +4042,7 @@ pub const VM = struct {
                 const target_selector: InternId = if (dynamic_target)
                     try self.internExtendTargetValue(try self.pop())
                 else
-                    @enumFromInt(inst.arg_b);
+                    @fromBackingInt(@intCast(inst.arg_b));
                 const target_raw = std.mem.trim(u8, self.intern_pool.get(target_selector), " \t\r\n");
                 const is_placeholder = if ((inst.arg_a & 0x2) != 0)
                     true
@@ -4176,11 +4176,11 @@ pub const VM = struct {
                 try self.ensureCurrentRuleOpenForDeclaration();
                 if (self.open_block_depth == 0 or (self.load_css_strict_top_level and self.open_rule_depth == 0)) return error.SassError;
                 if (self.mediaQueryActive() and self.open_rule_depth == 0 and !self.declarationAtRuleActive()) return error.SassError;
-                const input_prop_name = self.intern_pool.get(@enumFromInt(prop));
+                const input_prop_name = self.intern_pool.get(@fromBackingInt(@intCast(prop)));
                 if (self.prop_namespace_stack.items.len > 0 and std.mem.startsWith(u8, input_prop_name, "--")) {
                     return error.SassError;
                 }
-                const prop_id = try self.applyPropertyNamespace(@enumFromInt(prop));
+                const prop_id = try self.applyPropertyNamespace(@fromBackingInt(@intCast(prop)));
                 const prop_name = self.intern_pool.get(prop_id);
                 const is_custom_property = std.mem.startsWith(u8, prop_name, "--");
                 if (try self.declarationValueNeedsIndentedCommaSyntaxError(val, 0)) return error.SassError;
@@ -4200,7 +4200,7 @@ pub const VM = struct {
                 }
                 vid = try normalizeUnicodeRangeDeclValue(self, vid, is_custom_property);
                 if (!is_custom_property and self.intern_pool.get(vid).len == 0) return .continue_exec;
-                try self.rule_ir.appendDecl(self.allocator, @intFromEnum(prop_id), @intFromEnum(vid), self.currentSourceSpan());
+                try self.rule_ir.appendDecl(self.allocator, @backingInt(prop_id), @backingInt(vid), self.currentSourceSpan());
                 if (!is_custom_property) {
                     self.rule_ir.hintLastDecl(self.declStringValueHint(opcode_mod.emit_decl_flag_value_single_dynamic, val));
                     try self.noteLastDeclTokens(val);
@@ -4221,11 +4221,11 @@ pub const VM = struct {
                 try self.ensureCurrentRuleOpenForDeclaration();
                 if (self.open_block_depth == 0 or (self.load_css_strict_top_level and self.open_rule_depth == 0)) return error.SassError;
                 if (self.mediaQueryActive() and self.open_rule_depth == 0 and !self.declarationAtRuleActive()) return error.SassError;
-                const input_prop_name = self.intern_pool.get(@enumFromInt(prop));
+                const input_prop_name = self.intern_pool.get(@fromBackingInt(@intCast(prop)));
                 if (self.prop_namespace_stack.items.len > 0 and std.mem.startsWith(u8, input_prop_name, "--")) {
                     return error.SassError;
                 }
-                const prop_id = try self.applyPropertyNamespace(@enumFromInt(prop));
+                const prop_id = try self.applyPropertyNamespace(@fromBackingInt(@intCast(prop)));
                 const prop_name = self.intern_pool.get(prop_id);
                 const is_custom_property = std.mem.startsWith(u8, prop_name, "--");
                 if (try self.declarationValueNeedsIndentedCommaSyntaxError(val, emit_decl_flags)) return error.SassError;
@@ -4244,7 +4244,7 @@ pub const VM = struct {
                         defer if (spaced_raw.ptr != raw_value.ptr) self.allocator.free(@constCast(spaced_raw));
                         const normalized = try normalizeRawCustomPropertyLiteral(self.allocator, spaced_raw);
                         defer self.allocator.free(normalized);
-                        try self.rule_ir.appendDeclRaw(self.allocator, @intFromEnum(prop_id), normalized, self.currentSourceSpan());
+                        try self.rule_ir.appendDeclRaw(self.allocator, @backingInt(prop_id), normalized, self.currentSourceSpan());
                         return .continue_exec;
                     }
                 }
@@ -4302,7 +4302,7 @@ pub const VM = struct {
                     const raw_literal = self.intern_pool.get(vid);
                     const unmarked_literal = try stripLiteralDeclMarkersVm(self.allocator, raw_literal);
                     defer if (unmarked_literal.ptr != raw_literal.ptr) self.allocator.free(unmarked_literal);
-                    try self.rule_ir.appendDeclRaw(self.allocator, @intFromEnum(prop_id), unmarked_literal, self.currentSourceSpan());
+                    try self.rule_ir.appendDeclRaw(self.allocator, @backingInt(prop_id), unmarked_literal, self.currentSourceSpan());
                     self.rule_ir.hintLastDecl(if (is_plain_css_decl) plainCssDeclHints(emit_decl_flags) else self.declStringValueHint(emit_decl_flags, val));
                     if (!is_plain_css_decl) try self.noteLastDeclTokens(val);
                     return .continue_exec;
@@ -4312,7 +4312,7 @@ pub const VM = struct {
                     if (std.mem.indexOf(u8, vid_raw, calc_interp_preserve_start) != null and
                         css_utils.containsCalcFunction(vid_raw))
                     {
-                        try self.rule_ir.appendDeclRaw(self.allocator, @intFromEnum(prop_id), vid_raw, self.currentSourceSpan());
+                        try self.rule_ir.appendDeclRaw(self.allocator, @backingInt(prop_id), vid_raw, self.currentSourceSpan());
                         self.rule_ir.hintLastDecl(if (is_plain_css_decl) plainCssDeclHints(emit_decl_flags) else self.declStringValueHint(emit_decl_flags, val));
                         if (!is_plain_css_decl) try self.noteLastDeclTokens(val);
                         return .continue_exec;
@@ -4324,7 +4324,7 @@ pub const VM = struct {
                     if (std.mem.indexOf(u8, marked_raw, calc_interp_preserve_start) != null and
                         css_utils.containsCalcFunction(marked_raw))
                     {
-                        try self.rule_ir.appendDeclRaw(self.allocator, @intFromEnum(prop_id), marked_value, self.currentSourceSpan());
+                        try self.rule_ir.appendDeclRaw(self.allocator, @backingInt(prop_id), marked_value, self.currentSourceSpan());
                         self.rule_ir.hintLastDecl(if (is_plain_css_decl) plainCssDeclHints(emit_decl_flags) else self.declStringValueHint(emit_decl_flags, val));
                         if (!is_plain_css_decl) try self.noteLastDeclTokens(val);
                         return .continue_exec;
@@ -4395,7 +4395,7 @@ pub const VM = struct {
                     vid = try internWithLeadingMarker(self.intern_pool, self.allocator, interp_decl_marker, vid);
                 }
                 if (!is_custom_property and self.intern_pool.get(vid).len == 0) return .continue_exec;
-                try self.rule_ir.appendDecl(self.allocator, @intFromEnum(prop_id), @intFromEnum(vid), self.currentSourceSpan());
+                try self.rule_ir.appendDecl(self.allocator, @backingInt(prop_id), @backingInt(vid), self.currentSourceSpan());
                 if (!is_custom_property) {
                     self.rule_ir.hintLastDecl(if (is_plain_css_decl) plainCssDeclHints(emit_decl_flags) else self.declStringValueHint(emit_decl_flags, val));
                     if (!is_plain_css_decl) try self.noteLastDeclTokens(val);
@@ -4408,11 +4408,11 @@ pub const VM = struct {
                 try self.ensureCurrentRuleOpenForDeclaration();
                 if (self.open_block_depth == 0 or (self.load_css_strict_top_level and self.open_rule_depth == 0)) return error.SassError;
                 if (self.mediaQueryActive() and self.open_rule_depth == 0 and !self.declarationAtRuleActive()) return error.SassError;
-                const input_prop_name = self.intern_pool.get(@enumFromInt(prop));
+                const input_prop_name = self.intern_pool.get(@fromBackingInt(@intCast(prop)));
                 if (self.prop_namespace_stack.items.len > 0 and std.mem.startsWith(u8, input_prop_name, "--")) {
                     return error.SassError;
                 }
-                const prop_id = try self.applyPropertyNamespace(@enumFromInt(prop));
+                const prop_id = try self.applyPropertyNamespace(@fromBackingInt(@intCast(prop)));
                 const prop_name = self.intern_pool.get(prop_id);
                 const is_custom_property = std.mem.startsWith(u8, prop_name, "--");
 
@@ -4576,7 +4576,7 @@ pub const VM = struct {
                     out_id = try internWithLeadingMarker(self.intern_pool, self.allocator, interp_decl_marker, out_id);
                 }
                 if (!is_custom_property and self.intern_pool.get(out_id).len == 0) return .continue_exec;
-                try self.rule_ir.appendDeclRaw(self.allocator, @intFromEnum(prop_id), self.intern_pool.get(out_id), self.currentSourceSpan());
+                try self.rule_ir.appendDeclRaw(self.allocator, @backingInt(prop_id), self.intern_pool.get(out_id), self.currentSourceSpan());
                 if (!is_custom_property) {
                     if (self.currentSourceUsesPlainCss()) {
                         self.rule_ir.hintLastDecl(rule_ir_mod.decl_hint_plain_css);
@@ -4589,7 +4589,7 @@ pub const VM = struct {
             },
             .emit_at_rule_simple => {
                 try self.closeOpenMaybeCurrentRuleBeforeBoundary();
-                var name_id: InternId = @enumFromInt(inst.arg_b);
+                var name_id: InternId = @fromBackingInt(@intCast(inst.arg_b));
                 const prelude_v = try self.pop();
                 const prelude_id = if (self.intern_pool.get(name_id).len == 0) blk: {
                     const split = try self.splitDynamicAtRuleText(prelude_v);
@@ -4604,7 +4604,7 @@ pub const VM = struct {
             },
             .emit_at_rule_begin => {
                 try self.closeOpenMaybeCurrentRuleBeforeBoundary();
-                var name_id: InternId = @enumFromInt(inst.arg_b);
+                var name_id: InternId = @fromBackingInt(@intCast(inst.arg_b));
                 const prelude_v = try self.pop();
                 const prelude_id = if (self.intern_pool.get(name_id).len == 0) blk: {
                     const split = try self.splitDynamicAtRuleText(prelude_v);
@@ -4766,7 +4766,7 @@ pub const VM = struct {
                 try self.maybeFlushStreamChunks();
             },
             .emit_comment => {
-                const text_id: InternId = @enumFromInt(inst.arg_b);
+                const text_id: InternId = @fromBackingInt(@intCast(inst.arg_b));
                 // arg_a = source column of `/*` calculated by resolver (ast.source basis) + bit 15
                 // leading_same_line flag.
                 // Even if the module_id of chunk and the actual file differ with @import inline,
@@ -4888,13 +4888,13 @@ pub const VM = struct {
                 );
                 if (self.open_block_depth == 0 or (self.load_css_strict_top_level and self.open_rule_depth == 0)) return error.SassError;
                 if (self.mediaQueryActive() and self.open_rule_depth == 0 and !self.declarationAtRuleActive()) return error.SassError;
-                const prop_id = try self.applyPropertyNamespace(@enumFromInt(prop));
+                const prop_id = try self.applyPropertyNamespace(@fromBackingInt(@intCast(prop)));
                 const raw_fragment = self.intern_pool.get(raw_id);
                 const unmarked_fragment = try calc_utils.stripCalcInterpolationPreserveMarkers(self.allocator, raw_fragment);
                 defer if (unmarked_fragment.ptr != raw_fragment.ptr) self.allocator.free(unmarked_fragment);
                 try self.rule_ir.appendDeclRaw(
                     self.allocator,
-                    @intFromEnum(prop_id),
+                    @backingInt(prop_id),
                     unmarked_fragment,
                     self.currentSourceSpan(),
                 );
@@ -4929,7 +4929,7 @@ pub const VM = struct {
                 try self.reopenRecentNestedRuleForDeclaration();
                 try self.ensureCurrentRuleOpenForDeclaration();
                 const prop_id = try self.applyPropertyNamespace(try self.intern_pool.intern(raw_prop));
-                const prop_u: u32 = @intFromEnum(prop_id);
+                const prop_u: u32 = @backingInt(prop_id);
                 const prop_name = self.intern_pool.get(prop_id);
                 const is_custom_property = std.mem.startsWith(u8, prop_name, "--");
                 if (self.open_block_depth == 0) return error.SassError;
@@ -5064,7 +5064,7 @@ pub const VM = struct {
                     try self.noteLastDeclTokens(val);
                     return .continue_exec;
                 }
-                try self.rule_ir.appendDecl(self.allocator, prop_u, @intFromEnum(vid), self.currentSourceSpan());
+                try self.rule_ir.appendDecl(self.allocator, prop_u, @backingInt(vid), self.currentSourceSpan());
                 self.rule_ir.hintLastDecl(self.declStringValueHint(inst.arg_a, val));
                 try self.noteLastDeclTokens(val);
             },
@@ -5307,7 +5307,7 @@ pub const VM = struct {
             try self.scope_push_ir_lens.append(self.allocator, self.rule_ir.nodes.items.len);
             var span = self.current_source_span;
             span.file_id = owner_module;
-            try self.rule_ir.appendRuleBegin(self.allocator, @intFromEnum(out_id), nest_depth, span);
+            try self.rule_ir.appendRuleBegin(self.allocator, @backingInt(out_id), nest_depth, span);
             const new_idx = self.rule_ir.nodes.items.len - 1;
             self.applyPendingSuppressNextRuleBeginBlank(new_idx);
             // Rule_begin emitted within @at-root scope is treated as hoisted.
@@ -5453,7 +5453,7 @@ pub const VM = struct {
             if (frame.node_idx >= self.rule_ir.nodes.items.len) return rule_ir_mod.media_context_unknown;
             const node = self.rule_ir.nodes.items[frame.node_idx];
             if (node.kind != .at_rule_begin) return rule_ir_mod.media_context_unknown;
-            const name = self.intern_pool.get(@enumFromInt(self.rule_ir.extra.items[node.payload]));
+            const name = self.intern_pool.get(@fromBackingInt(@intCast(self.rule_ir.extra.items[node.payload])));
             if (!std.mem.eql(u8, name, "media")) continue;
             context = try rule_ir_mod.foldMediaContext(
                 self.allocator,
@@ -12623,8 +12623,8 @@ fn normalizePlainCssDeclSpaces(alloc: std.mem.Allocator, raw: []const u8) VMErro
 
     // Per-paren flag: is this paren group a modern color function
     // (rgb/hsl/hwb/lab/lch/oklab/oklch/color)? Only the `/` inside it is changed to ` / `.
-    var color_fn_stack: [16]bool = [_]bool{false} ** 16;
-    var var_fn_stack: [16]bool = [_]bool{false} ** 16;
+    var color_fn_stack: [16]bool = @splat(false);
+    var var_fn_stack: [16]bool = @splat(false);
     var paren_depth: u32 = 0;
     var url_depth: u32 = 0;
     // Do not insert space after `,` in the paren group after `progid:`;
@@ -12632,7 +12632,7 @@ fn normalizePlainCssDeclSpaces(alloc: std.mem.Allocator, raw: []const u8) VMErro
     // Set flag until `(` of progid:X.Y.foo(...) is closed.
     var progid_active = false;
     var progid_enter_depth: u32 = 0;
-    var opaque_fn_stack: [16]bool = [_]bool{false} ** 16;
+    var opaque_fn_stack: [16]bool = @splat(false);
     var opaque_active = false;
     var opaque_enter_depth: u32 = 0;
 

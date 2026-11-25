@@ -51,7 +51,7 @@ fn isKeyframesAtRuleRawName(raw_name: []const u8) bool {
 
 pub fn resolveAtRuleStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: anytype) ResolveError!StmtIndex {
     const off: ExtraIndex = n.payload;
-    const name_id: InternId = @enumFromInt(ctx.ast.getExtraU32(off));
+    const name_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
     const prelude_slot = ctx.ast.getExtraU32(off + 1);
     const body_extra = ctx.ast.getExtraU32(off + 2);
     var effective_name_id = name_id;
@@ -98,7 +98,7 @@ pub fn resolveAtRuleStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: an
         ctx.allow_unknown_var_literal = saved or allow_unknown_var_in_prelude;
         defer ctx.allow_unknown_var_literal = saved;
 
-        const prelude_node: NodeIndex = @enumFromInt(prelude_slot);
+        const prelude_node: NodeIndex = @fromBackingInt(@intCast(prelude_slot));
         const pn = ctx.ast.getNode(prelude_node);
         const prelude_raw_storage = try astTextNodeRawAlloc(ctx.a, ctx.ast, ctx.pool, prelude_node);
         defer ctx.a.free(prelude_raw_storage);
@@ -201,7 +201,7 @@ pub fn resolveAtRuleStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: an
             }
             try roots_buf.ensureTotalCapacity(ctx.a, raw.len);
             for (raw) |u| {
-                const child_idx = try deps.resolveStmt(ctx, @enumFromInt(u));
+                const child_idx = try deps.resolveStmt(ctx, @fromBackingInt(@intCast(u)));
                 if (ctx.pending_extra_top.items.len > 0) {
                     try roots_buf.ensureUnusedCapacity(ctx.a, ctx.pending_extra_top.items.len);
                     for (ctx.pending_extra_top.items) |ex| {
@@ -335,7 +335,7 @@ pub fn resolveAtRootStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: an
             defer roots_buf.deinit(ctx.a);
             try roots_buf.ensureTotalCapacity(ctx.a, raw.len);
             for (raw) |u| {
-                const child_idx = try deps.resolveStmt(ctx, @enumFromInt(u));
+                const child_idx = try deps.resolveStmt(ctx, @fromBackingInt(@intCast(u)));
                 if (ctx.pending_extra_top.items.len > 0) {
                     try roots_buf.ensureUnusedCapacity(ctx.a, ctx.pending_extra_top.items.len);
                     for (ctx.pending_extra_top.items) |ex| {
@@ -352,10 +352,10 @@ pub fn resolveAtRootStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: an
     var selector_raw_text: ?[]const u8 = null;
     var at_root_behavior: AtRootBehavior = .none;
     if (selector_slot != std.math.maxInt(u32)) {
-        const sel_node: NodeIndex = @enumFromInt(selector_slot);
+        const sel_node: NodeIndex = @fromBackingInt(@intCast(selector_slot));
         const sn = ctx.ast.getNode(sel_node);
         if (sn.tag == .expr_unquoted_ident) {
-            const raw_id: InternId = @enumFromInt(sn.payload);
+            const raw_id: InternId = @fromBackingInt(@intCast(sn.payload));
             selector_raw_text = ctx.pool.get(raw_id);
             at_root_behavior = classifyAtRootSelectorText(selector_raw_text.?);
         }
@@ -382,10 +382,10 @@ pub fn resolveAtRootStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: an
 
     var prelude_expr: ?ExprIndex = null;
     if (selector_slot != std.math.maxInt(u32)) {
-        const sel_node: NodeIndex = @enumFromInt(selector_slot);
+        const sel_node: NodeIndex = @fromBackingInt(@intCast(selector_slot));
         const sn = ctx.ast.getNode(sel_node);
         if (sn.tag == .expr_unquoted_ident) {
-            const raw_id: InternId = @enumFromInt(sn.payload);
+            const raw_id: InternId = @fromBackingInt(@intCast(sn.payload));
             const raw = ctx.pool.get(raw_id);
             if (std.mem.indexOfScalar(u8, raw, '$') != null) {
                 prelude_expr = try deps.resolveInterpolatedTextExpr(ctx, raw, span, true);

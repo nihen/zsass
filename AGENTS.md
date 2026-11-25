@@ -1,6 +1,6 @@
 # zsass
 
-Clean-room Sass implementation in Zig 0.16+.
+Clean-room Sass implementation in Zig 0.17.1+.
 
 ## Non-negotiable clean-room boundary
 

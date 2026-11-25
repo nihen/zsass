@@ -20,17 +20,17 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            zig: '0.16.0'
+            zig: '0.17.1'
             experimental: false
             run_spec: true
             run_fmt: true
           - os: macos-latest
-            zig: '0.16.0'
+            zig: '0.17.1'
             experimental: false
             run_spec: false
             run_fmt: false
           - os: windows-latest
-            zig: '0.16.0'
+            zig: '0.17.1'
             experimental: false
             run_spec: false
             run_fmt: false

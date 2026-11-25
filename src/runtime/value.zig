@@ -196,7 +196,7 @@ const sig_value: u64 = nan_signature << nan_signature_shift;
 
 inline fn packTagged(tag: ValueKind, aux: u8, handle: u32) u64 {
     return sig_value |
-        (@as(u64, @intFromEnum(tag)) << tag_shift) |
+        (@as(u64, @backingInt(tag)) << tag_shift) |
         (@as(u64, aux) << aux_shift) |
         @as(u64, handle);
 }
@@ -256,7 +256,7 @@ pub const Value = extern struct {
 
     pub inline fn kind(self: Value) ValueKind {
         if (!self.isNanBoxed()) return .number;
-        return @enumFromInt(self.rawTag());
+        return @fromBackingInt(@intCast(self.rawTag()));
     }
 
     /// Raw 32-bit payload accessor. Returns the low 32 bits of the aux+handle part in tagged Value.
@@ -271,11 +271,11 @@ pub const Value = extern struct {
     pub inline fn p64Of(self: Value) u64 {
         if (!self.isNanBoxed()) return self.bits;
         return switch (self.rawTag()) {
-            @intFromEnum(ValueKind.boolean) => self.bits & handle_mask,
-            @intFromEnum(ValueKind.string) => @as(u64, self.auxByte()),
-            @intFromEnum(ValueKind.list) => @as(u64, self.auxByte()),
-            @intFromEnum(ValueKind.calc_fragment),
-            @intFromEnum(ValueKind.interp_fragment),
+            @backingInt(ValueKind.boolean) => self.bits & handle_mask,
+            @backingInt(ValueKind.string) => @as(u64, self.auxByte()),
+            @backingInt(ValueKind.list) => @as(u64, self.auxByte()),
+            @backingInt(ValueKind.calc_fragment),
+            @backingInt(ValueKind.interp_fragment),
             => 0,
             // For other kinds, fallback to low-32 handle bits.
             else => self.bits & handle_mask,
@@ -305,32 +305,32 @@ pub const Value = extern struct {
 
     pub inline fn asF64(self: Value, pool: *const NumberPool) f64 {
         if (!self.isNanBoxed()) return @bitCast(self.bits);
-        std.debug.assert(self.rawTag() == @intFromEnum(ValueKind.number));
+        std.debug.assert(self.rawTag() == @backingInt(ValueKind.number));
         const handle: u32 = @truncate(self.bits & handle_mask);
         return pool.items[handle].value;
     }
 
     pub inline fn unitId(self: Value, pool: *const NumberPool) InternId {
         if (!self.isNanBoxed()) return .none;
-        std.debug.assert(self.rawTag() == @intFromEnum(ValueKind.number));
+        std.debug.assert(self.rawTag() == @backingInt(ValueKind.number));
         const handle: u32 = @truncate(self.bits & handle_mask);
         return pool.items[handle].unit;
     }
 
     pub inline fn isNumber(self: Value) bool {
         if (!self.isNanBoxed()) return true; // unitless number
-        return self.rawTag() == @intFromEnum(ValueKind.number);
+        return self.rawTag() == @backingInt(ValueKind.number);
     }
 
     pub inline fn isString(self: Value) bool {
-        return self.isNanBoxed() and self.rawTag() == @intFromEnum(ValueKind.string);
+        return self.isNanBoxed() and self.rawTag() == @backingInt(ValueKind.string);
     }
 
     pub inline fn isTruthy(self: Value) bool {
         if (!self.isNanBoxed()) return true; // any unitless number is truthy
         return switch (self.rawTag()) {
-            @intFromEnum(ValueKind.nil) => false,
-            @intFromEnum(ValueKind.boolean) => (self.bits & handle_mask) != 0,
+            @backingInt(ValueKind.nil) => false,
+            @backingInt(ValueKind.boolean) => (self.bits & handle_mask) != 0,
             else => true,
         };
     }
@@ -343,7 +343,7 @@ pub const Value = extern struct {
         var aux: u8 = 0;
         if (quoted) aux |= string_quoted_bit;
         aux |= string_preserve_ampersand_bit;
-        return .{ .bits = packTagged(.string, aux, @intFromEnum(intern)) };
+        return .{ .bits = packTagged(.string, aux, @backingInt(intern)) };
     }
 
     pub inline fn stringWithFlags(intern: InternId, quoted: bool, from_inspect: bool) Value {
@@ -360,12 +360,12 @@ pub const Value = extern struct {
         if (quoted) aux |= string_quoted_bit;
         if (from_inspect) aux |= string_from_inspect_bit;
         if (named_color_literal) aux |= string_named_color_literal_bit;
-        return .{ .bits = packTagged(.string, aux, @intFromEnum(intern)) };
+        return .{ .bits = packTagged(.string, aux, @backingInt(intern)) };
     }
 
     pub inline fn stringIntern(self: Value) InternId {
         std.debug.assert(self.kind() == .string);
-        return @enumFromInt(@as(u32, @truncate(self.bits & handle_mask)));
+        return @fromBackingInt(@intCast(@as(u32, @truncate(self.bits & handle_mask))));
     }
 
     pub inline fn stringQuoted(self: Value, pool: []const StringFlags) bool {
@@ -422,7 +422,7 @@ pub const Value = extern struct {
         const bracketed: u32 = if (is_bracketed) 0b100 else 0;
         const map_flag: u32 = if (is_map) 0b1000 else 0;
         const slash_flag: u32 = if (slash_coercible) 0b1_0000 else 0;
-        return @as(u32, @intFromEnum(separator)) | bracketed | map_flag | slash_flag;
+        return @as(u32, @backingInt(separator)) | bracketed | map_flag | slash_flag;
     }
 
     pub inline fn packListFlagsMeta(separator: ListSeparator, is_bracketed: bool, is_map: bool) u32 {
@@ -638,12 +638,12 @@ pub const Value = extern struct {
     /// what `meta.inspect()` prints and the identity (`sass:<name>` or the
     /// canonical module path) makes equal references share one InternId.
     pub inline fn moduleRef(key: InternId) Value {
-        return .{ .bits = packTagged(.module, 0, @intFromEnum(key)) };
+        return .{ .bits = packTagged(.module, 0, @backingInt(key)) };
     }
 
     pub inline fn moduleRefKey(self: Value) InternId {
         std.debug.assert(self.kind() == .module);
-        return @enumFromInt(@as(u32, @truncate(self.bits & handle_mask)));
+        return @fromBackingInt(@intCast(@as(u32, @truncate(self.bits & handle_mask))));
     }
 
     pub inline fn callablePoolHandle(self: Value) u32 {

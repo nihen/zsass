@@ -29,9 +29,29 @@ const watch_backend_mod = @import("watch_backend.zig");
 // loop's "Compiled X to Y." line, matching official Sass CLI output. Includes
 // the local TZ-aware breakdown which Zig's std does not currently
 // expose. zsass already links libc on every supported target.
-const c_time = @cImport({
-    @cInclude("time.h");
-});
+const c_time = struct {
+    // Declared by hand: the nine fields every C library puts first, in
+    // the order ISO C lists them. Only these are read, through the
+    // pointer `localtime` returns, so what a platform adds after them
+    // does not matter.
+    const tm = extern struct {
+        tm_sec: c_int,
+        tm_min: c_int,
+        tm_hour: c_int,
+        tm_mday: c_int,
+        tm_mon: c_int,
+        tm_year: c_int,
+        tm_wday: c_int,
+        tm_yday: c_int,
+        tm_isdst: c_int,
+    };
+    // The Windows C runtime exports the 64-bit names; `time` and
+    // `localtime` are inline wrappers in its header.
+    const windows = builtin.os.tag == .windows;
+    const time_t = if (windows) i64 else std.c.time_t;
+    const time = @extern(*const fn (?*time_t) callconv(.c) time_t, .{ .name = if (windows) "_time64" else "time" });
+    const localtime = @extern(*const fn (*const time_t) callconv(.c) ?*const tm, .{ .name = if (windows) "_localtime64" else "localtime" });
+};
 
 comptime {
     _ = observe_mod.PhaseTimer;
@@ -1900,7 +1920,7 @@ fn printEnvReportJson(paths: []const []const u8) void {
     var out_w = out_file.writer(zsass_io_mod.io, out_buf[0..]);
     out_w.interface.print(
         "{{\"name\":\"zsass\",\"version\":\"{s}\",\"optimize\":\"{s}\",\"zig\":\"{s}\",\"load_paths\":[",
-        .{ version_string, @tagName(builtin.mode), builtin.zig_version_string },
+        .{ version_string, optimizeModeName(), builtin.zig_version_string },
     ) catch return;
     for (paths, 0..) |p, idx| {
         if (idx != 0) out_w.interface.writeAll(",") catch return;
@@ -1984,7 +2004,7 @@ fn applyEarlyChdir(args: []const [:0]const u8) void {
             chdir_target = a["--chdir=".len..];
         }
         if (chdir_target) |target| {
-            const target_z = std.heap.c_allocator.dupeZ(u8, target) catch {
+            const target_z = std.heap.c_allocator.dupeSentinel(u8, target, 0) catch {
                 cliErrPrint("error: failed to allocate chdir path\n", .{});
                 std.process.exit(EX_SOFTWARE);
             };
@@ -2146,7 +2166,7 @@ fn printBuildInfoText() void {
     out_w.interface.print("  version: {s}\n", .{version_string}) catch return;
     out_w.interface.print("  zig: {s}\n", .{builtin.zig_version_string}) catch return;
     out_w.interface.print("  target: {s}\n", .{target}) catch return;
-    out_w.interface.print("  optimize: {s}\n", .{@tagName(builtin.mode)}) catch return;
+    out_w.interface.print("  optimize: {s}\n", .{optimizeModeName()}) catch return;
     out_w.interface.print("  link_libc: {s}\n", .{if (builtin.link_libc) "true" else "false"}) catch return;
     out_w.interface.print("  single_threaded: {s}\n", .{if (builtin.single_threaded) "true" else "false"}) catch return;
     if (exe_path) |path| {
@@ -2167,7 +2187,7 @@ fn printBuildInfoJson() void {
         .version = version_string,
         .zig = builtin.zig_version_string,
         .target = target,
-        .optimize = @tagName(builtin.mode),
+        .optimize = optimizeModeName(),
         .link_libc = builtin.link_libc,
         .single_threaded = builtin.single_threaded,
         .exe_path = exe_path,
@@ -3768,4 +3788,15 @@ test "compileFiles batch continues processing after one entry fails" {
         defer allocator.free(got);
         try std.testing.expect(got.len > 0);
     }
+}
+
+/// The optimize mode under the name the build option takes
+/// (`-Doptimize=ReleaseFast`), which is what `--info` has always printed.
+fn optimizeModeName() []const u8 {
+    return switch (builtin.mode) {
+        .debug => "Debug",
+        .safe => "ReleaseSafe",
+        .fast => "ReleaseFast",
+        .small => "ReleaseSmall",
+    };
 }

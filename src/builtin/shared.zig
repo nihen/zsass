@@ -347,7 +347,7 @@ pub inline fn bindNamedOrPositionalArgs(
     arg_names: []const InternId,
     comptime names: []const []const u8,
 ) [names.len]?Value {
-    var out: [names.len]?Value = [_]?Value{null} ** names.len;
+    var out: [names.len]?Value = @splat(null);
     var positional: usize = 0;
 
     for (args, 0..) |arg, i| {
@@ -382,7 +382,7 @@ pub inline fn bindNamedOrPositionalArgsStrict(
     comptime required_count: usize,
 ) BuiltinError![names.len]?Value {
     comptime std.debug.assert(required_count <= names.len);
-    var out: [names.len]?Value = [_]?Value{null} ** names.len;
+    var out: [names.len]?Value = @splat(null);
     var positional: usize = 0;
 
     for (args, 0..) |arg, i| {

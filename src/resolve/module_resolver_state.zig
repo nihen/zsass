@@ -71,7 +71,7 @@ pub fn appendImportOrigin(self: *ModuleResolver, source_path: []const u8, parent
         .module_id = std.math.maxInt(u32),
         .parent_import_origin = parent_import_origin,
     });
-    return @enumFromInt(idx_u32);
+    return @fromBackingInt(@intCast(idx_u32));
 }
 
 pub fn getExports(self: *const ModuleResolver, module_id: u32) ?*const ModuleExports {

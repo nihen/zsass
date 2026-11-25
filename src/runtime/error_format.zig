@@ -263,10 +263,10 @@ pub const max_error_stack: usize = 16;
 /// Dup and save everything to fixed-size buffer. Now it's safe until it reaches the driver catch path.
 pub const ErrorTraceFrame = struct {
     /// Path string (absolute or passed by driver). Truncate (rare path) if the 256 bytes limit is exceeded.
-    path_buf: [256]u8 = [_]u8{0} ** 256,
+    path_buf: [256]u8 = @splat(0),
     path_len: usize = 0,
     /// stack trace end-of-line labels (`root stylesheet` / `@use`, etc.). 32 is enough.
-    label_buf: [32]u8 = [_]u8{0} ** 32,
+    label_buf: [32]u8 = @splat(0),
     label_len: usize = 0,
     /// 1-base line / 1-base column (value already +1 for drawing).
     line_no: u32 = 1,
@@ -275,7 +275,7 @@ pub const ErrorTraceFrame = struct {
     end_line_no: u32 = 1,
     end_col_no: u32 = 1,
     /// text of frame line (bytes of the line pointed to by line_no). truncate at 512 limit.
-    line_text_buf: [512]u8 = [_]u8{0} ** 512,
+    line_text_buf: [512]u8 = @splat(0),
     line_text_len: usize = 0,
     /// Whether this frame had a span (= recordErrorSpan or @use updated).
     /// If false, trace line will be output with fallback of line=1 col=1.
@@ -284,16 +284,16 @@ pub const ErrorTraceFrame = struct {
 
 /// Single thread-local bundle for error context / resolver stack / snapshot (avoids torn reads across fields).
 pub const ErrorState = struct {
-    context_message_buf: [512]u8 = [_]u8{0} ** 512,
+    context_message_buf: [512]u8 = @splat(0),
     context_message_len: usize = 0,
     last_error_ctx: ErrorContext = .{},
-    error_stack: [max_error_stack]ErrorStackFrame = [_]ErrorStackFrame{.{ .path = "", .source = "", .label = "" }} ** max_error_stack,
+    error_stack: [max_error_stack]ErrorStackFrame = @splat(.{ .path = "", .source = "", .label = "" }),
     error_stack_len: usize = 0,
     /// Frames dropped by `pushFrame` because the stack was full. `popFrame`
     /// consumes this before touching `error_stack_len` so callers'
     /// unconditional `defer popFrame()` stays balanced past max depth.
     error_stack_overflow: usize = 0,
-    error_stack_snapshot: [max_error_stack]ErrorTraceFrame = [_]ErrorTraceFrame{.{}} ** max_error_stack,
+    error_stack_snapshot: [max_error_stack]ErrorTraceFrame = @splat(.{}),
     error_stack_snapshot_len: usize = 0,
 };
 
@@ -438,7 +438,7 @@ fn writeSourceFrameWithLabel(
         eprint("  >\n", .{});
     }
     // caret indicator
-    const lineno_pad = " " ** 8;
+    const lineno_pad = "        ";
     const pad_count = lineno_text.len;
     const indicator_pad_str = lineno_pad[0..pad_count];
     if (unicodeDiagnosticsEnabled()) {
@@ -494,7 +494,7 @@ pub fn writeStackTrace(allocator: std.mem.Allocator) !void {
 
     // Precompute the path+position string for all frames and calculate the max width.
     var pieces: [max_error_stack][]u8 = undefined;
-    var owned: [max_error_stack]bool = .{false} ** max_error_stack;
+    var owned: [max_error_stack]bool = @splat(false);
     defer {
         var k: usize = 0;
         while (k < slen) : (k += 1) {
@@ -559,7 +559,7 @@ fn writeSourceFrameAsciiOnlyFromSnapshot(
         eprint("{s} | {s}\n", .{ lineno_text, line_text });
     }
 
-    const lineno_pad = " " ** 8;
+    const lineno_pad = "        ";
     const pad_count = lineno_text.len;
     const indicator_pad_str = lineno_pad[0..pad_count];
     if (unicodeDiagnosticsEnabled()) {
