@@ -151,7 +151,7 @@ pub fn build(b: *std.Build) void {
     });
     // The compiler as it was built: the install prefix is not known while
     // the build graph is made.
-    realworld.addArtifactArg(exe);
+    realworld.addArtifactArg2(exe, .{});
     realworld.addArgs(&.{ "--jobs", "4" });
     realworld.step.dependOn(b.getInstallStep());
     realworld.addPassthruArgs();
@@ -256,7 +256,7 @@ fn addExecutable(
     name: []const u8,
     root_source_file: std.Build.LazyPath,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     zsass_options_module: *std.Build.Module,
     imports: []const ModuleImport,
     link_libc: bool,
@@ -279,7 +279,7 @@ fn createRootModule(
     b: *std.Build,
     root_source_file: std.Build.LazyPath,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     zsass_options_module: *std.Build.Module,
     imports: []const ModuleImport,
     link_libc: bool,

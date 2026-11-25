@@ -29,7 +29,7 @@ const zsass_io = @import("io.zig");
 pub const WatchBackend = struct {
     impl: Impl,
 
-    pub const Impl = switch (builtin.os.tag) {
+    pub const Impl = switch (builtin.target.os.tag) {
         .linux => LinuxInotify,
         .macos, .freebsd, .netbsd, .openbsd, .dragonfly => DarwinKqueue,
         .windows => WindowsRdcw,
@@ -39,7 +39,7 @@ pub const WatchBackend = struct {
     /// True when the active backend uses an OS event source rather than
     /// mtime polling. Surfaces to docs / `--info` so users on supported
     /// targets can confirm they're getting the fast path.
-    pub const native_events: bool = switch (builtin.os.tag) {
+    pub const native_events: bool = switch (builtin.target.os.tag) {
         .linux, .macos, .freebsd, .netbsd, .openbsd, .dragonfly, .windows => true,
         else => false,
     };
@@ -834,7 +834,7 @@ test "splitDirAndBasename peels off basename and keeps relative dir" {
 // fires", the assertions below catch it. Linux-only because it's the
 // only backend that can be exercised end-to-end in this CI.
 test "WatchBackend reports only the job that owns the changed file (linux)" {
-    if (builtin.os.tag != .linux) return;
+    if (builtin.target.os.tag != .linux) return;
 
     var td = std.testing.tmpDir(.{});
     defer td.cleanup();

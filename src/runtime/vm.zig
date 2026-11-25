@@ -469,7 +469,7 @@ pub const VM = struct {
     /// 2. A callsite that can determine that elements are "known no-`&`" at construction time (builtin/list/map/meta, etc.)
     // Route to pre-populate with /// and avoid the first walk itself (in parallel with Value internal flag bit)
     /// Index is handle (index of list_pool.items), size is resize delayed until list_pool.items.len.
-    list_parent_sel_none: std.DynamicBitSetUnmanaged = .{},
+    list_parent_sel_none: std.bit_set.Dynamic = .{},
     /// key -> index hash for `map.get` / `map.has-key` in `builtin/map.zig`.
     /// Drop iterative lookups on large maps to O(1) for repeated helper calls.
     map_lookup_index_cache: std.AutoHashMapUnmanaged(u32, ?*std.StringHashMapUnmanaged(u32)) = .empty,
@@ -1680,7 +1680,7 @@ pub const VM = struct {
     /// One pass over a chunk collecting cross-module observation edges into
     /// `deps` (any opcode carrying a target module id, plus cross-assign
     /// encoded slots).
-    fn noteChunkCrossModuleDeps(chunk: *const Chunk, deps: *std.DynamicBitSetUnmanaged) void {
+    fn noteChunkCrossModuleDeps(chunk: *const Chunk, deps: *std.bit_set.Dynamic) void {
         for (chunk.code) |inst| {
             switch (inst.opcode()) {
                 .run_dependency, .call_mixin, .call_function => {
@@ -1720,14 +1720,14 @@ pub const VM = struct {
         }
 
         // Collect each module's observed-module set once.
-        var deps_storage = try self.allocator.alloc(std.DynamicBitSetUnmanaged, n);
+        var deps_storage = try self.allocator.alloc(std.bit_set.Dynamic, n);
         var inited: usize = 0;
         defer {
             for (deps_storage[0..inited]) |*bits| bits.deinit(self.allocator);
             self.allocator.free(deps_storage);
         }
         for (deps_storage) |*bits| {
-            bits.* = try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, n);
+            bits.* = try std.bit_set.Dynamic.initEmpty(self.allocator, n);
             inited += 1;
         }
         for (self.program.modules, 0..) |*mod, mid| {
