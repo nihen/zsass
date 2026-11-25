@@ -148,21 +148,21 @@ fn appendNestedNotHasExpected(
     ab: []const u8,
     mode: enum { outer_not, compound_not, has },
 ) !void {
-    const c = try std.fmt.allocPrint(allocator, ":not({s}):not({s}:not({s}))", .{ ab, b, ab });
+    const c = try allocator.print(":not({s}):not({s}:not({s}))", .{ ab, b, ab });
     defer allocator.free(c);
-    const d = try std.fmt.allocPrint(allocator, "{s}:has({s})", .{ b, c });
+    const d = try allocator.print("{s}:has({s})", .{ b, c });
     defer allocator.free(d);
-    const e = try std.fmt.allocPrint(allocator, "{s}:not({s}):not({s})", .{ b, ab, d });
+    const e = try allocator.print("{s}:not({s}):not({s})", .{ b, ab, d });
     defer allocator.free(e);
-    const f = try std.fmt.allocPrint(allocator, "{s}:has(:not({s}):not({s}):not({s}))", .{ b, ab, d, e });
+    const f = try allocator.print("{s}:has(:not({s}):not({s}):not({s}))", .{ b, ab, d, e });
     defer allocator.free(f);
-    const g = try std.fmt.allocPrint(allocator, "{s}:not({s}):not({s}):not({s}):not({s})", .{ b, ab, d, e, f });
+    const g = try allocator.print("{s}:not({s}):not({s}):not({s}):not({s})", .{ b, ab, d, e, f });
     defer allocator.free(g);
 
     const rendered = switch (mode) {
-        .outer_not => try std.fmt.allocPrint(allocator, ":not({s}):not(:not({s}):not({s}))", .{ a.?, ab, d }),
-        .compound_not => try std.fmt.allocPrint(allocator, ":not({s}):not({s}):not({s}):not({s}):not({s})", .{ ab, d, e, f, g }),
-        .has => try std.fmt.allocPrint(allocator, ":has(:not({s}):not({s}):not({s}):not({s}):not({s}))", .{ ab, d, e, f, g }),
+        .outer_not => try allocator.print(":not({s}):not(:not({s}):not({s}))", .{ a.?, ab, d }),
+        .compound_not => try allocator.print(":not({s}):not({s}):not({s}):not({s}):not({s})", .{ ab, d, e, f, g }),
+        .has => try allocator.print(":has(:not({s}):not({s}):not({s}):not({s}):not({s}))", .{ ab, d, e, f, g }),
     };
     defer allocator.free(rendered);
     try out.appendSlice(allocator, rendered);
@@ -288,7 +288,7 @@ fn sourcePathForSourceMap(
         .absolute => {
             const abs_path: []const u8 = if (std.mem.eql(u8, effective, "<stdin>")) blk: {
                 const cwd = try zsass_io.realPathAlloc(std.Io.Dir.cwd(), ".", arena);
-                break :blk try std.fmt.allocPrint(arena, "{s}/<stdin>", .{cwd});
+                break :blk try arena.print("{s}/<stdin>", .{cwd});
             } else if (std.fs.path.isAbsolute(effective)) blk: {
                 break :blk zsass_io.realPathAlloc(std.Io.Dir.cwd(), effective, arena) catch |err| switch (err) {
                     error.FileNotFound => try std.fs.path.resolve(arena, &.{effective}),
@@ -299,9 +299,9 @@ fn sourcePathForSourceMap(
                 break :blk try std.fs.path.resolve(arena, &.{ cwd, effective });
             };
             if (std.mem.startsWith(u8, abs_path, "/")) {
-                return try std.fmt.allocPrint(arena, "file://{s}", .{abs_path});
+                return try arena.print("file://{s}", .{abs_path});
             }
-            return try std.fmt.allocPrint(arena, "file:///{s}", .{abs_path});
+            return try arena.print("file:///{s}", .{abs_path});
         },
     }
 }
@@ -606,7 +606,7 @@ fn normalizeCalcTrailingOperatorParens(allocator: std.mem.Allocator, raw: []cons
                 if (body.len != 0) {
                     const tail = body[body.len - 1];
                     if (tail == '*' or tail == '/') {
-                        return try std.fmt.allocPrint(allocator, "calc(({s}))", .{body});
+                        return try allocator.print("calc(({s}))", .{body});
                     }
                 }
             }
@@ -619,7 +619,7 @@ fn normalizeCalcTrailingOperatorParens(allocator: std.mem.Allocator, raw: []cons
     if (inner.len == 0 or (inner[0] == '(' and inner[inner.len - 1] == ')')) return null;
     const tail = inner[inner.len - 1];
     if (tail != '*' and tail != '/') return null;
-    return try std.fmt.allocPrint(allocator, "calc(({s}))", .{inner});
+    return try allocator.print("calc(({s}))", .{inner});
 }
 
 fn stripCalcDeclMarker(text: []const u8) []const u8 {
@@ -5049,11 +5049,11 @@ pub const RuleIR = struct {
             }
         }
         if (short) {
-            const rendered = try std.fmt.allocPrint(allocator, "#{x}{x}{x}", .{ @as(u4, @intCast(r >> 4)), @as(u4, @intCast(g >> 4)), @as(u4, @intCast(b >> 4)) });
+            const rendered = try allocator.print("#{x}{x}{x}", .{ @as(u4, @intCast(r >> 4)), @as(u4, @intCast(g >> 4)), @as(u4, @intCast(b >> 4)) });
             defer allocator.free(rendered);
             try out.appendSlice(allocator, rendered);
         } else {
-            const rendered = try std.fmt.allocPrint(allocator, "#{x:0>2}{x:0>2}{x:0>2}", .{ r, g, b });
+            const rendered = try allocator.print("#{x:0>2}{x:0>2}{x:0>2}", .{ r, g, b });
             defer allocator.free(rendered);
             try out.appendSlice(allocator, rendered);
         }
@@ -8385,7 +8385,7 @@ pub const RuleIR = struct {
 
                 const value = std.fmt.parseInt(u21, text[i..], 16) catch return text;
                 if (!(value == ' ' or value <= 0x1F or value == 0x7F)) return text;
-                return std.fmt.allocPrint(allocator, "{s} ", .{text});
+                return allocator.print("{s} ", .{text});
             }
 
             /// A hex escape in a selector name is always written with the
@@ -11858,7 +11858,7 @@ pub const RuleIR = struct {
             std.mem.endsWith(u8, trimmed, "  */"))
         {
             const inner = trimmed["/*  * ".len .. trimmed.len - "  */".len];
-            return std.fmt.allocPrint(allocator, "/*\n * {s}\n */", .{inner});
+            return allocator.print("/*\n * {s}\n */", .{inner});
         }
         if (!std.mem.startsWith(u8, trimmed, "/*")) return text;
         const has_closing = std.mem.endsWith(u8, trimmed, "*/");
@@ -11869,7 +11869,7 @@ pub const RuleIR = struct {
             if (has_closing) return text;
             const payload = std.mem.trim(u8, body_for_check, " \t");
             if (payload.len == 0) return allocator.dupe(u8, "/* */");
-            return std.fmt.allocPrint(allocator, "/* {s} */", .{payload});
+            return allocator.print("/* {s} */", .{payload});
         }
 
         // "Normal" block comments with multiple lines and closing `*/` are kept verbatim by the official Sass CLI
@@ -13363,8 +13363,7 @@ test "rule_ir writer uses marked source column for imported multiline custom pro
     const prelude = try pool.intern("(prefers-color-scheme: dark)");
     const sel = try pool.intern(".search-ui");
     const prop = try pool.intern("--component-shadow");
-    const value = try std.fmt.allocPrint(
-        allocator,
+    const value = try allocator.print(
         " {s}4;0 10px 25px -5px rgba(0, 0, 0, 0.5),\n      0 8px 10px -6px rgba(0, 0, 0, 0.5)",
         .{opcode_mod.custom_property_source_col_marker},
     );
@@ -13405,8 +13404,7 @@ test "rule_ir writer dedents imported custom property continuation at declaratio
 
     const sel = try pool.intern(".card-list[class*=cols] > .card");
     const prop = try pool.intern("--card-border-color");
-    const value = try std.fmt.allocPrint(
-        allocator,
+    const value = try allocator.print(
         " {s}4;none\n    border-radius: 0",
         .{opcode_mod.custom_property_source_col_marker},
     );

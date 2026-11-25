@@ -1491,7 +1491,7 @@ fn resolveCssSpecialOpaqueCallExpr(ctx: *Ctx, span: Span, canonical_name: []cons
     const rparen = std.mem.lastIndexOfScalar(u8, raw, ')') orelse return error.SassError;
     if (rparen < lparen) return error.SassError;
     const inner = raw[lparen + 1 .. rparen];
-    const text = try std.fmt.allocPrint(ctx.a, "{s}({s})", .{ canonical_name, inner });
+    const text = try ctx.a.print("{s}({s})", .{ canonical_name, inner });
     const id = if (ctx.calc_arg_mode) try markCalcArgText(ctx, text) else try ctx.pool.intern(text);
     return try appendExpr(ctx.prog, ctx.a, .{
         .kind = .literal_string,
@@ -1505,13 +1505,13 @@ fn isIdentifierChar(c: u8) bool {
 }
 
 fn markCalcArgText(ctx: *Ctx, raw: []const u8) ResolveError!InternId {
-    const marked = try std.fmt.allocPrint(ctx.a, "{s}{s}", .{ calc_arg_marker, raw });
+    const marked = try ctx.a.print("{s}{s}", .{ calc_arg_marker, raw });
     defer ctx.a.free(marked);
     return try ctx.pool.intern(marked);
 }
 
 fn markCalcInterpText(ctx: *Ctx, raw: []const u8) ResolveError!InternId {
-    const marked = try std.fmt.allocPrint(ctx.a, "{s}{s}", .{ calc_interp_marker, raw });
+    const marked = try ctx.a.print("{s}{s}", .{ calc_interp_marker, raw });
     defer ctx.a.free(marked);
     return try ctx.pool.intern(marked);
 }
@@ -3322,7 +3322,7 @@ fn resolveExprVariable(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
             }
         }
         const name = ctx.pool.get(name_id);
-        const text = try std.fmt.allocPrint(ctx.a, "${s}", .{name});
+        const text = try ctx.a.print("${s}", .{name});
         defer ctx.a.free(text);
         const id = try ctx.pool.intern(text);
         return try appendExpr(ctx.prog, ctx.a, .{
@@ -6782,7 +6782,7 @@ fn resolveCssSpecialCallExprFromSourceText(ctx: *Ctx, raw_text: []const u8, span
                 error.UnknownVar => return error.UnknownVar,
                 else => {},
             };
-            const normalized_text = try std.fmt.allocPrint(ctx.a, "{s}({s})", .{ canonical_name, normalized_inner });
+            const normalized_text = try ctx.a.print("{s}({s})", .{ canonical_name, normalized_inner });
             defer ctx.a.free(normalized_text);
             break :blk try resolveInterpolatedTextExpr(ctx, normalized_text, span, true);
         };
@@ -6807,13 +6807,13 @@ fn resolveCssSpecialCallExprFromSourceText(ctx: *Ctx, raw_text: []const u8, span
     }
 
     if (url_eval_mode == .basic) {
-        const normalized_text = try std.fmt.allocPrint(ctx.a, "{s}({s})", .{ canonical_name, normalized_inner });
+        const normalized_text = try ctx.a.print("{s}({s})", .{ canonical_name, normalized_inner });
         defer ctx.a.free(normalized_text);
         return try resolveInterpolatedTextExpr(ctx, normalized_text, span, true);
     }
 
     if (!has_interpolation) {
-        const text_out = try std.fmt.allocPrint(ctx.a, "{s}({s})", .{ canonical_name, normalized_inner });
+        const text_out = try ctx.a.print("{s}({s})", .{ canonical_name, normalized_inner });
         defer ctx.a.free(text_out);
         const id = if (ctx.calc_arg_mode) try markCalcArgText(ctx, text_out) else try ctx.pool.intern(text_out);
         return try appendExpr(ctx.prog, ctx.a, .{
@@ -8340,13 +8340,13 @@ fn internMarkedCustomPropertyRawValue(ctx: *Ctx, raw_value: []const u8, prop_spa
     while (leading < raw_value.len and (raw_value[leading] == ' ' or raw_value[leading] == '\t')) : (leading += 1) {}
 
     const marked = if (leading == 0)
-        try std.fmt.allocPrint(ctx.a, "{s}{d};{s}", .{
+        try ctx.a.print("{s}{d};{s}", .{
             opcode_mod.custom_property_source_col_marker,
             col,
             raw_value,
         })
     else
-        try std.fmt.allocPrint(ctx.a, "{s}{s}{d};{s}", .{
+        try ctx.a.print("{s}{s}{d};{s}", .{
             raw_value[0..leading],
             opcode_mod.custom_property_source_col_marker,
             col,
@@ -9508,7 +9508,7 @@ fn resolveIncludeArgsFromSource(ctx: *Ctx, inner_src: []const u8) ResolveError!R
         return .{ .arg_start = 0, .arg_count = 0 };
     }
 
-    const fake_call_src = try std.fmt.allocPrint(ctx.a, "__zsass_include({s})", .{inner_src});
+    const fake_call_src = try ctx.a.print("__zsass_include({s})", .{inner_src});
     var sub_ast = ast_flat.Ast.init(ctx.a, fake_call_src, .none);
     defer sub_ast.deinit();
     var lexer = lexer_mod.Lexer.init(ctx.a, fake_call_src);

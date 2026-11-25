@@ -41,7 +41,7 @@ pub fn main(init: std.process.Init) !void {
     try writeFile(output_path, result.css);
     try printLine("Wrote {s} ({d} bytes)\n", .{ output_path, result.css.len });
 
-    const map_path = try std.fmt.allocPrint(allocator, "{s}.map", .{output_path});
+    const map_path = try allocator.print("{s}.map", .{output_path});
     defer allocator.free(map_path);
     try writeFile(map_path, result.source_map_json);
     try printLine("Wrote {s} ({d} bytes)\n", .{ map_path, result.source_map_json.len });

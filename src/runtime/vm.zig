@@ -4238,7 +4238,7 @@ pub const VM = struct {
                     if (std.mem.indexOfScalar(u8, raw_value, '\n') != null or std.mem.indexOfScalar(u8, raw_value, '\r') != null) {
                         const spaced_raw = if (raw_value.len != 0 and raw_value[0] != ' ' and raw_value[0] != '\t' and
                             (emit_decl_flags & opcode_mod.emit_decl_flag_custom_property_leading_space) != 0)
-                            try std.fmt.allocPrint(self.allocator, " {s}", .{raw_value})
+                            try self.allocator.print(" {s}", .{raw_value})
                         else
                             raw_value;
                         defer if (spaced_raw.ptr != raw_value.ptr) self.allocator.free(@constCast(spaced_raw));
@@ -4284,7 +4284,7 @@ pub const VM = struct {
                         working.len != (if (had_literal_marker) before_plain.len - literal_decl_marker.len else before_plain.len))
                     {
                         if (had_literal_marker) {
-                            const marked = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ literal_decl_marker, working });
+                            const marked = try self.allocator.print("{s}{s}", .{ literal_decl_marker, working });
                             defer self.allocator.free(marked);
                             vid = try self.intern_pool.intern(marked);
                         } else {
@@ -4531,7 +4531,7 @@ pub const VM = struct {
                     const raw_before_ws = self.intern_pool.get(out_id);
                     if (raw_before_ws.len != 0 and raw_before_ws[0] != ' ' and raw_before_ws[0] != '\t') {
                         if ((inst.arg_a & opcode_mod.emit_raw_decl_flag_custom_property_leading_space) != 0) {
-                            const restored = try std.fmt.allocPrint(self.allocator, " {s}", .{raw_before_ws});
+                            const restored = try self.allocator.print(" {s}", .{raw_before_ws});
                             defer self.allocator.free(restored);
                             out_id = try self.intern_pool.intern(restored);
                         }
@@ -4964,7 +4964,7 @@ pub const VM = struct {
                             ((inst.arg_a & opcode_mod.emit_decl_flag_custom_property_leading_space) != 0 or
                                 (inst.arg_a & opcode_mod.emit_decl_flag_value_source_multiline) != 0 or
                                 dynamicCustomValueNeedsImplicitLeadingSpace(raw_value)))
-                            try std.fmt.allocPrint(self.allocator, " {s}", .{raw_value})
+                            try self.allocator.print(" {s}", .{raw_value})
                         else
                             raw_value;
                         defer if (spaced_raw.ptr != raw_value.ptr) self.allocator.free(@constCast(spaced_raw));
@@ -5020,7 +5020,7 @@ pub const VM = struct {
                             ((inst.arg_a & opcode_mod.emit_decl_flag_custom_property_leading_space) != 0 or
                                 (inst.arg_a & opcode_mod.emit_decl_flag_value_source_multiline) != 0 or
                                 dynamicCustomValueNeedsImplicitLeadingSpace(normalized)))
-                            try std.fmt.allocPrint(self.allocator, " {s}", .{normalized})
+                            try self.allocator.print(" {s}", .{normalized})
                         else
                             normalized;
                         defer if (raw_out.ptr != normalized.ptr) self.allocator.free(@constCast(raw_out));
@@ -5055,7 +5055,7 @@ pub const VM = struct {
                         ((inst.arg_a & opcode_mod.emit_decl_flag_custom_property_leading_space) != 0 or
                             (inst.arg_a & opcode_mod.emit_decl_flag_value_source_multiline) != 0 or
                             dynamicCustomValueNeedsImplicitLeadingSpace(value_text)))
-                        try std.fmt.allocPrint(self.allocator, " {s}", .{value_text})
+                        try self.allocator.print(" {s}", .{value_text})
                     else
                         value_text;
                     defer if (raw_out.ptr != value_text.ptr) self.allocator.free(@constCast(raw_out));
@@ -5077,7 +5077,7 @@ pub const VM = struct {
                     break :blk try self.intern_pool.intern(raw_prefix);
                 } else blk: {
                     const parent = self.intern_pool.get(self.prop_namespace_stack.items[self.prop_namespace_stack.items.len - 1]);
-                    const merged = try std.fmt.allocPrint(self.allocator, "{s}-{s}", .{ parent, raw_prefix });
+                    const merged = try self.allocator.print("{s}-{s}", .{ parent, raw_prefix });
                     defer self.allocator.free(merged);
                     break :blk try self.intern_pool.intern(merged);
                 };
@@ -5425,7 +5425,7 @@ pub const VM = struct {
         const prefix = self.intern_pool.get(prefix_id);
         if (prefix.len == 0) return prop_id;
         const prop = self.intern_pool.get(prop_id);
-        const merged = try std.fmt.allocPrint(self.allocator, "{s}-{s}", .{ prefix, prop });
+        const merged = try self.allocator.print("{s}-{s}", .{ prefix, prop });
         defer self.allocator.free(merged);
         return self.intern_pool.intern(merged) catch error.OutOfMemory;
     }
@@ -5493,7 +5493,7 @@ pub const VM = struct {
     pub fn ensureInternTrailingEscapeDelimiter(self: *VM, raw_id: InternId) VMError!InternId {
         const raw = self.intern_pool.get(raw_id);
         if (!endsWithCssHexEscape(raw)) return raw_id;
-        const with_delim = try std.fmt.allocPrint(self.allocator, "{s} ", .{raw});
+        const with_delim = try self.allocator.print("{s} ", .{raw});
         defer self.allocator.free(with_delim);
         return self.intern_pool.intern(with_delim) catch error.OutOfMemory;
     }
@@ -5628,7 +5628,7 @@ pub const VM = struct {
 
     fn allocValueDiagnosticText(self: *VM, v: Value) VMError![]const u8 {
         return valueToOpString(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.callable_payload_pool, v) catch
-            std.fmt.allocPrint(self.allocator, "<{s}>", .{@tagName(v.kind())}) catch error.OutOfMemory;
+            self.allocator.print("<{s}>", .{@tagName(v.kind())}) catch error.OutOfMemory;
     }
 
     fn currentSourceUsesIndentedSyntax(self: *const VM) bool {
@@ -8087,7 +8087,7 @@ pub const VM = struct {
                 }
             }
 
-            const wrapped_passthrough = try std.fmt.allocPrint(self.allocator, "calc({s})", .{normalized});
+            const wrapped_passthrough = try self.allocator.print("calc({s})", .{normalized});
             defer self.allocator.free(wrapped_passthrough);
             if (source_interp_marked) return try internCalcInterpString(self.intern_pool, self.allocator, wrapped_passthrough);
             const id_passthrough = try self.intern_pool.intern(wrapped_passthrough);
@@ -8137,7 +8137,7 @@ pub const VM = struct {
                 return try Value.number(n.value, unit_id, &self.number_pool, self.allocator);
             },
             .variable => {
-                const wrapped_var = try std.fmt.allocPrint(self.allocator, "calc({s})", .{trimmed});
+                const wrapped_var = try self.allocator.print("calc({s})", .{trimmed});
                 defer self.allocator.free(wrapped_var);
                 if (source_interp_marked) return try internCalcInterpString(self.intern_pool, self.allocator, wrapped_var);
                 const id_var = try self.intern_pool.intern(wrapped_var);
@@ -8157,7 +8157,7 @@ pub const VM = struct {
             return Value.string(id_inner, false);
         }
 
-        const wrapped = try std.fmt.allocPrint(self.allocator, "calc({s})", .{css});
+        const wrapped = try self.allocator.print("calc({s})", .{css});
         defer self.allocator.free(wrapped);
         if (source_interp_marked) return try internCalcInterpString(self.intern_pool, self.allocator, wrapped);
         const id = try self.intern_pool.intern(wrapped);
@@ -8293,7 +8293,7 @@ pub const VM = struct {
     }
 
     fn preserveUnparsedCalcText(self: *VM, trimmed: []const u8) VMError!Value {
-        const wrapped = try std.fmt.allocPrint(self.allocator, "calc({s})", .{trimmed});
+        const wrapped = try self.allocator.print("calc({s})", .{trimmed});
         defer self.allocator.free(wrapped);
         const id = try internRuntimeText(self.intern_pool, self.allocator, wrapped);
         return Value.string(id, false).withPreserveLiteralText();
@@ -8347,7 +8347,7 @@ pub const VM = struct {
         const arg0_text = calc_utils.stripCalcArgMarker(self.intern_pool.get(arg0_id));
 
         if (args.len == 1) {
-            const out = try std.fmt.allocPrint(self.allocator, "calc-size({s})", .{arg0_text});
+            const out = try self.allocator.print("calc-size({s})", .{arg0_text});
             defer self.allocator.free(out);
             const id_one = try self.intern_pool.intern(out);
             return Value.string(id_one, false);
@@ -8385,7 +8385,7 @@ pub const VM = struct {
         const restore_plain = try calc_utils.replaceAllLiteral(self.allocator, restore_var, "__zsass_calc_size__", "size");
         defer self.allocator.free(restore_plain);
 
-        const out = try std.fmt.allocPrint(self.allocator, "calc-size({s}, {s})", .{ arg0_text, restore_plain });
+        const out = try self.allocator.print("calc-size({s}, {s})", .{ arg0_text, restore_plain });
         defer self.allocator.free(out);
         const id_two = try self.intern_pool.intern(out);
         return Value.string(id_two, false);
@@ -8499,7 +8499,7 @@ pub const VM = struct {
     pub fn recordModuleArgumentMismatchMessage(self: *VM, value: Value) void {
         const rendered = formatInspectionValueForArgMessage(self, value) catch return;
         defer self.allocator.free(rendered);
-        const msg = std.fmt.allocPrint(self.allocator, "$module: {s} is neither a string nor a module reference.", .{rendered}) catch return;
+        const msg = self.allocator.print("$module: {s} is neither a string nor a module reference.", .{rendered}) catch return;
         defer self.allocator.free(msg);
         error_format.setContextMessage(msg);
     }
@@ -8871,7 +8871,7 @@ fn startsWithCalculationCall(text: []const u8) bool {
 fn internWithLeadingMarker(pool: *InternPool, alloc: std.mem.Allocator, marker: []const u8, id: InternId) VMError!InternId {
     const text = pool.get(id);
     if (std.mem.startsWith(u8, text, marker)) return id;
-    const marked = try std.fmt.allocPrint(alloc, "{s}{s}", .{ marker, text });
+    const marked = try alloc.print("{s}{s}", .{ marker, text });
     defer alloc.free(marked);
     return pool.intern(marked) catch error.OutOfMemory;
 }
@@ -8900,7 +8900,7 @@ fn isUnquotedCalcLikeString(pool: *InternPool, v: Value) bool {
 
 fn internCalcString(pool: *InternPool, alloc: std.mem.Allocator, text: []const u8, marked: bool) VMError!Value {
     if (marked) {
-        const wrapped = try std.fmt.allocPrint(alloc, "{s}{s}", .{ calc_arg_marker, text });
+        const wrapped = try alloc.print("{s}{s}", .{ calc_arg_marker, text });
         defer alloc.free(wrapped);
         const id_marked = try internRuntimeText(pool, alloc, wrapped);
         return Value.string(id_marked, false);
@@ -8910,7 +8910,7 @@ fn internCalcString(pool: *InternPool, alloc: std.mem.Allocator, text: []const u
 }
 
 fn internCalcInterpString(pool: *InternPool, alloc: std.mem.Allocator, text: []const u8) VMError!Value {
-    const wrapped = try std.fmt.allocPrint(alloc, "{s}{s}", .{ calc_interp_marker, text });
+    const wrapped = try alloc.print("{s}{s}", .{ calc_interp_marker, text });
     defer alloc.free(wrapped);
     const id_marked = try internRuntimeText(pool, alloc, wrapped);
     return Value.string(id_marked, false);
@@ -8981,7 +8981,7 @@ fn unaryPrefixValue(self: *VM, prefix: []const u8, v: Value, calc_policy: UnaryC
         return error.SassError;
     }
 
-    const merged = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ prefix, raw });
+    const merged = try self.allocator.print("{s}{s}", .{ prefix, raw });
     defer self.allocator.free(merged);
     const id = try self.intern_pool.intern(merged);
     return Value.string(id, false);
@@ -9137,9 +9137,9 @@ fn formatCalcArithmeticNumber(pool: *InternPool, number_pool: *NumberPool, alloc
     if (std.math.isNan(n)) {
         if (unit) |u| {
             if (unitFactorCanAttachDirectly(u)) {
-                return std.fmt.allocPrint(alloc, "NaN * 1{s}", .{u}) catch error.OutOfMemory;
+                return alloc.print("NaN * 1{s}", .{u}) catch error.OutOfMemory;
             }
-            return std.fmt.allocPrint(alloc, "NaN * {s}", .{u}) catch error.OutOfMemory;
+            return alloc.print("NaN * {s}", .{u}) catch error.OutOfMemory;
         }
         return try alloc.dupe(u8, "NaN");
     }
@@ -9147,9 +9147,9 @@ fn formatCalcArithmeticNumber(pool: *InternPool, number_pool: *NumberPool, alloc
         const keyword = if (n < 0) "-infinity" else "infinity";
         if (unit) |u| {
             if (unitFactorCanAttachDirectly(u)) {
-                return std.fmt.allocPrint(alloc, "{s} * 1{s}", .{ keyword, u }) catch error.OutOfMemory;
+                return alloc.print("{s} * 1{s}", .{ keyword, u }) catch error.OutOfMemory;
             }
-            return std.fmt.allocPrint(alloc, "{s} * {s}", .{ keyword, u }) catch error.OutOfMemory;
+            return alloc.print("{s} * {s}", .{ keyword, u }) catch error.OutOfMemory;
         }
         return try alloc.dupe(u8, keyword);
     }
@@ -9170,7 +9170,7 @@ fn recordIncompatibleUnitsMessage(
     defer alloc.free(sa);
     const sb = formatNumberValue(pool, number_pool, alloc, rhs) catch return;
     defer alloc.free(sb);
-    const msg = std.fmt.allocPrint(alloc, "{s} and {s} have incompatible units.", .{ sa, sb }) catch return;
+    const msg = alloc.print("{s} and {s} have incompatible units.", .{ sa, sb }) catch return;
     defer alloc.free(msg);
     error_format.setContextMessage(msg);
 }
@@ -9211,7 +9211,7 @@ fn addValues(
                     defer alloc.free(sa);
                     const sb = try formatCalcArithmeticNumber(pool, number_pool, alloc, rhs);
                     defer alloc.free(sb);
-                    const merged = try std.fmt.allocPrint(alloc, "{s} + {s}", .{ sa, sb });
+                    const merged = try alloc.print("{s} + {s}", .{ sa, sb });
                     defer alloc.free(merged);
                     return internCalcString(pool, alloc, merged, true);
                 }
@@ -9231,13 +9231,13 @@ fn addValues(
         const sb = calc_utils.stripCalcArgMarker(pool.get(rhs.stringIntern()));
         if (mark_result) {
             if (preserve_only and (qa or qb)) {
-                const merged = try std.fmt.allocPrint(alloc, "{s}{s}", .{ sa, sb });
+                const merged = try alloc.print("{s}{s}", .{ sa, sb });
                 defer alloc.free(merged);
                 const id = try internGeneratedString(pool, merged);
                 return Value.string(id, qa or qb);
             }
             if (qa or qb) return error.SassError;
-            const merged_calc = try std.fmt.allocPrint(alloc, "{s} + {s}", .{ sa, sb });
+            const merged_calc = try alloc.print("{s} + {s}", .{ sa, sb });
             defer alloc.free(merged_calc);
             return internCalcString(pool, alloc, merged_calc, true);
         }
@@ -9256,7 +9256,7 @@ fn addValues(
         // characters: a private-use escape becomes the character itself.
         const sb_text = if (qa and !qb) try css_utils.decodePrivateUseEscapes(alloc, sb) else sb;
         defer if (sb_text.ptr != sb.ptr) alloc.free(sb_text);
-        const merged = try std.fmt.allocPrint(alloc, "{s}{s}", .{ sa, sb_text });
+        const merged = try alloc.print("{s}{s}", .{ sa, sb_text });
         defer alloc.free(merged);
         const id = try internGeneratedString(pool, merged);
         const keep_rhs_quote = qb and !qa and isUnquotedCalcLikeString(pool, lhs);
@@ -9269,18 +9269,18 @@ fn addValues(
         const sb = calc_utils.stripCalcArgMarker(pool.get(rhs.stringIntern()));
         if (mark_result) {
             if (preserve_only and rhs.stringQuoted(value_mod.empty_string_flags_pool)) {
-                const merged = try std.fmt.allocPrint(alloc, "{s}{s}", .{ num_s, sb });
+                const merged = try alloc.print("{s}{s}", .{ num_s, sb });
                 defer alloc.free(merged);
                 const id = try internGeneratedString(pool, merged);
                 return Value.string(id, true);
             }
             if (rhs.stringQuoted(value_mod.empty_string_flags_pool)) return error.SassError;
-            const merged_calc = try std.fmt.allocPrint(alloc, "{s} + {s}", .{ num_s, sb });
+            const merged_calc = try alloc.print("{s} + {s}", .{ num_s, sb });
             defer alloc.free(merged_calc);
             return internCalcString(pool, alloc, merged_calc, true);
         }
         if (!rhs.stringQuoted(value_mod.empty_string_flags_pool) and isUnquotedCalcLikeString(pool, rhs)) return error.SassError;
-        const merged = try std.fmt.allocPrint(alloc, "{s}{s}", .{ num_s, sb });
+        const merged = try alloc.print("{s}{s}", .{ num_s, sb });
         defer alloc.free(merged);
         const id = try internGeneratedString(pool, merged);
         const out = Value.string(id, rhs.stringQuoted(value_mod.empty_string_flags_pool));
@@ -9292,18 +9292,18 @@ fn addValues(
         const sa = calc_utils.stripCalcArgMarker(pool.get(lhs.stringIntern()));
         if (mark_result) {
             if (preserve_only and lhs.stringQuoted(value_mod.empty_string_flags_pool)) {
-                const merged = try std.fmt.allocPrint(alloc, "{s}{s}", .{ sa, sb });
+                const merged = try alloc.print("{s}{s}", .{ sa, sb });
                 defer alloc.free(merged);
                 const id = try internGeneratedString(pool, merged);
                 return Value.string(id, true);
             }
             if (lhs.stringQuoted(value_mod.empty_string_flags_pool)) return error.SassError;
-            const merged_calc = try std.fmt.allocPrint(alloc, "{s} + {s}", .{ sa, sb });
+            const merged_calc = try alloc.print("{s} + {s}", .{ sa, sb });
             defer alloc.free(merged_calc);
             return internCalcString(pool, alloc, merged_calc, true);
         }
         if (!lhs.stringQuoted(value_mod.empty_string_flags_pool) and isUnquotedCalcLikeString(pool, lhs)) return error.SassError;
-        const merged = try std.fmt.allocPrint(alloc, "{s}{s}", .{ sa, sb });
+        const merged = try alloc.print("{s}{s}", .{ sa, sb });
         defer alloc.free(merged);
         const id = try internGeneratedString(pool, merged);
         const out = Value.string(id, lhs.stringQuoted(value_mod.empty_string_flags_pool));
@@ -9314,9 +9314,9 @@ fn addValues(
     const sb = try valueToOpString(pool, number_pool, alloc, list_pool, color_pool, callable_payload_pool, rhs);
     defer alloc.free(sb);
     const merged = if (mark_result)
-        try std.fmt.allocPrint(alloc, "{s} + {s}", .{ sa, sb })
+        try alloc.print("{s} + {s}", .{ sa, sb })
     else
-        try std.fmt.allocPrint(alloc, "{s}{s}", .{ sa, sb });
+        try alloc.print("{s}{s}", .{ sa, sb });
     defer alloc.free(merged);
     if (mark_result) {
         if ((lhs.kind() == .string and lhs.stringQuoted(value_mod.empty_string_flags_pool)) or (rhs.kind() == .string and rhs.stringQuoted(value_mod.empty_string_flags_pool))) {
@@ -9732,7 +9732,7 @@ fn subValues(
                     defer alloc.free(sa_num);
                     const sb_num = try formatCalcArithmeticNumber(pool, number_pool, alloc, rhs);
                     defer alloc.free(sb_num);
-                    const merged_num = try std.fmt.allocPrint(alloc, "{s} - {s}", .{ sa_num, sb_num });
+                    const merged_num = try alloc.print("{s} - {s}", .{ sa_num, sb_num });
                     defer alloc.free(merged_num);
                     return internCalcString(pool, alloc, merged_num, true);
                 }
@@ -9752,12 +9752,12 @@ fn subValues(
         const sa_t = std.mem.trim(u8, sa, " \t\r\n");
         const sb_t = std.mem.trim(u8, sb, " \t\r\n");
         const sb_fmt = if (calc_utils.calcExprHasAdditiveOp(sb_t))
-            try std.fmt.allocPrint(alloc, "({s})", .{sb_t})
+            try alloc.print("({s})", .{sb_t})
         else
             try alloc.dupe(u8, sb_t);
         defer alloc.free(sb_fmt);
-        break :blk try std.fmt.allocPrint(alloc, "{s} - {s}", .{ sa_t, sb_fmt });
-    } else try std.fmt.allocPrint(alloc, "{s}-{s}", .{ sa, sb });
+        break :blk try alloc.print("{s} - {s}", .{ sa_t, sb_fmt });
+    } else try alloc.print("{s}-{s}", .{ sa, sb });
     defer alloc.free(merged);
     if (mark_result) return internCalcString(pool, alloc, merged, true);
     const id = try internGeneratedString(pool, merged);
@@ -10120,16 +10120,16 @@ fn mulValues(
         const sa_t = std.mem.trim(u8, sa_raw, " \t\r\n");
         const sb_t = std.mem.trim(u8, sb_raw, " \t\r\n");
         const sa = if (calcOperandNeedsParensForMultiplicative(sa_t))
-            try std.fmt.allocPrint(alloc, "({s})", .{sa_t})
+            try alloc.print("({s})", .{sa_t})
         else
             try alloc.dupe(u8, sa_t);
         defer alloc.free(sa);
         const sb = if (calcOperandNeedsParensForMultiplicative(sb_t))
-            try std.fmt.allocPrint(alloc, "({s})", .{sb_t})
+            try alloc.print("({s})", .{sb_t})
         else
             try alloc.dupe(u8, sb_t);
         defer alloc.free(sb);
-        const merged = try std.fmt.allocPrint(alloc, "{s} * {s}", .{ sa, sb });
+        const merged = try alloc.print("{s} * {s}", .{ sa, sb });
         defer alloc.free(merged);
         return internCalcString(pool, alloc, merged, true);
     }
@@ -10210,7 +10210,7 @@ fn divValues(
                     defer alloc.free(sa);
                     const sb = try simplifySlashOperandText(pool, number_pool, alloc, sb_raw);
                     defer alloc.free(sb);
-                    const merged = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ sa, sb });
+                    const merged = try alloc.print("{s}/{s}", .{ sa, sb });
                     defer alloc.free(merged);
                     const id = try internGeneratedString(pool, merged);
                     return Value.string(id, false);
@@ -10250,21 +10250,21 @@ fn divValues(
         const sa_t = std.mem.trim(u8, sa, " \t\r\n");
         const sb_t = std.mem.trim(u8, sb, " \t\r\n");
         const sa_fmt = if (calcOperandNeedsParensForMultiplicative(sa_t))
-            try std.fmt.allocPrint(alloc, "({s})", .{sa_t})
+            try alloc.print("({s})", .{sa_t})
         else
             try alloc.dupe(u8, sa_t);
         defer alloc.free(sa_fmt);
         const sb_needs_parens = calcOperandNeedsParensForMultiplicative(sb_t) or hasTopLevelUnitOperatorVm(sb_t);
         const sb_fmt = if (sb_needs_parens)
-            try std.fmt.allocPrint(alloc, "({s})", .{sb_t})
+            try alloc.print("({s})", .{sb_t})
         else
             try alloc.dupe(u8, sb_t);
         defer alloc.free(sb_fmt);
-        const merged_calc = try std.fmt.allocPrint(alloc, "{s} / {s}", .{ sa_fmt, sb_fmt });
+        const merged_calc = try alloc.print("{s} / {s}", .{ sa_fmt, sb_fmt });
         defer alloc.free(merged_calc);
         return internCalcString(pool, alloc, merged_calc, true);
     }
-    const merged = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ sa, sb });
+    const merged = try alloc.print("{s}/{s}", .{ sa, sb });
     defer alloc.free(merged);
     const id = try internGeneratedString(pool, merged);
     return Value.string(id, false);
@@ -10404,9 +10404,9 @@ fn valueToArithmeticOperandText(
         if (std.math.isNan(n)) {
             if (unit) |u| {
                 if (unitFactorCanAttachDirectly(u)) {
-                    return std.fmt.allocPrint(alloc, "NaN * 1{s}", .{u}) catch error.OutOfMemory;
+                    return alloc.print("NaN * 1{s}", .{u}) catch error.OutOfMemory;
                 }
-                return std.fmt.allocPrint(alloc, "NaN * {s}", .{u}) catch error.OutOfMemory;
+                return alloc.print("NaN * {s}", .{u}) catch error.OutOfMemory;
             }
             return try alloc.dupe(u8, "NaN");
         }
@@ -10414,9 +10414,9 @@ fn valueToArithmeticOperandText(
             const keyword = if (n < 0) "-infinity" else "infinity";
             if (unit) |u| {
                 if (unitFactorCanAttachDirectly(u)) {
-                    return std.fmt.allocPrint(alloc, "{s} * 1{s}", .{ keyword, u }) catch error.OutOfMemory;
+                    return alloc.print("{s} * 1{s}", .{ keyword, u }) catch error.OutOfMemory;
                 }
-                return std.fmt.allocPrint(alloc, "{s} * {s}", .{ keyword, u }) catch error.OutOfMemory;
+                return alloc.print("{s} * {s}", .{ keyword, u }) catch error.OutOfMemory;
             }
             return try alloc.dupe(u8, keyword);
         }
@@ -10615,7 +10615,7 @@ fn recordArgumentTypeMismatchMessage(self: *VM, param_name: []const u8, value: V
     const rendered = formatInspectionValueForArgMessage(self, value) catch return;
     defer self.allocator.free(rendered);
     const article = value_inspect.indefiniteArticle(expected);
-    const msg = std.fmt.allocPrint(self.allocator, "${s}: {s} is not {s} {s}.", .{ param_name, rendered, article, expected }) catch return;
+    const msg = self.allocator.print("${s}: {s} is not {s} {s}.", .{ param_name, rendered, article, expected }) catch return;
     defer self.allocator.free(msg);
     error_format.setContextMessage(msg);
 }
@@ -11162,7 +11162,7 @@ fn combineNestedRuleSelectorLegacy(alloc: std.mem.Allocator, parent_sel: []const
         return expandAmpSelector(alloc, parent_sel, child_sel);
     }
     if (std.mem.indexOfScalar(u8, parent_sel, ',') == null) {
-        return std.fmt.allocPrint(alloc, "{s} {s}", .{ parent_sel, child_sel }) catch error.OutOfMemory;
+        return alloc.print("{s} {s}", .{ parent_sel, child_sel }) catch error.OutOfMemory;
     }
     var iter = std.mem.splitSequence(u8, parent_sel, ",");
     var joined: std.ArrayListUnmanaged(u8) = .empty;
@@ -11727,7 +11727,7 @@ fn normalizeCalcDeclString(alloc: std.mem.Allocator, raw: []const u8) VMError!?[
                         alloc.free(buf);
                         owned_normalized_inner = null;
                     }
-                    const wrapped = try std.fmt.allocPrint(alloc, "({s})", .{nested_inner_raw});
+                    const wrapped = try alloc.print("({s})", .{nested_inner_raw});
                     owned_normalized_inner = wrapped;
                     normalized_inner = wrapped;
                 } else if (!std.mem.eql(u8, normalized_inner, nested_inner_raw)) {
@@ -12016,12 +12016,12 @@ fn valueToInternIdInterpolated(
         defer if (maybe_normalized) |normalized| alloc.free(normalized);
         const effective = if (maybe_normalized) |normalized| normalized else raw;
         if (preserve_decl_text) {
-            const marked = try std.fmt.allocPrint(alloc, "{s}{s}", .{ literal_decl_marker, effective });
+            const marked = try alloc.print("{s}{s}", .{ literal_decl_marker, effective });
             defer alloc.free(marked);
             return pool.intern(marked) catch error.OutOfMemory;
         }
         if (calc_interp_marked) {
-            const marked = try std.fmt.allocPrint(alloc, "{s}{s}", .{ calc_interp_marker, effective });
+            const marked = try alloc.print("{s}{s}", .{ calc_interp_marker, effective });
             defer alloc.free(marked);
             return pool.intern(marked) catch error.OutOfMemory;
         }
@@ -12155,12 +12155,12 @@ fn valueToInternIdDeclWithMode(
             return internRuntimeText(pool, alloc, space_normalized_inner);
         }
         if (preserve_decl_text) {
-            const marked = try std.fmt.allocPrint(alloc, "{s}{s}", .{ literal_decl_marker, space_normalized_inner });
+            const marked = try alloc.print("{s}{s}", .{ literal_decl_marker, space_normalized_inner });
             defer alloc.free(marked);
             return pool.intern(marked) catch error.OutOfMemory;
         }
         if (calc_interp_marked) {
-            const marked = try std.fmt.allocPrint(alloc, "{s}{s}", .{ calc_interp_marker, space_normalized_inner });
+            const marked = try alloc.print("{s}{s}", .{ calc_interp_marker, space_normalized_inner });
             defer alloc.free(marked);
             return pool.intern(marked) catch error.OutOfMemory;
         }
@@ -17611,7 +17611,7 @@ fn compileWithSharedPoolCrossEntryToCss(
 }
 
 fn cssDeclValue(css: []const u8, prop: []const u8) ![]const u8 {
-    const key = try std.fmt.allocPrint(std.testing.allocator, "  {s}: ", .{prop});
+    const key = try std.testing.allocator.print("  {s}: ", .{prop});
     defer std.testing.allocator.free(key);
     const pos = std.mem.indexOf(u8, css, key) orelse return error.TestExpectedEqual;
     const start = pos + key.len;
@@ -17624,13 +17624,13 @@ test "vm: a loud comment before @forward is emitted once when a later module reu
     var td = std.testing.tmpDir(.{});
     defer td.cleanup();
 
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{td.sub_path[0..]});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{td.sub_path[0..]});
     defer allocator.free(root);
-    const a_path = try std.fmt.allocPrint(allocator, "{s}/_a.scss", .{root});
+    const a_path = try allocator.print("{s}/_a.scss", .{root});
     defer allocator.free(a_path);
-    const c_path = try std.fmt.allocPrint(allocator, "{s}/_c.scss", .{root});
+    const c_path = try allocator.print("{s}/_c.scss", .{root});
     defer allocator.free(c_path);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
 
     try writeFileAll(a_path, ".a { x: 1; }\n");
@@ -17671,13 +17671,13 @@ test "vm: cross-entry seed preserves load-css configured-load guard" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const dep_path = try std.fmt.allocPrint(allocator, "{s}/_dep.scss", .{root});
+    const dep_path = try allocator.print("{s}/_dep.scss", .{root});
     defer allocator.free(dep_path);
-    const entry1_path = try std.fmt.allocPrint(allocator, "{s}/entry1.scss", .{root});
+    const entry1_path = try allocator.print("{s}/entry1.scss", .{root});
     defer allocator.free(entry1_path);
-    const entry2_path = try std.fmt.allocPrint(allocator, "{s}/entry2.scss", .{root});
+    const entry2_path = try allocator.print("{s}/entry2.scss", .{root});
     defer allocator.free(entry2_path);
 
     try writeFileAll(dep_path,
@@ -17738,13 +17738,13 @@ test "vm: cross-entry does not replay stateful builtin globals" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const dep_path = try std.fmt.allocPrint(allocator, "{s}/_dep.scss", .{root});
+    const dep_path = try allocator.print("{s}/_dep.scss", .{root});
     defer allocator.free(dep_path);
-    const entry1_path = try std.fmt.allocPrint(allocator, "{s}/entry1.scss", .{root});
+    const entry1_path = try allocator.print("{s}/entry1.scss", .{root});
     defer allocator.free(entry1_path);
-    const entry2_path = try std.fmt.allocPrint(allocator, "{s}/entry2.scss", .{root});
+    const entry2_path = try allocator.print("{s}/entry2.scss", .{root});
     defer allocator.free(entry2_path);
 
     try writeFileAll(dep_path,
@@ -17793,11 +17793,11 @@ test "vm: ast cache converts imported indented syntax before parsing" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const part_path = try std.fmt.allocPrint(allocator, "{s}/_part.sass", .{root});
+    const part_path = try allocator.print("{s}/_part.sass", .{root});
     defer allocator.free(part_path);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
 
     try writeFileAll(part_path,
@@ -17917,11 +17917,11 @@ test "vm: if-wrapped content block does not hoist nested include out of content 
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const tools_path = try std.fmt.allocPrint(allocator, "{s}/tools/_index.scss", .{root});
+    const tools_path = try allocator.print("{s}/tools/_index.scss", .{root});
     defer allocator.free(tools_path);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
 
     try writeFileAll(tools_path,
@@ -18027,11 +18027,11 @@ test "vm: user module may use builtin-like namespace when builtin is not loaded"
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const color_path = try std.fmt.allocPrint(allocator, "{s}/_color.scss", .{root});
+    const color_path = try allocator.print("{s}/_color.scss", .{root});
     defer allocator.free(color_path);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
 
     try writeFileAll(color_path,
@@ -18062,11 +18062,11 @@ test "vm: parameter defaults may call namespaced user functions" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const cv_path = try std.fmt.allocPrint(allocator, "{s}/_cv.scss", .{root});
+    const cv_path = try allocator.print("{s}/_cv.scss", .{root});
     defer allocator.free(cv_path);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
 
     try writeFileAll(cv_path,
@@ -18216,11 +18216,11 @@ test "vm: plain css @use hoists direct media block around parent selector" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const plain_path = try std.fmt.allocPrint(allocator, "{s}/plain.css", .{root});
+    const plain_path = try allocator.print("{s}/plain.css", .{root});
     defer allocator.free(plain_path);
 
     const entry_source =
@@ -18258,11 +18258,11 @@ test "vm: imported plain css top-level & stays nested under parent rule" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const plain_path = try std.fmt.allocPrint(allocator, "{s}/plain.css", .{root});
+    const plain_path = try allocator.print("{s}/plain.css", .{root});
     defer allocator.free(plain_path);
 
     const entry_source =
@@ -18298,13 +18298,13 @@ test "vm: function default var resolves after later @import" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const fn_path = try std.fmt.allocPrint(allocator, "{s}/_functions.scss", .{root});
+    const fn_path = try allocator.print("{s}/_functions.scss", .{root});
     defer allocator.free(fn_path);
-    const vars_path = try std.fmt.allocPrint(allocator, "{s}/_variables.scss", .{root});
+    const vars_path = try allocator.print("{s}/_variables.scss", .{root});
     defer allocator.free(vars_path);
 
     const functions_src =
@@ -18343,9 +18343,9 @@ test "vm: callable global fallback does not collide with later flow locals" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
 
     const entry_src =
@@ -18415,13 +18415,13 @@ test "vm: mixin default var resolves after later @import" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const mixin_path = try std.fmt.allocPrint(allocator, "{s}/_functions.scss", .{root});
+    const mixin_path = try allocator.print("{s}/_functions.scss", .{root});
     defer allocator.free(mixin_path);
-    const vars_path = try std.fmt.allocPrint(allocator, "{s}/_variables.scss", .{root});
+    const vars_path = try allocator.print("{s}/_variables.scss", .{root});
     defer allocator.free(vars_path);
 
     const mixin_src =
@@ -18460,11 +18460,11 @@ test "vm: variable-exists stays false before configured !default declaration via
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const other_path = try std.fmt.allocPrint(allocator, "{s}/_other.scss", .{root});
+    const other_path = try allocator.print("{s}/_other.scss", .{root});
     defer allocator.free(other_path);
 
     const other_src =
@@ -18503,13 +18503,13 @@ test "vm: variable-exists stays false before configured !default declaration via
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const midstream_path = try std.fmt.allocPrint(allocator, "{s}/_midstream.scss", .{root});
+    const midstream_path = try allocator.print("{s}/_midstream.scss", .{root});
     defer allocator.free(midstream_path);
-    const upstream_path = try std.fmt.allocPrint(allocator, "{s}/_upstream.scss", .{root});
+    const upstream_path = try allocator.print("{s}/_upstream.scss", .{root});
     defer allocator.free(upstream_path);
 
     const midstream_src =
@@ -18553,13 +18553,13 @@ test "vm: @extend can target placeholders from forwarded modules" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const forwarder_path = try std.fmt.allocPrint(allocator, "{s}/_forwarder.scss", .{root});
+    const forwarder_path = try allocator.print("{s}/_forwarder.scss", .{root});
     defer allocator.free(forwarder_path);
-    const upstream_path = try std.fmt.allocPrint(allocator, "{s}/_upstream.scss", .{root});
+    const upstream_path = try allocator.print("{s}/_upstream.scss", .{root});
     defer allocator.free(upstream_path);
 
     const entry_src =
@@ -18593,11 +18593,11 @@ test "vm: @use placeholder extenders keep source order within module group" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const lib_path = try std.fmt.allocPrint(allocator, "{s}/_lib.scss", .{root});
+    const lib_path = try allocator.print("{s}/_lib.scss", .{root});
     defer allocator.free(lib_path);
 
     const entry_src =
@@ -18628,13 +18628,13 @@ test "vm: @forward ignores duplicate private default variables" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const a_path = try std.fmt.allocPrint(allocator, "{s}/_a.scss", .{root});
+    const a_path = try allocator.print("{s}/_a.scss", .{root});
     defer allocator.free(a_path);
-    const b_path = try std.fmt.allocPrint(allocator, "{s}/_b.scss", .{root});
+    const b_path = try allocator.print("{s}/_b.scss", .{root});
     defer allocator.free(b_path);
 
     try writeFileAll(a_path,
@@ -18665,17 +18665,17 @@ test "vm: placeholder-before-visible target sorts module extenders before visibl
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const common_path = try std.fmt.allocPrint(allocator, "{s}/_common.scss", .{root});
+    const common_path = try allocator.print("{s}/_common.scss", .{root});
     defer allocator.free(common_path);
-    const popovers_path = try std.fmt.allocPrint(allocator, "{s}/widgets/_popovers.scss", .{root});
+    const popovers_path = try allocator.print("{s}/widgets/_popovers.scss", .{root});
     defer allocator.free(popovers_path);
-    const app_path = try std.fmt.allocPrint(allocator, "{s}/widgets/_app-notification.scss", .{root});
+    const app_path = try allocator.print("{s}/widgets/_app-notification.scss", .{root});
     defer allocator.free(app_path);
-    const misc_path = try std.fmt.allocPrint(allocator, "{s}/widgets/_misc.scss", .{root});
+    const misc_path = try allocator.print("{s}/widgets/_misc.scss", .{root});
     defer allocator.free(misc_path);
 
     const entry_src =
@@ -18748,11 +18748,11 @@ test "vm: @use with arithmetic expression evaluates at resolve time" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const other_path = try std.fmt.allocPrint(allocator, "{s}/_theme.scss", .{root});
+    const other_path = try allocator.print("{s}/_theme.scss", .{root});
     defer allocator.free(other_path);
 
     const other_src =
@@ -18786,11 +18786,11 @@ test "vm: @forward with configurable calc variable evaluates at resolve time" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const target_path = try std.fmt.allocPrint(allocator, "{s}/_target.scss", .{root});
+    const target_path = try allocator.print("{s}/_target.scss", .{root});
     defer allocator.free(target_path);
 
     try writeFileAll(target_path,
@@ -18823,11 +18823,11 @@ test "vm: @use with config can read composite configurable defaults" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const target_path = try std.fmt.allocPrint(allocator, "{s}/_target.scss", .{root});
+    const target_path = try allocator.print("{s}/_target.scss", .{root});
     defer allocator.free(target_path);
 
     try writeFileAll(target_path,
@@ -18861,13 +18861,13 @@ test "vm: @forward keeps placeholder extends module-local" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const a_path = try std.fmt.allocPrint(allocator, "{s}/_a.scss", .{root});
+    const a_path = try allocator.print("{s}/_a.scss", .{root});
     defer allocator.free(a_path);
-    const b_path = try std.fmt.allocPrint(allocator, "{s}/_b.scss", .{root});
+    const b_path = try allocator.print("{s}/_b.scss", .{root});
     defer allocator.free(b_path);
 
     const entry_src =
@@ -18913,13 +18913,13 @@ test "vm: @forward with arithmetic expression evaluates at resolve time" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const mid_path = try std.fmt.allocPrint(allocator, "{s}/_mid.scss", .{root});
+    const mid_path = try allocator.print("{s}/_mid.scss", .{root});
     defer allocator.free(mid_path);
-    const theme_path = try std.fmt.allocPrint(allocator, "{s}/_theme.scss", .{root});
+    const theme_path = try allocator.print("{s}/_theme.scss", .{root});
     defer allocator.free(theme_path);
 
     const mid_src =
@@ -18958,23 +18958,23 @@ test "vm: forwarded configurable cross-module var stays dynamic until runtime co
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const module_a_dir = try std.fmt.allocPrint(allocator, "{s}/module/a", .{root});
+    const module_a_dir = try allocator.print("{s}/module/a", .{root});
     defer allocator.free(module_a_dir);
-    const module_b_dir = try std.fmt.allocPrint(allocator, "{s}/module/b", .{root});
+    const module_b_dir = try allocator.print("{s}/module/b", .{root});
     defer allocator.free(module_b_dir);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const index_path = try std.fmt.allocPrint(allocator, "{s}/module/_index.scss", .{root});
+    const index_path = try allocator.print("{s}/module/_index.scss", .{root});
     defer allocator.free(index_path);
-    const a_entry_path = try std.fmt.allocPrint(allocator, "{s}/module/a/a.scss", .{root});
+    const a_entry_path = try allocator.print("{s}/module/a/a.scss", .{root});
     defer allocator.free(a_entry_path);
-    const a_vars_path = try std.fmt.allocPrint(allocator, "{s}/module/a/_variables.scss", .{root});
+    const a_vars_path = try allocator.print("{s}/module/a/_variables.scss", .{root});
     defer allocator.free(a_vars_path);
-    const b_entry_path = try std.fmt.allocPrint(allocator, "{s}/module/b/b.scss", .{root});
+    const b_entry_path = try allocator.print("{s}/module/b/b.scss", .{root});
     defer allocator.free(b_entry_path);
-    const b_vars_path = try std.fmt.allocPrint(allocator, "{s}/module/b/_variables.scss", .{root});
+    const b_vars_path = try allocator.print("{s}/module/b/_variables.scss", .{root});
     defer allocator.free(b_vars_path);
 
     try std.Io.Dir.cwd().createDirPath(zsass_io.io, module_a_dir);
@@ -19036,13 +19036,13 @@ test "vm: @use with config reaches simple forwarded mutable defaults" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const index_path = try std.fmt.allocPrint(allocator, "{s}/_index.scss", .{root});
+    const index_path = try allocator.print("{s}/_index.scss", .{root});
     defer allocator.free(index_path);
-    const lib_path = try std.fmt.allocPrint(allocator, "{s}/_lib.scss", .{root});
+    const lib_path = try allocator.print("{s}/_lib.scss", .{root});
     defer allocator.free(lib_path);
 
     const entry_src =
@@ -19099,17 +19099,17 @@ test "vm: @forward header loud comment is not replayed for a later @use of the f
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const index_path = try std.fmt.allocPrint(allocator, "{s}/_index.scss", .{root});
+    const index_path = try allocator.print("{s}/_index.scss", .{root});
     defer allocator.free(index_path);
-    const shared_path = try std.fmt.allocPrint(allocator, "{s}/_shared.scss", .{root});
+    const shared_path = try allocator.print("{s}/_shared.scss", .{root});
     defer allocator.free(shared_path);
-    const a_path = try std.fmt.allocPrint(allocator, "{s}/_a.scss", .{root});
+    const a_path = try allocator.print("{s}/_a.scss", .{root});
     defer allocator.free(a_path);
-    const b_path = try std.fmt.allocPrint(allocator, "{s}/_b.scss", .{root});
+    const b_path = try allocator.print("{s}/_b.scss", .{root});
     defer allocator.free(b_path);
 
     try writeFileAll(entry_path,
@@ -19166,15 +19166,15 @@ test "vm: meta.load-css runtime config overrides forwarded !default seed with mu
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const case_dir = try std.fmt.allocPrint(allocator, "{s}/through_default", .{root});
+    const case_dir = try allocator.print("{s}/through_default", .{root});
     defer allocator.free(case_dir);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{case_dir});
+    const entry_path = try allocator.print("{s}/entry.scss", .{case_dir});
     defer allocator.free(entry_path);
-    const loaded_path = try std.fmt.allocPrint(allocator, "{s}/_loaded.scss", .{case_dir});
+    const loaded_path = try allocator.print("{s}/_loaded.scss", .{case_dir});
     defer allocator.free(loaded_path);
-    const forwarded_path = try std.fmt.allocPrint(allocator, "{s}/_forwarded.scss", .{case_dir});
+    const forwarded_path = try allocator.print("{s}/_forwarded.scss", .{case_dir});
     defer allocator.free(forwarded_path);
 
     try writeFileAll(entry_path,
@@ -19212,15 +19212,15 @@ test "vm: meta.load-css runtime config reaches forwarded unconfigured defaults" 
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const case_dir = try std.fmt.allocPrint(allocator, "{s}/through_unconfigured", .{root});
+    const case_dir = try allocator.print("{s}/through_unconfigured", .{root});
     defer allocator.free(case_dir);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{case_dir});
+    const entry_path = try allocator.print("{s}/entry.scss", .{case_dir});
     defer allocator.free(entry_path);
-    const loaded_path = try std.fmt.allocPrint(allocator, "{s}/_loaded.scss", .{case_dir});
+    const loaded_path = try allocator.print("{s}/_loaded.scss", .{case_dir});
     defer allocator.free(loaded_path);
-    const forwarded_path = try std.fmt.allocPrint(allocator, "{s}/_forwarded.scss", .{case_dir});
+    const forwarded_path = try allocator.print("{s}/_forwarded.scss", .{case_dir});
     defer allocator.free(forwarded_path);
 
     try writeFileAll(entry_path,
@@ -19263,11 +19263,11 @@ test "vm: meta.load-css leaves unconfigured defaults intact for multi-word value
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const other_path = try std.fmt.allocPrint(allocator, "{s}/_other.scss", .{root});
+    const other_path = try allocator.print("{s}/_other.scss", .{root});
     defer allocator.free(other_path);
 
     try writeFileAll(entry_path,
@@ -19307,11 +19307,11 @@ test "vm: @use with list expression seeds runtime list values" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const other_path = try std.fmt.allocPrint(allocator, "{s}/_theme.scss", .{root});
+    const other_path = try allocator.print("{s}/_theme.scss", .{root});
     defer allocator.free(other_path);
 
     const other_src =
@@ -19345,13 +19345,13 @@ test "vm: configured module forwards initial config through nested @use with loc
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const include_path = try std.fmt.allocPrint(allocator, "{s}/_include.scss", .{root});
+    const include_path = try allocator.print("{s}/_include.scss", .{root});
     defer allocator.free(include_path);
-    const settings_path = try std.fmt.allocPrint(allocator, "{s}/_settings.scss", .{root});
+    const settings_path = try allocator.print("{s}/_settings.scss", .{root});
     defer allocator.free(settings_path);
 
     const entry_src =
@@ -19394,11 +19394,11 @@ test "vm: @use with color literal seeds runtime color values" {
     defer td.cleanup();
 
     const tmp_sub = td.sub_path[0..];
-    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_sub});
+    const root = try allocator.print(".zig-cache/tmp/{s}", .{tmp_sub});
     defer allocator.free(root);
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.scss", .{root});
+    const entry_path = try allocator.print("{s}/entry.scss", .{root});
     defer allocator.free(entry_path);
-    const other_path = try std.fmt.allocPrint(allocator, "{s}/_theme.scss", .{root});
+    const other_path = try allocator.print("{s}/_theme.scss", .{root});
     defer allocator.free(other_path);
 
     const other_src =

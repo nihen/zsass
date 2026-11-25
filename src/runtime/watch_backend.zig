@@ -844,7 +844,7 @@ test "WatchBackend reports only the job that owns the changed file (linux)" {
 
     var paths: [3][]u8 = undefined;
     inline for (.{ "a", "b", "c" }, 0..) |name, i| {
-        paths[i] = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/{s}.scss", .{ sub, name });
+        paths[i] = try allocator.print(".zig-cache/tmp/{s}/{s}.scss", .{ sub, name });
         const f = try std.fs.cwd().createFile(paths[i], .{});
         try f.writeAll(".x{}\n");
         f.close();

@@ -509,7 +509,7 @@ pub fn writeStackTrace(allocator: std.mem.Allocator) !void {
         const idx = slen - 1 - i;
         const f = error_state.error_stack_snapshot[idx];
         const path = f.path_buf[0..f.path_len];
-        const text = try std.fmt.allocPrint(allocator, "{s} {d}:{d}", .{
+        const text = try allocator.print("{s} {d}:{d}", .{
             path,
             f.line_no,
             f.col_no,

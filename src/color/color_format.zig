@@ -39,13 +39,13 @@ fn canShortHex(r: u8, g: u8, b: u8) bool {
 
 fn allocHexColor(alloc: std.mem.Allocator, r: u8, g: u8, b: u8, short: bool) std.mem.Allocator.Error![]u8 {
     if (short and canShortHex(r, g, b)) {
-        return std.fmt.allocPrint(alloc, "#{x}{x}{x}", .{
+        return alloc.print("#{x}{x}{x}", .{
             @as(u4, @intCast(r >> 4)),
             @as(u4, @intCast(g >> 4)),
             @as(u4, @intCast(b >> 4)),
         });
     }
-    return std.fmt.allocPrint(alloc, "#{x:0>2}{x:0>2}{x:0>2}", .{ r, g, b });
+    return alloc.print("#{x:0>2}{x:0>2}{x:0>2}", .{ r, g, b });
 }
 
 /// Named CSS colors reverse lookup.
@@ -89,9 +89,9 @@ fn formatLegacyHslCss(
     if (has_alpha) {
         const aa = try value_format.formatNumberCore(alloc, alpha);
         defer alloc.free(aa);
-        return std.fmt.allocPrint(alloc, "hsla({s}, {s}, {s}, {s})", .{ hh, ss, ll, aa });
+        return alloc.print("hsla({s}, {s}, {s}, {s})", .{ hh, ss, ll, aa });
     }
-    return std.fmt.allocPrint(alloc, "hsl({s}, {s}, {s})", .{ hh, ss, ll });
+    return alloc.print("hsl({s}, {s}, {s})", .{ hh, ss, ll });
 }
 
 fn appendFormattedNumber(
@@ -185,11 +185,11 @@ fn formatLegacyRgbFunction(
         filled += 1;
     }
     if (@abs(alpha - 1.0) < 5e-6) {
-        return std.fmt.allocPrint(alloc, "rgb({s}, {s}, {s})", .{ parts[0], parts[1], parts[2] });
+        return alloc.print("rgb({s}, {s}, {s})", .{ parts[0], parts[1], parts[2] });
     }
     const a = try value_format.formatNumberCore(alloc, alpha);
     defer alloc.free(a);
-    return std.fmt.allocPrint(alloc, "rgba({s}, {s}, {s}, {s})", .{ parts[0], parts[1], parts[2], a });
+    return alloc.print("rgba({s}, {s}, {s}, {s})", .{ parts[0], parts[1], parts[2], a });
 }
 
 /// The official CLI collapses a legacy color to hex only when every channel
@@ -415,8 +415,7 @@ fn formatLabLikeOutOfRange(
     const z = try value_format.formatNumberCore(alloc, xyz.channels[2]);
     defer alloc.free(z);
 
-    return std.fmt.allocPrint(
-        alloc,
+    return alloc.print(
         "color-mix(in {s}, color(xyz {s} {s} {s}) 100%, black)",
         .{ colorSpaceCssNameForFunction(space), x, y, z },
     );

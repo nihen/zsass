@@ -561,7 +561,7 @@ fn serializeColorAlphaPassthrough(
     defer ctx.allocator.free(b);
     const alpha_s = try valueToCssString(ctx, alpha_arg);
     defer ctx.allocator.free(alpha_s);
-    const text = try std.fmt.allocPrint(ctx.allocator, "{s}({s}, {s}, {s}, {s})", .{
+    const text = try ctx.allocator.print("{s}({s}, {s}, {s}, {s})", .{
         function_name,
         r,
         g,
@@ -786,11 +786,11 @@ fn maybeNormalizeCalcFallbackText(ctx: *BuiltinContext, css: []const u8) Builtin
                 const head = inner[0..head_end];
                 const tail = inner[head_end..];
                 const rebuilt = if (tail[0] == '-')
-                    try std.fmt.allocPrint(ctx.allocator, "{s} - {s}", .{ head, tail[1..] })
+                    try ctx.allocator.print("{s} - {s}", .{ head, tail[1..] })
                 else if (tail[0] == '+')
-                    try std.fmt.allocPrint(ctx.allocator, "{s} + {s}", .{ head, tail[1..] })
+                    try ctx.allocator.print("{s} + {s}", .{ head, tail[1..] })
                 else
-                    try std.fmt.allocPrint(ctx.allocator, "{s} + {s}", .{ head, tail });
+                    try ctx.allocator.print("{s} + {s}", .{ head, tail });
                 owned_inner = rebuilt;
                 normalized_inner = rebuilt;
             }
@@ -842,7 +842,7 @@ fn maybeNormalizeCalcFallbackText(ctx: *BuiltinContext, css: []const u8) Builtin
         try slash_buf.appendSlice(ctx.allocator, normalized_inner);
     }
 
-    return try std.fmt.allocPrint(ctx.allocator, "calc({s})", .{slash_buf.items});
+    return try ctx.allocator.print("calc({s})", .{slash_buf.items});
 }
 
 fn appendValueCss(buf: *std.ArrayListUnmanaged(u8), ctx: *BuiltinContext, v: Value) BuiltinError!void {
@@ -1007,7 +1007,7 @@ fn serializeConstructorListFallback(
         buf.items;
     defer if (rendered.ptr != buf.items.ptr) ctx.allocator.free(rendered);
     const marked_rendered = if (preserve_relative_slash_text)
-        try std.fmt.allocPrint(ctx.allocator, "{s}{s}", .{ color_preserve_slash_marker, rendered })
+        try ctx.allocator.print("{s}{s}", .{ color_preserve_slash_marker, rendered })
     else
         rendered;
     defer if (marked_rendered.ptr != rendered.ptr) ctx.allocator.free(marked_rendered);
@@ -1262,7 +1262,7 @@ fn color_hwbImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
             defer ctx.allocator.free(rendered);
             const trimmed = std.mem.trim(u8, rendered, " \t\n\r");
             if (splitTopLevelSlash(trimmed)) |parts| {
-                const text = try std.fmt.allocPrint(ctx.allocator, "hwb({s} / {s})", .{ parts.left, parts.right });
+                const text = try ctx.allocator.print("hwb({s} / {s})", .{ parts.left, parts.right });
                 defer ctx.allocator.free(text);
                 const id = try internString(ctx, text);
                 return Value.string(id, false);
@@ -1649,7 +1649,7 @@ pub fn color_saturate(ctx: *BuiltinContext, args: []const Value) BuiltinError!Va
             if (single.stringQuoted(ctx.string_flags_pool.items)) {
                 if (!isRawCalcString(raw)) return error.BuiltinType;
                 const trimmed = std.mem.trim(u8, raw, " \t\n\r");
-                const text = try std.fmt.allocPrint(ctx.allocator, "saturate({s})", .{trimmed});
+                const text = try ctx.allocator.print("saturate({s})", .{trimmed});
                 defer ctx.allocator.free(text);
                 const id = try internString(ctx, text);
                 return Value.string(id, false);
@@ -1657,7 +1657,7 @@ pub fn color_saturate(ctx: *BuiltinContext, args: []const Value) BuiltinError!Va
             if (std.mem.findScalar(u8, raw, '(') == null) return error.BuiltinType;
             if (isRawCalcString(raw)) {
                 const trimmed = std.mem.trim(u8, raw, " \t\n\r");
-                const text = try std.fmt.allocPrint(ctx.allocator, "saturate({s})", .{trimmed});
+                const text = try ctx.allocator.print("saturate({s})", .{trimmed});
                 defer ctx.allocator.free(text);
                 const id = try internString(ctx, text);
                 return Value.string(id, false);
@@ -2029,7 +2029,7 @@ fn setColorOpScalePercentRangeError(ctx: *BuiltinContext, key: ColorOpChannel, n
     const val_s = value_format.formatNumberWithUnit(ctx.allocator, raw, unit) catch return;
     defer ctx.allocator.free(val_s);
     const pname = colorOpChannelParamLabel(key);
-    const msg = std.fmt.allocPrint(ctx.allocator, "${s}: Expected {s} to be within -100% and 100%.", .{ pname, val_s }) catch return;
+    const msg = ctx.allocator.print("${s}: Expected {s} to be within -100% and 100%.", .{ pname, val_s }) catch return;
     defer ctx.allocator.free(msg);
     error_format.setContextMessage(msg);
 }
@@ -3469,7 +3469,7 @@ fn serializeFilterFunction(ctx: *BuiltinContext, name: []const u8, value: Value,
         break :blk try valueToCssString(ctx, value);
     };
     defer ctx.allocator.free(css);
-    const text = try std.fmt.allocPrint(ctx.allocator, "{s}({s})", .{ name, css });
+    const text = try ctx.allocator.print("{s}({s})", .{ name, css });
     defer ctx.allocator.free(text);
     const id = try internString(ctx, text);
     return Value.string(id, false);
@@ -3700,7 +3700,7 @@ fn color_invertImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
         if (color_arg.isNumber() or color_arg.kind() == .calc_fragment or color_arg.kind() == .interp_fragment) {
             const css = try valueToCssString(ctx, color_arg);
             defer ctx.allocator.free(css);
-            const text = try std.fmt.allocPrint(ctx.allocator, "invert({s})", .{css});
+            const text = try ctx.allocator.print("invert({s})", .{css});
             defer ctx.allocator.free(text);
             const id = try internString(ctx, text);
             return Value.string(id, false);
@@ -3710,7 +3710,7 @@ fn color_invertImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
             if (color_arg.stringQuoted(ctx.string_flags_pool.items)) {
                 if (!isRawCalcString(raw)) return error.BuiltinType;
                 const trimmed = std.mem.trim(u8, raw, " \t\n\r");
-                const text = try std.fmt.allocPrint(ctx.allocator, "invert({s})", .{trimmed});
+                const text = try ctx.allocator.print("invert({s})", .{trimmed});
                 defer ctx.allocator.free(text);
                 const id = try internString(ctx, text);
                 return Value.string(id, false);
@@ -3718,14 +3718,14 @@ fn color_invertImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
             if (std.mem.findScalar(u8, raw, '(') == null) return error.BuiltinType;
             if (isRawCalcString(raw)) {
                 const trimmed = std.mem.trim(u8, raw, " \t\n\r");
-                const text = try std.fmt.allocPrint(ctx.allocator, "invert({s})", .{trimmed});
+                const text = try ctx.allocator.print("invert({s})", .{trimmed});
                 defer ctx.allocator.free(text);
                 const id = try internString(ctx, text);
                 return Value.string(id, false);
             }
             const css = try valueToCssString(ctx, color_arg);
             defer ctx.allocator.free(css);
-            const text = try std.fmt.allocPrint(ctx.allocator, "invert({s})", .{css});
+            const text = try ctx.allocator.print("invert({s})", .{css});
             defer ctx.allocator.free(text);
             const id = try internString(ctx, text);
             return Value.string(id, false);
@@ -3996,7 +3996,7 @@ pub fn color_ie_hex_str(ctx: *BuiltinContext, args: []const Value) BuiltinError!
     const c = tryCoerceColorArg(ctx, args[0]) orelse return error.BuiltinType;
     const rgb = colorCompatRgbBytes(ctx, c);
     const a256 = colorCompatAlphaByte(ctx, c);
-    const hex = try std.fmt.allocPrint(ctx.allocator, "#{X:0>2}{X:0>2}{X:0>2}{X:0>2}", .{
+    const hex = try ctx.allocator.print("#{X:0>2}{X:0>2}{X:0>2}{X:0>2}", .{
         a256,
         rgb[0],
         rgb[1],

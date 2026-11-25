@@ -3056,9 +3056,9 @@ fn cssCachePaths(
     const root = try cssCacheRoot(allocator);
     errdefer allocator.free(root);
     const key = try cssCacheKeyHex(allocator, input_path, opts);
-    const css = try std.fmt.allocPrint(allocator, "{s}/{s}.css", .{ root, key });
+    const css = try allocator.print("{s}/{s}.css", .{ root, key });
     errdefer allocator.free(css);
-    const manifest = try std.fmt.allocPrint(allocator, "{s}/{s}.manifest", .{ root, key });
+    const manifest = try allocator.print("{s}/{s}.manifest", .{ root, key });
     return .{ .root = root, .css = css, .manifest = manifest };
 }
 
@@ -3254,7 +3254,7 @@ fn collectDirJobs(
 }
 
 fn inferSourceMapPath(allocator: std.mem.Allocator, output_path: []const u8) ![]u8 {
-    return try std.fmt.allocPrint(allocator, "{s}.map", .{output_path});
+    return try allocator.print("{s}.map", .{output_path});
 }
 
 const TrackingWriter = struct {
@@ -3374,7 +3374,7 @@ fn appendCssComment(out: *TrackingWriter, comment: []const u8) !void {
 }
 
 fn appendSourceMapUrlComment(out: *TrackingWriter, allocator: std.mem.Allocator, map_url: []const u8) !void {
-    const comment = try std.fmt.allocPrint(allocator, "/*# sourceMappingURL={s} */", .{map_url});
+    const comment = try allocator.print("/*# sourceMappingURL={s} */", .{map_url});
     defer allocator.free(comment);
     try appendCssComment(out, comment);
 }
@@ -3476,8 +3476,7 @@ fn buildExpectedCssWithTrailer(
         .@"inline" => {
             const encoded = try source_map_mod.percentEncode(allocator, source_map_json);
             defer allocator.free(encoded);
-            const inline_comment = try std.fmt.allocPrint(
-                allocator,
+            const inline_comment = try allocator.print(
                 "/*# sourceMappingURL=data:application/json;charset=utf-8,{s} */",
                 .{encoded},
             );
@@ -3502,11 +3501,11 @@ test "runEnd2End output matches API for source map off/file/inline" {
     ;
 
     const tmp_sub = td.sub_path[0..];
-    const input_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/input.scss", .{tmp_sub});
+    const input_path = try allocator.print(".zig-cache/tmp/{s}/input.scss", .{tmp_sub});
     defer allocator.free(input_path);
     try writeFileAll(input_path, source);
 
-    const output_off = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/out-off.css", .{tmp_sub});
+    const output_off = try allocator.print(".zig-cache/tmp/{s}/out-off.css", .{tmp_sub});
     defer allocator.free(output_off);
     try runEnd2End(allocator, input_path, output_off, .{ .source_map_mode = .off });
     const got_off = try readFileToStringAlloc(allocator, output_off);
@@ -3515,7 +3514,7 @@ test "runEnd2End output matches API for source map off/file/inline" {
     defer allocator.free(expected_off);
     try std.testing.expectEqualStrings(expected_off, got_off);
 
-    const output_file = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/out-file.css", .{tmp_sub});
+    const output_file = try allocator.print(".zig-cache/tmp/{s}/out-file.css", .{tmp_sub});
     defer allocator.free(output_file);
     try runEnd2End(allocator, input_path, output_file, .{ .source_map_mode = .file });
     const got_file = try readFileToStringAlloc(allocator, output_file);
@@ -3538,7 +3537,7 @@ test "runEnd2End output matches API for source map off/file/inline" {
     defer allocator.free(got_map);
     try std.testing.expectEqualStrings(expected_file_base.source_map_json, got_map);
 
-    const output_inline = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/out-inline.css", .{tmp_sub});
+    const output_inline = try allocator.print(".zig-cache/tmp/{s}/out-inline.css", .{tmp_sub});
     defer allocator.free(output_inline);
     try runEnd2End(allocator, input_path, output_inline, .{ .source_map_mode = .@"inline" });
     const got_inline = try readFileToStringAlloc(allocator, output_inline);
@@ -3589,11 +3588,11 @@ test "buildJobOrderByFileSize sorts larger files first" {
     defer td.cleanup();
 
     const allocator = std.testing.allocator;
-    const small = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/small.scss", .{td.sub_path[0..]});
+    const small = try allocator.print(".zig-cache/tmp/{s}/small.scss", .{td.sub_path[0..]});
     defer allocator.free(small);
-    const mid = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/mid.scss", .{td.sub_path[0..]});
+    const mid = try allocator.print(".zig-cache/tmp/{s}/mid.scss", .{td.sub_path[0..]});
     defer allocator.free(mid);
-    const large = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/large.scss", .{td.sub_path[0..]});
+    const large = try allocator.print(".zig-cache/tmp/{s}/large.scss", .{td.sub_path[0..]});
     defer allocator.free(large);
     try writeFileAll(small, "a{}\n");
     try writeFileAll(mid, "aaaaaaaaaaaa\n");
@@ -3666,13 +3665,13 @@ test "compileFiles batch with one failing job does not double-join" {
     const allocator = std.testing.allocator;
     const sub = td.sub_path[0..];
 
-    const ok1_in = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ok1.scss", .{sub});
+    const ok1_in = try allocator.print(".zig-cache/tmp/{s}/ok1.scss", .{sub});
     defer allocator.free(ok1_in);
-    const ok2_in = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ok2.scss", .{sub});
+    const ok2_in = try allocator.print(".zig-cache/tmp/{s}/ok2.scss", .{sub});
     defer allocator.free(ok2_in);
-    const ok3_in = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ok3.scss", .{sub});
+    const ok3_in = try allocator.print(".zig-cache/tmp/{s}/ok3.scss", .{sub});
     defer allocator.free(ok3_in);
-    const bad_in = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/bad.scss", .{sub});
+    const bad_in = try allocator.print(".zig-cache/tmp/{s}/bad.scss", .{sub});
     defer allocator.free(bad_in);
 
     try writeFileAll(ok1_in, ".a{color:red}\n");
@@ -3680,13 +3679,13 @@ test "compileFiles batch with one failing job does not double-join" {
     try writeFileAll(ok3_in, ".c{color:green}\n");
     try writeFileAll(bad_in, "@import \"definitely-missing-stylesheet\";\n");
 
-    const ok1_out = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ok1.css", .{sub});
+    const ok1_out = try allocator.print(".zig-cache/tmp/{s}/ok1.css", .{sub});
     defer allocator.free(ok1_out);
-    const ok2_out = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ok2.css", .{sub});
+    const ok2_out = try allocator.print(".zig-cache/tmp/{s}/ok2.css", .{sub});
     defer allocator.free(ok2_out);
-    const ok3_out = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ok3.css", .{sub});
+    const ok3_out = try allocator.print(".zig-cache/tmp/{s}/ok3.css", .{sub});
     defer allocator.free(ok3_out);
-    const bad_out = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/bad.css", .{sub});
+    const bad_out = try allocator.print(".zig-cache/tmp/{s}/bad.css", .{sub});
     defer allocator.free(bad_out);
 
     // No source map / no error CSS keeps the side effects minimal and
@@ -3743,14 +3742,14 @@ test "compileFiles batch continues processing after one entry fails" {
     }
 
     for (0..ok_count) |i| {
-        ok_in_paths[i] = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ok{d:0>2}.scss", .{ sub, i });
-        ok_out_paths[i] = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ok{d:0>2}.css", .{ sub, i });
+        ok_in_paths[i] = try allocator.print(".zig-cache/tmp/{s}/ok{d:0>2}.scss", .{ sub, i });
+        ok_out_paths[i] = try allocator.print(".zig-cache/tmp/{s}/ok{d:0>2}.css", .{ sub, i });
         try writeFileAll(ok_in_paths[i], ".a{color:red}\n");
     }
 
-    const bad_in = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/bad.scss", .{sub});
+    const bad_in = try allocator.print(".zig-cache/tmp/{s}/bad.scss", .{sub});
     defer allocator.free(bad_in);
-    const bad_out = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/bad.css", .{sub});
+    const bad_out = try allocator.print(".zig-cache/tmp/{s}/bad.css", .{sub});
     defer allocator.free(bad_out);
 
     // Pad the failing entry so it's strictly the largest input. This forces
