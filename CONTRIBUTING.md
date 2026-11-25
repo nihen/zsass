@@ -41,6 +41,11 @@ zig build spec -- --filter "your-filter"   # focused sass-spec run
 zig fmt --check src/ tests/spec_runner.zig examples/ build.zig
 ```
 
+While editing, `zig build -fincremental --watch` keeps the debug build
+running and rebuilds `zig-out/bin/zsass` on every save, in a fraction of
+a second on x86_64-linux. Zig's incremental compilation is not finished
+on every target; if a rebuild looks wrong, run a plain `zig build`.
+
 The pre-merge checklist is just three commands:
 
 ```bash

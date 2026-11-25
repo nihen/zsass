@@ -536,7 +536,7 @@ const LocalSlotUse = struct {
     max_exclusive: u32 = 0,
     /// When set, note() also records whether any noted slot is a
     /// module-global slot (used by analyzeChunkGlobalBandUse).
-    global_bits: ?*const std.DynamicBitSetUnmanaged = null,
+    global_bits: ?*const std.bit_set.Dynamic = null,
     global_hit: bool = false,
 
     fn note(self: *LocalSlotUse, slot: u32) void {
@@ -766,7 +766,7 @@ fn topChunkIsCrossEntryPure(top: *const Chunk) bool {
 fn analyzeChunkGlobalBandUse(
     resolved: *const ResolvedProgram,
     chunk: *Chunk,
-    global_bits: *const std.DynamicBitSetUnmanaged,
+    global_bits: *const std.bit_set.Dynamic,
 ) void {
     if (resolved.next_global_slot == 0) {
         chunk.uses_global_band = false;
@@ -5349,7 +5349,7 @@ fn compileOneModule(
 
     // Precise module-global slot set (globals interleave with callable
     // locals in one numbering); used by analyzeChunkGlobalBandUse.
-    var global_slot_bits = try std.DynamicBitSetUnmanaged.initEmpty(parent_alloc, resolved.max_slot);
+    var global_slot_bits = try std.bit_set.Dynamic.initEmpty(parent_alloc, resolved.max_slot);
     defer global_slot_bits.deinit(parent_alloc);
     {
         var git = resolved.global_slots.valueIterator();

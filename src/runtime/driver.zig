@@ -47,7 +47,7 @@ const c_time = struct {
     };
     // The Windows C runtime exports the 64-bit names; `time` and
     // `localtime` are inline wrappers in its header.
-    const windows = builtin.os.tag == .windows;
+    const windows = builtin.target.os.tag == .windows;
     const time_t = if (windows) i64 else std.c.time_t;
     const time = @extern(*const fn (?*time_t) callconv(.c) time_t, .{ .name = if (windows) "_time64" else "time" });
     const localtime = @extern(*const fn (*const time_t) callconv(.c) ?*const tm, .{ .name = if (windows) "_localtime64" else "localtime" });
