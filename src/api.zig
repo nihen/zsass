@@ -2590,6 +2590,21 @@ test "api: @extend across modules keeps repeats and credits every @extend" {
         \\}
         \\
     , credited);
+
+    // The same when the extender made later is the one written first.
+    const credited_back = try compileSourceToCss(alloc,
+        \\@use "target";
+        \\.x:is(.a, .b) {@extend .t}
+        \\.x:is(.a) {@extend .t}
+        \\.b {@extend .a}
+    , entry_path, &.{}, .{ .quiet = true });
+    defer alloc.free(credited_back);
+    try std.testing.expectEqualStrings(
+        \\.t, .x:is(.a, .b) {
+        \\  x: y;
+        \\}
+        \\
+    , credited_back);
 }
 
 test "api: a selector with an escaped space is extended like any other" {

@@ -420,28 +420,37 @@ pub const Engine = struct {
     pub fn appendEntryCredits(self: *const Engine, allocator: Allocator, index: usize, out: *std.ArrayList(u32)) Error!void {
         var owners: std.ArrayList(u32) = .empty;
         defer owners.deinit(allocator);
-        try self.appendOwners(allocator, @intCast(index), &owners);
+        const visited = try allocator.alloc(bool, self.entries.items.len);
+        defer allocator.free(visited);
+        @memset(visited, false);
+        try self.appendOwners(allocator, @intCast(index), visited, &owners);
         for (owners.items) |step_index| try self.appendStepCredits(allocator, step_index, out);
     }
 
     /// The steps whose `@extend`s an entry belongs to, those of the entries
-    /// it was made from included. An entry is made from earlier ones only.
-    fn appendOwners(self: *const Engine, allocator: Allocator, index: u32, out: *std.ArrayList(u32)) Error!void {
+    /// it was made from included. An entry can come of a later one when a
+    /// later extender turns out the same as it, so each is visited once.
+    fn appendOwners(self: *const Engine, allocator: Allocator, index: u32, visited: []bool, out: *std.ArrayList(u32)) Error!void {
+        if (visited[index]) return;
+        visited[index] = true;
         const entry = &self.entries.items[index];
         try out.append(allocator, entry.owner);
         try out.appendSlice(allocator, entry.also_owners.items);
-        for (entry.origins.items) |from| {
-            if (from < index) try self.appendOwners(allocator, from, out);
-        }
+        for (entry.origins.items) |from| try self.appendOwners(allocator, from, visited, out);
     }
 
-    fn noteFound(self: *Engine, index: u32) void {
+    fn noteFound(self: *Engine, a: Allocator, index: u32) Error!void {
         const entry = &self.entries.items[index];
-        self.steps.items[entry.owner].found = true;
-        for (entry.also_owners.items) |other| self.steps.items[other].found = true;
-        for (entry.origins.items) |from| {
-            if (from < index) self.noteFound(from);
+        if (entry.origins.items.len == 0) {
+            self.steps.items[entry.owner].found = true;
+            for (entry.also_owners.items) |other| self.steps.items[other].found = true;
+            return;
         }
+        var owners: std.ArrayList(u32) = .empty;
+        const visited = try a.alloc(bool, self.entries.items.len);
+        @memset(visited, false);
+        try self.appendOwners(a, index, visited, &owners);
+        for (owners.items) |step_index| self.steps.items[step_index].found = true;
     }
 
     fn appendStepCredits(self: *const Engine, allocator: Allocator, step_index: u32, out: *std.ArrayList(u32)) Error!void {
@@ -553,7 +562,7 @@ pub const Engine = struct {
             if (visible) {
                 try out.append(a, entry);
                 // A selector holds the target: the `@extend` found it.
-                self.noteFound(index);
+                try self.noteFound(a, index);
             }
         }
     }
