@@ -4965,7 +4965,9 @@ pub const RuleIR = struct {
             if (std.mem.findScalar(u8, target_raw, ':') != null and !(edge_idx < engine_known.len and engine_known[edge_idx])) {
                 continue;
             }
-            const duplicate_satisfied = edge_idx < edge_duplicate_satisfied.len and edge_duplicate_satisfied[edge_idx];
+            // Where the extension itself tells, nothing else decides.
+            const known = edge_idx < engine_known.len and engine_known[edge_idx];
+            const duplicate_satisfied = !known and edge_idx < edge_duplicate_satisfied.len and edge_duplicate_satisfied[edge_idx];
             const is_matched = !edge_required_unmatched[edge_idx] and
                 (duplicate_satisfied or (edge_idx < edge_matched.len and edge_matched[edge_idx]));
             if (edge.relation_id == std.math.maxInt(u32)) {
@@ -10283,6 +10285,19 @@ pub const RuleIR = struct {
         const engine_known = try temp.alloc(bool, self.extend_edges.items.len);
         @memset(engine_known, false);
         try extend_state.collectFound(engine_found, engine_known);
+        // An `@extend` written again in the same rule is the same
+        // extension: it found its target when the first one did.
+        for (self.extend_edges.items, 0..) |edge, edge_idx| {
+            if (engine_known[edge_idx]) continue;
+            for (self.extend_edges.items, 0..) |other, other_idx| {
+                if (!engine_known[other_idx]) continue;
+                if (other.source_module != edge.source_module or other.target_module != edge.target_module) continue;
+                if (other.extending_selector != edge.extending_selector or other.target_selector != edge.target_selector) continue;
+                engine_known[edge_idx] = true;
+                engine_found[edge_idx] = engine_found[other_idx];
+                break;
+            }
+        }
         for (engine_known, 0..) |known, edge_idx| {
             if (known) edge_matched[edge_idx] = engine_found[edge_idx];
         }

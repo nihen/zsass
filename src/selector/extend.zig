@@ -172,7 +172,7 @@ fn firstCompound(complex: *const ComplexSelector) ?*const CompoundSelector {
 const GroupData = struct {
     module: u32,
     /// For every extender, the `@extend` its target belongs to.
-    credits: std.ArrayList(u32) = .empty,
+    credits: std.ArrayList(std.ArrayList(u32)) = .empty,
     targets: std.ArrayList(CompoundSelector) = .empty,
     extenders: std.ArrayList(SelectorList) = .empty,
     done: bool = false,
@@ -181,6 +181,7 @@ const GroupData = struct {
     fn deinit(self: *GroupData, allocator: std.mem.Allocator) void {
         for (self.targets.items) |*target| target.deinit();
         self.targets.deinit(allocator);
+        for (self.credits.items) |*credits| credits.deinit(allocator);
         self.credits.deinit(allocator);
         for (self.extenders.items) |*list| list.deinit();
         self.extenders.deinit(allocator);
@@ -399,8 +400,14 @@ pub const ApplyState = struct {
         defer sources.deinit(self.allocator);
         for (indices) |index| {
             const group = &groups[index];
-            for (group.targets.items, group.extenders.items, group.credits.items) |*target, *list, credit| {
-                try sources.append(self.allocator, .{ .extender = list, .target = target, .order = @intCast(sources.items.len), .credit = credit });
+            for (group.targets.items, group.extenders.items, group.credits.items) |*target, *list, credits| {
+                try sources.append(self.allocator, .{
+                    .extender = list,
+                    .target = target,
+                    .order = @intCast(sources.items.len),
+                    .credit = credits.items[0],
+                    .more_credits = credits.items[1..],
+                });
             }
         }
         return extend_engine.Engine.init(self.allocator, sources.items, .resolved);
@@ -471,9 +478,13 @@ pub const ApplyState = struct {
             var target = CompoundSelector.init(self.allocator);
             errdefer target.deinit();
             try target.simple_selectors.append(self.allocator, try selector_mod.cloneSimpleSelector(engine.entryTarget(entry_index), self.allocator));
+            var credits: std.ArrayList(u32) = .empty;
+            errdefer credits.deinit(self.allocator);
+            try engine.appendEntryCredits(self.allocator, entry_index, &credits);
+            // Nothing fails from here on: the group owns all three.
             group.targets.appendAssumeCapacity(target);
             group.extenders.appendAssumeCapacity(extended);
-            group.credits.appendAssumeCapacity(engine.entryCredit(entry_index));
+            group.credits.appendAssumeCapacity(credits);
         }
         group.done = true;
     }
@@ -514,7 +525,7 @@ pub const ApplyState = struct {
             const changed = extended.selectors.items.len != result.selectors.items.len;
             result.deinit();
             result = extended;
-            if (changed) extend_engine.trimUnion(&result, &group_details);
+            if (changed) try extend_engine.trimUnion(self.allocator, &result, &group_details);
         }
         return result;
     }

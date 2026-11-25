@@ -2469,6 +2469,26 @@ test "api: an @extend finds its target where the extension holds it" {
         \\
     ;
     try std.testing.expectError(error.SassError, compileSourceToCss(alloc, missing, "", &.{}, .{ .quiet = true }));
+
+    // Written again as optional in the same rule, it is still mandatory.
+    const repeated =
+        \\.x {@extend :is(.a) !optional; @extend :is(.a)}
+        \\.y {@extend .a}
+        \\:is(.a) {x: y}
+        \\
+    ;
+    try std.testing.expectError(error.SassError, compileSourceToCss(alloc, repeated, "", &.{}, .{ .quiet = true }));
+
+    // A selector with two combinators in a row is left alone, but a
+    // target in it, in a pseudo-class argument too, is found.
+    const left_alone =
+        \\.x {@extend .a}
+        \\:is(.a) > > .b {x: y}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, left_alone, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings("", css);
 }
 
 test "api: selector functions take their extendees one after the other" {
@@ -2517,4 +2537,55 @@ test "api: selector functions take their extendees one after the other" {
         \\}
         \\
     , css);
+}
+
+test "api: @extend across modules keeps repeats and credits every @extend" {
+    const alloc = std.testing.allocator;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    try writeApiTmpFileAll(&tmp_dir, "_repeats.scss",
+        \\.a.c, .a.c {x: 0}
+        \\.c, .a, .c {x: 1}
+    );
+    try writeApiTmpFileAll(&tmp_dir, "_target.scss",
+        \\.t {x: y}
+    );
+
+    const tmp_path = try zsass_io.realPathAlloc(tmp_dir.dir, ".", alloc);
+    defer alloc.free(tmp_path);
+    const entry_path = try std.fs.path.join(alloc, &.{ tmp_path, "entry.scss" });
+    defer alloc.free(entry_path);
+
+    const repeats = try compileSourceToCss(alloc,
+        \\@use "repeats";
+        \\.z {@extend .a}
+    , entry_path, &.{}, .{ .quiet = true });
+    defer alloc.free(repeats);
+    try std.testing.expectEqualStrings(
+        \\.a.c, .c.z, .a.c {
+        \\  x: 0;
+        \\}
+        \\
+        \\.c, .a, .z, .c {
+        \\  x: 1;
+        \\}
+        \\
+    , repeats);
+
+    // Two `@extend`s whose extenders end up the same both found `.t`.
+    const credited = try compileSourceToCss(alloc,
+        \\@use "target";
+        \\.b {@extend .a}
+        \\.x:is(.a) {@extend .t}
+        \\.x:is(.a, .b) {@extend .t}
+    , entry_path, &.{}, .{ .quiet = true });
+    defer alloc.free(credited);
+    try std.testing.expectEqualStrings(
+        \\.t, .x:is(.a, .b) {
+        \\  x: y;
+        \\}
+        \\
+    , credited);
 }
