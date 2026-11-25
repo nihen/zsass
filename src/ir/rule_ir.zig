@@ -10049,8 +10049,7 @@ pub const RuleIR = struct {
                     continue;
                 }
             }
-            const force_preserve_raw_selector = std.mem.find(u8, selector_text, "\\ ") != null;
-            if ((!has_extensions or force_preserve_raw_selector) and shouldPreserveRawSelectorWithoutExtend(selector_text)) {
+            if (!has_extensions and shouldPreserveRawSelectorWithoutExtend(selector_text)) {
                 // Only in cases where there is no @extend + you want to keep the casing/quote of attribute selector
                 // selector_mod.toCss() Avoid normalization and prefer the original selector string.
                 if (selector_mod.hasInvalidIdentifierStart(selector_text)) {

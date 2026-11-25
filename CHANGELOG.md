@@ -103,6 +103,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A selector written twice in one list is dropped only when it stands
   next to its repeat: `.a.c, .a.c {…}` extended by `.z {@extend .a}` is
   `.a.c, .c.z, .a.c`.
+- A rule whose selector has an escaped space is extended like any other:
+  `.a.foo\\ bar {…}` with `.x {@extend .a}` is `.a.foo\\ bar, .foo\\ bar.x`.
 - `selector.extend()` and `selector.replace()` use the same implementation.
 - `selector.is-superselector()` matches front to back as the official CLI
   does: `.a .x` does not cover `.a.e + .a.b .x`, and `::foo` covers

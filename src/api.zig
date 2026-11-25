@@ -2574,18 +2574,36 @@ test "api: @extend across modules keeps repeats and credits every @extend" {
         \\
     , repeats);
 
-    // Two `@extend`s whose extenders end up the same both found `.t`.
+    // Two `@extend`s whose extenders end up the same both found `.t`,
+    // also through the extender that a later `@extend` makes of it.
     const credited = try compileSourceToCss(alloc,
         \\@use "target";
         \\.b {@extend .a}
         \\.x:is(.a) {@extend .t}
         \\.x:is(.a, .b) {@extend .t}
+        \\.c {@extend .a}
     , entry_path, &.{}, .{ .quiet = true });
     defer alloc.free(credited);
     try std.testing.expectEqualStrings(
-        \\.t, .x:is(.a, .b) {
+        \\.t, .x:is(.a, .c, .b) {
         \\  x: y;
         \\}
         \\
     , credited);
+}
+
+test "api: a selector with an escaped space is extended like any other" {
+    const alloc = std.testing.allocator;
+    const css = try compileSourceToCss(alloc,
+        \\.a.foo\ bar {x: y}
+        \\.x {@extend .a}
+        \\
+    , "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.a.foo\ bar, .foo\ bar.x {
+        \\  x: y;
+        \\}
+        \\
+    , css);
 }

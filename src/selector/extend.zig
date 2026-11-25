@@ -522,10 +522,13 @@ pub const ApplyState = struct {
                 if (own_index < details.items.len) detail.* = details.items[own_index];
                 own_index += 1;
             }
-            const changed = extended.selectors.items.len != result.selectors.items.len;
+            // Trimmed before it takes the place of `result`: until then
+            // each of the two has its own owner on failure.
+            if (extended.selectors.items.len != result.selectors.items.len) {
+                try extend_engine.trimUnion(self.allocator, &extended, &group_details);
+            }
             result.deinit();
             result = extended;
-            if (changed) try extend_engine.trimUnion(self.allocator, &result, &group_details);
         }
         return result;
     }
