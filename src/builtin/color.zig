@@ -1565,7 +1565,6 @@ fn color_mixImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
 }
 
 pub fn color_mix(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    try emitColorDeprecation(ctx, "mix() is deprecated; use color.mix() instead");
     return color_mixImpl(ctx, args, arg_names) catch |err| normalizeColorUserError(err);
 }
 
@@ -3616,7 +3615,6 @@ fn color_complementImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []
 }
 
 pub fn color_complement(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    try emitColorDeprecation(ctx, "complement() is deprecated; use color.channel() with color.channel() instead");
     return color_complementImpl(ctx, args, arg_names) catch |err| normalizeColorUserError(err);
 }
 
@@ -3840,7 +3838,6 @@ fn color_invertImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
 }
 
 pub fn color_invert(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    try emitColorDeprecation(ctx, "invert() is deprecated; use color.invert() or color.channel() instead");
     return color_invertImpl(ctx, args, arg_names) catch |err| normalizeColorUserError(err);
 }
 
@@ -3921,7 +3918,6 @@ pub fn color_grayscale(ctx: *BuiltinContext, args: []const Value) BuiltinError!V
 }
 
 pub fn global_grayscale(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
-    try emitColorDeprecation(ctx, "grayscale() is deprecated; use color.channel() or color.to-space() instead");
     return grayscaleImpl(ctx, args, .global) catch |err| normalizeColorUserError(err);
 }
 
@@ -3991,7 +3987,6 @@ pub fn color_transparentize(ctx: *BuiltinContext, args: []const Value) BuiltinEr
 }
 
 pub fn color_ie_hex_str(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
-    try emitColorDeprecation(ctx, "ie-hex-str() is deprecated; use color.to-space() instead");
     try expectArity(args, 1);
     const c = tryCoerceColorArg(ctx, args[0]) orelse return error.BuiltinType;
     const rgb = colorCompatRgbBytes(ctx, c);

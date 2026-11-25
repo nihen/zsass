@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   released binaries and the container image are built with it; what
   `zsass` writes for a stylesheet is unchanged.
 
+### Fixed
+- `mix()`, `complement()`, `invert()`, `grayscale()` and `ie-hex-str()`,
+  and the same functions of `sass:color`, no longer report a
+  `color-functions` deprecation. Sass does not deprecate them, so a
+  stylesheet that used one failed under
+  `--fatal-deprecation=color-functions` and warned otherwise.
+
 ## 0.4.3 (2026-11-25)
 
 ### Fixed

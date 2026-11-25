@@ -2707,3 +2707,46 @@ test "api: selector.unify() unifies and weaves as @extend does" {
         \\
     , css);
 }
+
+test "api: color functions report color-functions only where a replacement is asked for" {
+    const alloc = std.testing.allocator;
+    const deprecation_mod = @import("runtime/deprecation.zig");
+    const Case = struct { source: []const u8, reported: bool };
+    const cases = [_]Case{
+        .{ .source = "@use \"sass:color\";\na {b: color.mix(red, blue, 50%)}\n", .reported = false },
+        .{ .source = "@use \"sass:color\";\na {b: color.complement(red)}\n", .reported = false },
+        .{ .source = "@use \"sass:color\";\na {b: color.invert(red)}\n", .reported = false },
+        .{ .source = "@use \"sass:color\";\na {b: color.grayscale(red)}\n", .reported = false },
+        .{ .source = "@use \"sass:color\";\na {b: color.ie-hex-str(red)}\n", .reported = false },
+        .{ .source = "a {b: mix(red, blue, 50%)}\n", .reported = false },
+        .{ .source = "a {b: complement(red)}\n", .reported = false },
+        .{ .source = "a {b: invert(red)}\n", .reported = false },
+        .{ .source = "a {b: grayscale(red)}\n", .reported = false },
+        .{ .source = "a {b: ie-hex-str(red)}\n", .reported = false },
+        .{ .source = "a {b: lighten(red, 10%)}\n", .reported = true },
+        .{ .source = "a {b: darken(red, 10%)}\n", .reported = true },
+        .{ .source = "a {b: saturate(red, 10%)}\n", .reported = true },
+        .{ .source = "a {b: desaturate(red, 10%)}\n", .reported = true },
+        .{ .source = "a {b: adjust-hue(red, 10deg)}\n", .reported = true },
+        .{ .source = "a {b: opacify(rgba(red, 0.5), 0.1)}\n", .reported = true },
+        .{ .source = "a {b: fade-out(red, 0.1)}\n", .reported = true },
+    };
+    for (cases) |case| {
+        var recorder: deprecation_mod.DeprecationRecorder = .{ .alloc = alloc };
+        defer recorder.deinit();
+        {
+            const prev = deprecation_mod.swapActiveRecorder(&recorder);
+            defer _ = deprecation_mod.swapActiveRecorder(prev);
+            const css = try compileSourceToCss(alloc, case.source, "", &.{}, .{ .quiet = true });
+            alloc.free(css);
+        }
+        var reported = false;
+        for (recorder.items.items) |item| {
+            if (item.kind == .color_functions) reported = true;
+        }
+        std.testing.expectEqual(case.reported, reported) catch |err| {
+            std.debug.print("source: {s}", .{case.source});
+            return err;
+        };
+    }
+}
