@@ -2650,6 +2650,11 @@ test "api: selector.unify() unifies and weaves as @extend does" {
         \\  r4: selector.unify(":root ~ .a", ".y .b");
         \\  r5: selector.unify(":root ~ .x .a", ".x .b");
         \\  l1: selector.unify(":scope, .p", "[x], [x]");
+        \\  c1: selector.unify(".a > > .b", ".c");
+        \\  c2: selector.unify("::before::marker .a", "::before::marker .b");
+        \\  c3: selector.unify(".a >", ".c");
+        \\  c4: selector.unify(".a >", ".c ~");
+        \\  c5: selector.unify(".x .a >", ".y .c");
         \\}
         \\
     ;
@@ -2681,6 +2686,9 @@ test "api: selector.unify() unifies and weaves as @extend does" {
         \\  r4: .y :root ~ .a.b;
         \\  r5: :root ~ .x .a.b;
         \\  l1: [x]:scope, [x]:scope, .p[x], .p[x];
+        \\  c2: ::before::marker .a.b;
+        \\  c3: .a.c >;
+        \\  c5: .x .y .a.c >, .y .x .a.c >;
         \\}
         \\
     , css);

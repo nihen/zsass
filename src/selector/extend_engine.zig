@@ -265,10 +265,27 @@ pub fn unifyComplexes(allocator: Allocator, first: *const ComplexSelector, secon
     defer arena.deinit();
     const a = arena.allocator();
 
-    const pieces1 = try piecesOf(a, first, zero_spec);
-    const pieces2 = try piecesOf(a, second, zero_spec);
+    var pieces1 = try piecesOf(a, first, zero_spec);
+    var pieces2 = try piecesOf(a, second, zero_spec);
+    // Two combinators in a row match nothing that can be unified.
+    for ([_][]const Piece{ pieces1, pieces2 }) |pieces| {
+        for (pieces[0..pieces.len -| 1], pieces[@min(1, pieces.len)..]) |x, y| {
+            if (x == .combinator and y == .combinator) return allocator.alloc(ComplexSelector, 0);
+        }
+    }
+    // A combinator at the end stays at the end; two must be the same.
+    var trailing: ?Combinator = null;
+    if (pieces1.len != 0 and pieces1[pieces1.len - 1] == .combinator) {
+        trailing = pieces1[pieces1.len - 1].combinator;
+        pieces1 = pieces1[0 .. pieces1.len - 1];
+    }
+    if (pieces2.len != 0 and pieces2[pieces2.len - 1] == .combinator) {
+        const other = pieces2[pieces2.len - 1].combinator;
+        if (trailing != null and trailing.? != other) return allocator.alloc(ComplexSelector, 0);
+        trailing = other;
+        pieces2 = pieces2[0 .. pieces2.len - 1];
+    }
     if (pieces1.len == 0 or pieces2.len == 0) return allocator.alloc(ComplexSelector, 0);
-    if (pieces1[pieces1.len - 1] != .compound or pieces2[pieces2.len - 1] != .compound) return allocator.alloc(ComplexSelector, 0);
 
     var simples: std.ArrayList(SimpleSelector) = .empty;
     var marks: std.ArrayList(Specificity) = .empty;
@@ -295,6 +312,7 @@ pub fn unifyComplexes(allocator: Allocator, first: *const ComplexSelector, secon
         var pieces: std.ArrayList(Piece) = .empty;
         try pieces.appendSlice(a, prefix);
         try pieces.append(a, .{ .compound = .{ .simples = simples.items, .marks = marks.items } });
+        if (trailing) |combinator| try pieces.append(a, .{ .combinator = combinator });
         const made = try materialize(a, pieces.items);
         var cloned = try made.clone(allocator);
         errdefer cloned.deinit();
@@ -1569,9 +1587,9 @@ fn weavePrefixes(a: Allocator, first: []const Piece, second: []const Piece) Erro
         var until2 = groups2.len;
         if (next) |group| {
             until1 = at1;
-            while (until1 < groups1.len and !try parentsCover(a, groups1[until1], group)) until1 += 1;
+            while (until1 < groups1.len and !sameGroup(groups1[until1], group) and !try parentsCover(a, groups1[until1], group)) until1 += 1;
             until2 = at2;
-            while (until2 < groups2.len and !try parentsCover(a, groups2[until2], group)) until2 += 1;
+            while (until2 < groups2.len and !sameGroup(groups2[until2], group) and !try parentsCover(a, groups2[until2], group)) until2 += 1;
         }
         const part1 = try flatten(a, groups1[at1..until1]);
         const part2 = try flatten(a, groups2[at2..until2]);
