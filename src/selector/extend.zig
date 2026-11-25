@@ -171,6 +171,8 @@ fn firstCompound(complex: *const ComplexSelector) ?*const CompoundSelector {
 /// that module left it.
 const GroupData = struct {
     module: u32,
+    /// For every extender, the `@extend` its target belongs to.
+    credits: std.ArrayList(u32) = .empty,
     targets: std.ArrayList(CompoundSelector) = .empty,
     extenders: std.ArrayList(SelectorList) = .empty,
     done: bool = false,
@@ -179,6 +181,7 @@ const GroupData = struct {
     fn deinit(self: *GroupData, allocator: std.mem.Allocator) void {
         for (self.targets.items) |*target| target.deinit();
         self.targets.deinit(allocator);
+        self.credits.deinit(allocator);
         for (self.extenders.items) |*list| list.deinit();
         self.extenders.deinit(allocator);
     }
@@ -220,6 +223,9 @@ pub const ApplyState = struct {
     engines_usable: bool = false,
     /// The module whose rules this store extends.
     own_module: u32 = 0,
+    /// Where engines that are built and dropped along the way leave which
+    /// `@extend`s found their target. Borrowed; empty until asked for.
+    found_edges: []bool = &.{},
     /// `visibility[from * n + target]`: module `from` uses module `target`,
     /// directly or not. Borrowed.
     visibility: []const bool = &.{},
@@ -263,6 +269,25 @@ pub const ApplyState = struct {
 
     pub fn addExactOrderHint(self: *ApplyState, extension: Extension) !void {
         try self.exact_order_hints.append(self.allocator, extension);
+    }
+
+    /// Keep which `@extend`s an engine that is about to go found targets for.
+    fn noteFound(self: *ApplyState, engine: *const extend_engine.Engine) void {
+        if (self.found_edges.len != 0) engine.markFound(self.found_edges);
+    }
+
+    /// Mark in `found`, indexed by edge, the `@extend`s whose target some
+    /// selector held, and in `known` the ones this store can tell that of.
+    pub fn collectFound(self: *ApplyState, found: []bool, known: []bool) !void {
+        if (!self.engines_built) try self.buildEngines();
+        if (!self.engines_usable) return;
+        for (self.engines.items) |group| group.engine.markFound(found);
+        for (self.exact_order_hints.items) |*hint| {
+            if (hint.eval_order < known.len) known[hint.eval_order] = true;
+        }
+        for (self.unmatched_hints.items) |*hint| {
+            if (hint.eval_order < known.len) known[hint.eval_order] = true;
+        }
     }
 
     fn dropEngines(self: *ApplyState) void {
@@ -374,8 +399,8 @@ pub const ApplyState = struct {
         defer sources.deinit(self.allocator);
         for (indices) |index| {
             const group = &groups[index];
-            for (group.targets.items, group.extenders.items) |*target, *list| {
-                try sources.append(self.allocator, .{ .extender = list, .target = target, .order = @intCast(sources.items.len) });
+            for (group.targets.items, group.extenders.items, group.credits.items) |*target, *list, credit| {
+                try sources.append(self.allocator, .{ .extender = list, .target = target, .order = @intCast(sources.items.len), .credit = credit });
             }
         }
         return extend_engine.Engine.init(self.allocator, sources.items, .resolved);
@@ -404,6 +429,8 @@ pub const ApplyState = struct {
         }
         const engine = try extend_engine.Engine.init(self.allocator, sources.items, .written) orelse return error.Unsupported;
         defer engine.deinit(self.allocator);
+        // What the module's own extenders held is found already.
+        defer self.noteFound(engine);
 
         // The modules that use this one extend its extenders.
         var downstream: std.ArrayList(usize) = .empty;
@@ -417,10 +444,14 @@ pub const ApplyState = struct {
             try self.resolvedEngine(groups, downstream.items) orelse return error.Unsupported
         else
             null;
-        defer if (downstream_engine) |e| e.deinit(self.allocator);
+        defer if (downstream_engine) |e| {
+            self.noteFound(e);
+            e.deinit(self.allocator);
+        };
 
         const count = engine.entryCount();
         try group.targets.ensureTotalCapacity(self.allocator, count);
+        try group.credits.ensureTotalCapacity(self.allocator, count);
         try group.extenders.ensureTotalCapacity(self.allocator, count);
         for (0..count) |entry_index| {
             if (engine.entrySuperseded(entry_index)) continue;
@@ -442,6 +473,7 @@ pub const ApplyState = struct {
             try target.simple_selectors.append(self.allocator, try selector_mod.cloneSimpleSelector(engine.entryTarget(entry_index), self.allocator));
             group.targets.appendAssumeCapacity(target);
             group.extenders.appendAssumeCapacity(extended);
+            group.credits.appendAssumeCapacity(engine.entryCredit(entry_index));
         }
         group.done = true;
     }
@@ -982,6 +1014,18 @@ pub const RuleModuleExtendState = struct {
         store.dropEngines();
     }
 
+    /// Give every store the buffer, indexed by edge, in which the
+    /// `@extend`s that found their target are marked. Before any selector
+    /// is extended.
+    pub fn setFoundBuffer(self: *RuleModuleExtendState, found: []bool) void {
+        for (self.module_stores) |*store| store.found_edges = found;
+    }
+
+    /// See `ApplyState.collectFound`. `found` is the buffer given before.
+    pub fn collectFound(self: *RuleModuleExtendState, found: []bool, known: []bool) !void {
+        for (self.module_stores) |*store| try store.collectFound(found, known);
+    }
+
     /// Tell every store which module uses which.
     pub fn setVisibility(self: *RuleModuleExtendState, matrix: []const bool, n: u32) void {
         for (self.module_stores) |*store| {
@@ -1114,7 +1158,9 @@ fn applySelectorFunction(
     }
     const engine = try extend_engine.Engine.init(allocator, sources.items, if (replace) .replace else .function) orelse return selector_list.clone(allocator);
     defer engine.deinit(allocator);
-    return engine.extendSelector(allocator, selector_list, std.math.maxInt(u32));
+    // The extendees are taken one after the other, each on what the ones
+    // before it left: the selector comes before all of them.
+    return engine.extendSelector(allocator, selector_list, 0);
 }
 
 fn extensionExtenderContainsTarget(ext: *const Extension, target: *const CompoundSelector) bool {

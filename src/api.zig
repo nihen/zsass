@@ -2457,3 +2457,64 @@ test "api: @extend keeps the results of an extender extended by itself" {
         \\
     , css);
 }
+
+test "api: an @extend finds its target where the extension holds it" {
+    const alloc = std.testing.allocator;
+    // `:is(.a)` is extended by `.y` before `.x` looks for it, so `.x` does
+    // not find it.
+    const missing =
+        \\.x {@extend :is(.a)}
+        \\.y {@extend .a}
+        \\:is(.a) {x: y}
+        \\
+    ;
+    try std.testing.expectError(error.SassError, compileSourceToCss(alloc, missing, "", &.{}, .{ .quiet = true }));
+}
+
+test "api: selector functions take their extendees one after the other" {
+    const alloc = std.testing.allocator;
+    // Also: the rule of an `@extend` holds its own target, and a selector
+    // written twice is dropped only next to its repeat.
+    const source =
+        \\@use "sass:selector";
+        \\.f .g {@extend .f}
+        \\.a.c, .a.c {x: 0}
+        \\.z {@extend .a}
+        \\a {
+        \\  r1: selector.replace(".a.b.c", ".a.b, .a.c", ".x");
+        \\  r2: selector.replace(".c", ".c", ".x, .c");
+        \\  r3: selector.replace(".c, .c.b", ".a, .b", ".x, .c .y .c");
+        \\  r4: selector.replace(".a.b, .c", ".a", ".c");
+        \\  r5: selector.replace(".a, .a", ".a", ".x, .z");
+        \\  r6: selector.replace(".c.a", ".c, .c", ".y.c > .x + .c");
+        \\  r7: selector.replace(".d > .b.c > .a.d", ".a", ".q, .a ~ .x > .q");
+        \\  e1: selector.extend(".a.b", ".c.b, .a.b", ".x + .x.a");
+        \\  e2: selector.extend(".c, .a, .c", ".a", ".x");
+        \\  e3: selector.extend(".c, .c, .a", ".a", ".x");
+        \\  e4: selector.extend(".d > .b > .a", ".a", ".y ~ .b > .a.z");
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.a.c, .c.z, .a.c {
+        \\  x: 0;
+        \\}
+        \\
+        \\a {
+        \\  r1: .c.x;
+        \\  r2: .x, .c;
+        \\  r3: .c, .c.x;
+        \\  r4: .b.c, .c;
+        \\  r5: .x, .z, .x;
+        \\  r6: .y.c > .x + .y.c > .x + .a.c;
+        \\  r7: .d > .b.c > .d.q;
+        \\  e1: .a.b, .x + .a.x;
+        \\  e2: .c, .a, .x, .c;
+        \\  e3: .c, .a, .x;
+        \\  e4: .d > .b > .a, .d > .y ~ .b > .a.z;
+        \\}
+        \\
+    , css);
+}

@@ -4948,6 +4948,7 @@ pub const RuleIR = struct {
         edge_required_unmatched: []const bool,
         edge_duplicate_satisfied: []const bool,
         edge_matched: []const bool,
+        engine_known: []const bool,
     ) !void {
         const RelationTargetKey = struct {
             relation_id: u32,
@@ -4958,8 +4959,10 @@ pub const RuleIR = struct {
         for (self.extend_edges.items, 0..) |edge, edge_idx| {
             if (edge.optional) continue;
             if (!edge_eligible[edge_idx] and !edge_required_unmatched[edge_idx]) continue;
+            // A pseudo target is checked only where the extension itself
+            // can tell whether a selector held it.
             const target_raw = intern_pool.get(edge.target_selector);
-            if (std.mem.findScalar(u8, target_raw, ':') != null) {
+            if (std.mem.findScalar(u8, target_raw, ':') != null and !(edge_idx < engine_known.len and engine_known[edge_idx])) {
                 continue;
             }
             const duplicate_satisfied = edge_idx < edge_duplicate_satisfied.len and edge_duplicate_satisfied[edge_idx];
@@ -9881,6 +9884,11 @@ pub const RuleIR = struct {
         var extend_state = try extend_mod.RuleModuleExtendState.init(temp, module_store_count);
         defer extend_state.deinit();
         extend_state.setVisibility(self.module_visibility_matrix, self.module_visibility_n);
+        // Which `@extend`s found their target is what the extension itself
+        // saw: a selector held the target when it was extended.
+        const engine_found = try temp.alloc(bool, self.extend_edges.items.len);
+        @memset(engine_found, false);
+        extend_state.setFoundBuffer(engine_found);
 
         const edge_eligible = try temp.alloc(bool, self.extend_edges.items.len);
         @memset(edge_eligible, false);
@@ -10272,8 +10280,15 @@ pub const RuleIR = struct {
             }
         }
 
+        const engine_known = try temp.alloc(bool, self.extend_edges.items.len);
+        @memset(engine_known, false);
+        try extend_state.collectFound(engine_found, engine_known);
+        for (engine_known, 0..) |known, edge_idx| {
+            if (known) edge_matched[edge_idx] = engine_found[edge_idx];
+        }
+
         for (self.extend_edges.items, 0..) |edge, edge_idx| {
-            if (edge_idx >= edge_matched.len or edge_matched[edge_idx]) continue;
+            if (edge_idx >= edge_matched.len or edge_matched[edge_idx] or engine_known[edge_idx]) continue;
             const target_raw = intern_pool.get(edge.target_selector);
             if (target_raw.len == 0) continue;
             const target_module = edge.target_module;
@@ -10314,7 +10329,7 @@ pub const RuleIR = struct {
             transitive_changed = false;
             for (self.extend_edges.items, 0..) |edge, edge_idx| {
                 if (edge_idx >= edge_matched.len or edge_matched[edge_idx] or edge_duplicate_satisfied[edge_idx]) continue;
-                if (!edge_eligible[edge_idx]) continue;
+                if (!edge_eligible[edge_idx] or engine_known[edge_idx]) continue;
                 const target_raw = intern_pool.get(edge.target_selector);
                 if (target_raw.len == 0) continue;
 
@@ -10350,6 +10365,7 @@ pub const RuleIR = struct {
             edge_required_unmatched,
             edge_duplicate_satisfied,
             edge_matched,
+            engine_known,
         );
 
         const saw_charset = try self.computeSkipFlagsAndCharset(
