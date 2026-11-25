@@ -868,7 +868,7 @@ fn normalizeIdentifierEscapesForParse(
     // digit is escaped (`-\31 `), where a value escapes the hyphen (`\-1`).
     if (canonical.len >= 3 and canonical[0] == '\\' and canonical[1] == '-' and std.ascii.isDigit(canonical[2])) {
         defer allocator.free(canonical);
-        return std.fmt.allocPrint(allocator, "-\\3{c} {s}", .{ canonical[2], canonical[3..] }) catch return ParseError.OutOfMemory;
+        return allocator.print("-\\3{c} {s}", .{ canonical[2], canonical[3..] }) catch return ParseError.OutOfMemory;
     }
     return canonical;
 }

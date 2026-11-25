@@ -75,9 +75,9 @@ fn formatDegenerateWithUnit(
     unit: ?[]const u8,
 ) std.mem.Allocator.Error![]u8 {
     if (unit) |u| {
-        if (u.len != 0) return std.fmt.allocPrint(alloc, "calc({s} * 1{s})", .{ keyword, u });
+        if (u.len != 0) return alloc.print("calc({s} * 1{s})", .{ keyword, u });
     }
-    return std.fmt.allocPrint(alloc, "calc({s})", .{keyword});
+    return alloc.print("calc({s})", .{keyword});
 }
 
 /// Return value comes from `alloc`, caller is `alloc.free`.
@@ -93,14 +93,14 @@ pub fn formatNumberCore(alloc: std.mem.Allocator, v: f64) std.mem.Allocator.Erro
     if (v == t and @abs(v) < 1e20 and v >= -9223372036854775808.0 and v <= 9223372036854775807.0) {
         var int_buf: [32]u8 = undefined;
         const int_text = std.fmt.bufPrint(&int_buf, "{d}", .{@as(i64, @intFromFloat(t))}) catch {
-            return try std.fmt.allocPrint(alloc, "{d}", .{@as(i64, @intFromFloat(t))});
+            return try alloc.print("{d}", .{@as(i64, @intFromFloat(t))});
         };
         return try alloc.dupe(u8, int_text);
     }
 
     var fixed_buf: [128]u8 = undefined;
     const s = std.fmt.bufPrint(&fixed_buf, "{d:.10}", .{v}) catch blk: {
-        break :blk try std.fmt.allocPrint(alloc, "{d:.10}", .{v});
+        break :blk try alloc.print("{d:.10}", .{v});
     };
     const must_free_s = @intFromPtr(s.ptr) != @intFromPtr(&fixed_buf[0]);
     defer if (must_free_s) alloc.free(s);
@@ -622,9 +622,9 @@ pub fn formatNumberWithUnit(
     // A unit such as `e1` would read back as an exponent (`1e1` is 10), so
     // its leading `e` is written as an escape.
     if (u.len > 1 and (u[0] == 'e' or u[0] == 'E') and std.ascii.isDigit(u[1])) {
-        return std.fmt.allocPrint(alloc, "{s}\\65 {s}", .{ core, u[1..] });
+        return alloc.print("{s}\\65 {s}", .{ core, u[1..] });
     }
-    return std.fmt.allocPrint(alloc, "{s}{s}", .{ core, u });
+    return alloc.print("{s}{s}", .{ core, u });
 }
 
 test "formatNumberCore: integers" {

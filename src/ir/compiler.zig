@@ -5436,7 +5436,7 @@ fn compileOneModule(
     defer content_chunks.deinit(arena);
     try content_chunks.ensureTotalCapacity(arena, resolved.content_blocks.items.len);
     for (resolved.content_blocks.items) |c| {
-        const name = try std.fmt.allocPrint(arena, "content_{d}", .{c.id});
+        const name = try arena.print("content_{d}", .{c.id});
         const content_analysis = analyzeStmtRange(modules, pool, resolved, module_id, c.body_roots, no_content_analysis, 0);
         var ch = try compileChunkIntoArena(
             parent_alloc,
@@ -5477,7 +5477,7 @@ fn compileOneModule(
     for (resolved.rule_stmts.items) |r| {
         if (r.selector_kind != .literal or !r.is_placeholder) continue;
         const rule_analysis = analyzeStmtRange(modules, pool, resolved, module_id, r.body_direct, no_content_analysis, 0);
-        const name = try std.fmt.allocPrint(arena, "placeholder_{d}", .{placeholder_chunks.items.len});
+        const name = try arena.print("placeholder_{d}", .{placeholder_chunks.items.len});
         const ch = try compileChunkIntoArena(
             parent_alloc,
             arena,
@@ -5603,7 +5603,7 @@ fn cloneCallableNames(
     var cursor: usize = 0;
     for (callables, 0..) |entry, idx| {
         if (entry.name == .none) {
-            out[idx] = try std.fmt.allocPrint(arena, fallback_prefix ++ "_{d}", .{entry.id});
+            out[idx] = try arena.print(fallback_prefix ++ "_{d}", .{entry.id});
             continue;
         }
         const raw = pool.get(entry.name);

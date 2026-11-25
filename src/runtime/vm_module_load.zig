@@ -59,9 +59,9 @@ fn moduleDisplayNamespace(path: []const u8) []const u8 {
 fn makeModuleRefValue(vm: anytype, namespace: []const u8, identity: []const u8) !Value {
     const sep = value_mod.module_ref_separator;
     const key = if (isPlainSassIdentifier(namespace))
-        try std.fmt.allocPrint(vm.allocator, "get-module(\"{s}\"){c}{s}", .{ namespace, sep, identity })
+        try vm.allocator.print("get-module(\"{s}\"){c}{s}", .{ namespace, sep, identity })
     else
-        try std.fmt.allocPrint(vm.allocator, "get-module(){c}{s}", .{ sep, identity });
+        try vm.allocator.print("get-module(){c}{s}", .{ sep, identity });
     defer vm.allocator.free(key);
     return Value.moduleRef(try vm.intern_pool.intern(key));
 }

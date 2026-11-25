@@ -211,8 +211,8 @@ pub fn maybeSerializeIndirectBuiltinColor(self: anytype, call_name: []const u8, 
     const text = if (identifierEq(call_name, "rgba") or @abs(a - 1.0) > 1e-12) blk: {
         const as = try value_format.formatNumberCore(self.allocator, a);
         defer self.allocator.free(as);
-        break :blk try std.fmt.allocPrint(self.allocator, "rgba({s}, {s}, {s}, {s})", .{ rs, gs, bs, as });
-    } else try std.fmt.allocPrint(self.allocator, "rgb({s}, {s}, {s})", .{ rs, gs, bs });
+        break :blk try self.allocator.print("rgba({s}, {s}, {s}, {s})", .{ rs, gs, bs, as });
+    } else try self.allocator.print("rgb({s}, {s}, {s})", .{ rs, gs, bs });
     defer self.allocator.free(text);
 
     const id = self.intern_pool.intern(text) catch return error.OutOfMemory;

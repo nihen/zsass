@@ -283,7 +283,7 @@ fn evalCssCall(env: anytype, prog: anytype, payload: u32) Error!Value {
         if (arg.kind() == .number) return arg;
         const text = try valueToCssCallArgText(env, arg);
         defer env.allocator().free(text);
-        const rendered = try std.fmt.allocPrint(env.allocator(), "calc({s})", .{text});
+        const rendered = try env.allocator().print("calc({s})", .{text});
         defer env.allocator().free(rendered);
         const id = try env.pool().intern(rendered);
         const out = Value.string(id, false);
@@ -441,7 +441,7 @@ fn unaryPrefixValue(env: anytype, prefix: []const u8, v: Value, calc_policy: Una
         return error.SassError;
     }
 
-    const merged = try std.fmt.allocPrint(env.allocator(), "{s}{s}", .{ prefix, raw });
+    const merged = try env.allocator().print("{s}{s}", .{ prefix, raw });
     defer env.allocator().free(merged);
     const id = try env.pool().intern(merged);
     return Value.string(id, false);
@@ -468,7 +468,7 @@ fn calcBinaryIfMarked(env: anytype, lhs: Value, rhs: Value, op: []const u8) Erro
     defer env.allocator().free(lhs_text);
     const rhs_text = try valueToCssCallArgText(env, rhs);
     defer env.allocator().free(rhs_text);
-    const merged = try std.fmt.allocPrint(env.allocator(), "{s}{s} {s} {s}", .{ calc_arg_marker, lhs_text, op, rhs_text });
+    const merged = try env.allocator().print("{s}{s} {s} {s}", .{ calc_arg_marker, lhs_text, op, rhs_text });
     defer env.allocator().free(merged);
     const id = try env.pool().intern(merged);
     return Value.string(id, false);
@@ -493,7 +493,7 @@ fn addValues(env: anytype, a: Value, b: Value) Error!Value {
                     defer env.allocator().free(sa);
                     const sb = try formatNumberValue(env.pool(), env.numberPool(), env.allocator(), rhs);
                     defer env.allocator().free(sb);
-                    const merged = try std.fmt.allocPrint(env.allocator(), "{s} + {s}", .{ sa, sb });
+                    const merged = try env.allocator().print("{s} + {s}", .{ sa, sb });
                     defer env.allocator().free(merged);
                     const id = try env.pool().intern(merged);
                     return Value.string(id, false);
@@ -507,7 +507,7 @@ fn addValues(env: anytype, a: Value, b: Value) Error!Value {
     if (lhs.kind() == .string and rhs.kind() == .string) {
         const sa = env.pool().get(lhs.stringIntern());
         const sb = env.pool().get(rhs.stringIntern());
-        const merged = try std.fmt.allocPrint(env.allocator(), "{s}{s}", .{ sa, sb });
+        const merged = try env.allocator().print("{s}{s}", .{ sa, sb });
         defer env.allocator().free(merged);
         const id = try env.pool().intern(merged);
         return Value.string(id, lhs.stringQuoted(env.stringFlagsPool().items));
@@ -516,7 +516,7 @@ fn addValues(env: anytype, a: Value, b: Value) Error!Value {
         const num_s = try formatNumberValue(env.pool(), env.numberPool(), env.allocator(), lhs);
         defer env.allocator().free(num_s);
         const sb = env.pool().get(rhs.stringIntern());
-        const merged = try std.fmt.allocPrint(env.allocator(), "{s}{s}", .{ num_s, sb });
+        const merged = try env.allocator().print("{s}{s}", .{ num_s, sb });
         defer env.allocator().free(merged);
         const id = try env.pool().intern(merged);
         return Value.string(id, rhs.stringQuoted(env.stringFlagsPool().items));
@@ -525,7 +525,7 @@ fn addValues(env: anytype, a: Value, b: Value) Error!Value {
         const sb = try formatNumberValue(env.pool(), env.numberPool(), env.allocator(), rhs);
         defer env.allocator().free(sb);
         const sa = env.pool().get(lhs.stringIntern());
-        const merged = try std.fmt.allocPrint(env.allocator(), "{s}{s}", .{ sa, sb });
+        const merged = try env.allocator().print("{s}{s}", .{ sa, sb });
         defer env.allocator().free(merged);
         const id = try env.pool().intern(merged);
         return Value.string(id, lhs.stringQuoted(env.stringFlagsPool().items));
@@ -534,7 +534,7 @@ fn addValues(env: anytype, a: Value, b: Value) Error!Value {
     defer env.allocator().free(sa);
     const sb = try valueToOpString(env, rhs);
     defer env.allocator().free(sb);
-    const merged = try std.fmt.allocPrint(env.allocator(), "{s}{s}", .{ sa, sb });
+    const merged = try env.allocator().print("{s}{s}", .{ sa, sb });
     defer env.allocator().free(merged);
     const id = try env.pool().intern(merged);
     const quoted = (lhs.kind() == .string and lhs.stringQuoted(env.stringFlagsPool().items)) or (rhs.kind() == .string and rhs.stringQuoted(env.stringFlagsPool().items));
@@ -558,7 +558,7 @@ fn subValues(env: anytype, a: Value, b: Value) Error!Value {
     defer env.allocator().free(sa);
     const sb = try valueToArithmeticOperandText(env, rhs);
     defer env.allocator().free(sb);
-    const merged = try std.fmt.allocPrint(env.allocator(), "{s}-{s}", .{ sa, sb });
+    const merged = try env.allocator().print("{s}-{s}", .{ sa, sb });
     defer env.allocator().free(merged);
     const id = try env.pool().intern(merged);
     return Value.string(id, false);
@@ -635,7 +635,7 @@ fn divValues(env: anytype, a: Value, b: Value, lhs_written_as_slash: bool) Error
                     defer env.allocator().free(sa);
                     const sb = try simplifySlashOperandText(env.pool(), env.numberPool(), env.allocator(), sb_raw);
                     defer env.allocator().free(sb);
-                    const merged = try std.fmt.allocPrint(env.allocator(), "{s}/{s}", .{ sa, sb });
+                    const merged = try env.allocator().print("{s}/{s}", .{ sa, sb });
                     defer env.allocator().free(merged);
                     const id = try env.pool().intern(merged);
                     return Value.string(id, false);
@@ -680,11 +680,11 @@ fn divValues(env: anytype, a: Value, b: Value, lhs_written_as_slash: bool) Error
     defer env.allocator().free(sa);
     // Run time writes a quoted string with its quotes.
     const sb = if (lhs_written_slash and rhs_quoted)
-        try std.fmt.allocPrint(env.allocator(), "\"{s}\"", .{sb_raw})
+        try env.allocator().print("\"{s}\"", .{sb_raw})
     else
         try simplifySlashOperandText(env.pool(), env.numberPool(), env.allocator(), sb_raw);
     defer env.allocator().free(sb);
-    const merged = try std.fmt.allocPrint(env.allocator(), "{s}/{s}", .{ sa, sb });
+    const merged = try env.allocator().print("{s}/{s}", .{ sa, sb });
     defer env.allocator().free(merged);
     const id = try env.pool().intern(merged);
     return Value.string(id, false);

@@ -27,7 +27,7 @@ pub fn normalizePlainCssImportQuote(
         const inner = text[1 .. text.len - 1];
         if (std.mem.indexOfScalar(u8, inner, '"') != null) return null;
         if (std.mem.indexOfScalar(u8, inner, '\\') != null) return null;
-        return std.fmt.allocPrint(allocator, "\"{s}\"", .{inner}) catch null;
+        return allocator.print("\"{s}\"", .{inner}) catch null;
     }
     if (is_url_form) {
         const inner = text[4 .. text.len - 1];
@@ -37,7 +37,7 @@ pub fn normalizePlainCssImportQuote(
         const url_inner = inner_trim[1 .. inner_trim.len - 1];
         if (std.mem.indexOfScalar(u8, url_inner, '"') != null) return null;
         if (std.mem.indexOfScalar(u8, url_inner, '\\') != null) return null;
-        return std.fmt.allocPrint(allocator, "url(\"{s}\")", .{url_inner}) catch null;
+        return allocator.print("url(\"{s}\")", .{url_inner}) catch null;
     }
     return null;
 }

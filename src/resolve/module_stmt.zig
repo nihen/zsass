@@ -364,7 +364,7 @@ fn emitImportAtRuleCssOnly(
         !std.mem.startsWith(u8, url_inner, "//") and
         !std.mem.startsWith(u8, url_raw, "url(");
     var url_emit_text = if (needs_quoted_css_url) blk: {
-        url_emit_storage = try std.fmt.allocPrint(ctx.a, "\"{s}\"", .{url_inner});
+        url_emit_storage = try ctx.a.print("\"{s}\"", .{url_inner});
         break :blk url_emit_storage.?;
     } else url_raw;
     if (normalizePlainCssImportQuote(ctx.a, url_emit_text, in_plain_css_module)) |adjusted| {

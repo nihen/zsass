@@ -518,7 +518,7 @@ fn valueToCssStringWithMode(ctx: *BuiltinContext, v: Value, mode: ListStringCont
     if (v.kind() == .nil) {
         return try ctx.allocator.dupe(u8, "null");
     }
-    return try std.fmt.allocPrint(ctx.allocator, "()", .{});
+    return try ctx.allocator.print("()", .{});
 }
 
 pub fn valueEql(ctx: *BuiltinContext, a: Value, b: Value) bool {

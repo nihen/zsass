@@ -1206,7 +1206,7 @@ fn mergeTypes(x: TypeParts, y: TypeParts) ?TypeParts {
 
 fn typeSimple(a: Allocator, parts: TypeParts) Error!SimpleSelector {
     if (parts.namespace) |namespace| {
-        return .{ .type_selector = try std.fmt.allocPrint(a, "{s}|{s}", .{ namespace, parts.name }) };
+        return .{ .type_selector = try a.print("{s}|{s}", .{ namespace, parts.name }) };
     }
     if (std.mem.eql(u8, parts.name, "*")) return .universal;
     return .{ .type_selector = parts.name };
@@ -1884,9 +1884,9 @@ fn pseudoWithSelector(a: Allocator, simple: SimpleSelector, complexes: []const C
 /// Text that is the same for simple selectors that are the same.
 fn simpleKey(a: Allocator, simple: SimpleSelector) Error![]const u8 {
     return switch (simple) {
-        .class => |name| std.fmt.allocPrint(a, ".{s}", .{name}),
-        .id => |name| std.fmt.allocPrint(a, "#{s}", .{name}),
-        .placeholder => |name| std.fmt.allocPrint(a, "%{s}", .{name}),
+        .class => |name| a.print(".{s}", .{name}),
+        .id => |name| a.print("#{s}", .{name}),
+        .placeholder => |name| a.print("%{s}", .{name}),
         .type_selector => |name| name,
         .universal => "*",
         .parent => "&",

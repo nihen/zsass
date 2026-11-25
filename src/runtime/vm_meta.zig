@@ -151,7 +151,7 @@ fn internDisplayIdentifier(ctx: *BuiltinContext, raw: []const u8) BuiltinError!I
 fn internQualifiedDisplayIdentifier(ctx: *BuiltinContext, module_name: []const u8, raw: []const u8) BuiltinError!InternId {
     const member_id = try internDisplayIdentifier(ctx, raw);
     const member = ctx.intern_pool.get(member_id);
-    const full = try std.fmt.allocPrint(ctx.allocator, "{s}.{s}", .{ module_name, member });
+    const full = try ctx.allocator.print("{s}.{s}", .{ module_name, member });
     defer ctx.allocator.free(full);
     return internString(ctx, full);
 }
@@ -851,7 +851,7 @@ fn valueToInspectCssString(ctx: *BuiltinContext, value: Value) BuiltinError![]co
         const name = ctx.intern_pool.get(value.callableNameIntern(ctx.callable_payload_pool));
         const display = if (value.callableIsMixin(ctx.callable_payload_pool)) "get-mixin" else "get-function";
         if (value.callableIsCss(ctx.callable_payload_pool)) {
-            return std.fmt.allocPrint(ctx.allocator, "{s}(\"{s}\", $css: true)", .{ display, name }) catch error.OutOfMemory;
+            return ctx.allocator.print("{s}(\"{s}\", $css: true)", .{ display, name }) catch error.OutOfMemory;
         }
         // A module member is stored as `namespace.name`; only the member
         // name is shown, written as a quoted string.
@@ -865,7 +865,7 @@ fn valueToInspectCssString(ctx: *BuiltinContext, value: Value) BuiltinError![]co
             if (ch == '"' or ch == '\\') try quoted.append(ctx.allocator, '\\');
             try quoted.append(ctx.allocator, ch);
         }
-        return std.fmt.allocPrint(ctx.allocator, "{s}(\"{s}\")", .{ display, quoted.items }) catch error.OutOfMemory;
+        return ctx.allocator.print("{s}(\"{s}\")", .{ display, quoted.items }) catch error.OutOfMemory;
     }
     if (value.kind() == .list) {
         const view = value_mod.inspectLogicalListView(ctx.list_pool.items, value) orelse unreachable;

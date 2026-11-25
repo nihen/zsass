@@ -2132,7 +2132,7 @@ pub fn math_div(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     defer ctx.allocator.free(sa);
     const sb = try valueToCssString(ctx, rhs);
     defer ctx.allocator.free(sb);
-    const text = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ sa, sb });
+    const text = try ctx.allocator.print("{s}/{s}", .{ sa, sb });
     defer ctx.allocator.free(text);
     const id = try internString(ctx, text);
     return Value.string(id, false);

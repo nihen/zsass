@@ -78,6 +78,6 @@ pub fn forwardAllowsPlain(name: []const u8, show: ?[]const []const u8, hide: ?[]
 }
 
 pub fn withForwardPrefix(prog: *ResolvedProgram, prefix: ?[]const u8, name: []const u8) ![]const u8 {
-    if (prefix) |p| return std.fmt.allocPrint(prog.arena.allocator(), "{s}{s}", .{ p, name });
+    if (prefix) |p| return prog.arena.allocator().print("{s}{s}", .{ p, name });
     return name;
 }
