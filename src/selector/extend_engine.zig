@@ -106,6 +106,9 @@ const Entry = struct {
     /// not an `@extend`'s own: what finds this one finds their targets,
     /// whichever `@extend`s come to own them later.
     origins: std.ArrayList(u32) = .empty,
+    /// `Engine.links_version` plus one when this entry's owners were last
+    /// marked as found; zero before.
+    noted_at: u32 = 0,
     /// Made by the `@extend` itself, not by extending an extender.
     direct: bool,
     /// A complex selector of the `@extend`'s rule as it was written.
@@ -257,6 +260,8 @@ pub const Engine = struct {
     arena: std.heap.ArenaAllocator,
     entries: std.ArrayList(Entry) = .empty,
     steps: std.ArrayList(Step) = .empty,
+    /// Counts the changes to which entry belongs to which `@extend`.
+    links_version: u32 = 0,
     by_target: std.StringHashMapUnmanaged(std.ArrayList(u32)) = .empty,
     steps_by_target: std.StringHashMapUnmanaged(std.ArrayList(u32)) = .empty,
     mode: Mode = .written,
@@ -383,9 +388,13 @@ pub const Engine = struct {
                     // The same extender for the same target: one entry,
                     // and both `@extend`s find their target through it.
                     if (origin) |from| {
-                        if (from != index) try existing.origins.append(a, from);
+                        if (from != index) {
+                            try existing.origins.append(a, from);
+                            self.links_version += 1;
+                        }
                     } else if (existing.owner != owner) {
                         try existing.also_owners.append(a, owner);
+                        self.links_version += 1;
                     }
                     return;
                 }
@@ -441,6 +450,9 @@ pub const Engine = struct {
 
     fn noteFound(self: *Engine, a: Allocator, index: u32) Error!void {
         const entry = &self.entries.items[index];
+        // Marked already, and nothing has changed owners since.
+        if (entry.noted_at == self.links_version + 1) return;
+        entry.noted_at = self.links_version + 1;
         if (entry.origins.items.len == 0) {
             self.steps.items[entry.owner].found = true;
             for (entry.also_owners.items) |other| self.steps.items[other].found = true;
