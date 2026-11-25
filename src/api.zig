@@ -2622,3 +2622,66 @@ test "api: a selector with an escaped space is extended like any other" {
         \\
     , css);
 }
+
+test "api: selector.unify() unifies and weaves as @extend does" {
+    const alloc = std.testing.allocator;
+    // `:host` by itself, what follows a pseudo-element, a `*` that is not
+    // first, a root on one side or both, and repeats in the result.
+    const source =
+        \\@use "sass:selector";
+        \\.c:host(.x):is(.r) {x: 2}
+        \\.d:is(.q) {@extend .c}
+        \\.m:hover {x: 7}
+        \\.n::after:hover {@extend .m}
+        \\a {
+        \\  h1: selector.unify(":host(.x)", ":is(.q)");
+        \\  h2: selector.unify(":host(.x):is(.r)", ":is(.q)");
+        \\  h3: selector.unify(".a:host", ".b");
+        \\  h4: selector.unify(":host", "a.b");
+        \\  h5: selector.unify(":host:hover", ":focus");
+        \\  e1: selector.unify(":hover", "::after:hover");
+        \\  e2: selector.unify("::after:hover", ":hover");
+        \\  e3: selector.unify(":hover", "::after.a");
+        \\  e4: selector.unify(".a*:focus", ":before:host-context(.y):is(.a)");
+        \\  t1: selector.unify("#j*", "a");
+        \\  r1: selector.unify(":root ~ .x .a", ".y .b");
+        \\  r2: selector.unify(":root ~ .x .a", ":root .y .b");
+        \\  r3: selector.unify(":root .x .a", ":scope .y .b");
+        \\  r4: selector.unify(":root ~ .a", ".y .b");
+        \\  r5: selector.unify(":root ~ .x .a", ".x .b");
+        \\  l1: selector.unify(":scope, .p", "[x], [x]");
+        \\}
+        \\
+    ;
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .quiet = true });
+    defer alloc.free(css);
+    try std.testing.expectEqualStrings(
+        \\.c:host(.x):is(.r), .d:host(.x):is(.r):is(.q) {
+        \\  x: 2;
+        \\}
+        \\
+        \\.m:hover, .n:hover::after:hover {
+        \\  x: 7;
+        \\}
+        \\
+        \\a {
+        \\  h1: :is(.q):host(.x);
+        \\  h2: :host(.x):is(.r):is(.q);
+        \\  h3: .a.b:host;
+        \\  h4: a.b:host;
+        \\  h5: :host:hover:focus;
+        \\  e1: :hover::after:hover;
+        \\  e2: ::after:hover;
+        \\  e3: .a:hover::after;
+        \\  e4: .a*:focus:before:is(.a):host-context(.y);
+        \\  t1: a#j*;
+        \\  r1: :root ~ .x :root ~ .y .a.b, :root ~ .y :root ~ .x .a.b;
+        \\  r2: :root ~ .x :root .y .a.b, :root .y :root ~ .x .a.b;
+        \\  r3: :root:scope .x .y .a.b, :root:scope .y .x .a.b;
+        \\  r4: .y :root ~ .a.b;
+        \\  r5: :root ~ .x .a.b;
+        \\  l1: [x]:scope, [x]:scope, .p[x], .p[x];
+        \\}
+        \\
+    , css);
+}

@@ -105,6 +105,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.a.c, .c.z, .a.c`.
 - A rule whose selector has an escaped space is extended like any other:
   `.a.foo\ bar {…}` with `.x {@extend .a}` is `.a.foo\ bar, .foo\ bar.x`.
+- `selector.unify()` uses the unification and weaving of `@extend`, and
+  the older code for both is removed. With selectors that hold `:host`,
+  `:root`, `:scope`, or a pseudo-element it now gives what the official
+  CLI gives: `selector.unify(":host(.x):is(.r)", ":is(.q)")` is
+  `:host(.x):is(.r):is(.q)`, `selector.unify(":hover", "::after:hover")`
+  is `:hover::after:hover`, and
+  `selector.unify(":root ~ .x .a", ".y .b")` is
+  `:root ~ .x :root ~ .y .a.b, :root ~ .y :root ~ .x .a.b`. The same
+  rules apply where `@extend` unifies: `.c:host(.x):is(.r) {…}` with
+  `.d:is(.q) {@extend .c}` gains `.d:host(.x):is(.r):is(.q)`.
 - `selector.extend()` and `selector.replace()` use the same implementation.
 - `selector.is-superselector()` matches front to back as the official CLI
   does: `.a .x` does not cover `.a.e + .a.b .x`, and `::foo` covers

@@ -256,6 +256,53 @@ pub fn trimUnion(allocator: Allocator, list: *SelectorList, details: *std.ArrayL
     }
 }
 
+/// `selector.unify()` of two complex selectors: every selector that
+/// matches what both match, by the unification and weaving the engine
+/// extends with. Empty when there is none. The results belong to
+/// `allocator`.
+pub fn unifyComplexes(allocator: Allocator, first: *const ComplexSelector, second: *const ComplexSelector) Error![]ComplexSelector {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const pieces1 = try piecesOf(a, first, zero_spec);
+    const pieces2 = try piecesOf(a, second, zero_spec);
+    if (pieces1.len == 0 or pieces2.len == 0) return allocator.alloc(ComplexSelector, 0);
+    if (pieces1[pieces1.len - 1] != .compound or pieces2[pieces2.len - 1] != .compound) return allocator.alloc(ComplexSelector, 0);
+
+    var simples: std.ArrayList(SimpleSelector) = .empty;
+    var marks: std.ArrayList(Specificity) = .empty;
+    const last1 = pieces1[pieces1.len - 1].compound;
+    const last2 = pieces2[pieces2.len - 1].compound;
+    try simples.appendSlice(a, last1.simples);
+    try marks.appendSlice(a, last1.marks);
+    if (!try unifyCompoundInto(a, &simples, &marks, last2)) return allocator.alloc(ComplexSelector, 0);
+
+    const prefix1 = pieces1[0 .. pieces1.len - 1];
+    const prefix2 = pieces2[0 .. pieces2.len - 1];
+    const single = [_][]const Piece{if (prefix1.len != 0) prefix1 else prefix2};
+    const prefixes: []const []const Piece = if (prefix1.len != 0 and prefix2.len != 0)
+        try weavePrefixes(a, prefix1, prefix2)
+    else
+        &single;
+
+    var out: std.ArrayList(ComplexSelector) = .empty;
+    errdefer {
+        for (out.items) |*complex| complex.deinit();
+        out.deinit(allocator);
+    }
+    for (prefixes) |prefix| {
+        var pieces: std.ArrayList(Piece) = .empty;
+        try pieces.appendSlice(a, prefix);
+        try pieces.append(a, .{ .compound = .{ .simples = simples.items, .marks = marks.items } });
+        const made = try materialize(a, pieces.items);
+        var cloned = try made.clone(allocator);
+        errdefer cloned.deinit();
+        try out.append(allocator, cloned);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 pub const Engine = struct {
     arena: std.heap.ArenaAllocator,
     entries: std.ArrayList(Entry) = .empty,
@@ -918,11 +965,7 @@ fn unifyChosen(
             try base_simples.appendSlice(a, last.simples);
             try base_marks.appendSlice(a, last.marks);
         } else {
-            var after_element = false;
-            for (last.simples, last.marks) |simple, mark| {
-                if (!try unifySimple(a, base_simples, base_marks, simple, mark, after_element)) return;
-                if (isPseudoElement(simple)) after_element = true;
-            }
+            if (!try unifyCompoundInto(a, base_simples, base_marks, last)) return;
         }
 
         const prefix = pieces[0 .. pieces.len - 1];
@@ -1006,6 +1049,33 @@ fn typeParts(simple: SimpleSelector) ?TypeParts {
     };
 }
 
+/// Add every simple selector of `added` to the compound. The pseudo
+/// selectors that follow a pseudo-element in `added` are about that
+/// pseudo-element: they are unified among themselves and go to the end,
+/// whatever the compound holds already (`:hover` and `::after:hover`
+/// give `:hover::after:hover`). False when nothing matches both.
+fn unifyCompoundInto(
+    a: Allocator,
+    simples: *std.ArrayList(SimpleSelector),
+    marks: *std.ArrayList(Specificity),
+    added: Marked,
+) Error!bool {
+    var tail: std.ArrayList(SimpleSelector) = .empty;
+    var tail_marks: std.ArrayList(Specificity) = .empty;
+    var after_element = false;
+    for (added.simples, added.marks) |simple, mark| {
+        if (after_element and isPseudo(simple)) {
+            if (!try unifySimple(a, &tail, &tail_marks, simple, mark)) return false;
+            continue;
+        }
+        if (!try unifySimple(a, simples, marks, simple, mark)) return false;
+        if (isPseudoElement(simple)) after_element = true;
+    }
+    try simples.appendSlice(a, tail.items);
+    try marks.appendSlice(a, tail_marks.items);
+    return true;
+}
+
 /// "Unifying a Simple Selector" of the specification: add `simple` to
 /// the compound so that it matches what both match. False when nothing can.
 fn unifySimple(
@@ -1014,21 +1084,27 @@ fn unifySimple(
     marks: *std.ArrayList(Specificity),
     simple: SimpleSelector,
     mark: Specificity,
-    /// In the compound it comes from, `simple` follows a pseudo-element.
-    after_element: bool,
 ) Error!bool {
     if (isHost(simple)) {
         for (simples.items) |other| {
             if (!isHost(other) and pseudoSelectorOf(other) == null) return false;
         }
-    } else if (pseudoSelectorOf(simple) == null) {
-        for (simples.items) |other| {
-            if (isHost(other)) return false;
+    } else if (simples.items.len == 1 and isHost(simples.items[0])) {
+        // The compound is a `:host` selector by itself. A pseudo-class
+        // with a selector argument goes in front of it; a type selector
+        // is let through; nothing else matches what it matches.
+        if (pseudoSelectorOf(simple) != null) {
+            try simples.insert(a, 0, simple);
+            try marks.insert(a, 0, mark);
+            return true;
         }
+        if (simple != .type_selector) return false;
     }
 
     if (typeParts(simple)) |added| {
-        for (simples.items, 0..) |other, index| {
+        // Only what stands first is the compound's type: a `*` written
+        // further on stays where it is.
+        for (simples.items[0..@min(1, simples.items.len)], 0..) |other, index| {
             const existing = typeParts(other) orelse continue;
             const merged = mergeTypes(existing, added) orelse return false;
             simples.items[index] = try typeSimple(a, merged);
@@ -1066,15 +1142,21 @@ fn unifySimple(
         return true;
     }
     var position = simples.items.len;
-    if (after_element) {
-        // What follows a pseudo-element stays behind it.
-    } else if (isPseudo(simple)) {
-        for (simples.items, 0..) |other, index| {
-            if (isPseudoElement(other) or isHost(other)) {
-                position = index;
-                break;
+    if (isPseudo(simple)) {
+        // Before the pseudo-element. The official CLI writes it before
+        // every pseudo-element when a compound has several.
+        var index = simples.items.len;
+        var last_element: ?usize = null;
+        while (index > 0) {
+            index -= 1;
+            if (!isPseudoElement(simples.items[index])) continue;
+            if (last_element) |later| {
+                try simples.insert(a, later, simple);
+                try marks.insert(a, later, mark);
             }
+            last_element = index;
         }
+        if (last_element) |first| position = first;
     } else {
         for (simples.items, 0..) |other, index| {
             if (isPseudo(other)) {
@@ -1159,11 +1241,7 @@ fn unifyLinks(a: Allocator, first: Link, second: Link, combinator: Combinator) E
     var marks: std.ArrayList(Specificity) = .empty;
     try simples.appendSlice(a, first.compound.simple_selectors.items);
     try marks.appendSlice(a, first.marks);
-    var after_element = false;
-    for (second.compound.simple_selectors.items, second.marks) |simple, mark| {
-        if (!try unifySimple(a, &simples, &marks, simple, mark, after_element)) return null;
-        if (isPseudoElement(simple)) after_element = true;
-    }
+    if (!try unifyCompoundInto(a, &simples, &marks, .{ .simples = second.compound.simple_selectors.items, .marks = second.marks })) return null;
     var compound = CompoundSelector.init(a);
     try compound.simple_selectors.appendSlice(a, simples.items);
     return .{ .compound = compound, .marks = marks.items, .combinator = combinator };
@@ -1294,10 +1372,26 @@ fn isRootish(compound: *const CompoundSelector) bool {
 /// same element: the narrower of the two when one covers the other, and
 /// the two put together when they name the same ID or pseudo-element.
 fn commonGroup(a: Allocator, first: []const Link, second: []const Link) Error!?[]const Link {
+    if (sameGroup(first, second)) return try markedAlso(a, first, second);
     if (shareUnique(first, second)) return unifyGroups(a, second, first);
     if (try parentsCover(a, second, first)) return try markedAlso(a, first, second);
     if (try parentsCover(a, first, second)) return try markedAlso(a, second, first);
     return null;
+}
+
+/// Written the same, simple selector for simple selector.
+fn sameGroup(first: []const Link, second: []const Link) bool {
+    if (first.len != second.len) return false;
+    for (first, second) |x, y| {
+        if (x.combinator != y.combinator) return false;
+        const xs = x.compound.simple_selectors.items;
+        const ys = y.compound.simple_selectors.items;
+        if (xs.len != ys.len) return false;
+        for (xs, ys) |p, q| {
+            if (!spec_mod.simpleSelectorEql(p, q)) return false;
+        }
+    }
+    return true;
 }
 
 /// `group`, also carrying where `other` came from: it stands for both.
@@ -1326,8 +1420,8 @@ fn weavePrefixes(a: Allocator, first: []const Piece, second: []const Piece) Erro
     if (one.leading.len != 0 and two.leading.len != 0 and !std.mem.eql(Combinator, one.leading, two.leading)) return &.{};
     const leading = if (one.leading.len != 0) one.leading else two.leading;
 
-    var links1 = one.links;
-    var links2 = two.links;
+    var links1: []const Link = one.links;
+    var links2: []const Link = two.links;
 
     // Sets of alternatives, in the order they are written.
     var sets: std.ArrayList([]const []const Link) = .empty;
@@ -1404,30 +1498,24 @@ fn weavePrefixes(a: Allocator, first: []const Piece, second: []const Piece) Erro
         try tail_sets.append(a, alternatives.items);
     }
 
-    // A root comes first, and two roots are one.
+    // A root is on both sides: two roots are unified, each side keeping
+    // the combinator that follows its own, and a root one side lacks is
+    // put in front of it together with its combinator. After that a root
+    // is a parent like any other, so `:root ~ .x` and `.y` come out as
+    // `:root ~ .x :root ~ .y` and `:root ~ .y :root ~ .x`.
     {
         const root1 = links1.len != 0 and isRootish(&links1[0].compound);
         const root2 = links2.len != 0 and isRootish(&links2[0].compound);
         if (root1 and root2) {
-            // What a combinator ties to one root stays right behind it.
-            const tied1 = groupEnd(links1);
-            const tied2 = groupEnd(links2);
-            const tied = if (tied1 > 1) links1[1..tied1] else links2[1..tied2];
-            if (tied1 > 1 and tied2 > 1) return &.{};
-            const combinator = if (tied1 > 1) links1[0].combinator else links2[0].combinator;
-            const unified = try unifyLinks(a, links1[0], links2[0], combinator) orelse return &.{};
-            const single = try a.alloc([]const Link, 1);
-            single[0] = try joinLinks(a, try oneLink(a, unified), tied);
-            try sets.append(a, single);
-            links1 = links1[tied1..];
-            links2 = links2[tied2..];
-        } else if (root1 or root2) {
-            const links = if (root1) links1 else links2;
-            const tied = groupEnd(links);
-            const single = try a.alloc([]const Link, 1);
-            single[0] = links[0..tied];
-            try sets.append(a, single);
-            if (root1) links1 = links1[tied..] else links2 = links2[tied..];
+            const unified = try unifyLinks(a, links1[0], links2[0], links1[0].combinator) orelse return &.{};
+            var other = unified;
+            other.combinator = links2[0].combinator;
+            links1 = try joinLinks(a, try oneLink(a, unified), links1[1..]);
+            links2 = try joinLinks(a, try oneLink(a, other), links2[1..]);
+        } else if (root1) {
+            links2 = try joinLinks(a, links1[0..1], links2);
+        } else if (root2) {
+            links1 = try joinLinks(a, links2[0..1], links1);
         }
     }
 
