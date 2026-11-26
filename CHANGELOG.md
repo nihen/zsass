@@ -15,7 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default, so values that double each step stop as well. Each
   has a stable diagnostic code, such as `ZSASS_LIMIT_VM_STEPS`, and fails
   with exit code 65.
-- The CLI's Docker image runs as an unprivileged user.
+- Numbers too large for a 64-bit integer, passed to `list.nth()`,
+  `math.random()`, the string functions, and similar, are refused instead
+  of being converted out of range, which crashed a safety build and was
+  undefined behavior in a release build. 2^63 reads as the largest 64-bit
+  integer, as in the official CLI.
+- Comparing the keys of a map literal counts toward the step limit.
+- The CLI's Docker image runs as an unprivileged user, is built from the
+  release tag it is published for, and pins its base image by digest.
 
 ### Added
 - `CompileOptions.limits` and `CompileFilesOptions.limits`
@@ -29,6 +36,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it with the default limits. The default stays `.unrestricted`, as in Sass.
 
 ### Fixed
+- The CLI's CSS cache is keyed by where the input and load paths lead and
+  by the output style, syntax, fatal deprecations, and limits. Compiling
+  again with another `--style` returned the cached CSS, and projects
+  sharing `ZSASS_CSS_CACHE_DIR` could get each other's CSS. The cache moves
+  to a new directory, so older entries are not used.
+- `compileFiles` no longer lets an entry that configures a module, or uses
+  Sass `@import`, change what another entry gets from that module.
+- `compileFiles` compiles one entry at a time until a thread-capable
+  `io_facility.io` is installed, since the default one does not support
+  several threads.
+- `@extend` applied by many rules to the same selector no longer holds the
+  work of every rule at once: 1000 rules extending one placeholder take
+  tens of megabytes instead of nearly a gigabyte.
 - A selector with `:is()`, `:not()`, or another pseudo-class nested more than
   32 levels deep is no longer an "Invalid CSS syntax" error.
 - `@use`, `@forward`, `@import`, and `meta.load-css()` load a stylesheet
