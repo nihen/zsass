@@ -4,12 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.4.4 (2026-11-26)
 
 ### Changed
 - Building from source needs Zig 0.17.1 or newer (0.16.0 before). The
   released binaries and the container image are built with it; what
   `zsass` writes for a stylesheet is unchanged.
+- Large stylesheets compile about 3% faster: three scans over each
+  declaration value end early when the value cannot hold what they look
+  for.
 
 ### Fixed
 - `mix()`, `complement()`, `invert()`, `grayscale()` and `ie-hex-str()`,
