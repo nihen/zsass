@@ -354,7 +354,8 @@ fn compileOnePath(
     budget.file_access = file_access;
     const guard = stack_guard.begin(opts.limits.stack_bytes);
     defer guard.end();
-    compileOnePathFallible(out_alloc, work_alloc, input_path, opts, shared_pool, source_cache, ast_cache, persistent_state, out, &budget) catch |caught| {
+    var limited_alloc = resource_budget.LimitedAllocator.init(&budget, work_alloc);
+    compileOnePathFallible(out_alloc, limited_alloc.allocator(), input_path, opts, shared_pool, source_cache, ast_cache, persistent_state, out, &budget) catch |caught| {
         const err = budget.mapError(stack_guard.mapError(caught));
         if (out.css) |b| {
             out_alloc.free(b);
@@ -493,6 +494,8 @@ fn compileOnePathFallible(
     try rule_ir.writeToWithSourceMap(&limited.interface, shared_pool, sm_ptr, source_locations, opts.output_style, .{});
     try limited.interface.flush();
     if (stack_guard.tripped()) return error.NestingLimit;
+    // A limit an inner layer recovered from still fails the entry.
+    if (budget.exceeded) |e| return e;
     out.css = try aw.toOwnedSlice();
 
     if (sm) |*m| {

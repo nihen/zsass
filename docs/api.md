@@ -81,6 +81,7 @@ pub const CompileLimits = struct {
     max_selector_candidates: usize = 200_000,
     max_ir_nodes: usize = 5_000_000,
     max_output_bytes: usize = 128 * 1024 * 1024,
+    max_memory_bytes: usize = 2 * 1024 * 1024 * 1024,
     stack_bytes: usize = 4 * 1024 * 1024,
 
     pub fn unlimited() CompileLimits;
@@ -263,9 +264,11 @@ process:
 | `max_selector_candidates` | 200,000 | `error.SelectorExpansionLimit` | `ZSASS_LIMIT_SELECTOR_CANDIDATES` |
 | `max_ir_nodes` | 5,000,000 | `error.IrNodeLimit` | `ZSASS_LIMIT_IR_NODES` |
 | `max_output_bytes` | 128 MiB | `error.OutputSizeLimit` | `ZSASS_LIMIT_OUTPUT_BYTES` |
+| `max_memory_bytes` (held at once through the given allocator) | 2 GiB | `error.MemoryLimit` | `ZSASS_LIMIT_MEMORY_BYTES` |
 
 One budget covers the whole compilation: every module it loads and every
-`meta.load-css()` counts against it. Each `compileFiles` entry gets its own.
+`meta.load-css()` counts against it. Each `compileFiles` entry gets its own;
+the caches its entries share do not count toward `max_memory_bytes`.
 Syntax depth counts blocks, parentheses, brackets, interpolation, unary
 operators, and each operator of a chain such as `a + b + c`. A selector
 counts toward `max_selector_candidates` once per compound and combinator,

@@ -221,6 +221,19 @@ test "limits: loaded modules share the entry's step budget" {
     try std.testing.expectError(error.ExecutionLimit, compile(a, twice_load_css, entry, &.{}, budget_probe));
 }
 
+test "limits: values that double each step stop at the memory limit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const opts = withLimits(.{ .max_memory_bytes = 64 * 1024 * 1024 });
+    const strings = "$s: a; @for $i from 1 through 40 { $s: $s + $s; } a { x: str-length($s); }";
+    try std.testing.expectError(error.MemoryLimit, compile(a, strings, "", &.{}, opts));
+    const lists = "@use \"sass:list\"; $l: 1 2; @for $i from 1 through 40 { $l: list.join($l, $l); } a { x: list.length($l); }";
+    try std.testing.expectError(error.MemoryLimit, compile(a, lists, "", &.{}, opts));
+    const few = "$s: a; @for $i from 1 through 4 { $s: $s + $s; } a { x: str-length($s); }";
+    try std.testing.expectEqualStrings("a {\n  x: 16;\n}\n", try compile(a, few, "", &.{}, opts));
+}
+
 test "limits: source and output size" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

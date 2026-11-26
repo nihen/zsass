@@ -15,6 +15,7 @@ pub const default_max_selector_candidates: usize = 200_000;
 pub const default_max_ir_nodes: usize = 5_000_000;
 pub const default_max_output_bytes: usize = 128 * 1024 * 1024;
 pub const default_stack_bytes: usize = 4 * 1024 * 1024;
+pub const default_max_memory_bytes: usize = 2 * 1024 * 1024 * 1024;
 
 /// Caller-tunable limits. The defaults are finite so that compiling
 /// untrusted input fails with a diagnostic instead of exhausting the
@@ -34,6 +35,9 @@ pub const CompileLimits = struct {
     max_ir_nodes: usize = default_max_ir_nodes,
     /// Bytes of generated CSS.
     max_output_bytes: usize = default_max_output_bytes,
+    /// Bytes the compilation holds at once through the allocator it was
+    /// given. Caches shared by `compileFiles` entries are not counted.
+    max_memory_bytes: usize = default_max_memory_bytes,
     /// Native stack the compiler may use below the frame that calls it,
     /// for recursion over values and selectors built at run time. The
     /// calling thread needs this much stack and some more to spare; lower
@@ -50,6 +54,7 @@ pub const CompileLimits = struct {
             .max_selector_candidates = std.math.maxInt(usize),
             .max_ir_nodes = std.math.maxInt(usize),
             .max_output_bytes = std.math.maxInt(usize),
+            .max_memory_bytes = std.math.maxInt(usize),
             .stack_bytes = default_stack_bytes,
         };
     }
@@ -67,6 +72,7 @@ pub const LimitError = error{
     SelectorExpansionLimit,
     IrNodeLimit,
     OutputSizeLimit,
+    MemoryLimit,
     CompilationCancelled,
     /// The file import policy refused every candidate for a URL.
     FileImportDenied,
@@ -84,6 +90,7 @@ pub fn isLimitError(err: anyerror) bool {
         error.SelectorExpansionLimit,
         error.IrNodeLimit,
         error.OutputSizeLimit,
+        error.MemoryLimit,
         error.CompilationCancelled,
         error.FileImportDenied,
         => true,
@@ -98,6 +105,7 @@ pub const execution_message = "Execution step limit exceeded.";
 pub const selector_expansion_message = "Selector expansion limit exceeded.";
 pub const ir_node_message = "Generated output node limit exceeded.";
 pub const output_size_message = "Output size limit exceeded.";
+pub const memory_message = "Memory limit exceeded.";
 pub const cancelled_message = "Compilation cancelled.";
 pub const file_import_denied_message = "This file is not allowed to be loaded.";
 
@@ -111,6 +119,7 @@ pub fn limitMessage(err: anyerror) ?[]const u8 {
         error.SelectorExpansionLimit => selector_expansion_message,
         error.IrNodeLimit => ir_node_message,
         error.OutputSizeLimit => output_size_message,
+        error.MemoryLimit => memory_message,
         error.CompilationCancelled => cancelled_message,
         error.FileImportDenied => file_import_denied_message,
         else => null,
@@ -127,6 +136,7 @@ pub fn limitCode(err: anyerror) ?[]const u8 {
         error.SelectorExpansionLimit => "ZSASS_LIMIT_SELECTOR_CANDIDATES",
         error.IrNodeLimit => "ZSASS_LIMIT_IR_NODES",
         error.OutputSizeLimit => "ZSASS_LIMIT_OUTPUT_BYTES",
+        error.MemoryLimit => "ZSASS_LIMIT_MEMORY_BYTES",
         error.CompilationCancelled => "ZSASS_CANCELLED",
         error.FileImportDenied => "ZSASS_IMPORT_DENIED",
         else => null,
@@ -162,6 +172,10 @@ pub const ResourceBudget = struct {
         };
         b.vm_fuel = b.nextFuel();
         return b;
+    }
+
+    fn noteExceeded(self: *ResourceBudget, err: LimitError) void {
+        if (self.exceeded == null) self.exceeded = err;
     }
 
     fn fail(self: *ResourceBudget, err: LimitError) LimitError {
@@ -246,6 +260,76 @@ pub const ResourceBudget = struct {
         const total = std.math.add(usize, self.output_bytes, n) catch return self.fail(error.OutputSizeLimit);
         if (total > self.limits.max_output_bytes) return self.fail(error.OutputSizeLimit);
         self.output_bytes = total;
+    }
+};
+
+/// Allocator that refuses an allocation once the budget's memory limit would
+/// be exceeded, and records the refusal in the budget. One compilation uses
+/// it from one thread at a time.
+pub const LimitedAllocator = struct {
+    budget: *ResourceBudget,
+    child: std.mem.Allocator,
+    used: usize = 0,
+    peak: usize = 0,
+
+    pub fn init(budget: *ResourceBudget, child: std.mem.Allocator) LimitedAllocator {
+        return .{ .budget = budget, .child = child };
+    }
+
+    pub fn allocator(self: *LimitedAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn reserve(self: *LimitedAllocator, n: usize) bool {
+        const total = std.math.add(usize, self.used, n) catch {
+            self.budget.noteExceeded(error.MemoryLimit);
+            return false;
+        };
+        if (total > self.budget.limits.max_memory_bytes) {
+            self.budget.noteExceeded(error.MemoryLimit);
+            return false;
+        }
+        self.used = total;
+        if (total > self.peak) self.peak = total;
+        return true;
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *LimitedAllocator = @ptrCast(@alignCast(ctx));
+        if (!self.reserve(len)) return null;
+        const ptr = self.child.rawAlloc(len, alignment, ret_addr) orelse {
+            self.used -= len;
+            return null;
+        };
+        return ptr;
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *LimitedAllocator = @ptrCast(@alignCast(ctx));
+        if (new_len > memory.len and !self.reserve(new_len - memory.len)) return false;
+        if (!self.child.rawResize(memory, alignment, new_len, ret_addr)) {
+            if (new_len > memory.len) self.used -= new_len - memory.len;
+            return false;
+        }
+        if (new_len < memory.len) self.used -= memory.len - new_len;
+        return true;
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *LimitedAllocator = @ptrCast(@alignCast(ctx));
+        if (new_len > memory.len and !self.reserve(new_len - memory.len)) return null;
+        const ptr = self.child.rawRemap(memory, alignment, new_len, ret_addr) orelse {
+            if (new_len > memory.len) self.used -= new_len - memory.len;
+            return null;
+        };
+        if (new_len < memory.len) self.used -= memory.len - new_len;
+        return ptr;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *LimitedAllocator = @ptrCast(@alignCast(ctx));
+        self.used -|= memory.len;
+        self.child.rawFree(memory, alignment, ret_addr);
     }
 };
 
@@ -382,4 +466,18 @@ test "limited writer stops at the output limit" {
     try std.testing.expectEqual(@as(?LimitError, error.OutputSizeLimit), b.exceeded);
     try std.testing.expect(lw.limit_hit);
     try std.testing.expectEqual(error.OutputSizeLimit, lw.mapError(error.WriteFailed));
+}
+
+test "limited allocator refuses what would exceed the limit" {
+    var b = ResourceBudget.init(.{ .max_memory_bytes = 1024 }, null, null);
+    var la = LimitedAllocator.init(&b, std.testing.allocator);
+    const a = la.allocator();
+    const first = try a.alloc(u8, 1000);
+    try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 100));
+    try std.testing.expectEqual(@as(?LimitError, error.MemoryLimit), b.exceeded);
+    a.free(first);
+    const again = try a.alloc(u8, 1000);
+    a.free(again);
+    try std.testing.expectEqual(@as(usize, 0), la.used);
+    try std.testing.expectEqual(error.MemoryLimit, b.mapError(error.OutOfMemory));
 }

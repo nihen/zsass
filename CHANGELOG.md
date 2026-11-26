@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out of memory on small hostile inputs: deeply nested syntax, values or
   selectors nested at run time, endless loops, and `@extend`s whose
   combinations multiply. Limits on syntax depth, VM steps, generated rules,
-  `@extend` expansion, source size, and output size apply by default. Each
+  `@extend` expansion, source size, output size, and memory apply by
+  default, so values that double each step stop as well. Each
   has a stable diagnostic code, such as `ZSASS_LIMIT_VM_STEPS`, and fails
   with exit code 65.
 - The CLI's Docker image runs as an unprivileged user.

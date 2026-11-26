@@ -2524,10 +2524,12 @@ fn runEnd2EndWithPool(
     var budget = resource_budget.ResourceBudget.init(opts.limits, null, null);
     const guard = stack_guard.begin(opts.limits.stack_bytes);
     defer guard.end();
-    runEnd2EndWithBudget(allocator, input_path, output_path, opts, shared_pool, source_cache, ast_cache, phase_aggregator, persistent_state, cross_entry_states, &budget) catch |err| {
+    var limited_alloc = resource_budget.LimitedAllocator.init(&budget, allocator);
+    runEnd2EndWithBudget(limited_alloc.allocator(), input_path, output_path, opts, shared_pool, source_cache, ast_cache, phase_aggregator, persistent_state, cross_entry_states, &budget) catch |err| {
         return budget.mapError(stack_guard.mapError(err));
     };
     if (stack_guard.tripped()) return error.NestingLimit;
+    if (budget.exceeded) |e| return e;
 }
 
 fn runEnd2EndWithBudget(
@@ -2758,7 +2760,9 @@ fn runEnd2EndWithBudget(
             rule_ir.nodes.items.len,
         });
     };
-    vm_mod.VM.runTop(&vm) catch |err| {
+    vm_mod.VM.runTop(&vm) catch |vm_err| {
+        // Report the limit an allocation failure came from.
+        const err = budget.mapError(vm_err);
         if (error_format.verboseErrorsEnabled()) {
             cliErrPrint("zsass: VM error: {}\n", .{err});
         }

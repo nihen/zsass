@@ -32,6 +32,10 @@ printf '%s\n' '@function spin() { @while true {} @return 1; } a { x: spin(); }' 
 printf '%s\n' '@while true {}' > "${work}/while.scss"
 # shellcheck disable=SC2016
 printf '%s\n' '@for $i from 1 through 1000000000 {}' > "${work}/for.scss"
+# shellcheck disable=SC2016
+printf '%s\n' '$s: a; @for $i from 1 through 40 { $s: $s + $s; } a { x: str-length($s); }' > "${work}/doubling.scss"
+# shellcheck disable=SC2016
+printf '%s\n' '$l: 1px; @for $i from 1 through 20000 { $l: calc($l + 1%); } a { x: $l; }' > "${work}/calc.scss"
 for n in 14 20; do
   {
     for ((i = 0; i < n; i++)); do printf '.a%d ' "${i}"; done
@@ -42,10 +46,10 @@ done
 
 failures=0
 expect() {
-  local name="$1" pattern="$2"
+  local name="$1" pattern="$2" cap="${3:-${memory_limit}}"
   local status=0
   (
-    ulimit -v "${memory_limit}"
+    ulimit -v "${cap}"
     exec timeout "${time_limit}" "${zsass}" --no-source-map "${work}/${name}.scss"
   ) > /dev/null 2> "${work}/${name}.err" || status=$?
   if [[ "${status}" -eq 65 ]] && grep -Eq "${pattern}" "${work}/${name}.err"; then
@@ -67,6 +71,9 @@ expect while 'limit exceeded'
 expect for 'limit exceeded'
 expect extend14 'Selector expansion limit exceeded'
 expect extend20 'Selector expansion limit exceeded'
+# The default memory limit is 2 GiB, so these run under a larger cap.
+expect doubling 'Memory limit exceeded' 4194304
+expect calc 'Memory limit exceeded' 4194304
 
 if [[ "${failures}" -ne 0 ]]; then
   printf '%d security regression case(s) failed\n' "${failures}"

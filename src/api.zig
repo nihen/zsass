@@ -245,13 +245,14 @@ pub fn compileSourceToCss(
     // The compiler keeps what it allocates for the whole compile and gives
     // it back in one go, as the CLI does. Values made along the way, such
     // as the lists built-in functions return, have no other owner.
-    var arena = std.heap.ArenaAllocator.init(alloc);
+    var budget = resource_budget.ResourceBudget.init(opts.limits, opts.cancellation_check, opts.cancellation_ctx);
+    var limited_alloc = resource_budget.LimitedAllocator.init(&budget, alloc);
+    var arena = std.heap.ArenaAllocator.init(limited_alloc.allocator());
     defer arena.deinit();
     var file_access = file_access_mod.FileAccess.init(arena.allocator(), opts.file_import_policy) catch |err| {
         reportFinalErrorDiagnostic(err, file_path, opts);
         return err;
     };
-    var budget = resource_budget.ResourceBudget.init(opts.limits, opts.cancellation_check, opts.cancellation_ctx);
     budget.file_access = &file_access;
     const guard = stack_guard.begin(opts.limits.stack_bytes);
     defer guard.end();
@@ -314,6 +315,8 @@ fn compileSourceToCssInArena(
     try rule_ir.writeToWithSourceMap(&limited.interface, &r.pool, null, source_locations, opts.output_style, .{});
     try limited.interface.flush();
     if (stack_guard.tripped()) return error.NestingLimit;
+    // A limit an inner layer recovered from still fails the compilation.
+    if (budget.exceeded) |e| return e;
     return try aw.toOwnedSlice();
 }
 
@@ -329,13 +332,14 @@ pub fn compileSourceToCssWithSourceMap(
     source_map_output_css_path: ?[]const u8,
     opts: CompileOptions,
 ) anyerror!CompileCssWithSourceMapResult {
-    var arena = std.heap.ArenaAllocator.init(alloc);
+    var budget = resource_budget.ResourceBudget.init(opts.limits, opts.cancellation_check, opts.cancellation_ctx);
+    var limited_alloc = resource_budget.LimitedAllocator.init(&budget, alloc);
+    var arena = std.heap.ArenaAllocator.init(limited_alloc.allocator());
     defer arena.deinit();
     var file_access = file_access_mod.FileAccess.init(arena.allocator(), opts.file_import_policy) catch |err| {
         reportFinalErrorDiagnostic(err, file_path, opts);
         return err;
     };
-    var budget = resource_budget.ResourceBudget.init(opts.limits, opts.cancellation_check, opts.cancellation_ctx);
     budget.file_access = &file_access;
     const guard = stack_guard.begin(opts.limits.stack_bytes);
     defer guard.end();
@@ -415,6 +419,8 @@ fn compileSourceToCssWithSourceMapInArena(
     });
     try limited.interface.flush();
     if (stack_guard.tripped()) return error.NestingLimit;
+    // A limit an inner layer recovered from still fails the compilation.
+    if (budget.exceeded) |e| return e;
     const css = try aw.toOwnedSlice();
     errdefer alloc.free(css);
 

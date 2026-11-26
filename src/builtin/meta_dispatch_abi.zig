@@ -121,6 +121,7 @@ pub const Status = enum(u8) {
     output_size_limit = 12,
     compilation_cancelled = 13,
     file_import_denied = 14,
+    memory_limit = 15,
 };
 
 pub fn statusFromBuiltinError(err: BuiltinError) Status {
@@ -140,6 +141,7 @@ pub fn statusFromBuiltinError(err: BuiltinError) Status {
         error.OutputSizeLimit => .output_size_limit,
         error.CompilationCancelled => .compilation_cancelled,
         error.FileImportDenied => .file_import_denied,
+        error.MemoryLimit => .memory_limit,
     };
 }
 
@@ -160,5 +162,6 @@ pub fn builtinErrorFromStatus(status: Status) BuiltinError {
         .output_size_limit => error.OutputSizeLimit,
         .compilation_cancelled => error.CompilationCancelled,
         .file_import_denied => error.FileImportDenied,
+        .memory_limit => error.MemoryLimit,
     };
 }

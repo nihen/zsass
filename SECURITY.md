@@ -54,7 +54,8 @@ lets it compute without bound. When you compile input you do not trust:
   work, not time.
 - Still run the compiler in a separate process or container with CPU,
   memory, and wall-clock limits. The limits stop known ways to exhaust a
-  process; they do not bound every allocation.
+  process, but work that grows faster than its input can still take
+  seconds before a limit stops it.
 - Releases without resource limits can be made to crash, loop forever, or
   use unbounded memory with small inputs. Run them only in an isolated
   process or container with those limits, never in the same process as
