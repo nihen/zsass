@@ -616,7 +616,11 @@ test "limits: extending while writing counts toward the memory limit" {
         try src.print(a, ".q{d} {{ x: y; }}\n", .{k});
     }
     for (0..10) |i| try src.print(a, ".x{d} {{ @extend .a{d}; }}\n", .{ i, i });
-    try std.testing.expectError(error.MemoryLimit, compile(a, src.items, "", &.{}, withLimits(.{ .max_memory_bytes = 64 * 1024 * 1024 })));
+    const css = try compile(a, src.items, "", &.{}, quiet);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".x0 .x1 .x2 .x3 .x4 .x5 .x6 .x7 .x8 .x9 .q99") != null);
+    if (compile(a, src.items, "", &.{}, withLimits(.{ .max_memory_bytes = 4 * 1024 * 1024 }))) |_| {
+        return error.TestUnexpectedResult;
+    } else |err| try std.testing.expectEqual(error.MemoryLimit, err);
 }
 
 test "limits: a raised syntax depth lets selectors nest deeper" {
@@ -672,4 +676,20 @@ test "file policy: a root given through a link accepts links spelled that way" {
     const entry = try std.fs.path.join(a, &.{ via, "entry.scss" });
     const css = try compile(a, "@use \"abs\";", entry, &.{}, opts);
     try std.testing.expect(std.mem.indexOf(u8, css, ".partial") != null);
+}
+
+test "limits: a placeholder extended by many rules stays within the defaults" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var src: std.ArrayList(u8) = .empty;
+    try src.appendSlice(a, "%p { x: y; }\n");
+    for (0..1000) |i| try src.print(a, ".c{d} .d > .e {{ @extend %p; }}\n", .{i});
+    const css = try compile(a, src.items, "", &.{}, withLimits(.{ .max_memory_bytes = 256 * 1024 * 1024 }));
+    try std.testing.expect(std.mem.indexOf(u8, css, ".c999 .d > .e") != null);
+}
+
+test "limits: the compressed writer frees its buffer when output stops" {
+    const css = compile(std.testing.allocator, "@for $i from 1 through 1000 { .a#{$i} { x: y; } }", "", &.{}, .{ .quiet = true, .output_style = .compressed, .limits = .{ .max_output_bytes = 1 } });
+    try std.testing.expectError(error.OutputSizeLimit, css);
 }

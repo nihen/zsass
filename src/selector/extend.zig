@@ -956,6 +956,8 @@ pub const RuleModuleExtendState = struct {
                 });
                 try self.module_edge_indices[idx].append(self.allocator, edge_idx);
             }
+            // Each branch went into an extension of its own.
+            filtered_extender.deinit();
 
             if (self.module_next_eval_order[idx] != std.math.maxInt(u32)) {
                 self.module_next_eval_order[idx] += 1;

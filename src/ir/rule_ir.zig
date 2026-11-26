@@ -6081,6 +6081,12 @@ pub const RuleIR = struct {
             compress_aw = std.Io.Writer.Allocating.fromArrayList(write_alloc, &compress_buf);
             break :blk &compress_aw.writer;
         } else writer;
+        // On every way out, also when writing fails: whichever of the two
+        // holds the buffer frees it, and the other is empty.
+        defer if (output_style == .compressed) {
+            compress_aw.deinit();
+            compress_buf.deinit(write_alloc);
+        };
 
         const n = self.nodes.items.len;
         const skip = try temp.alloc(bool, n);
@@ -9748,7 +9754,12 @@ pub const RuleIR = struct {
             try rule_nodes_by_module[@intCast(node_module)].append(temp, @intCast(node_idx));
         }
 
-        var extend_state = try extend_mod.RuleModuleExtendState.init(temp, module_store_count, self.budget);
+        // The extension state frees what each rule's extension leaves
+        // behind, so it allocates from a heap, not from `temp`, which keeps
+        // everything until the write ends.
+        var extend_limiter: ?resource_budget.LimitedAllocator = if (self.budget) |b| resource_budget.LimitedAllocator.init(b, std.heap.c_allocator) else null;
+        const extend_alloc: std.mem.Allocator = if (extend_limiter) |*l| l.allocator() else std.heap.c_allocator;
+        var extend_state = try extend_mod.RuleModuleExtendState.init(extend_alloc, module_store_count, self.budget);
         defer extend_state.deinit();
         extend_state.setVisibility(self.module_visibility_matrix, self.module_visibility_n);
         // Which `@extend`s found their target is what the extension itself
@@ -11637,7 +11648,6 @@ pub const RuleIR = struct {
                 try writer.writeAll(compressed);
                 try writer.writeAll("\n");
             }
-            compress_buf.deinit(write_alloc);
         }
     }
 

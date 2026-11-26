@@ -222,6 +222,26 @@ fn piecesOf(a: Allocator, complex: *const ComplexSelector, mark: Specificity) Er
     return out;
 }
 
+/// A deep copy of `items` in `a`, sharing nothing with where they were made.
+fn cloneItems(a: Allocator, items: []const Item) Error![]Item {
+    const out = try a.alloc(Item, items.len);
+    for (items, out) |item, *copy| {
+        const pieces = try a.alloc(Piece, item.pieces.len);
+        for (item.pieces, pieces) |piece, *piece_copy| {
+            piece_copy.* = switch (piece) {
+                .combinator => piece,
+                .compound => |m| blk: {
+                    const simples = try a.alloc(SimpleSelector, m.simples.len);
+                    for (m.simples, simples) |simple, *simple_copy| simple_copy.* = try selector_mod.cloneSimpleSelector(simple, a);
+                    break :blk .{ .compound = .{ .simples = simples, .marks = try a.dupe(Specificity, m.marks) } };
+                },
+            };
+        }
+        copy.* = .{ .pieces = pieces, .complex = try item.complex.clone(a), .original = item.original };
+    }
+    return out;
+}
+
 fn makeItem(a: Allocator, pieces: []const Piece, original: bool, newline: bool) Error!Item {
     var complex = try materialize(a, pieces);
     complex.leading_separator_has_newline = newline;
@@ -626,7 +646,10 @@ pub const Engine = struct {
     pub fn extendSelectorDetailed(self: *Engine, out: Allocator, list: *const SelectorList, snapshot: u32, details: ?*std.ArrayList(Detail)) Error!SelectorList {
         const mark = beginOperation(self.budget);
         defer endOperation(self.budget, mark);
-        var scratch = std.heap.ArenaAllocator.init(self.arena.child_allocator);
+        // The engine's allocator may be an arena that keeps what is freed;
+        // the scratch space of one selector must really go back when it ends.
+        var scratch_limiter: ?resource_budget.LimitedAllocator = if (self.budget) |b| resource_budget.LimitedAllocator.init(b, std.heap.c_allocator) else null;
+        var scratch = std.heap.ArenaAllocator.init(if (scratch_limiter) |*l| l.allocator() else self.arena.child_allocator);
         defer scratch.deinit();
         const a = scratch.allocator();
 
@@ -639,9 +662,25 @@ pub const Engine = struct {
 
         var next_step: u32 = 0;
         while (next_step < self.steps.items.len and self.steps.items[next_step].order < snapshot) next_step += 1;
+        // Each step works in an arena of its own and keeps only a copy of its
+        // result, so a selector extended by many `@extend`s in turn holds one
+        // step's worth of memory, not the work of every step before.
+        const parent = scratch.child_allocator;
+        var kept: ?std.heap.ArenaAllocator = null;
+        defer if (kept) |*k| k.deinit();
         while (true) {
-            const step_index = try self.firstStepHeld(a, current, next_step) orelse break;
-            current = try self.extendItems(a, current, .{ .step = step_index });
+            // Steps can be many; a caller's deadline applies between them.
+            if (self.budget) |b| try b.checkCancelled();
+            var work = std.heap.ArenaAllocator.init(parent);
+            defer work.deinit();
+            const step_index = try self.firstStepHeld(work.allocator(), current, next_step) orelse break;
+            const extended = try self.extendItems(work.allocator(), current, .{ .step = step_index });
+            var next = std.heap.ArenaAllocator.init(parent);
+            errdefer next.deinit();
+            const copied = try cloneItems(next.allocator(), extended);
+            if (kept) |*k| k.deinit();
+            kept = next;
+            current = copied;
             next_step = step_index + 1;
         }
 
