@@ -13354,6 +13354,11 @@ fn stringNeedsDeclEscape(raw: []const u8) bool {
         if (c == calc_interp_preserve_start[0] and std.mem.startsWith(u8, raw[scan_i..], calc_interp_preserve_start)) {
             const body_start = scan_i + calc_interp_preserve_start.len;
             if (std.mem.indexOf(u8, raw[body_start..], calc_interp_preserve_end)) |end_rel| {
+                // The body is not checked for escapes, but a private-use
+                // code point in it still counts below.
+                for (raw[body_start .. body_start + end_rel]) |b| {
+                    if (b >= 0x80) has_non_ascii = true;
+                }
                 scan_i = body_start + end_rel + calc_interp_preserve_end.len;
                 continue;
             }
@@ -13386,6 +13391,18 @@ fn stringNeedsDeclEscape(raw: []const u8) bool {
         i += seq_len;
     }
     return false;
+}
+
+test "stringNeedsDeclEscape finds a private-use code point anywhere in the value" {
+    try std.testing.expect(!stringNeedsDeclEscape("solid red"));
+    try std.testing.expect(!stringNeedsDeclEscape("caf\xc3\xa9"));
+    try std.testing.expect(stringNeedsDeclEscape("a\\b"));
+    try std.testing.expect(stringNeedsDeclEscape("a\x1fb"));
+    try std.testing.expect(stringNeedsDeclEscape("a \xee\x80\x80 b"));
+    // Inside a preserved calc body an escape is left alone, but a
+    // private-use code point is not.
+    try std.testing.expect(!stringNeedsDeclEscape("a " ++ calc_interp_preserve_start ++ "1 \\ 2" ++ calc_interp_preserve_end ++ " b"));
+    try std.testing.expect(stringNeedsDeclEscape("a " ++ calc_interp_preserve_start ++ "\xee\x80\x80" ++ calc_interp_preserve_end ++ " b"));
 }
 
 fn normalizeCustomPropertyValueSingleLine(alloc: std.mem.Allocator, value: []const u8) VMError![]const u8 {
