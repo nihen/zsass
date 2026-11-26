@@ -60,6 +60,12 @@ pub inline fn overflowed() bool {
     return false;
 }
 
+/// Fail the way `check()` does, for nesting found too deep before recursing.
+pub fn refuse() error{OutOfMemory} {
+    tripped_flag = true;
+    return error.OutOfMemory;
+}
+
 /// True when a `check()` failed since the outermost scope opened.
 pub fn tripped() bool {
     return tripped_flag;

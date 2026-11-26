@@ -23,6 +23,7 @@ const UnaryOp = ast_flat.UnaryOp;
 const error_format = @import("../runtime/error_format.zig");
 const css_utils = @import("../runtime/css_utils.zig");
 const resource_budget = @import("../runtime/resource_budget.zig");
+const stack_guard = @import("../runtime/stack_guard.zig");
 const syntax_nesting_message = resource_budget.syntax_nesting_message;
 
 const ParseError = error{ UnexpectedEof, OutOfMemory, SyntaxError, HardSyntaxError, SyntaxNestingLimit };
@@ -166,6 +167,8 @@ pub const Parser = struct {
     /// Enter one level of syntax nesting. Pair with `leaveSyntax` through
     /// `defer` so that error paths restore the depth.
     fn enterSyntax(self: *Parser) ParseError!void {
+        // The depth limit can be lifted; the native stack still bounds it.
+        try stack_guard.check();
         if (self.syntax_depth >= self.max_syntax_depth) {
             error_format.setContextMessage(syntax_nesting_message);
             const span = self.currentTokenSpan();
@@ -774,6 +777,18 @@ pub const Parser = struct {
     /// Returns the raw byte span of the selector text (trailing
     /// trivia trimmed).  On successful return, `self.pos` points at
     /// the `{` token.
+    /// Record an open bracket of a selector. Brackets count toward the syntax
+    /// depth: the selector is parsed again at run time, one level at a time.
+    fn pushSelectorBracket(self: *Parser, stack: *std.ArrayListUnmanaged(u8), bracket: u8) ParseError!void {
+        if (self.syntax_depth + stack.items.len >= self.max_syntax_depth) {
+            error_format.setContextMessage(syntax_nesting_message);
+            const span = self.currentTokenSpan();
+            error_format.recordErrorSpanIfUnset(span.start, span.end, 0);
+            return error.SyntaxNestingLimit;
+        }
+        try stack.append(self.allocator, bracket);
+    }
+
     fn collectSelectorSpan(self: *Parser) ParseError!Span {
         if (self.isAtEnd()) return error.SyntaxError;
         const start = self.current().span.start;
@@ -807,13 +822,13 @@ pub const Parser = struct {
             }
 
             if (tok.tag == .lparen) {
-                try stack.append(self.allocator, '(');
+                try self.pushSelectorBracket(&stack, '(');
                 last_significant_end = tok.span.end;
                 self.advance();
                 continue;
             }
             if (tok.tag == .lbracket) {
-                try stack.append(self.allocator, '[');
+                try self.pushSelectorBracket(&stack, '[');
                 last_significant_end = tok.span.end;
                 self.advance();
                 continue;
@@ -1003,8 +1018,8 @@ pub const Parser = struct {
         var last_significant_end: u32 = start;
         var last_significant_tag: ?Token.Tag = null;
 
-        var stack: [32]u8 = undefined;
-        var depth: usize = 0;
+        var stack: std.ArrayListUnmanaged(u8) = .empty;
+        defer stack.deinit(self.allocator);
         var interp_depth: u32 = 0;
 
         while (!self.isAtEnd()) {
@@ -1031,28 +1046,22 @@ pub const Parser = struct {
             }
 
             if (tok.tag == .lparen) {
-                if (depth < stack.len) {
-                    stack[depth] = '(';
-                    depth += 1;
-                }
+                try self.pushSelectorBracket(&stack, '(');
                 last_significant_end = tok.span.end;
                 last_significant_tag = tok.tag;
                 self.advance();
                 continue;
             }
             if (tok.tag == .lbracket) {
-                if (depth < stack.len) {
-                    stack[depth] = '[';
-                    depth += 1;
-                }
+                try self.pushSelectorBracket(&stack, '[');
                 last_significant_end = tok.span.end;
                 last_significant_tag = tok.tag;
                 self.advance();
                 continue;
             }
             if (tok.tag == .rparen) {
-                if (depth > 0 and stack[depth - 1] == '(') {
-                    depth -= 1;
+                if (stack.items.len > 0 and stack.items[stack.items.len - 1] == '(') {
+                    _ = stack.pop();
                     last_significant_end = tok.span.end;
                     last_significant_tag = tok.tag;
                     self.advance();
@@ -1061,8 +1070,8 @@ pub const Parser = struct {
                 return error.SyntaxError;
             }
             if (tok.tag == .rbracket) {
-                if (depth > 0 and stack[depth - 1] == '[') {
-                    depth -= 1;
+                if (stack.items.len > 0 and stack.items[stack.items.len - 1] == '[') {
+                    _ = stack.pop();
                     last_significant_end = tok.span.end;
                     last_significant_tag = tok.tag;
                     self.advance();
@@ -1070,7 +1079,7 @@ pub const Parser = struct {
                 }
                 return error.SyntaxError;
             }
-            if (depth > 0) {
+            if (stack.items.len > 0) {
                 last_significant_end = tok.span.end;
                 last_significant_tag = tok.tag;
                 self.advance();

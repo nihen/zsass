@@ -87,22 +87,69 @@ pub const FileAccess = struct {
         return self.mode != .unrestricted;
     }
 
-    /// True when `path` may be looked at, judged by its text alone.
-    pub fn allowsPath(self: *const FileAccess, path: []const u8) bool {
-        return switch (self.mode) {
-            .unrestricted => true,
-            .disabled => false,
-            .roots => blk: {
-                var buf: [std.fs.max_path_bytes]u8 = undefined;
-                var fba = std.heap.FixedBufferAllocator.init(&buf);
-                const abs = std.fs.path.resolve(fba.allocator(), &.{ self.cwd, path }) catch break :blk false;
-                break :blk insideAny(self.lexical_roots, abs) or insideAny(self.canonical_roots, abs);
-            },
-        };
+    pub const Placement = enum {
+        /// The path leads to an entry inside a root, or to nothing yet
+        /// whose parent is inside one.
+        inside,
+        /// The path, or a symbolic link on it, leads outside the roots.
+        outside,
+        /// Something inside a root on the way does not exist.
+        missing,
+    };
+
+    /// Where `path` leads. With roots, symbolic links on it are followed one
+    /// component at a time and only inside the roots: a link whose target
+    /// lies outside makes the answer `outside` without the target being
+    /// looked at, so the answer does not depend on what exists out there.
+    pub fn place(self: *const FileAccess, path: []const u8) Placement {
+        switch (self.mode) {
+            .unrestricted => return .inside,
+            .disabled => return .outside,
+            .roots => {},
+        }
+        var buf: [4 * std.fs.max_path_bytes]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&buf);
+        const a = fba.allocator();
+        var abs: []const u8 = std.fs.path.resolve(a, &.{ self.cwd, path }) catch return .outside;
+        var hops: usize = 0;
+        while (true) {
+            // Rewrite a path under a root as given to the same path under the
+            // root with its links resolved.
+            const root, const rest = self.splitAtRoot(abs) orelse return .outside;
+            var current: std.ArrayListUnmanaged(u8) = .empty;
+            current.appendSlice(a, root) catch return .outside;
+            var it = std.mem.tokenizeScalar(u8, rest, std.fs.path.sep);
+            const followed: ?[]const u8 = while (it.next()) |component| {
+                const base_len = current.items.len;
+                if (base_len == 0 or !std.fs.path.isSep(current.items[base_len - 1])) current.append(a, std.fs.path.sep) catch return .outside;
+                current.appendSlice(a, component) catch return .outside;
+                const st = std.Io.Dir.cwd().statFile(zsass_io.io, current.items, .{ .follow_symlinks = false }) catch return .missing;
+                if (st.kind != .sym_link) continue;
+                var target_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const n = std.Io.Dir.cwd().readLink(zsass_io.io, current.items, &target_buf) catch return .outside;
+                const target = target_buf[0..n];
+                const parent = current.items[0..base_len];
+                break std.fs.path.resolve(a, &.{ parent, target, it.rest() }) catch return .outside;
+            } else null;
+            const next = followed orelse return .inside;
+            hops += 1;
+            if (hops > 40) return .outside;
+            if (!insideAny(self.canonical_roots, next)) return .outside;
+            abs = next;
+        }
+    }
+
+    /// The canonical root `path` lies under and the rest of the path.
+    fn splitAtRoot(self: *const FileAccess, path: []const u8) ?struct { []const u8, []const u8 } {
+        for (self.canonical_roots, self.lexical_roots) |canonical, lexical| {
+            if (inside(canonical, path)) return .{ canonical, path[canonical.len..] };
+            if (inside(lexical, path)) return .{ canonical, path[lexical.len..] };
+        }
+        return null;
     }
 
     /// True when the file `path` names, symbolic links resolved, lies
-    /// inside a root. Only call this for a path `allowsPath` accepted.
+    /// inside a root. Only call this for a path `place` put inside.
     pub fn allowsFile(self: *const FileAccess, path: []const u8) bool {
         return switch (self.mode) {
             .unrestricted => true,
@@ -124,11 +171,17 @@ pub const Probe = struct {
     access: ?*const FileAccess = null,
     denied: bool = false,
 
+    /// True when the caller may look for `path` on disk.
     pub fn allows(self: *Probe, path: []const u8) bool {
         const access = self.access orelse return true;
-        if (access.allowsPath(path)) return true;
-        self.denied = true;
-        return false;
+        switch (access.place(path)) {
+            .inside => return true,
+            .missing => return false,
+            .outside => {
+                self.denied = true;
+                return false;
+            },
+        }
     }
 
     /// The final check on a file resolution chose.

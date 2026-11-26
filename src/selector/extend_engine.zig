@@ -50,6 +50,14 @@ const Allocator = std.mem.Allocator;
 pub const Error = Allocator.Error || resource_budget.LimitError;
 const Budget = resource_budget.ResourceBudget;
 
+/// Start counting candidates for one operation: the selectors one selector
+/// is extended into, or the extenders one `@extend` registers. The limit
+/// bounds an operation, so a long stylesheet that extends many selectors a
+/// little does not add up to it.
+fn beginOperation(budget: ?*Budget) void {
+    if (budget) |b| b.beginSelectorOperation();
+}
+
 /// Charge `n` selector candidates, made or about to be made. A selector
 /// counts as many candidates as it has compounds and combinators, since the
 /// memory it takes grows with its length.
@@ -289,6 +297,7 @@ pub fn trimUnion(allocator: Allocator, list: *SelectorList, details: *std.ArrayL
 /// extends with. Empty when there is none. The results belong to
 /// `allocator`.
 pub fn unifyComplexes(allocator: Allocator, budget: ?*Budget, first: *const ComplexSelector, second: *const ComplexSelector) Error![]ComplexSelector {
+    beginOperation(budget);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -395,6 +404,7 @@ pub const Engine = struct {
     }
 
     fn register(self: *Engine, source: Source) Error!void {
+        beginOperation(self.budget);
         const resolved = self.mode != .written;
         const by_function = self.mode == .function or self.mode == .replace;
         const a = self.arena.allocator();
@@ -600,6 +610,7 @@ pub const Engine = struct {
     /// The same, also telling of every resulting selector whether the rule
     /// was written with it and how specific its extenders are.
     pub fn extendSelectorDetailed(self: *Engine, out: Allocator, list: *const SelectorList, snapshot: u32, details: ?*std.ArrayList(Detail)) Error!SelectorList {
+        beginOperation(self.budget);
         var scratch = std.heap.ArenaAllocator.init(self.arena.child_allocator);
         defer scratch.deinit();
         const a = scratch.allocator();
@@ -1473,6 +1484,8 @@ fn markedAlso(a: Allocator, group: []const Link, other: []const Link) Error![]co
 /// by their combinators; the rest keep their own order, and the parents the
 /// two share are written once.
 fn weavePrefixes(a: Allocator, budget: ?*Budget, first: []const Piece, second: []const Piece) Error![]const []const Piece {
+    // Recursion through commonGroup and unifyGroups.
+    try stack_guard.check();
     const one = try parseParents(a, first) orelse return &.{};
     const two = try parseParents(a, second) orelse return &.{};
     if (one.leading.len != 0 and two.leading.len != 0 and !std.mem.eql(Combinator, one.leading, two.leading)) return &.{};

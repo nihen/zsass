@@ -267,12 +267,15 @@ process:
 | `max_memory_bytes` (held at once through the given allocator) | 2 GiB | `error.MemoryLimit` | `ZSASS_LIMIT_MEMORY_BYTES` |
 
 One budget covers the whole compilation: every module it loads and every
-`meta.load-css()` counts against it. Each `compileFiles` entry gets its own;
-the caches its entries share do not count toward `max_memory_bytes`.
+`meta.load-css()` counts against it. Each `compileFiles` entry gets its own,
+and the caches its entries share have one more `max_memory_bytes` of their
+own.
 Syntax depth counts blocks, parentheses, brackets, interpolation, unary
-operators, and each operator of a chain such as `a + b + c`. A selector
-counts toward `max_selector_candidates` once per compound and combinator,
-because the memory it takes grows with its length. The defaults leave wide
+operators, each operator of a chain such as `a + b + c`, and the brackets of
+a selector. `max_selector_candidates` bounds the selectors made while one
+selector is extended (or one `@extend` is registered); a selector counts once
+per compound and combinator, because the memory it takes grows with its
+length. The defaults leave wide
 room over the sass-spec suite and a corpus of real-world projects; raise a
 limit when a trusted stylesheet needs more, or use `CompileLimits.unlimited()`.
 `isLimitError(err)` tells these errors apart from Sass errors, and the final
@@ -283,8 +286,9 @@ to `stack_bytes` below the call; give the thread at least twice that, or
 lower `stack_bytes` and `max_syntax_depth` together on a small stack.
 
 The limits count work, not time. For a wall-clock timeout, pass
-`cancellation_check`; it is called about every thousand VM instructions,
-and returning `true` stops the compilation with `error.CompilationCancelled`:
+`cancellation_check`; it is called about every thousand VM instructions and
+between the phases of the compilation, and returning `true` stops it with
+`error.CompilationCancelled`:
 
 ```zig
 const Deadline = struct {

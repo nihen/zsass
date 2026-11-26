@@ -485,3 +485,111 @@ test "batch: each entry has its own budget" {
     const tight = try api.compileFiles(a, &paths, .{ .quiet = true, .jobs = 1, .limits = .{ .max_vm_steps = 1_000 } });
     for (tight) |r| try std.testing.expectEqual(@as(?anyerror, error.ExecutionLimit), r.err);
 }
+
+// ---------------------------------------------------------------------
+// Review follow-ups
+// ---------------------------------------------------------------------
+
+test "limits: the selector budget bounds one selector, not the stylesheet" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var src: std.ArrayList(u8) = .empty;
+    for (0..3000) |i| try src.print(a, ".a-{d} .b {{ x: y; }}\n", .{i});
+    try src.appendSlice(a, ".c { @extend .b; }\n");
+    const opts = withLimits(.{ .max_selector_candidates = 2_000 });
+    const css = try compile(a, src.items, "", &.{}, opts);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".a-2999 .b, .a-2999 .c") != null);
+    const calls = "@use \"sass:selector\"; @for $i from 1 through 2000 { .x-#{$i} { y: selector.extend(\".a-#{$i} .b\", \".b\", \".c\"); } }";
+    _ = try compile(a, calls, "", &.{}, opts);
+}
+
+test "limits: a deeply nested selector stops before it is parsed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const deep = try repeat(a, &.{ "a", ":is(", "b", ")", "{x:y}" }, &.{ 1, 20000, 1, 20000, 1 });
+    try std.testing.expectError(error.SyntaxNestingLimit, compile(a, deep, "", &.{}, quiet));
+    const indented = try repeat(a, &.{ "a", ":is(", "b", ")", "\n  x: y\n" }, &.{ 1, 20000, 1, 20000, 1 });
+    try std.testing.expectError(error.SyntaxNestingLimit, compile(a, indented, "input.sass", &.{}, quiet));
+    const runtime = try repeat(a, &.{ "@use \"sass:selector\"; a { x: selector.parse(\"", ":is(", "b", ")", "\"); }" }, &.{ 1, 600, 1, 600, 1 });
+    try std.testing.expectError(error.NestingLimit, compile(a, runtime, "", &.{}, quiet));
+}
+
+test "limits: lifting the limits still keeps the parser on the stack" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectError(error.NestingLimit, compile(a, try nestedParens(a, 64000), "", &.{}, withLimits(api.CompileLimits.unlimited())));
+}
+
+test "limits: deferred CSS of meta.load and load-css wrappers count as nodes" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeFile(tmp.dir, "_big.scss", "@for $i from 1 through 100000 { .r#{$i} { x: y; } }");
+    try writeFile(tmp.dir, "_comments.scss", "/**/@foo; /**/@bar;");
+    const root = try tmpPath(a, &tmp);
+    const entry = try std.fs.path.join(a, &.{ root, "entry.scss" });
+    const opts = withLimits(.{ .max_ir_nodes = 10_000 });
+    try std.testing.expectError(error.IrNodeLimit, compile(a, "@use \"sass:meta\"; $m: meta.load(\"big\");", entry, &.{}, opts));
+    const wrap = "@use \"sass:meta\"; a { @include meta.load-css(\"comments\"); }";
+    const css = try compile(a, wrap, entry, &.{}, quiet);
+    try std.testing.expect(std.mem.indexOf(u8, css, "@foo") != null);
+    try std.testing.expectError(error.IrNodeLimit, compile(a, wrap, entry, &.{}, withLimits(.{ .max_ir_nodes = 6 })));
+}
+
+test "limits: a batch entry counts what its arena keeps and the shared caches" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeFile(tmp.dir, "grow.scss", "$s: a; @for $i from 1 through 40 { $s: $s + $s; } a { x: str-length($s); }");
+    var big: std.ArrayList(u8) = .empty;
+    for (0..60000) |i| try big.print(a, "$v{d}: {d};\n", .{ i, i });
+    try writeFile(tmp.dir, "_big.scss", big.items);
+    try writeFile(tmp.dir, "uses.scss", "@use \"big\"; a { x: big.$v1; }");
+    const root = try tmpPath(a, &tmp);
+    const paths = [_][]const u8{
+        try std.fs.path.join(a, &.{ root, "grow.scss" }),
+        try std.fs.path.join(a, &.{ root, "uses.scss" }),
+    };
+    const results = try api.compileFiles(a, &paths, .{ .quiet = true, .jobs = 1, .limits = .{ .max_memory_bytes = 1024 * 1024 } });
+    for (results) |r| try std.testing.expectEqual(@as(?anyerror, error.MemoryLimit), r.err);
+}
+
+test "file policy: a failure to set it up reports the memory limit" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try PolicyFixture.init(a);
+    defer f.deinit();
+    var opts = f.opts();
+    opts.limits.max_memory_bytes = 1;
+    try std.testing.expectError(error.MemoryLimit, compile(a, "a { b: c; }", f.entry, &.{}, opts));
+}
+
+test "file policy: a link out of a root tells nothing about its target" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try PolicyFixture.init(a);
+    defer f.deinit();
+    try f.tmp.dir.symLink(zsass_io.io, "../outside", "allowed/linkdir", .{});
+    try f.tmp.dir.symLink(zsass_io.io, "../outside/_nothing.scss", "allowed/_dangling.scss", .{});
+    const opts = f.opts();
+    try std.testing.expectError(error.FileImportDenied, compile(a, "@use \"linkdir/secret\";", f.entry, &.{}, opts));
+    try std.testing.expectError(error.FileImportDenied, compile(a, "@use \"linkdir/nothing\";", f.entry, &.{}, opts));
+    try std.testing.expectError(error.FileImportDenied, compile(a, "@use \"dangling\";", f.entry, &.{}, opts));
+    // A link that stays inside the root is followed.
+    try f.tmp.dir.symLink(zsass_io.io, "dir", "allowed/alias", .{});
+    const css = try compile(a, "@use \"alias\";", f.entry, &.{}, opts);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".index") != null);
+}

@@ -1,5 +1,6 @@
 const std = @import("std");
 const stack_guard = @import("../runtime/stack_guard.zig");
+const resource_budget = @import("../runtime/resource_budget.zig");
 const css_utils = @import("../runtime/css_utils.zig");
 
 // ============================================================================
@@ -286,6 +287,35 @@ pub const ResolveParentError = std.mem.Allocator.Error || error{
     InvalidParentSelector,
 };
 
+/// The deepest nesting of parentheses in `text`, outside quoted strings.
+fn parenNesting(text: []const u8) usize {
+    var depth: usize = 0;
+    var deepest: usize = 0;
+    var quote: u8 = 0;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (c == '\\') {
+            i += 1;
+            continue;
+        }
+        if (quote != 0) {
+            if (c == quote) quote = 0;
+            continue;
+        }
+        switch (c) {
+            '"', '\'' => quote = c,
+            '(' => {
+                depth += 1;
+                deepest = @max(deepest, depth);
+            },
+            ')' => depth -|= 1,
+            else => {},
+        }
+    }
+    return deepest;
+}
+
 inline fn dupeForParse(allocator: std.mem.Allocator, value: []const u8) ParseError![]const u8 {
     return allocator.dupe(u8, value) catch return ParseError.OutOfMemory;
 }
@@ -299,9 +329,20 @@ inline fn allocSelectorListForParse(allocator: std.mem.Allocator, value: Selecto
 /// Parse a selector-list source string into a `SelectorList` AST.
 /// Rejects syntactically invalid selectors with `ParseError.InvalidSelector`.
 /// Returned value is owned by the caller; free via `SelectorList.deinit`.
+/// Pseudo-class arguments nest deeper than this are refused before parsing:
+/// each level re-scans the text inside it, so the cost grows with the square
+/// of the depth.
+const max_selector_nesting = resource_budget.default_max_syntax_depth;
+
+/// `parse` calls in progress on this thread; the outermost checks the depth.
+threadlocal var parse_depth: u32 = 0;
+
 pub fn parse(allocator: std.mem.Allocator, input: []const u8) ParseError!SelectorList {
     // Recursion through selector pseudo-class arguments.
     try stack_guard.check();
+    if (parse_depth == 0 and parenNesting(input) > max_selector_nesting) return stack_guard.refuse();
+    parse_depth += 1;
+    defer parse_depth -= 1;
     var list = SelectorList.init(allocator);
     errdefer list.deinit();
 

@@ -288,6 +288,7 @@ fn runModuleDeferringCss(self: anytype, module_id: u32) !void {
         const saved_state = self.saveState();
         defer self.restoreState(&saved_state);
         var scratch = rule_ir_mod.RuleIR.init();
+        scratch.budget = self.rule_ir.budget;
         defer scratch.deinit(self.allocator);
         scratch.module_visibility_matrix = self.rule_ir.module_visibility_matrix;
         scratch.module_visibility_n = self.rule_ir.module_visibility_n;

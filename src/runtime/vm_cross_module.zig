@@ -557,6 +557,8 @@ fn wrapRuleIrTopLevelAmpRulesWithParent(self: anytype, start_idx: usize, parent_
         i = end_idx;
     }
 
+    // Each range gains a rule around it.
+    if (self.rule_ir.budget) |b| try b.chargeIrNodes(2 * ranges.items.len);
     var ri = ranges.items.len;
     while (ri > 0) {
         ri -= 1;
@@ -687,6 +689,8 @@ fn prefixRuleIrRangeTopLevelRules(self: anytype, start_idx: usize, parent_select
         }
     }
     if (wrapped_comments == 0) return;
+    // At most one rule opened and closed per comment.
+    if (self.rule_ir.budget) |b| try b.chargeIrNodes(2 * wrapped_comments);
 
     // Rebuild the tail of both node buffers in one pass; inserting two nodes
     // per comment in place would move the rest of the buffer every time.

@@ -28,8 +28,9 @@ pub const CompileLimits = struct {
     max_syntax_depth: u32 = default_max_syntax_depth,
     /// VM instructions executed by the whole compilation.
     max_vm_steps: u64 = default_max_vm_steps,
-    /// Selectors produced while extending, intermediates included, each
-    /// counted by its number of compounds and combinators.
+    /// Selectors produced while extending one selector (or registering one
+    /// `@extend`), intermediates included, each counted by its number of
+    /// compounds and combinators.
     max_selector_candidates: usize = default_max_selector_candidates,
     /// Rule, declaration, and other output nodes the VM emits.
     max_ir_nodes: usize = default_max_ir_nodes,
@@ -239,6 +240,11 @@ pub const ResourceBudget = struct {
         return self.vm_steps - self.vm_fuel;
     }
 
+    /// Start a new selector operation; the selector limit bounds each one.
+    pub fn beginSelectorOperation(self: *ResourceBudget) void {
+        self.selector_candidates = 0;
+    }
+
     pub fn chargeSelectorCandidates(self: *ResourceBudget, n: usize) LimitError!void {
         try self.ensureSelectorCandidates(n);
         self.selector_candidates += n;
@@ -271,9 +277,21 @@ pub const LimitedAllocator = struct {
     child: std.mem.Allocator,
     used: usize = 0,
     peak: usize = 0,
+    /// Count what is freed or shrunk as still held. Use it when `child` is an
+    /// arena, which keeps freed memory until it is reset.
+    monotonic: bool = false,
 
     pub fn init(budget: *ResourceBudget, child: std.mem.Allocator) LimitedAllocator {
         return .{ .budget = budget, .child = child };
+    }
+
+    /// For a `child` that does not give freed memory back, such as an arena.
+    pub fn initOverArena(budget: *ResourceBudget, child: std.mem.Allocator) LimitedAllocator {
+        return .{ .budget = budget, .child = child, .monotonic = true };
+    }
+
+    fn release(self: *LimitedAllocator, n: usize) void {
+        if (!self.monotonic) self.used -|= n;
     }
 
     pub fn allocator(self: *LimitedAllocator) std.mem.Allocator {
@@ -311,7 +329,7 @@ pub const LimitedAllocator = struct {
             if (new_len > memory.len) self.used -= new_len - memory.len;
             return false;
         }
-        if (new_len < memory.len) self.used -= memory.len - new_len;
+        if (new_len < memory.len) self.release(memory.len - new_len);
         return true;
     }
 
@@ -322,13 +340,94 @@ pub const LimitedAllocator = struct {
             if (new_len > memory.len) self.used -= new_len - memory.len;
             return null;
         };
-        if (new_len < memory.len) self.used -= memory.len - new_len;
+        if (new_len < memory.len) self.release(memory.len - new_len);
         return ptr;
     }
 
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
         const self: *LimitedAllocator = @ptrCast(@alignCast(ctx));
-        self.used -|= memory.len;
+        self.release(memory.len);
+        self.child.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+/// Thread-safe allocator for state that several compilations share, such as
+/// the caches of `compileFiles`. It refuses an allocation that would take
+/// what it holds past `limit` and remembers that it did.
+pub const SharedLimitedAllocator = struct {
+    child: std.mem.Allocator,
+    limit: usize,
+    used: std.atomic.Value(usize) = .init(0),
+    exceeded: std.atomic.Value(bool) = .init(false),
+
+    pub fn init(child: std.mem.Allocator, limit: usize) SharedLimitedAllocator {
+        return .{ .child = child, .limit = limit };
+    }
+
+    pub fn allocator(self: *SharedLimitedAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    /// The error to report for `err`: `error.MemoryLimit` when the shared
+    /// state ran out of its allowance.
+    pub fn mapError(self: *const SharedLimitedAllocator, err: anyerror) anyerror {
+        if (err == error.OutOfMemory and self.exceeded.load(.acquire)) return error.MemoryLimit;
+        return err;
+    }
+
+    fn reserve(self: *SharedLimitedAllocator, n: usize) bool {
+        var cur = self.used.load(.monotonic);
+        while (true) {
+            const total = std.math.add(usize, cur, n) catch {
+                self.exceeded.store(true, .release);
+                return false;
+            };
+            if (total > self.limit) {
+                self.exceeded.store(true, .release);
+                return false;
+            }
+            cur = self.used.cmpxchgWeak(cur, total, .monotonic, .monotonic) orelse return true;
+        }
+    }
+
+    fn release(self: *SharedLimitedAllocator, n: usize) void {
+        _ = self.used.fetchSub(n, .monotonic);
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *SharedLimitedAllocator = @ptrCast(@alignCast(ctx));
+        if (!self.reserve(len)) return null;
+        return self.child.rawAlloc(len, alignment, ret_addr) orelse {
+            self.release(len);
+            return null;
+        };
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *SharedLimitedAllocator = @ptrCast(@alignCast(ctx));
+        if (new_len > memory.len and !self.reserve(new_len - memory.len)) return false;
+        if (!self.child.rawResize(memory, alignment, new_len, ret_addr)) {
+            if (new_len > memory.len) self.release(new_len - memory.len);
+            return false;
+        }
+        if (new_len < memory.len) self.release(memory.len - new_len);
+        return true;
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *SharedLimitedAllocator = @ptrCast(@alignCast(ctx));
+        if (new_len > memory.len and !self.reserve(new_len - memory.len)) return null;
+        const ptr = self.child.rawRemap(memory, alignment, new_len, ret_addr) orelse {
+            if (new_len > memory.len) self.release(new_len - memory.len);
+            return null;
+        };
+        if (new_len < memory.len) self.release(memory.len - new_len);
+        return ptr;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *SharedLimitedAllocator = @ptrCast(@alignCast(ctx));
+        self.release(memory.len);
         self.child.rawFree(memory, alignment, ret_addr);
     }
 };
@@ -480,4 +579,26 @@ test "limited allocator refuses what would exceed the limit" {
     a.free(again);
     try std.testing.expectEqual(@as(usize, 0), la.used);
     try std.testing.expectEqual(error.MemoryLimit, b.mapError(error.OutOfMemory));
+}
+
+test "limited allocator over an arena keeps counting what the arena keeps" {
+    var b = ResourceBudget.init(.{ .max_memory_bytes = 1024 }, null, null);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var la = LimitedAllocator.initOverArena(&b, arena.allocator());
+    const a = la.allocator();
+    const first = try a.alloc(u8, 600);
+    a.free(first);
+    try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 600));
+    try std.testing.expectEqual(@as(?LimitError, error.MemoryLimit), b.exceeded);
+}
+
+test "shared limited allocator refuses past its limit" {
+    var sla = SharedLimitedAllocator.init(std.testing.allocator, 1024);
+    const a = sla.allocator();
+    const first = try a.alloc(u8, 1000);
+    try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 100));
+    try std.testing.expectEqual(error.MemoryLimit, sla.mapError(error.OutOfMemory));
+    a.free(first);
+    try std.testing.expectEqual(@as(usize, 0), sla.used.load(.monotonic));
 }

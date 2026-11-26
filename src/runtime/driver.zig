@@ -2524,10 +2524,20 @@ fn runEnd2EndWithPool(
     var budget = resource_budget.ResourceBudget.init(opts.limits, null, null);
     const guard = stack_guard.begin(opts.limits.stack_bytes);
     defer guard.end();
-    var limited_alloc = resource_budget.LimitedAllocator.init(&budget, allocator);
+    // A batch worker passes an arena, which keeps what is freed.
+    var limited_alloc = if (shared_pool != null)
+        resource_budget.LimitedAllocator.initOverArena(&budget, allocator)
+    else
+        resource_budget.LimitedAllocator.init(&budget, allocator);
     runEnd2EndWithBudget(limited_alloc.allocator(), input_path, output_path, opts, shared_pool, source_cache, ast_cache, phase_aggregator, persistent_state, cross_entry_states, &budget) catch |err| {
         return budget.mapError(stack_guard.mapError(err));
     };
+    if (stack_guard.tripped()) return error.NestingLimit;
+    if (budget.exceeded) |e| return e;
+}
+
+/// A limit that an inner layer recovered from still fails the entry.
+fn failOnRecoveredLimit(budget: *const resource_budget.ResourceBudget) !void {
     if (stack_guard.tripped()) return error.NestingLimit;
     if (budget.exceeded) |e| return e;
 }
@@ -2763,6 +2773,8 @@ fn runEnd2EndWithBudget(
     vm_mod.VM.runTop(&vm) catch |vm_err| {
         // Report the limit an allocation failure came from.
         const err = budget.mapError(vm_err);
+        // The compile's allocator may be what ran out; the report must not be.
+        const diag_alloc = std.heap.c_allocator;
         if (error_format.verboseErrorsEnabled()) {
             cliErrPrint("zsass: VM error: {}\n", .{err});
         }
@@ -2773,16 +2785,16 @@ fn runEnd2EndWithBudget(
         const ctx = error_format.error_state.last_error_ctx;
         const root_idx: u32 = program_ptr.root_index;
         const file_id_is_entry = (ctx.file_id == root_idx);
-        const frame_info = resolveFrameInfoEx(allocator, program_ptr, ctx, source, module_path, file_id_is_entry);
-        defer if (frame_info.source_owned) |s| allocator.free(s);
+        const frame_info = resolveFrameInfoEx(diag_alloc, program_ptr, ctx, source, module_path, file_id_is_entry);
+        defer if (frame_info.source_owned) |s| diag_alloc.free(s);
 
         // CLI-FIX-E Step 2c+ Phase 3: VM error in imported module is 2-step trace
         // Rendered with (`{imported} l:c {fn-name}()\n {entry} l:c root stylesheet`).
         // Take exact callsite span of entry in outermostCallerInfo() of VM and innerMostChunkName()
         // Reflect the function/mixin name in the inner frame label.
         if (frame_info.has_frame and !file_id_is_entry) {
-            buildVmErrorSnapshotV3(&vm, program_ptr, allocator, frame_info.source.?, frame_info.path, ctx.span_start, ctx.span_end, source, module_path);
-            error_format.writeStackTrace(allocator) catch {
+            buildVmErrorSnapshotV3(&vm, program_ptr, diag_alloc, frame_info.source.?, frame_info.path, ctx.span_start, ctx.span_end, source, module_path);
+            error_format.writeStackTrace(diag_alloc) catch {
                 error_format.writeSourceFrame(frame_info.source.?, frame_info.line_starts.?, ctx.span_start, ctx.span_end, frame_info.path);
             };
         } else if (frame_info.has_frame) {
@@ -2792,7 +2804,7 @@ fn runEnd2EndWithBudget(
         }
         // CLI-FIX-E Step 3 (C-6): Write error CSS template to out.css in file output mode.
         writeErrorCssIfNeeded(
-            allocator,
+            diag_alloc,
             output_path,
             err,
             frame_info.path,
@@ -2806,6 +2818,7 @@ fn runEnd2EndWithBudget(
         return err;
     };
     perf.timeEnd(.phase_execute_ns, perf_exec_start);
+    try failOnRecoveredLimit(budget);
     if (opts.phase_timer) phase_timer.record(.execute, exec_start);
 
     if (opts.opcode_histogram) {
@@ -2975,6 +2988,9 @@ fn runEnd2EndWithBudget(
             };
             if (tw.bytes_written == 0 and !output_to_stdout) try tw.writeAll("\n");
         }
+        // Writing can trip a limit that a fallback hid; then the file is not
+        // replaced and nothing is cached.
+        try failOnRecoveredLimit(budget);
         try tw.flush();
         if (atomic_writer) |*a| try a.replace(zsass_io_mod.io);
     }
@@ -3000,6 +3016,7 @@ fn runEnd2EndWithBudget(
         }
     }
 
+    try failOnRecoveredLimit(budget);
     try storeCssCache(allocator, input_path, output_path, opts, program_ptr);
 }
 

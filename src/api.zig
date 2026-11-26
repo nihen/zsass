@@ -249,7 +249,8 @@ pub fn compileSourceToCss(
     var limited_alloc = resource_budget.LimitedAllocator.init(&budget, alloc);
     var arena = std.heap.ArenaAllocator.init(limited_alloc.allocator());
     defer arena.deinit();
-    var file_access = file_access_mod.FileAccess.init(arena.allocator(), opts.file_import_policy) catch |err| {
+    var file_access = file_access_mod.FileAccess.init(arena.allocator(), opts.file_import_policy) catch |caught| {
+        const err = budget.mapError(caught);
         reportFinalErrorDiagnostic(err, file_path, opts);
         return err;
     };
@@ -281,6 +282,7 @@ fn compileSourceToCssInArena(
     const prev_diag = pushDiagnosticSink(opts);
     defer restoreDiagnosticSink(prev_diag);
     var r = try compiler_mod.parseResolveCompileWithPathAndBudget(alloc, source, file_path, load_paths, budget);
+    try budget.checkCancelled();
     defer r.pool.deinit(alloc);
     defer r.color_pool.deinit(alloc);
     defer r.resolved.deinit();
@@ -310,6 +312,7 @@ fn compileSourceToCssInArena(
 
     var aw = std.Io.Writer.Allocating.init(alloc);
     defer aw.deinit();
+    try budget.checkCancelled();
     var limit_buf: [4096]u8 = undefined;
     var limited = resource_budget.LimitedWriter.init(budget, &aw.writer, limit_buf[0..]);
     try rule_ir.writeToWithSourceMap(&limited.interface, &r.pool, null, source_locations, opts.output_style, .{});
@@ -336,7 +339,8 @@ pub fn compileSourceToCssWithSourceMap(
     var limited_alloc = resource_budget.LimitedAllocator.init(&budget, alloc);
     var arena = std.heap.ArenaAllocator.init(limited_alloc.allocator());
     defer arena.deinit();
-    var file_access = file_access_mod.FileAccess.init(arena.allocator(), opts.file_import_policy) catch |err| {
+    var file_access = file_access_mod.FileAccess.init(arena.allocator(), opts.file_import_policy) catch |caught| {
+        const err = budget.mapError(caught);
         reportFinalErrorDiagnostic(err, file_path, opts);
         return err;
     };
@@ -373,6 +377,7 @@ fn compileSourceToCssWithSourceMapInArena(
     const prev_diag = pushDiagnosticSink(opts);
     defer restoreDiagnosticSink(prev_diag);
     var r = try compiler_mod.parseResolveCompileWithPathAndBudget(alloc, source, file_path, load_paths, budget);
+    try budget.checkCancelled();
     defer r.pool.deinit(alloc);
     defer r.color_pool.deinit(alloc);
     defer r.resolved.deinit();
@@ -412,6 +417,7 @@ fn compileSourceToCssWithSourceMapInArena(
 
     var aw = std.Io.Writer.Allocating.init(alloc);
     defer aw.deinit();
+    try budget.checkCancelled();
     var limit_buf: [4096]u8 = undefined;
     var limited = resource_budget.LimitedWriter.init(budget, &aw.writer, limit_buf[0..]);
     try rule_ir.writeToWithSourceMap(&limited.interface, &r.pool, &sm, source_locations, opts.output_style, .{
