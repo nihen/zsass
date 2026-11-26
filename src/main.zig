@@ -34,4 +34,5 @@ test {
     _ = @import("runtime/stack_guard.zig");
     _ = @import("resolve/file_access.zig");
     _ = @import("api_limits_test.zig");
+    _ = @import("runtime/float_int.zig");
 }

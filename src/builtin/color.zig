@@ -1,5 +1,6 @@
 //! sass:color builtins.
 const std = @import("std");
+const float_int = @import("../runtime/float_int.zig");
 const stack_guard = @import("../runtime/stack_guard.zig");
 const calculation = @import("../color/calculation.zig");
 const color_mod = @import("../color/color.zig");
@@ -2990,19 +2991,21 @@ fn appendFixedFloat(
         return;
     }
 
-    if (@abs(value - @round(value)) <= 5e-10 and @abs(value) >= 1e4) {
-        var tmp_int: [512]u8 = undefined;
+    if (@abs(value - @round(value)) <= 5e-10 and @abs(value) >= 1e4 and @abs(@round(value)) < 0x1p127) {
+        var tmp_int: [64]u8 = undefined;
         const rounded: i128 = @intFromFloat(@round(value));
-        const formatted = std.fmt.bufPrint(&tmp_int, "{}", .{rounded}) catch |err| {
-            std.debug.panic("appendFixedFloat integer formatting failed: {s}", .{@errorName(err)});
-        };
+        const formatted = std.fmt.bufPrint(&tmp_int, "{}", .{rounded}) catch unreachable;
         try out.appendSlice(allocator, formatted);
         return;
     }
 
+    // Large values print hundreds of digits; they go to the heap.
     var formatted_buf: [128]u8 = undefined;
-    const formatted = std.fmt.bufPrint(&formatted_buf, "{d:.10}", .{value}) catch |err| {
-        std.debug.panic("appendFixedFloat decimal formatting failed: {s}", .{@errorName(err)});
+    var heap_formatted: ?[]u8 = null;
+    defer if (heap_formatted) |h| allocator.free(h);
+    const formatted = std.fmt.bufPrint(&formatted_buf, "{d:.10}", .{value}) catch blk: {
+        heap_formatted = try std.fmt.allocPrint(allocator, "{d:.10}", .{value});
+        break :blk heap_formatted.?;
     };
     if (std.mem.findScalar(u8, formatted, '.')) |dot_idx| {
         var end = formatted.len;

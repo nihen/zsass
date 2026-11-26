@@ -8,6 +8,7 @@
 //! - `-0` is normalized to `0`
 
 const std = @import("std");
+const float_int = @import("float_int.zig");
 const color_mod = @import("../color/color.zig");
 const perf = @import("perf.zig");
 
@@ -90,12 +91,8 @@ pub fn formatNumberCore(alloc: std.mem.Allocator, v: f64) std.mem.Allocator.Erro
     if (try formatNormalizedLargeInteger(alloc, v)) |normalized| return normalized;
 
     const t = @trunc(v);
-    if (v == t and @abs(v) < 1e20 and v >= -9223372036854775808.0 and v <= 9223372036854775807.0) {
-        var int_buf: [32]u8 = undefined;
-        const int_text = std.fmt.bufPrint(&int_buf, "{d}", .{@as(i64, @intFromFloat(t))}) catch {
-            return try alloc.print("{d}", .{@as(i64, @intFromFloat(t))});
-        };
-        return try alloc.dupe(u8, int_text);
+    if (v == t and @abs(v) < 1e20) {
+        if (float_int.toI64(t)) |int_value| return try alloc.print("{d}", .{int_value});
     }
 
     var fixed_buf: [128]u8 = undefined;

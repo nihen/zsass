@@ -1,6 +1,7 @@
 //!Stage 1a bytecode VM -- while+switch dispatch, Rule IR append.
 
 const std = @import("std");
+const float_int = @import("float_int.zig");
 const stack_guard = @import("stack_guard.zig");
 const resource_budget = @import("resource_budget.zig");
 const builtin = @import("builtin");
@@ -2709,13 +2710,10 @@ pub const VM = struct {
         }
 
         const idx_trunc = @trunc(idx_f);
-        const max_idx_f: f64 = @floatFromInt(std.math.maxInt(usize));
-        if (idx_trunc > max_idx_f) {
+        const idx: usize = std.math.cast(usize, float_int.toI64(idx_trunc) orelse -1) orelse {
             try self.push(Value.nil_v);
             return;
-        }
-
-        const idx: usize = @intFromFloat(idx_trunc);
+        };
         if (listv.kind() != .list) {
             if (idx == 0) {
                 try self.push(listv);

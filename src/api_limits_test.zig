@@ -693,3 +693,28 @@ test "limits: the compressed writer frees its buffer when output stops" {
     const css = compile(std.testing.allocator, "@for $i from 1 through 1000 { .a#{$i} { x: y; } }", "", &.{}, .{ .quiet = true, .output_style = .compressed, .limits = .{ .max_output_bytes = 1 } });
     try std.testing.expectError(error.OutputSizeLimit, css);
 }
+
+test "numbers: integers past the 64-bit range are refused, not converted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const refused = [_][]const u8{
+        "a { x: nth(1 2 3, 1e300); }",
+        "@use \"sass:list\"; a { x: list.nth(1 2 3, 18446744073709551616); }",
+        "@use \"sass:list\"; a { x: list.set-nth(1 2 3, -1e300, 4); }",
+        "@use \"sass:math\"; a { x: math.random(18446744073709551616); }",
+        "@use \"sass:string\"; a { x: string.insert(\"abc\", \"x\", 1e300); }",
+    };
+    for (refused) |src| {
+        if (compile(a, src, "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    }
+    // The official CLI reads 2^63 as the largest 64-bit integer.
+    try std.testing.expectEqualStrings(
+        "a {\n  x: 9223372036854775807;\n  y: -9223372036854775808;\n}\n",
+        try compile(a, "a { x: 9223372036854775808; y: -9223372036854775809; }", "", &.{}, quiet),
+    );
+    try std.testing.expectEqualStrings(
+        "a {\n  a: \"bc\";\n  b: \"abc\";\n  c: \"abcx\";\n  d: \"\";\n}\n",
+        try compile(a, "@use \"sass:string\"; a { a: string.slice(\"abc\", 2, 9223372036854775807); b: string.slice(\"abc\", -9223372036854775808); c: string.insert(\"abc\", \"x\", 9223372036854775808); d: string.slice(\"abc\", 9223372036854775808); }", "", &.{}, quiet),
+    );
+}

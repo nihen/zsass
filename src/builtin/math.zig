@@ -1,5 +1,6 @@
 //! sass:math builtins.
 const std = @import("std");
+const float_int = @import("../runtime/float_int.zig");
 const stack_guard = @import("../runtime/stack_guard.zig");
 const shared = @import("shared.zig");
 const deprecation_mod = @import("../runtime/deprecation.zig");
@@ -2395,10 +2396,7 @@ pub fn math_random(ctx: *BuiltinContext, args: []const Value, arg_names: []const
         if (@abs(raw - rounded) > 1e-10) return error.BuiltinType;
         if (rounded <= 0) return error.BuiltinType;
 
-        const max_u64_f: f64 = @floatFromInt(std.math.maxInt(u64));
-        if (rounded > max_u64_f) return error.BuiltinType;
-
-        const limit: u64 = @intFromFloat(rounded);
+        const limit: u64 = @intCast(float_int.toI64(rounded) orelse return error.BuiltinType);
         if (limit == 1) return Value.numberUnitless(1);
 
         const rand = randomNext(ctx.random_state);

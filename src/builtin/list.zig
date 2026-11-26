@@ -1,5 +1,6 @@
 //! sass:list builtins.
 const std = @import("std");
+const float_int = @import("../runtime/float_int.zig");
 const shared = @import("shared.zig");
 const intern_pool_mod = @import("../runtime/intern_pool.zig");
 const error_format = @import("../runtime/error_format.zig");
@@ -102,8 +103,7 @@ fn listItemTruthy(value: Value) bool {
 fn parseListIndexArg(ctx: *BuiltinContext, param_name: []const u8, value: Value) BuiltinError!i64 {
     if (value.kind() != .number) return reportArgumentTypeMismatch(ctx, param_name, value, "number");
     const raw = value.asF64(ctx.number_pool);
-    if (!std.math.isFinite(raw)) return error.BuiltinType;
-    return @intFromFloat(@trunc(raw));
+    return float_int.toI64(@trunc(raw)) orelse error.BuiltinType;
 }
 
 fn reportInvalidListIndex(param_name: []const u8, index: i64, list_len: usize) BuiltinError {
