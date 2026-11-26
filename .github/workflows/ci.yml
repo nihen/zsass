@@ -48,6 +48,7 @@ jobs:
         with:
           # sass-spec submodule is only needed by the spec test step.
           submodules: ${{ matrix.run_spec && 'recursive' || '' }}
+          persist-credentials: false
 
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29  # v2
         with:
@@ -86,6 +87,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
 
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
@@ -104,6 +107,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
 
       - name: Run PSScriptAnalyzer on installer scripts
         shell: pwsh
@@ -133,6 +138,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
 
       - name: Compare target lists
         # Target triple lists in scripts/build-release.sh and

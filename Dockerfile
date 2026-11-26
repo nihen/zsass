@@ -32,8 +32,13 @@ RUN set -eux; \
     chmod 0755 /out/zsass
 
 FROM debian:${DEBIAN_VERSION}
+RUN groupadd --system --gid 10001 zsass \
+    && useradd --system --uid 10001 --gid zsass --home-dir /work --no-create-home --shell /usr/sbin/nologin zsass \
+    && mkdir -p /work \
+    && chown zsass:zsass /work
 COPY LICENSE /usr/share/licenses/zsass/LICENSE
 COPY --from=fetch /out/zsass /usr/local/bin/zsass
 WORKDIR /work
+USER zsass:zsass
 ENTRYPOINT ["zsass"]
 CMD ["--help"]
