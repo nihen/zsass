@@ -1,4 +1,6 @@
 const std = @import("std");
+const stack_guard = @import("../runtime/stack_guard.zig");
+const resource_budget = @import("../runtime/resource_budget.zig");
 const perf = @import("../runtime/perf.zig");
 const syntax_override_mod = @import("../runtime/syntax_override.zig");
 const builtin_mod = @import("../builtin/mod.zig");
@@ -4099,6 +4101,7 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
 }
 
 fn resolveExpr(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ResolveError!ExprIndex {
+    try stack_guard.check();
     if (node == .none) return error.SassError;
     const n = ast.getNode(node);
     const span = Span{ .start = n.span_start, .end = n.span_end };
@@ -5131,6 +5134,19 @@ fn textHasRealInterpolationOutsideSkips(text: []const u8) bool {
     return false;
 }
 
+fn maxSyntaxDepth(ctx: *const Ctx) u32 {
+    const loader = ctx.loader orelse return resource_budget.default_max_syntax_depth;
+    const budget = loader.budget orelse return resource_budget.default_max_syntax_depth;
+    return budget.limits.max_syntax_depth;
+}
+
+/// A failed re-parse of source text is a Sass error unless a limit stopped it.
+fn subParseError(err: anyerror) ResolveError {
+    if (err == error.OutOfMemory) return error.OutOfMemory;
+    if (resource_budget.isLimitError(err)) return @errorCast(err);
+    return error.SassError;
+}
+
 fn parseSubExpr(ctx: *Ctx, inner: []const u8, _: Span) ResolveError!ExprIndex {
     var sub_ast = ast_flat.Ast.init(ctx.a, inner, .none);
     defer sub_ast.deinit();
@@ -5139,9 +5155,10 @@ fn parseSubExpr(ctx: *Ctx, inner: []const u8, _: Span) ResolveError!ExprIndex {
     defer lexer.deinit();
     const tokens = lexer.tokenize() catch return error.SassError;
     var parser = parser_mod.Parser.init(ctx.a, ctx.pool, tokens, inner);
+    parser.max_syntax_depth = maxSyntaxDepth(ctx);
     defer parser.deinit();
     parser.pos = 0;
-    const expr_root = parser.parseExpression(&sub_ast) catch return error.SassError;
+    const expr_root = parser.parseExpression(&sub_ast) catch |err| return subParseError(err);
     var ppos = parser.pos;
     while (ppos < parser.tokens.len) {
         const t = parser.tokens[ppos].tag;
@@ -9105,6 +9122,7 @@ fn resolveWhileStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
 }
 
 fn resolveStmt(ctx: *Ctx, node: NodeIndex) ResolveError!StmtIndex {
+    try stack_guard.check();
     const n = ctx.ast.getNode(node);
     const span = Span{ .start = n.span_start, .end = n.span_end };
     // CLI-FIX-E Step 2: When an error occurs, record the most recent stmt span in thread-local.
@@ -9452,9 +9470,10 @@ fn resolveExprFromSourceText(ctx: *Ctx, raw_src: []const u8) ResolveError!ExprIn
     defer lexer.deinit();
     const tokens = lexer.tokenize() catch return error.SassError;
     var parser = parser_mod.Parser.init(ctx.a, ctx.pool, tokens, raw_src);
+    parser.max_syntax_depth = maxSyntaxDepth(ctx);
     defer parser.deinit();
     parser.pos = 0;
-    const expr_root = parser.parseExpression(&sub_ast) catch return error.SassError;
+    const expr_root = parser.parseExpression(&sub_ast) catch |err| return subParseError(err);
     var ppos = parser.pos;
     while (ppos < parser.tokens.len) {
         const t = parser.tokens[ppos].tag;
@@ -9512,9 +9531,10 @@ fn resolveIncludeArgsFromSource(ctx: *Ctx, inner_src: []const u8) ResolveError!R
     defer lexer.deinit();
     const tokens = lexer.tokenize() catch return error.SassError;
     var parser = parser_mod.Parser.init(ctx.a, ctx.pool, tokens, fake_call_src);
+    parser.max_syntax_depth = maxSyntaxDepth(ctx);
     defer parser.deinit();
     parser.pos = 0;
-    const expr_root = parser.parseExpression(&sub_ast) catch return error.SassError;
+    const expr_root = parser.parseExpression(&sub_ast) catch |err| return subParseError(err);
     var ppos = parser.pos;
     while (ppos < parser.tokens.len) {
         const t = parser.tokens[ppos].tag;
@@ -11467,6 +11487,7 @@ fn resolveWithEntryPathImpl(
     persistent_ctx: ?PersistentResolveContext,
     deprecation_opts: ?*deprecation_mod.DeprecationOpts,
     preamble_store: ?*PreambleCheckpointStore,
+    budget: ?*resource_budget.ResourceBudget,
 ) ResolveError!ResolvedBundle {
     const t = perf.timeBegin();
     defer perf.timeEnd(.phase_resolve_ns, t);
@@ -11510,6 +11531,7 @@ fn resolveWithEntryPathImpl(
         .source_cache = source_cache,
         .ast_cache = ast_cache,
         .deprecation_opts = deprecation_opts,
+        .budget = budget,
         .records_alloc = records_alloc,
         .prog_arena_alloc = prog_arena_alloc,
         .static_eval_store = sel_store,
@@ -11560,7 +11582,7 @@ fn resolveWithEntryPath(
     entry_path: []const u8,
     load_paths: []const []const u8,
 ) ResolveError!ResolvedBundle {
-    return resolveWithEntryPathImpl(allocator, ast, intern_pool, entry_path, load_paths, null, null, null, null, null, null);
+    return resolveWithEntryPathImpl(allocator, ast, intern_pool, entry_path, load_paths, null, null, null, null, null, null, null);
 }
 
 pub fn resolveWithEntryPathAndColorPool(
@@ -11571,7 +11593,7 @@ pub fn resolveWithEntryPathAndColorPool(
     load_paths: []const []const u8,
     color_pool: *value_mod.ColorPool,
 ) ResolveError!ResolvedBundle {
-    return resolveWithEntryPathImpl(allocator, ast, intern_pool, entry_path, load_paths, color_pool, null, null, null, null, null);
+    return resolveWithEntryPathImpl(allocator, ast, intern_pool, entry_path, load_paths, color_pool, null, null, null, null, null, null);
 }
 
 pub fn resolveWithEntryPathColorPoolCachesAndPersistent(
@@ -11586,8 +11608,9 @@ pub fn resolveWithEntryPathColorPoolCachesAndPersistent(
     persistent_ctx: ?PersistentResolveContext,
     deprecation_opts: ?*deprecation_mod.DeprecationOpts,
     preamble_store: ?*PreambleCheckpointStore,
+    budget: ?*resource_budget.ResourceBudget,
 ) ResolveError!ResolvedBundle {
-    return resolveWithEntryPathImpl(allocator, ast, intern_pool, entry_path, load_paths, color_pool, source_cache, ast_cache, persistent_ctx, deprecation_opts, preamble_store);
+    return resolveWithEntryPathImpl(allocator, ast, intern_pool, entry_path, load_paths, color_pool, source_cache, ast_cache, persistent_ctx, deprecation_opts, preamble_store, budget);
 }
 
 fn parseAndResolve(allocator: std.mem.Allocator, source: []const u8) !ResolvedBundle {

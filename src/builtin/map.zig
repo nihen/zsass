@@ -1,5 +1,6 @@
 //! sass:map builtins.
 const std = @import("std");
+const stack_guard = @import("../runtime/stack_guard.zig");
 const shared = @import("shared.zig");
 const value_mod = @import("../runtime/value.zig");
 const intern_pool_mod = @import("../runtime/intern_pool.zig");
@@ -314,6 +315,7 @@ fn mergeTwoMapsShallowPairsHashed(ctx: *BuiltinContext, base: []const Value, ove
 }
 
 fn deepMergeTwoMaps(ctx: *BuiltinContext, base: []const Value, overlay: []const Value) BuiltinError!Value {
+    try stack_guard.check();
     var out: std.ArrayListUnmanaged(Value) = .empty;
     defer out.deinit(ctx.allocator);
 
@@ -363,6 +365,7 @@ fn coerceBasePairsForNestedMerge(ctx: *BuiltinContext, base: Value) BuiltinError
 }
 
 fn nestedMapMerge(ctx: *BuiltinContext, base: Value, keys: []const Value, overlay: Value) BuiltinError!Value {
+    try stack_guard.check();
     const base_pairs = try coerceBasePairsForNestedMerge(ctx, base);
 
     if (keys.len == 0) {
@@ -432,6 +435,7 @@ fn mapSetPathImmutable(
     new_val: Value,
     allow_replace_non_map: bool,
 ) BuiltinError!Value {
+    try stack_guard.check();
     std.debug.assert(keys.len > 0);
 
     const base_pairs: []const Value = blk: {
@@ -481,6 +485,7 @@ fn clonePairsContent(ctx: *BuiltinContext, pairs: []const Value) BuiltinError!Va
 }
 
 fn mapDeepRemovePathImmutable(ctx: *BuiltinContext, base_pairs: []const Value, keys: []const Value) BuiltinError!Value {
+    try stack_guard.check();
     std.debug.assert(keys.len > 0);
 
     if (keys.len == 1) {

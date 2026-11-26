@@ -104,6 +104,7 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: 
         if (ctx.loader) |ld| ld.source_cache else null,
         if (ctx.loader) |ld| ld.ast_cache else null,
         resolved_path,
+        if (ctx.loader) |ld| ld.budget else null,
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.IoFailure => {
@@ -113,6 +114,7 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: 
             return error.SassError;
         },
         error.SyntaxError => return error.SassError,
+        else => |e| return e,
     };
     defer child_loaded.deinit(ctx.a);
 

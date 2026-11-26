@@ -73,6 +73,14 @@ jobs:
         if: matrix.run_spec
         run: zig build spec -Doptimize=ReleaseFast
 
+      # Inputs that once crashed, hung, or exhausted memory must stop with a
+      # limit error in the release build too.
+      - name: Security regression (ReleaseFast)
+        if: matrix.run_spec
+        run: |
+          zig build -Doptimize=ReleaseFast
+          scripts/security_regression.sh zig-out/bin/zsass
+
   shellcheck:
     name: Shellcheck
     runs-on: ubuntu-latest

@@ -73,6 +73,7 @@ pub const ParsedAstCache = struct {
         self: *ParsedAstCache,
         path: []const u8,
         source: []const u8,
+        max_syntax_depth: u32,
     ) !*const Entry {
         {
             self.mutex.lockUncancelable(zsass_io.io);
@@ -106,6 +107,7 @@ pub const ParsedAstCache = struct {
         parser.is_indented_syntax = is_indented_syntax;
         parser.is_plain_css = is_plain_css;
         parser.no_interpolation = !lexer.saw_interpolation;
+        parser.max_syntax_depth = max_syntax_depth;
         defer parser.deinit();
         var ast = try parser.parse();
         ast.is_indented_syntax = is_indented_syntax;

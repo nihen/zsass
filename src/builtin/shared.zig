@@ -1,5 +1,7 @@
 //! Shared types and helpers for vm builtin modules.
 const std = @import("std");
+const stack_guard = @import("../runtime/stack_guard.zig");
+const resource_budget = @import("../runtime/resource_budget.zig");
 const value_mod = @import("../runtime/value.zig");
 const intern_pool_mod = @import("../runtime/intern_pool.zig");
 const color_mod = @import("../color/color.zig");
@@ -32,7 +34,7 @@ pub const BuiltinError = error{
     BuiltinUnsupported,
     SassError,
     FatalDeprecation,
-};
+} || resource_budget.LimitError;
 
 pub const BuiltinContext = struct {
     allocator: std.mem.Allocator,
@@ -58,6 +60,8 @@ pub const BuiltinContext = struct {
     /// as CSS and with where in it the arguments are that were strings.
     /// Compressed output writes those as they are.
     calc_text_args_hook: ?CalcTextArgsHook = null,
+    /// The compilation's budget; null when nothing limits the work.
+    budget: ?*resource_budget.ResourceBudget = null,
     /// list_handle is "a map with only a naive string key (no calc-marker / no named-color / no escape)"
     /// If it is determined, the hash index of the first index of that key bytes  ->  pair is retained.
     /// Replace linear scan of `map.get` / `map.has-key` with O(1) for hot
@@ -458,6 +462,7 @@ pub fn valueToCssString(ctx: *BuiltinContext, v: Value) BuiltinError![]const u8 
 }
 
 fn valueToCssStringWithMode(ctx: *BuiltinContext, v: Value, mode: ListStringContext) BuiltinError![]const u8 {
+    try stack_guard.check();
     if (v.isString()) {
         const raw = stripCalcArgMarker(ctx.intern_pool.get(v.stringIntern()));
         const visible = if (std.mem.startsWith(u8, raw, color_preserve_slash_marker)) raw[color_preserve_slash_marker.len..] else raw;

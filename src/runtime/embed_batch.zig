@@ -27,6 +27,8 @@ const perf = @import("perf.zig");
 const syntax_override_mod = @import("syntax_override.zig");
 const zsass_io = @import("io.zig");
 const error_format = @import("error_format.zig");
+const resource_budget = @import("resource_budget.zig");
+const stack_guard = @import("stack_guard.zig");
 
 /// Spin-lock-guarded wrapper around an arbitrary `std.mem.Allocator`. Used so
 /// the caller's allocator is safe to share across worker threads even when its
@@ -136,6 +138,12 @@ pub const CompileFilesOptions = struct {
     load_paths: []const []const u8 = &.{},
     /// Worker thread count. `0` means "use `std.Thread.getCpuCount()`".
     jobs: usize = 0,
+    /// Limits applied to each entry separately.
+    limits: resource_budget.CompileLimits = .{},
+    /// Polled during each entry; returning true stops that entry with
+    /// `error.CompilationCancelled`. Called from worker threads.
+    cancellation_check: ?resource_budget.CancellationCheck = null,
+    cancellation_ctx: ?*anyopaque = null,
 };
 
 /// Compile each path in `paths` and return one `CompileFileResult` per entry,
@@ -328,7 +336,12 @@ fn compileOnePath(
     // Diagnostic state is threadlocal; reset so a previous entry compiled on
     // this worker thread cannot leak its span/stack into this entry's report.
     error_format.clearErrorContext();
-    compileOnePathFallible(out_alloc, work_alloc, input_path, opts, shared_pool, source_cache, ast_cache, persistent_state, out) catch |err| {
+    // A fresh budget per entry: one entry cannot use up another's allowance.
+    var budget = resource_budget.ResourceBudget.init(opts.limits, opts.cancellation_check, opts.cancellation_ctx);
+    const guard = stack_guard.begin(opts.limits.stack_bytes);
+    defer guard.end();
+    compileOnePathFallible(out_alloc, work_alloc, input_path, opts, shared_pool, source_cache, ast_cache, persistent_state, out, &budget) catch |caught| {
+        const err = budget.mapError(stack_guard.mapError(caught));
         if (out.css) |b| {
             out_alloc.free(b);
             out.css = null;
@@ -399,6 +412,7 @@ fn compileOnePathFallible(
     ast_cache: *ast_cache_mod.ParsedAstCache,
     persistent_state: *persistent_resolver_mod.PersistentResolverState,
     out: *CompileFileResult,
+    budget: *resource_budget.ResourceBudget,
 ) !void {
     const source = try readFileAlloc(work_alloc, input_path);
 
@@ -418,6 +432,7 @@ fn compileOnePathFallible(
         persistent_ctx,
         &deprecation_opts,
         null,
+        budget,
     );
     defer {
         if (!borrowed.borrowed_color_pool) borrowed.color_pool.deinit(work_alloc);
@@ -426,9 +441,11 @@ fn compileOnePathFallible(
     }
 
     var rule_ir = rule_ir_mod.RuleIR.init();
+    rule_ir.budget = budget;
     defer rule_ir.deinit(work_alloc);
 
     var vm = try vm_mod.VM.init(work_alloc, shared_pool, &borrowed.color_pool, &rule_ir, &borrowed.program);
+    vm.budget = budget;
     defer vm.deinit();
     vm.deprecation_opts = deprecation_opts;
     // Stream chunk flush keeps VM emit memory bounded when source maps are off
@@ -456,8 +473,12 @@ fn compileOnePathFallible(
 
     var aw = std.Io.Writer.Allocating.init(out_alloc);
     defer aw.deinit();
+    var limit_buf: [4096]u8 = undefined;
+    var limited = resource_budget.LimitedWriter.init(budget, &aw.writer, limit_buf[0..]);
     const sm_ptr: ?*source_map_mod.SourceMap = if (sm) |*m| m else null;
-    try rule_ir.writeToWithSourceMap(&aw.writer, shared_pool, sm_ptr, source_locations, opts.output_style, .{});
+    try rule_ir.writeToWithSourceMap(&limited.interface, shared_pool, sm_ptr, source_locations, opts.output_style, .{});
+    try limited.interface.flush();
+    if (stack_guard.tripped()) return error.NestingLimit;
     out.css = try aw.toOwnedSlice();
 
     if (sm) |*m| {

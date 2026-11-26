@@ -1,4 +1,5 @@
 const std = @import("std");
+const stack_guard = @import("../runtime/stack_guard.zig");
 const zsass_io = @import("../runtime/io.zig");
 const pkg_importer = @import("pkg_importer.zig");
 const test_utils = struct {
@@ -574,6 +575,7 @@ const DependencyGraph = struct {
         path: *std.ArrayList([]const u8),
         allocator: std.mem.Allocator,
     ) !bool {
+        try stack_guard.check();
         try colors.put(node, .gray);
         try path.append(allocator, node);
 

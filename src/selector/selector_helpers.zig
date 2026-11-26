@@ -1,6 +1,7 @@
 //! Selector validation and post-processing helpers for extend and placeholder flows.
 
 const std = @import("std");
+const stack_guard = @import("../runtime/stack_guard.zig");
 const SelectorPart = struct {
     text: []const u8,
     separator_has_newline: bool = false,
@@ -803,6 +804,7 @@ fn rebuildUniqueCommaSeparatedPseudoArgs(
 }
 
 fn dedupeSelectorPseudoArguments(allocator: std.mem.Allocator, selector: []const u8) std.mem.Allocator.Error![]const u8 {
+    try stack_guard.check();
     const pseudo_defs = [_][]const u8{
         ":is(",   ":where(",        ":matches(", ":any(",      ":not(", ":has(",
         ":host(", ":host-context(", ":slotted(", "::slotted(",

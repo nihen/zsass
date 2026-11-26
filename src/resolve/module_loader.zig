@@ -7,6 +7,7 @@ const ast_flat = @import("../frontend/ast_flat.zig");
 const data = @import("data.zig");
 const module_resolver_state = @import("module_resolver_state.zig");
 const path_resolution = @import("path_resolution.zig");
+const resource_budget = @import("../runtime/resource_budget.zig");
 
 const ModuleResolver = data.ModuleResolver;
 const ResolveError = data.ResolveError;
@@ -14,6 +15,21 @@ const ResolveError = data.ResolveError;
 const isVisiting = module_resolver_state.isVisiting;
 const loadModuleSource = path_resolution.loadModuleSource;
 const resolveUserModulePath = path_resolution.resolveUserModulePath;
+
+fn maxSyntaxDepth(self: *const ModuleResolver) u32 {
+    return if (self.budget) |b| b.limits.max_syntax_depth else resource_budget.default_max_syntax_depth;
+}
+
+fn checkSourceBytes(self: *const ModuleResolver, len: usize) ResolveError!void {
+    if (self.budget) |b| try b.checkSourceBytes(len);
+}
+
+/// Report a failed child parse as `fallback` unless a limit caused it.
+fn parseFailure(err: anyerror, fallback: ResolveError) ResolveError {
+    if (err == error.OutOfMemory) return error.OutOfMemory;
+    if (resource_budget.isLimitError(err)) return @errorCast(err);
+    return fallback;
+}
 
 pub const ResolveParsedModuleFn = *const fn (*ModuleResolver, *const ast_flat.Ast, []const u8) ResolveError!u32;
 
@@ -68,10 +84,10 @@ pub fn resolveUserModule(self: *ModuleResolver, from_path: []const u8, url: []co
             else => return error.UsermoduleIoFailure,
         };
         defer source_for_cache.deinit(self.alloc);
-        const entry = ac.getOrParse(resolved, source_for_cache.source) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
+        try checkSourceBytes(self, source_for_cache.source.len);
+        const entry = ac.getOrParse(resolved, source_for_cache.source, maxSyntaxDepth(self)) catch |err| switch (err) {
             error.SyntaxError => return error.UsermoduleLexFailure,
-            else => return error.UsermoduleParseFailure,
+            else => return parseFailure(err, error.UsermoduleParseFailure),
         };
         if (entry.ast.getNode(entry.ast.root).tag != .stylesheet_root) return error.UsermoduleRootMismatch;
         return resolveParsedWithPendingInitialConfig(self, &entry.ast, resolved, resolve_parsed);
@@ -83,6 +99,7 @@ pub fn resolveUserModule(self: *ModuleResolver, from_path: []const u8, url: []co
     };
     defer loaded.deinit(self.alloc);
     const source = loaded.source;
+    try checkSourceBytes(self, source.len);
 
     var scratch = std.heap.ArenaAllocator.init(self.alloc);
     defer scratch.deinit();
@@ -108,8 +125,9 @@ pub fn resolveUserModule(self: *ModuleResolver, from_path: []const u8, url: []co
     parser.is_indented_syntax = is_indented_syntax;
     parser.is_plain_css = is_plain_css_source;
     parser.no_interpolation = !lexer.saw_interpolation;
+    parser.max_syntax_depth = maxSyntaxDepth(self);
     defer parser.deinit();
-    var ast = parser.parse() catch return error.UsermoduleParseFailure;
+    var ast = parser.parse() catch |err| return parseFailure(err, error.UsermoduleParseFailure);
     ast.is_indented_syntax = is_indented_syntax;
     defer ast.deinit();
     if (ast.getNode(ast.root).tag != .stylesheet_root) return error.UsermoduleRootMismatch;

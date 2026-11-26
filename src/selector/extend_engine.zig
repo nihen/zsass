@@ -33,6 +33,8 @@
 //! `selector.extend()` and `selector.replace()` use the same machinery.
 
 const std = @import("std");
+const resource_budget = @import("../runtime/resource_budget.zig");
+const stack_guard = @import("../runtime/stack_guard.zig");
 const selector_mod = @import("selector.zig");
 const spec_mod = @import("extend_specificity.zig");
 
@@ -45,7 +47,33 @@ const Combinator = selector_mod.Combinator;
 const Specificity = spec_mod.Specificity;
 
 const Allocator = std.mem.Allocator;
-const Error = Allocator.Error;
+pub const Error = Allocator.Error || resource_budget.LimitError;
+const Budget = resource_budget.ResourceBudget;
+
+/// Charge `n` selector candidates, made or about to be made. A selector
+/// counts as many candidates as it has compounds and combinators, since the
+/// memory it takes grows with its length.
+fn charge(budget: ?*Budget, n: usize) Error!void {
+    if (budget) |b| try b.chargeSelectorCandidates(n);
+}
+
+/// Fail before enumerating `n` combinations that cannot fit.
+fn ensure(budget: ?*Budget, n: usize) Error!void {
+    if (budget) |b| try b.ensureSelectorCandidates(n);
+}
+
+/// The number of combinations of lists of these lengths, saturating.
+fn piecesWeight(selectors: []const []const Piece) usize {
+    var total: usize = 0;
+    for (selectors) |pieces| total +|= @max(pieces.len, 1);
+    return total;
+}
+
+fn combinations(lengths: anytype) usize {
+    var total: usize = 1;
+    for (lengths) |len| total = std.math.mul(usize, total, @max(len, 1)) catch return std.math.maxInt(usize);
+    return total;
+}
 
 const zero_spec: Specificity = .{ .a = 0, .b = 0, .c = 0 };
 
@@ -260,7 +288,7 @@ pub fn trimUnion(allocator: Allocator, list: *SelectorList, details: *std.ArrayL
 /// matches what both match, by the unification and weaving the engine
 /// extends with. Empty when there is none. The results belong to
 /// `allocator`.
-pub fn unifyComplexes(allocator: Allocator, first: *const ComplexSelector, second: *const ComplexSelector) Error![]ComplexSelector {
+pub fn unifyComplexes(allocator: Allocator, budget: ?*Budget, first: *const ComplexSelector, second: *const ComplexSelector) Error![]ComplexSelector {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -299,7 +327,7 @@ pub fn unifyComplexes(allocator: Allocator, first: *const ComplexSelector, secon
     const prefix2 = pieces2[0 .. pieces2.len - 1];
     const single = [_][]const Piece{if (prefix1.len != 0) prefix1 else prefix2};
     const prefixes: []const []const Piece = if (prefix1.len != 0 and prefix2.len != 0)
-        try weavePrefixes(a, prefix1, prefix2)
+        try weavePrefixes(a, budget, prefix1, prefix2)
     else
         &single;
 
@@ -332,6 +360,8 @@ pub const Engine = struct {
     mode: Mode = .written,
     /// `selector.replace()`: a compound that holds a target does not stay.
     replace: bool = false,
+    /// Charged for every selector the engine makes along the way.
+    budget: ?*Budget = null,
 
     pub const Mode = enum {
         /// `@extend`s of one module, as they were written.
@@ -348,12 +378,12 @@ pub const Engine = struct {
     };
 
     /// `sources` must be in registration order.
-    pub fn init(backing: Allocator, sources: []const Source, mode: Mode) Error!?*Engine {
+    pub fn init(backing: Allocator, sources: []const Source, mode: Mode, budget: ?*Budget) Error!?*Engine {
         for (sources) |source| {
             if (source.target.simple_selectors.items.len == 0) return null;
         }
         const self = try backing.create(Engine);
-        self.* = .{ .arena = std.heap.ArenaAllocator.init(backing), .mode = mode, .replace = mode == .replace };
+        self.* = .{ .arena = std.heap.ArenaAllocator.init(backing), .mode = mode, .replace = mode == .replace, .budget = budget };
         errdefer self.deinit(backing);
         for (sources) |source| try self.register(source);
         return self;
@@ -465,6 +495,7 @@ pub const Engine = struct {
                 }
             }
         }
+        try charge(self.budget, @max(item.pieces.len, 1));
         const entry_index: u32 = @intCast(self.entries.items.len);
         for (targets) |target| {
             const gop = try self.by_target.getOrPut(a, try simpleKey(a, target));
@@ -505,6 +536,7 @@ pub const Engine = struct {
     /// it was made from included. An entry can come of a later one when a
     /// later extender turns out the same as it, so each is visited once.
     fn appendOwners(self: *const Engine, allocator: Allocator, index: u32, visited: []bool, out: *std.ArrayList(u32)) Error!void {
+        try stack_guard.check();
         if (visited[index]) return;
         visited[index] = true;
         const entry = &self.entries.items[index];
@@ -609,6 +641,7 @@ pub const Engine = struct {
     }
 
     fn firstStepInComplex(self: *Engine, a: Allocator, complex: *const ComplexSelector, from: u32, best: *?u32) Error!void {
+        try stack_guard.check();
         for (complex.components.items) |*component| {
             if (component.* != .compound) continue;
             for (component.compound.simple_selectors.items) |simple| {
@@ -670,6 +703,7 @@ pub const Engine = struct {
     /// Note the targets a selector that is left alone holds, those in the
     /// arguments of its pseudo-classes included.
     fn noteHeld(self: *Engine, a: Allocator, complex: *const ComplexSelector, view: View) Error!void {
+        try stack_guard.check();
         var ignored: std.ArrayList(*const Entry) = .empty;
         for (complex.components.items) |*component| {
             if (component.* != .compound) continue;
@@ -710,6 +744,11 @@ pub const Engine = struct {
             try options.append(a, extended);
         }
         if (!any) return null;
+        {
+            var lengths: std.ArrayList(usize) = .empty;
+            for (options.items) |list| try lengths.append(a, if (list) |l| l.len else 1);
+            try ensure(self.budget, combinations(lengths.items) *| pieces.len);
+        }
 
         var results: std.ArrayList(Item) = .empty;
         const choice = try a.alloc(usize, pieces.len);
@@ -729,7 +768,8 @@ pub const Engine = struct {
                 const protects = self.mode == .written or (self.replace and choice[index] == 0);
                 if (pieces.len == 1 and protects and list[choice[index]].written_extender) written_extender = true;
             }
-            const woven = try weaveChoice(a, pieces, options.items, choice);
+            const woven = try weaveChoice(a, self.budget, pieces, options.items, choice);
+            try charge(self.budget, piecesWeight(woven));
             for (woven, 0..) |made, woven_index| {
                 // In a replacement the first result stands where the
                 // selector stood.
@@ -789,11 +829,17 @@ pub const Engine = struct {
             try choices.append(a, found.items);
         }
         if (!any) return null;
+        {
+            var lengths: std.ArrayList(usize) = .empty;
+            for (choices.items) |entries| try lengths.append(a, entries.len +| 1);
+            try ensure(self.budget, combinations(lengths.items));
+        }
 
         var results: std.ArrayList(Made) = .empty;
         const choice = try a.alloc(usize, compound.simples.len);
         @memset(choice, 0);
         while (true) {
+            try charge(self.budget, 1);
             var base_simples: std.ArrayList(SimpleSelector) = .empty;
             var base_marks: std.ArrayList(Specificity) = .empty;
             var chosen: std.ArrayList(*const Entry) = .empty;
@@ -834,7 +880,7 @@ pub const Engine = struct {
                 single[0] = .{ .compound = .{ .simples = base_simples.items, .marks = base_marks.items } };
                 try results.append(a, .{ .pieces = single });
             } else {
-                try unifyChosen(a, &base_simples, &base_marks, chosen.items, &results);
+                try unifyChosen(a, self.budget, &base_simples, &base_marks, chosen.items, &results);
             }
 
             var position: usize = 0;
@@ -953,6 +999,7 @@ pub const Engine = struct {
 /// are woven together; one result per way of weaving is appended.
 fn unifyChosen(
     a: Allocator,
+    budget: ?*Budget,
     base_simples: *std.ArrayList(SimpleSelector),
     base_marks: *std.ArrayList(Specificity),
     chosen: []const *const Entry,
@@ -994,7 +1041,7 @@ fn unifyChosen(
                 try next.append(a, prefix);
                 continue;
             }
-            const woven = try weavePrefixes(a, existing, prefix);
+            const woven = try weavePrefixes(a, budget, existing, prefix);
             try next.appendSlice(a, woven);
         }
         parents = next;
@@ -1343,7 +1390,7 @@ fn linksToPieces(a: Allocator, links: []const Link) Error![]const Piece {
 
 /// Two groups as one: their last compounds merged and the parents before
 /// them woven. Null unless there is exactly one way.
-fn unifyGroups(a: Allocator, base: []const Link, added: []const Link) Error!?[]const Link {
+fn unifyGroups(a: Allocator, budget: ?*Budget, base: []const Link, added: []const Link) Error!?[]const Link {
     const base_last = base[base.len - 1];
     const added_last = added[added.len - 1];
     const last = try unifyLinks(a, base_last, added_last, base_last.combinator) orelse return null;
@@ -1351,6 +1398,7 @@ fn unifyGroups(a: Allocator, base: []const Link, added: []const Link) Error!?[]c
     if (base.len > 1 or added.len > 1) {
         const woven = try weavePrefixes(
             a,
+            budget,
             try linksToPieces(a, base[0 .. base.len - 1]),
             try linksToPieces(a, added[0 .. added.len - 1]),
         );
@@ -1381,9 +1429,9 @@ fn isRootish(compound: *const CompoundSelector) bool {
 /// The group that stands for both when two parents are taken to be the
 /// same element: the narrower of the two when one covers the other, and
 /// the two put together when they name the same ID or pseudo-element.
-fn commonGroup(a: Allocator, first: []const Link, second: []const Link) Error!?[]const Link {
+fn commonGroup(a: Allocator, budget: ?*Budget, first: []const Link, second: []const Link) Error!?[]const Link {
     if (sameGroup(first, second)) return try markedAlso(a, first, second);
-    if (shareUnique(first, second)) return unifyGroups(a, second, first);
+    if (shareUnique(first, second)) return unifyGroups(a, budget, second, first);
     if (try parentsCover(a, second, first)) return try markedAlso(a, first, second);
     if (try parentsCover(a, first, second)) return try markedAlso(a, second, first);
     return null;
@@ -1424,7 +1472,7 @@ fn markedAlso(a: Allocator, group: []const Link, other: []const Link) Error![]co
 /// binds it to what follows. The parents next to what follows are merged
 /// by their combinators; the rest keep their own order, and the parents the
 /// two share are written once.
-fn weavePrefixes(a: Allocator, first: []const Piece, second: []const Piece) Error![]const []const Piece {
+fn weavePrefixes(a: Allocator, budget: ?*Budget, first: []const Piece, second: []const Piece) Error![]const []const Piece {
     const one = try parseParents(a, first) orelse return &.{};
     const two = try parseParents(a, second) orelse return &.{};
     if (one.leading.len != 0 and two.leading.len != 0 and !std.mem.eql(Combinator, one.leading, two.leading)) return &.{};
@@ -1544,7 +1592,7 @@ fn weavePrefixes(a: Allocator, first: []const Piece, second: []const Piece) Erro
     // giving up a group of the second side first when either would do.
     for (groups1, 0..) |g1, i| {
         for (groups2, 0..) |g2, j| {
-            const both = try commonGroup(a, g1, g2);
+            const both = try commonGroup(a, budget, g1, g2);
             common[(i + 1) * cols + (j + 1)] = both;
             lengths[(i + 1) * cols + (j + 1)] = if (both != null)
                 lengths[i * cols + j] + 1
@@ -1614,10 +1662,16 @@ fn weavePrefixes(a: Allocator, first: []const Piece, second: []const Piece) Erro
     }
 
     // Every combination, the first set varying fastest.
+    {
+        var set_lengths: std.ArrayList(usize) = .empty;
+        for (sets.items) |alternatives| try set_lengths.append(a, alternatives.len);
+        try ensure(budget, combinations(set_lengths.items));
+    }
     var out: std.ArrayList([]const Piece) = .empty;
     const choice = try a.alloc(usize, sets.items.len);
     @memset(choice, 0);
     while (true) {
+        try charge(budget, @max(first.len + second.len, 1));
         var components: std.ArrayList(Piece) = .empty;
         for (leading) |combinator| try components.append(a, .{ .combinator = combinator });
         for (sets.items, 0..) |alternatives, index| {
@@ -1650,7 +1704,7 @@ fn joinLinks(a: Allocator, x: []const Link, y: []const Link) Error![]const Link 
 }
 
 /// Put together one choice of every compound's results.
-fn weaveChoice(a: Allocator, pieces: []const Piece, options: []const ?[]const Made, choice: []const usize) Error![]const []const Piece {
+fn weaveChoice(a: Allocator, budget: ?*Budget, pieces: []const Piece, options: []const ?[]const Made, choice: []const usize) Error![]const []const Piece {
     var prefixes: std.ArrayList([]const Piece) = .empty;
     try prefixes.append(a, &.{});
 
@@ -1691,7 +1745,7 @@ fn weaveChoice(a: Allocator, pieces: []const Piece, options: []const ?[]const Ma
                     try next.append(a, chosen);
                     continue;
                 }
-                const woven = try weavePrefixes(a, prefix, parents);
+                const woven = try weavePrefixes(a, budget, prefix, parents);
                 for (woven) |w| try next.append(a, try concat(a, w, rest));
             }
         }
@@ -1822,6 +1876,7 @@ fn pseudoSelectorOf(simple: SimpleSelector) ?*SelectorList {
 }
 
 fn complexHoldsSimple(complex: *const ComplexSelector, target: SimpleSelector) bool {
+    if (stack_guard.overflowed()) return false;
     for (complex.components.items) |*component| {
         if (component.* != .compound) continue;
         for (component.compound.simple_selectors.items) |simple| {

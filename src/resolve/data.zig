@@ -1,4 +1,5 @@
 const std = @import("std");
+const resource_budget = @import("../runtime/resource_budget.zig");
 const origin_mod = @import("../runtime/origin.zig");
 const value_mod = @import("../runtime/value.zig");
 const intern_pool_mod = @import("../runtime/intern_pool.zig");
@@ -67,7 +68,7 @@ pub const ResolveError = error{
     /// User-module loader: child parse succeeded but AST root is not `stylesheet_root`.
     UsermoduleRootMismatch,
     Unsupported,
-};
+} || resource_budget.LimitError;
 
 pub fn spanStartLineColOneBased(source_len: usize, line_starts: []const u32, span_start: u32) struct { line: u32, col: u32 } {
     const offset: u32 = @min(span_start, @as(u32, @intCast(source_len)));
@@ -746,6 +747,8 @@ pub const ModuleResolver = struct {
     ast_cache: ?*ast_cache_mod.ParsedAstCache = null,
     /// When non-null, Sass `@import` and similar emit dart-compatible deprecation diagnostics.
     deprecation_opts: ?*deprecation_mod.DeprecationOpts = null,
+    /// Charged for every module this resolver loads; null means unlimited.
+    budget: ?*resource_budget.ResourceBudget = null,
 
     /// records / id_by_path / module path key dupe / allocator for alloc in ModuleExports.
     /// Same meta_arena as `self.meta` by default (single-entry).

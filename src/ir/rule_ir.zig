@@ -1,6 +1,8 @@
 //!Rule IR -- append-only intermediate between VM and Writer (Stage 1a skeleton).
 
 const std = @import("std");
+const stack_guard = @import("../runtime/stack_guard.zig");
+const resource_budget = @import("../runtime/resource_budget.zig");
 const intern_pool_mod = @import("../runtime/intern_pool.zig");
 const InternPool = intern_pool_mod.InternPool;
 const InternId = intern_pool_mod.InternId;
@@ -966,6 +968,9 @@ pub const RuleIR = struct {
     /// point of a number depends on how the number was rounded.
     decl_token_sets: std.ArrayListUnmanaged([]const u8) = .empty,
     decl_token_set_index: std.StringHashMapUnmanaged(u16) = .empty,
+    /// Charged for every node an append helper creates. Nodes that are only
+    /// moved or reordered were charged when they were created.
+    budget: ?*resource_budget.ResourceBudget = null,
 
     comptime {
         std.debug.assert(@sizeOf(Node) == 16);
@@ -1029,6 +1034,15 @@ pub const RuleIR = struct {
     /// `nest_depth`: 0 = top-level style rule (previously blanked), >0 = hoisted from parent style rule
     /// nested rule (do not insert blank in front). dart sass's expanded output of the top-level sibling style rule
     /// A 1-word hint to express the behavior of inserting a blank line only in between using flat Rule IR.
+    fn chargeNodes(self: *RuleIR, n: usize) resource_budget.LimitError!void {
+        if (self.budget) |b| try b.chargeIrNodes(n);
+    }
+
+    fn appendNode(self: *RuleIR, allocator: std.mem.Allocator, node: Node) !void {
+        try self.chargeNodes(1);
+        try self.nodes.append(allocator, node);
+    }
+
     pub fn appendRuleBegin(
         self: *RuleIR,
         allocator: std.mem.Allocator,
@@ -1043,7 +1057,7 @@ pub const RuleIR = struct {
         const extend_snapshot: u32 = if (self.next_rule_extend_snapshot) |entered| @min(entered, edges_now) else edges_now;
         self.next_rule_extend_snapshot = null;
         try self.extra.appendSlice(allocator, &[_]u32{ selector_intern, nest_depth, 0, extend_snapshot });
-        try self.nodes.append(allocator, .{
+        try self.appendNode(allocator, .{
             .kind = .rule_begin,
             .payload = extra_off,
             .source_start = span.start,
@@ -1063,7 +1077,7 @@ pub const RuleIR = struct {
     }
 
     pub fn appendRuleEnd(self: *RuleIR, allocator: std.mem.Allocator, span: Span) !void {
-        try self.nodes.append(allocator, .{
+        try self.appendNode(allocator, .{
             .kind = .rule_end,
             .payload = 0,
             .source_start = span.start,
@@ -1077,7 +1091,7 @@ pub const RuleIR = struct {
         const extra_off: u32 = @intCast(self.extra.items.len);
         try self.extra.append(allocator, prop_intern);
         try self.extra.append(allocator, value_intern);
-        try self.nodes.append(allocator, .{
+        try self.appendNode(allocator, .{
             .kind = .decl,
             .payload = extra_off,
             .source_start = span.start,
@@ -1141,7 +1155,7 @@ pub const RuleIR = struct {
 
         const extra_off: u32 = @intCast(self.extra.items.len);
         try self.extra.appendSlice(allocator, &[_]u32{ prop_intern, str_idx });
-        try self.nodes.append(allocator, .{
+        try self.appendNode(allocator, .{
             .kind = .decl_raw,
             .payload = extra_off,
             .source_start = span.start,
@@ -1162,7 +1176,7 @@ pub const RuleIR = struct {
         try self.extra.append(allocator, @backingInt(name_intern));
         try self.extra.append(allocator, if (prelude_intern) |p| @backingInt(p) else std.math.maxInt(u32));
         try self.extra.append(allocator, 0);
-        try self.nodes.append(allocator, .{
+        try self.appendNode(allocator, .{
             .kind = .at_rule_simple,
             .payload = extra_off,
             .source_start = span.start,
@@ -1173,7 +1187,7 @@ pub const RuleIR = struct {
     }
 
     pub fn appendGroupBoundary(self: *RuleIR, allocator: std.mem.Allocator, span: Span) !void {
-        try self.nodes.append(allocator, .{
+        try self.appendNode(allocator, .{
             .kind = .group_boundary,
             .payload = 0,
             .source_start = span.start,
@@ -1183,7 +1197,7 @@ pub const RuleIR = struct {
     }
 
     pub fn appendSourcemapGap(self: *RuleIR, allocator: std.mem.Allocator, span: Span) !void {
-        try self.nodes.append(allocator, .{
+        try self.appendNode(allocator, .{
             .kind = .sourcemap_gap,
             .payload = 0,
             .source_start = span.start,
@@ -1352,7 +1366,7 @@ pub const RuleIR = struct {
 
                     try self.nodes.appendSlice(allocator, moved_comment_nodes);
                     try self.node_source_files.appendSlice(allocator, moved_comment_files);
-                    try self.nodes.append(allocator, node);
+                    try self.appendNode(allocator, node);
                     try self.node_source_files.append(allocator, span.file_id);
                     try self.nodes.appendSlice(allocator, middle_nodes);
                     try self.node_source_files.appendSlice(allocator, middle_files);
@@ -1361,13 +1375,14 @@ pub const RuleIR = struct {
                 }
             }
 
+            try self.chargeNodes(1);
             try self.nodes.insert(allocator, insert_at, node);
             try self.node_source_files.insert(allocator, insert_at, span.file_id);
             self.last_visible_emit_node_count = self.nodes.items.len;
             return;
         }
 
-        try self.nodes.append(allocator, node);
+        try self.appendNode(allocator, node);
         try self.node_source_files.append(allocator, span.file_id);
         self.last_visible_emit_node_count = self.nodes.items.len;
     }
@@ -1389,7 +1404,7 @@ pub const RuleIR = struct {
             if (keep_empty_block) 1 else 0,
             0,
         });
-        try self.nodes.append(allocator, .{
+        try self.appendNode(allocator, .{
             .kind = .at_rule_begin,
             .payload = extra_off,
             .source_start = span.start,
@@ -1400,7 +1415,7 @@ pub const RuleIR = struct {
     }
 
     pub fn appendAtRuleEnd(self: *RuleIR, allocator: std.mem.Allocator, span: Span) !void {
-        try self.nodes.append(allocator, .{
+        try self.appendNode(allocator, .{
             .kind = .at_rule_end,
             .payload = 0,
             .source_start = span.start,
@@ -1411,7 +1426,7 @@ pub const RuleIR = struct {
     }
 
     pub fn appendStmtGap(self: *RuleIR, allocator: std.mem.Allocator, span: Span) !void {
-        try self.nodes.append(allocator, .{
+        try self.appendNode(allocator, .{
             .kind = .stmt_gap,
             .payload = 0,
             .source_start = span.start,
@@ -1458,7 +1473,7 @@ pub const RuleIR = struct {
         try self.extra.append(allocator, @backingInt(text_intern));
         try self.extra.append(allocator, source_col);
         try self.extra.append(allocator, if (leading_same_line) 1 else 0);
-        try self.nodes.append(allocator, .{
+        try self.appendNode(allocator, .{
             .kind = .comment,
             .payload = extra_off,
             .source_start = span.start,
@@ -1803,6 +1818,7 @@ pub const RuleIR = struct {
         start_idx: usize,
         end_idx: usize,
     ) !usize {
+        try stack_guard.check();
         var i = start_idx;
         var limit = end_idx;
         while (i < limit) {
@@ -1847,6 +1863,7 @@ pub const RuleIR = struct {
         end_idx: usize,
         mode: SelectorFilterMode,
     ) !usize {
+        try stack_guard.check();
         var i = start_idx;
         var limit = end_idx;
         while (i < limit) {
@@ -9727,7 +9744,7 @@ pub const RuleIR = struct {
             try rule_nodes_by_module[@intCast(node_module)].append(temp, @intCast(node_idx));
         }
 
-        var extend_state = try extend_mod.RuleModuleExtendState.init(temp, module_store_count);
+        var extend_state = try extend_mod.RuleModuleExtendState.init(temp, module_store_count, self.budget);
         defer extend_state.deinit();
         extend_state.setVisibility(self.module_visibility_matrix, self.module_visibility_n);
         // Which `@extend`s found their target is what the extension itself

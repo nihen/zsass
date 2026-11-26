@@ -21,6 +21,8 @@ const persistent_resolver_mod = @import("../resolve/persistent_resolver.zig");
 const cross_entry_state_mod = @import("cross_entry_state.zig");
 const source_map_mod = @import("../ir/source_map.zig");
 const syntax_override_mod = @import("syntax_override.zig");
+const resource_budget = @import("resource_budget.zig");
+const stack_guard = @import("stack_guard.zig");
 
 const zsass_io_mod = @import("io.zig");
 const watch_backend_mod = @import("watch_backend.zig");
@@ -116,6 +118,7 @@ const USAGE =
     \\  --poll                                 Use polling watcher (requires --watch)
     \\  --update                               Recompile only when output is older than input
     \\  --check, --dry-run                     Compile without writing files
+    \\  --no-limits                            Lift the limits on work and output (trusted input only)
     \\  --dry-run=json                         Print resolved compile targets as JSON
     \\  --compile-only <input>                 Parse/resolve/compile only (no VM/emit phase)
     \\  --list-load-paths                      Print resolved load paths and exit
@@ -603,7 +606,7 @@ const bash_completion_script =
     \\    COMPREPLY=()
     \\    cur="${COMP_WORDS[COMP_CWORD]}"
     \\    prev="${COMP_WORDS[COMP_CWORD-1]}"
-    \\    opts="-h --help -v -V --version --info --completions -i --interactive --stdin --stdin-filepath -s --style -I --load-path -C --chdir -o --output -q --quiet --no-quiet --verbose --no-verbose --silence-deprecation --future-deprecation --fatal-deprecation -c --color --no-color --unicode --no-unicode --trace --no-trace --error-css --no-error-css --source-map --no-source-map --embed-source-map --embed-sources --no-embed-sources --source-map-file --source-map-url --source-map-urls --plain-css --scss --indented --no-indented --charset --no-charset -w --watch --poll --update --check --dry-run --compile-only --list-load-paths --env-report --phase-timer --dump-bc --opcode-histogram --trace-diff"
+    \\    opts="-h --help -v -V --version --info --completions -i --interactive --stdin --stdin-filepath -s --style -I --load-path -C --chdir -o --output -q --quiet --no-quiet --verbose --no-verbose --silence-deprecation --future-deprecation --fatal-deprecation -c --color --no-color --unicode --no-unicode --trace --no-trace --error-css --no-error-css --source-map --no-source-map --embed-source-map --embed-sources --no-embed-sources --source-map-file --source-map-url --source-map-urls --plain-css --scss --indented --no-indented --charset --no-charset --no-limits -w --watch --poll --update --check --dry-run --compile-only --list-load-paths --env-report --phase-timer --dump-bc --opcode-histogram --trace-diff"
     \\
     \\    case "$prev" in
     \\        --completions)
@@ -697,6 +700,7 @@ const zsh_completion_script =
     \\      '--no-indented[Force SCSS syntax]' \
     \\      '--charset[Emit @charset for non-ASCII output (default)]' \
     \\      '--no-charset[Disable @charset emission]' \
+    \\      '--no-limits[Lift the limits on work and output]' \
     \\      '(-w --watch)'{-w,--watch}'[Recompile on changes]' \
     \\      '--poll[Use polling watcher (requires --watch)]' \
     \\      '--update[Recompile only when output is older than input]' \
@@ -759,6 +763,7 @@ const fish_completion_script =
     \\complete -c zsass -l no-indented -d "Force SCSS syntax"
     \\complete -c zsass -l charset -d "Emit @charset for non-ASCII output (default)"
     \\complete -c zsass -l no-charset -d "Disable @charset emission"
+    \\complete -c zsass -l no-limits -d "Lift the limits on work and output"
     \\complete -c zsass -s w -l watch -d "Recompile on changes"
     \\complete -c zsass -l poll -d "Use polling watcher (requires --watch)"
     \\complete -c zsass -l update -d "Recompile only when output is older than input"
@@ -822,6 +827,8 @@ const RunOpts = struct {
     /// official Sass CLI `--scss` (default) / `--indented` / `--no-indented` /
     /// `--plain-css` semantics.
     syntax_override: ?syntax_override_mod.SyntaxOverride = null,
+    /// Resource limits for each entry (`--no-limits` lifts them).
+    limits: resource_budget.CompileLimits = .{},
 };
 
 /// Out-parameter carrier for `RunOpts.watch_out_deps`. The watcher owns
@@ -1253,6 +1260,8 @@ pub fn main(init: std.process.Init) !void {
             opts.charset = true;
         } else if (std.mem.eql(u8, a, "--no-charset")) {
             opts.charset = false;
+        } else if (std.mem.eql(u8, a, "--no-limits")) {
+            opts.limits = resource_budget.CompileLimits.unlimited();
         } else if (std.mem.eql(u8, a, "--indented")) {
             opts.syntax_override = .sass;
         } else if (std.mem.eql(u8, a, "--no-indented") or std.mem.eql(u8, a, "--scss")) {
@@ -2511,6 +2520,29 @@ fn runEnd2EndWithPool(
     persistent_state: ?*persistent_resolver_mod.PersistentResolverState,
     cross_entry_states: ?*cross_entry_state_mod.CrossEntryModuleStates,
 ) !void {
+    // Each entry gets its own budget, so one entry cannot use up another's.
+    var budget = resource_budget.ResourceBudget.init(opts.limits, null, null);
+    const guard = stack_guard.begin(opts.limits.stack_bytes);
+    defer guard.end();
+    runEnd2EndWithBudget(allocator, input_path, output_path, opts, shared_pool, source_cache, ast_cache, phase_aggregator, persistent_state, cross_entry_states, &budget) catch |err| {
+        return budget.mapError(stack_guard.mapError(err));
+    };
+    if (stack_guard.tripped()) return error.NestingLimit;
+}
+
+fn runEnd2EndWithBudget(
+    allocator: std.mem.Allocator,
+    input_path: []const u8,
+    output_path: []const u8,
+    opts: RunOpts,
+    shared_pool: ?*intern_pool_mod.InternPool,
+    source_cache: ?*source_cache_mod.SharedSourceCache,
+    ast_cache: ?*ast_cache_mod.ParsedAstCache,
+    phase_aggregator: ?*PhaseAggregator,
+    persistent_state: ?*persistent_resolver_mod.PersistentResolverState,
+    cross_entry_states: ?*cross_entry_state_mod.CrossEntryModuleStates,
+    budget: *resource_budget.ResourceBudget,
+) !void {
     if (opts.update_mode) {
         if (opts.stdin_source == null and
             !std.mem.eql(u8, input_path, "-") and
@@ -2579,12 +2611,12 @@ fn runEnd2EndWithPool(
             if (persistent_ctx == null and !envFlagDisabled("ZSASS_PREAMBLE_CHECKPOINT")) &ps.preamble_checkpoints else null
         else
             null;
-        borrowed_result = try compiler_mod.parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(allocator, source, module_path, opts.load_paths, phase_timer_ptr, pool, source_cache, ast_cache, persistent_ctx, &deprecation_opts, preamble_store);
+        borrowed_result = try compiler_mod.parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(allocator, source, module_path, opts.load_paths, phase_timer_ptr, pool, source_cache, ast_cache, persistent_ctx, &deprecation_opts, preamble_store, budget);
         pool_ptr = pool;
         color_pool_ptr = &borrowed_result.?.color_pool;
         program_ptr = &borrowed_result.?.program;
     } else {
-        owned_result = try compiler_mod.parseResolveCompileWithPathAndPhaseTimer(allocator, source, module_path, opts.load_paths, phase_timer_ptr, &deprecation_opts);
+        owned_result = try compiler_mod.parseResolveCompileWithPathAndPhaseTimer(allocator, source, module_path, opts.load_paths, phase_timer_ptr, &deprecation_opts, budget);
         pool_ptr = &owned_result.?.pool;
         color_pool_ptr = &owned_result.?.color_pool;
         program_ptr = &owned_result.?.program;
@@ -2665,10 +2697,12 @@ fn runEnd2EndWithPool(
     }
 
     var rule_ir = rule_ir_mod.RuleIR.init();
+    rule_ir.budget = budget;
     defer rule_ir.deinit(allocator);
 
     var vm = try vm_mod.VM.init(allocator, pool_ptr, color_pool_ptr, &rule_ir, program_ptr);
     vm.error_sink_fd = api_mod.compileErrorSinkFd();
+    vm.budget = budget;
     defer vm.deinit();
     vm.deprecation_opts = deprecation_opts;
     if (std.c.getenv("ZSASS_TRACE_SLOT")) |slot_z| {
@@ -2832,7 +2866,9 @@ fn runEnd2EndWithPool(
         // they presuppose a real output destination.
         var discard_buf: [4096]u8 = undefined;
         var discard = std.Io.Writer.Discarding.init(discard_buf[0..]);
-        var tw = TrackingWriter.init(&discard.writer);
+        var limit_buf: [4096]u8 = undefined;
+        var limited = resource_budget.LimitedWriter.init(budget, &discard.writer, limit_buf[0..]);
+        var tw = TrackingWriter.init(&limited.interface);
         if (source_map) |*sm| {
             rule_ir.writeToWithSourceMap(&tw.writer, pool_ptr, sm, source_locations, opts.output_style, write_sm_opts) catch |err| {
                 cliErrPrint("zsass-check phase=writeTo-sm err={}\n", .{err});
@@ -2863,7 +2899,9 @@ fn runEnd2EndWithPool(
         defer css_out.deinit(allocator);
         {
             var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &css_out);
-            var tw = TrackingWriter.init(&aw.writer);
+            var limit_buf: [4096]u8 = undefined;
+            var limited = resource_budget.LimitedWriter.init(budget, &aw.writer, limit_buf[0..]);
+            var tw = TrackingWriter.init(&limited.interface);
             if (source_map) |*sm| {
                 try rule_ir.writeToWithSourceMap(&tw.writer, pool_ptr, sm, source_locations, opts.output_style, write_sm_opts);
                 if (opts.embed_sources) try sm.populateEmbedContents(allocator, module_path, source);
@@ -2913,7 +2951,9 @@ fn runEnd2EndWithPool(
             atomic_writer = created;
             break :blk &fw.interface;
         };
-        var tw = TrackingWriter.init(target_writer);
+        var limit_buf: [4096]u8 = undefined;
+        var limited = resource_budget.LimitedWriter.init(budget, target_writer, limit_buf[0..]);
+        var tw = TrackingWriter.init(&limited.interface);
         if (source_map) |*sm| {
             rule_ir.writeToWithSourceMap(&tw.writer, pool_ptr, sm, source_locations, opts.output_style, write_sm_opts) catch |err| {
                 cliErrPrint("zsass-emit phase=writeTo-sm err={}\n", .{err});

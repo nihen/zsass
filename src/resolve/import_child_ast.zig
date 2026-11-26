@@ -6,10 +6,17 @@ const intern_pool_mod = @import("../runtime/intern_pool.zig");
 const path_resolution = @import("path_resolution.zig");
 const source_cache_mod = @import("source_cache.zig");
 const ast_cache_mod = @import("ast_cache.zig");
+const resource_budget = @import("../runtime/resource_budget.zig");
 
 const InternPool = intern_pool_mod.InternPool;
 
-pub const LoadImportChildAstError = error{ OutOfMemory, IoFailure, SyntaxError };
+pub const LoadImportChildAstError = error{ OutOfMemory, IoFailure, SyntaxError } || resource_budget.LimitError;
+
+fn parseFailure(err: anyerror) LoadImportChildAstError {
+    if (err == error.OutOfMemory) return error.OutOfMemory;
+    if (resource_budget.isLimitError(err)) return @errorCast(err);
+    return error.SyntaxError;
+}
 
 pub const ImportChildAst = struct {
     source: []const u8,
@@ -37,6 +44,7 @@ pub fn loadImportChildAst(
     source_cache: ?*source_cache_mod.SharedSourceCache,
     ast_cache: ?*ast_cache_mod.ParsedAstCache,
     path: []const u8,
+    budget: ?*resource_budget.ResourceBudget,
 ) LoadImportChildAstError!ImportChildAst {
     var loaded = path_resolution.loadModuleSource(allocator, source_cache, path) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -44,16 +52,15 @@ pub fn loadImportChildAst(
     };
     errdefer loaded.deinit(allocator);
     const source = loaded.source;
+    if (budget) |b| try b.checkSourceBytes(source.len);
+    const max_syntax_depth = if (budget) |b| b.limits.max_syntax_depth else resource_budget.default_max_syntax_depth;
 
     var scratch = std.heap.ArenaAllocator.init(allocator);
     errdefer scratch.deinit();
     const sa = scratch.allocator();
 
     if (ast_cache) |ac| {
-        const entry = ac.getOrParse(path, source) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.SyntaxError,
-        };
+        const entry = ac.getOrParse(path, source, max_syntax_depth) catch |err| return parseFailure(err);
         return .{
             .source = source,
             .loaded = loaded,
@@ -76,8 +83,9 @@ pub fn loadImportChildAst(
     parser.is_indented_syntax = is_indented_syntax;
     parser.is_plain_css = is_plain_css_source;
     parser.no_interpolation = !lexer.saw_interpolation;
+    parser.max_syntax_depth = max_syntax_depth;
     defer parser.deinit();
-    var ast = parser.parse() catch return error.SyntaxError;
+    var ast = parser.parse() catch |err| return parseFailure(err);
     ast.is_indented_syntax = is_indented_syntax;
     errdefer ast.deinit();
 

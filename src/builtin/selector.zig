@@ -1,5 +1,7 @@
 //! sass:selector builtins.
 const std = @import("std");
+const resource_budget = @import("../runtime/resource_budget.zig");
+const stack_guard = @import("../runtime/stack_guard.zig");
 const selector_mod = @import("../selector/selector.zig");
 const extend_mod = @import("../selector/extend.zig");
 const extend_engine_mod = @import("../selector/extend_engine.zig");
@@ -48,6 +50,7 @@ fn makeUnquotedStringValue(ctx: *BuiltinContext, s: []const u8) BuiltinError!Val
 }
 
 fn selectorValueToString(ctx: *BuiltinContext, value: Value, depth: u8) BuiltinError![]u8 {
+    try stack_guard.check();
     if (value.isString()) {
         return ctx.allocator.dupe(u8, ctx.intern_pool.get(value.stringIntern())) catch error.OutOfMemory;
     }
@@ -236,7 +239,7 @@ pub fn selector_unify(ctx: *BuiltinContext, args: []const Value, arg_names: []co
 
     for (sel1.selectors.items) |complex1| {
         for (sel2.selectors.items) |complex2| {
-            const unified_list = try unifyComplexSelectors(ctx.allocator, &complex1, &complex2);
+            const unified_list = try unifyComplexSelectors(ctx.allocator, ctx.budget, &complex1, &complex2);
             defer {
                 for (unified_list) |*item| item.deinit();
                 ctx.allocator.free(unified_list);
@@ -458,6 +461,7 @@ fn selectorExtendCore(
 
     var result = try extend_mod.applySelectorFunctionExtend(
         ctx.allocator,
+        ctx.budget,
         &sel,
         &extendee,
         &extender,
@@ -490,7 +494,7 @@ fn selectorReplaceCore(
 
     // The whole list at once: what one selector turns into can be dropped
     // for another selector of the list that covers it.
-    var result = try extend_mod.applySelectorFunctionReplace(ctx.allocator, &sel, &original, &replacement);
+    var result = try extend_mod.applySelectorFunctionReplace(ctx.allocator, ctx.budget, &sel, &original, &replacement);
     defer result.deinit();
     return selectorListToValue(ctx, &result);
 }
@@ -789,10 +793,11 @@ fn mergeUnifiedCompoundSelectors(
 
 fn unifyComplexSelectors(
     allocator: std.mem.Allocator,
+    budget: ?*resource_budget.ResourceBudget,
     complex1: *const ComplexSelector,
     complex2: *const ComplexSelector,
 ) ![]ComplexSelector {
-    return extend_engine_mod.unifyComplexes(allocator, complex1, complex2);
+    return extend_engine_mod.unifyComplexes(allocator, budget, complex1, complex2);
 }
 
 fn complexLeadingCombinatorCount(complex: *const ComplexSelector) usize {
@@ -1128,7 +1133,7 @@ fn expectUnifiedSelectorSet(
     var rhs = try selector_mod.parse(allocator, rhs_src);
     defer rhs.deinit();
 
-    const unified = try unifyComplexSelectors(allocator, &lhs.selectors.items[0], &rhs.selectors.items[0]);
+    const unified = try unifyComplexSelectors(allocator, null, &lhs.selectors.items[0], &rhs.selectors.items[0]);
     defer {
         for (unified) |*item| item.deinit();
         allocator.free(unified);
@@ -1199,7 +1204,7 @@ test "selector unify complex: child and descendant weaving keeps child context" 
     var rhs = try selector_mod.parse(allocator, ".e .f");
     defer rhs.deinit();
 
-    const unified = try unifyComplexSelectors(allocator, &lhs.selectors.items[0], &rhs.selectors.items[0]);
+    const unified = try unifyComplexSelectors(allocator, null, &lhs.selectors.items[0], &rhs.selectors.items[0]);
     defer {
         for (unified) |*item| item.deinit();
         allocator.free(unified);
@@ -1219,7 +1224,7 @@ test "selector unify complex: sibling and next-sibling returns both legacy branc
     var rhs = try selector_mod.parse(allocator, ".e + .f");
     defer rhs.deinit();
 
-    const unified = try unifyComplexSelectors(allocator, &lhs.selectors.items[0], &rhs.selectors.items[0]);
+    const unified = try unifyComplexSelectors(allocator, null, &lhs.selectors.items[0], &rhs.selectors.items[0]);
     defer {
         for (unified) |*item| item.deinit();
         allocator.free(unified);
@@ -1244,7 +1249,7 @@ test "selector unify complex: leading combinator stays on result" {
     var rhs = try selector_mod.parse(allocator, "+ .d");
     defer rhs.deinit();
 
-    const unified = try unifyComplexSelectors(allocator, &lhs.selectors.items[0], &rhs.selectors.items[0]);
+    const unified = try unifyComplexSelectors(allocator, null, &lhs.selectors.items[0], &rhs.selectors.items[0]);
     defer {
         for (unified) |*item| item.deinit();
         allocator.free(unified);

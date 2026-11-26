@@ -18,6 +18,15 @@ const vm_mod = @import("runtime/vm.zig");
 const zsass_io = @import("runtime/io.zig");
 const perf_mod = @import("runtime/perf.zig");
 const embed_batch_mod = @import("runtime/embed_batch.zig");
+const resource_budget = @import("runtime/resource_budget.zig");
+const stack_guard = @import("runtime/stack_guard.zig");
+
+/// Limits on the work and output of one compilation. See `CompileOptions.limits`.
+pub const CompileLimits = resource_budget.CompileLimits;
+/// Callback polled during compilation; see `CompileOptions.cancellation_check`.
+pub const CancellationCheck = resource_budget.CancellationCheck;
+/// True for the errors a limit in `CompileLimits` or cancellation returns.
+pub const isLimitError = resource_budget.isLimitError;
 
 comptime {
     //export symbol (`zsass_builtin_meta_dispatch`) of runtime/vm_meta.zig
@@ -77,6 +86,15 @@ pub const CompileOptions = struct {
     diagnostic_sink: ?DiagnosticSink = null,
     /// Opaque pointer threaded back into every `diagnostic_sink` call.
     diagnostic_ctx: ?*anyopaque = null,
+    /// Bounds on the compilation as a whole, including every module it
+    /// loads. Exceeding one returns a limit error such as
+    /// `error.ExecutionLimit`; `CompileLimits.unlimited()` removes them.
+    limits: CompileLimits = .{},
+    /// Polled during compilation; returning true stops it with
+    /// `error.CompilationCancelled`. A wall-clock timeout belongs here.
+    cancellation_check: ?CancellationCheck = null,
+    /// Opaque pointer passed to `cancellation_check`.
+    cancellation_ctx: ?*anyopaque = null,
 };
 
 threadlocal var diagnostic_sink_tls: ?DiagnosticSink = null;
@@ -133,6 +151,7 @@ fn reportFinalErrorDiagnostic(err: anyerror, file_path: []const u8, opts: Compil
     const diag = Diagnostic{
         .level = .err,
         .message = error_format_mod.errorToUserMessageWithContext(err),
+        .code = resource_budget.limitCode(err),
         .file = if (file_path.len > 0) file_path else null,
     };
     sink(&diag, opts.diagnostic_ctx);
@@ -204,9 +223,13 @@ pub fn compileSourceToCss(
     // as the lists built-in functions return, have no other owner.
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
+    var budget = resource_budget.ResourceBudget.init(opts.limits, opts.cancellation_check, opts.cancellation_ctx);
+    const guard = stack_guard.begin(opts.limits.stack_bytes);
+    defer guard.end();
     // Declared after the arena so it runs first: the message may point into
     // memory the compile allocated. It also covers the copy below.
-    const css = compileSourceToCssInArena(arena.allocator(), source, file_path, load_paths, opts) catch |err| {
+    const css = compileSourceToCssInArena(arena.allocator(), source, file_path, load_paths, opts, &budget) catch |caught| {
+        const err = budget.mapError(stack_guard.mapError(caught));
         reportFinalErrorDiagnostic(err, file_path, opts);
         return err;
     };
@@ -222,21 +245,24 @@ fn compileSourceToCssInArena(
     file_path: []const u8,
     load_paths: []const []const u8,
     opts: CompileOptions,
+    budget: *resource_budget.ResourceBudget,
 ) anyerror![]u8 {
     error_format_mod.clearContextMessage();
     const prev_diag = pushDiagnosticSink(opts);
     defer restoreDiagnosticSink(prev_diag);
-    var r = try compiler_mod.parseResolveCompileWithPath(alloc, source, file_path, load_paths);
+    var r = try compiler_mod.parseResolveCompileWithPathAndBudget(alloc, source, file_path, load_paths, budget);
     defer r.pool.deinit(alloc);
     defer r.color_pool.deinit(alloc);
     defer r.resolved.deinit();
     defer r.program.deinit();
 
     var rule_ir = rule_ir_mod.RuleIR.init();
+    rule_ir.budget = budget;
     defer rule_ir.deinit(alloc);
 
     var vm = try vm_mod.VM.init(alloc, &r.pool, &r.color_pool, &rule_ir, &r.program);
     vm.error_sink_fd = compile_error_sink_fd_tls;
+    vm.budget = budget;
     vm.deprecation_opts.quiet = opts.quiet or builtin.is_test;
     defer vm.deinit();
 
@@ -254,7 +280,11 @@ fn compileSourceToCssInArena(
 
     var aw = std.Io.Writer.Allocating.init(alloc);
     defer aw.deinit();
-    try rule_ir.writeToWithSourceMap(&aw.writer, &r.pool, null, source_locations, opts.output_style, .{});
+    var limit_buf: [4096]u8 = undefined;
+    var limited = resource_budget.LimitedWriter.init(budget, &aw.writer, limit_buf[0..]);
+    try rule_ir.writeToWithSourceMap(&limited.interface, &r.pool, null, source_locations, opts.output_style, .{});
+    try limited.interface.flush();
+    if (stack_guard.tripped()) return error.NestingLimit;
     return try aw.toOwnedSlice();
 }
 
@@ -272,7 +302,11 @@ pub fn compileSourceToCssWithSourceMap(
 ) anyerror!CompileCssWithSourceMapResult {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
-    const result = compileSourceToCssWithSourceMapInArena(arena.allocator(), source, file_path, load_paths, source_map_output_css_path, opts) catch |err| {
+    var budget = resource_budget.ResourceBudget.init(opts.limits, opts.cancellation_check, opts.cancellation_ctx);
+    const guard = stack_guard.begin(opts.limits.stack_bytes);
+    defer guard.end();
+    const result = compileSourceToCssWithSourceMapInArena(arena.allocator(), source, file_path, load_paths, source_map_output_css_path, opts, &budget) catch |caught| {
+        const err = budget.mapError(stack_guard.mapError(caught));
         reportFinalErrorDiagnostic(err, file_path, opts);
         return err;
     };
@@ -295,21 +329,24 @@ fn compileSourceToCssWithSourceMapInArena(
     load_paths: []const []const u8,
     source_map_output_css_path: ?[]const u8,
     opts: CompileOptions,
+    budget: *resource_budget.ResourceBudget,
 ) anyerror!CompileCssWithSourceMapResult {
     error_format_mod.clearContextMessage();
     const prev_diag = pushDiagnosticSink(opts);
     defer restoreDiagnosticSink(prev_diag);
-    var r = try compiler_mod.parseResolveCompileWithPath(alloc, source, file_path, load_paths);
+    var r = try compiler_mod.parseResolveCompileWithPathAndBudget(alloc, source, file_path, load_paths, budget);
     defer r.pool.deinit(alloc);
     defer r.color_pool.deinit(alloc);
     defer r.resolved.deinit();
     defer r.program.deinit();
 
     var rule_ir = rule_ir_mod.RuleIR.init();
+    rule_ir.budget = budget;
     defer rule_ir.deinit(alloc);
 
     var vm = try vm_mod.VM.init(alloc, &r.pool, &r.color_pool, &rule_ir, &r.program);
     vm.error_sink_fd = compile_error_sink_fd_tls;
+    vm.budget = budget;
     vm.deprecation_opts.quiet = opts.quiet or builtin.is_test;
     defer vm.deinit();
 
@@ -337,9 +374,13 @@ fn compileSourceToCssWithSourceMapInArena(
 
     var aw = std.Io.Writer.Allocating.init(alloc);
     defer aw.deinit();
-    try rule_ir.writeToWithSourceMap(&aw.writer, &r.pool, &sm, source_locations, opts.output_style, .{
+    var limit_buf: [4096]u8 = undefined;
+    var limited = resource_budget.LimitedWriter.init(budget, &aw.writer, limit_buf[0..]);
+    try rule_ir.writeToWithSourceMap(&limited.interface, &r.pool, &sm, source_locations, opts.output_style, .{
         .source_map_output_dir_abs = sm_out_dir,
     });
+    try limited.interface.flush();
+    if (stack_guard.tripped()) return error.NestingLimit;
     const css = try aw.toOwnedSlice();
     errdefer alloc.free(css);
 
@@ -2161,7 +2202,9 @@ test "api: a target repeated in ten compounds is extended in every combination" 
         \\.x .f { @extend .a; }
         \\
     ;
-    const css = try compileSourceToCss(alloc, source, "", &.{}, .{});
+    // Weaving 2047 selectors of twenty compounds each takes more than the
+    // default selector budget.
+    const css = try compileSourceToCss(alloc, source, "", &.{}, .{ .limits = .{ .max_selector_candidates = 1_000_000 } });
     // The official CLI writes the original and 2046 more: every way of
     // taking `.x .f` for some of the ten, woven. A list this long is not
     // trimmed.

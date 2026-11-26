@@ -1,4 +1,5 @@
 const std = @import("std");
+const stack_guard = @import("../runtime/stack_guard.zig");
 const css_utils = @import("../runtime/css_utils.zig");
 
 // ============================================================================
@@ -141,6 +142,7 @@ pub const ComplexSelector = struct {
     }
 
     pub fn clone(self: *const ComplexSelector, allocator: std.mem.Allocator) !ComplexSelector {
+        try stack_guard.check();
         var result = ComplexSelector.init(allocator);
         // OOM mid-loop must release every component already cloned into
         // `result` (compounds carry their own owned memory).
@@ -181,6 +183,7 @@ pub const SelectorList = struct {
     }
 
     pub fn clone(self: *const SelectorList, allocator: std.mem.Allocator) !SelectorList {
+        try stack_guard.check();
         var result = SelectorList.init(allocator);
         // OOM mid-loop must release every complex selector that has
         // already been deep-cloned into `result`.
@@ -297,6 +300,8 @@ inline fn allocSelectorListForParse(allocator: std.mem.Allocator, value: Selecto
 /// Rejects syntactically invalid selectors with `ParseError.InvalidSelector`.
 /// Returned value is owned by the caller; free via `SelectorList.deinit`.
 pub fn parse(allocator: std.mem.Allocator, input: []const u8) ParseError!SelectorList {
+    // Recursion through selector pseudo-class arguments.
+    try stack_guard.check();
     var list = SelectorList.init(allocator);
     errdefer list.deinit();
 
@@ -2225,6 +2230,7 @@ pub fn isSuperSelector(super_sel: *const SelectorList, sub: *const SelectorList)
 }
 
 pub fn complexIsSuperSelector(super_sel: *const ComplexSelector, sub: *const ComplexSelector) bool {
+    if (stack_guard.overflowed()) return false;
     if (transparentPseudoPairIsSuperSelector(super_sel, sub)) |result| {
         return result;
     }

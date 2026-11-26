@@ -1,5 +1,6 @@
 //! sass:color builtins.
 const std = @import("std");
+const stack_guard = @import("../runtime/stack_guard.zig");
 const calculation = @import("../color/calculation.zig");
 const color_mod = @import("../color/color.zig");
 const value_mod = @import("../runtime/value.zig");
@@ -477,6 +478,7 @@ fn bindColorOverrideAlphaArgs(
 }
 
 fn valueLooksLikeColorPassthrough(ctx: *BuiltinContext, v: Value) bool {
+    if (stack_guard.overflowed()) return false;
     if (v.isString()) {
         const raw = ctx.intern_pool.get(v.stringIntern());
         if (!v.stringQuoted(ctx.string_flags_pool.items) and identifierEq(raw, "from")) return true;
@@ -507,6 +509,7 @@ fn shouldSerializeColorFallback(ctx: *BuiltinContext, args: []const Value) bool 
 }
 
 fn valueContainsQuotedString(ctx: *BuiltinContext, v: Value) bool {
+    if (stack_guard.overflowed()) return false;
     if (v.isString()) return v.stringQuoted(ctx.string_flags_pool.items);
     if (v.kind() == .list) {
         const items = ctx.list_pool.items[v.listHandle()];

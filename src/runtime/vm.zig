@@ -1,6 +1,8 @@
 //!Stage 1a bytecode VM -- while+switch dispatch, Rule IR append.
 
 const std = @import("std");
+const stack_guard = @import("stack_guard.zig");
+const resource_budget = @import("resource_budget.zig");
 const builtin = @import("builtin");
 const opcode_mod = @import("../ir/opcode.zig");
 const media_prelude = @import("../resolve/media_prelude.zig");
@@ -126,7 +128,7 @@ const VMError = error{
     FatalDeprecation,
     BadJump,
     InternalError,
-};
+} || resource_budget.LimitError;
 
 /// Value that does not conflict with `encodeChunkRef` / `decodeChunkRef` (assuming id does not use upper bit).
 const chunk_run_sentinel: u32 = 0xffff_fffc;
@@ -574,6 +576,8 @@ pub const VM = struct {
     rule_ir: *RuleIR,
     program: *Program,
     histogram: ?*observe_mod.OpcodeHistogram = null,
+    /// Shared with child VMs so the whole compilation draws on one budget.
+    budget: ?*resource_budget.ResourceBudget = null,
     /// Debug: if non-zero, prints STORE_LOCAL events for this slot.
     trace_slot: u32 = std.math.maxInt(u32),
 
@@ -1414,6 +1418,7 @@ pub const VM = struct {
     }
 
     fn persistableLoadCssValue(src_list_pool: []const []Value, value: Value) bool {
+        if (stack_guard.overflowed()) return false;
         if (value.kind() == .list) {
             const handle: usize = @intCast(value.listHandle());
             if (handle >= src_list_pool.len) return false;
@@ -1432,6 +1437,7 @@ pub const VM = struct {
         src_list_pool: []const []Value,
         value: Value,
     ) VMError!?Value {
+        try stack_guard.check();
         if (value.kind() == .list) {
             const handle: usize = @intCast(value.listHandle());
             if (handle >= src_list_pool.len) return null;
@@ -1570,6 +1576,7 @@ pub const VM = struct {
     /// this VM's list handles (slash-preserve, arglist keywords, source
     /// shapes). A false here disqualifies the whole module snapshot.
     fn crossEntryValueMovable(self: *const VM, value: Value) bool {
+        if (stack_guard.overflowed()) return false;
         switch (value.kind()) {
             .nil, .boolean, .string, .number, .color => return true,
             .list => {
@@ -1593,6 +1600,7 @@ pub const VM = struct {
         cache: *cross_entry_state_mod.CrossEntryModuleStates,
         value: Value,
     ) std.mem.Allocator.Error!Value {
+        try stack_guard.check();
         switch (value.kind()) {
             .number => {
                 const unit = value.unitId(&self.number_pool);
@@ -1630,6 +1638,7 @@ pub const VM = struct {
         cache: *const cross_entry_state_mod.CrossEntryModuleStates,
         value: Value,
     ) std.mem.Allocator.Error!Value {
+        try stack_guard.check();
         switch (value.kind()) {
             .number => {
                 const unit = value.unitId(&cache.number_pool);
@@ -2345,6 +2354,7 @@ pub const VM = struct {
         }
         if (self.histogram) |h| h.tick(inst.opcode());
         perf.note(.vm_step);
+        if (self.budget) |b| try b.chargeVmStep();
         return inst;
     }
 
@@ -2553,6 +2563,7 @@ pub const VM = struct {
 
         const inst = chunk.code[self.pc];
         self.pc += 1;
+        if (self.budget) |b| try b.chargeVmStep();
         if (chunk.source_locs.len == chunk.code.len) {
             const loc = chunk.source_locs[self.pc - 1];
             self.current_source_span = .{
@@ -5742,6 +5753,7 @@ pub const VM = struct {
     }
 
     fn collectDeclTokens(self: *VM, tokens: *std.ArrayListUnmanaged(u8), val: Value, depth: usize, list_plain_numbers: bool) VMError!void {
+        try stack_guard.check();
         switch (val.kind()) {
             .list => {
                 if (depth >= 8) return;
@@ -6246,6 +6258,7 @@ pub const VM = struct {
     }
 
     pub fn maybeResolveParentSelectorValue(self: *VM, v: Value) VMError!Value {
+        try stack_guard.check();
         if (v.kind() == .list) {
             if (v.listParentSelectorNone()) return v;
             const in_handle = v.listHandle();
@@ -6406,6 +6419,7 @@ pub const VM = struct {
     }
 
     fn diagnosticTextWithModules(self: *VM, v: Value) VMError![]const u8 {
+        try stack_guard.check();
         if (v.kind() == .module) {
             return try self.allocator.dupe(u8, value_mod.moduleRefDisplay(self.intern_pool.get(v.moduleRefKey())));
         }
@@ -8519,6 +8533,7 @@ pub const VM = struct {
     pub fn initLoadCssChildVM(self: *VM, child_program: *Program, is_plain_css_source: bool, has_parent_selector: bool) std.mem.Allocator.Error!VM {
         var child_vm = try VM.init(self.allocator, self.intern_pool, self.color_pool, self.rule_ir, child_program);
         child_vm.error_sink_fd = self.error_sink_fd;
+        child_vm.budget = self.budget;
         child_vm.load_css_stack_ptr = self.load_css_stack_ptr;
         child_vm.load_css_loaded_paths_ptr = self.load_css_loaded_paths_ptr;
         child_vm.load_css_state_ptr = self.load_css_state_ptr;
@@ -9493,6 +9508,7 @@ fn parseCalcMultiplicativeNumberishExpr(
     numerators: *std.ArrayListUnmanaged([]const u8),
     denominators: *std.ArrayListUnmanaged([]const u8),
 ) VMError!bool {
+    try stack_guard.check();
     const expr = std.mem.trim(u8, expr_raw, " \t\r\n");
     if (expr.len == 0) return false;
 
@@ -9851,6 +9867,7 @@ fn appendUnitExprFactorsVm(
     numerators: *std.ArrayListUnmanaged([]const u8),
     denominators: *std.ArrayListUnmanaged([]const u8),
 ) VMError!bool {
+    try stack_guard.check();
     if (start_op == .div) {
         var local_nums: std.ArrayListUnmanaged([]const u8) = .empty;
         defer local_nums.deinit(alloc);
@@ -10308,6 +10325,7 @@ fn valueToOpString(
     callable_payload_pool: *const value_mod.CallablePayloadPool,
     v: Value,
 ) VMError![]const u8 {
+    try stack_guard.check();
     if (v.kind() == .nil) return try alloc.dupe(u8, "");
     if (v.kind() == .boolean) return try alloc.dupe(u8, if (v.p64Of() != 0) "true" else "false");
     if (v.isNumber()) return try formatNumberValue(pool, number_pool, alloc, v);
@@ -11388,6 +11406,7 @@ const ListSerializeMode = enum {
 };
 
 fn listValueContainsMapRecursive(list_pool: *const std.ArrayListUnmanaged([]Value), value: Value) bool {
+    if (stack_guard.overflowed()) return false;
     if (value.kind() != .list) return false;
     if (value.listIsMap(value_mod.empty_list_meta_pool)) return true;
     const handle: usize = @intCast(value.listHandle());
@@ -11400,6 +11419,7 @@ fn listValueContainsMapRecursive(list_pool: *const std.ArrayListUnmanaged([]Valu
 }
 
 fn listValueContainsQuotedStringRecursive(list_pool: *const std.ArrayListUnmanaged([]Value), value: Value) bool {
+    if (stack_guard.overflowed()) return false;
     if (value.kind() != .list) return false;
     const handle: usize = @intCast(value.listHandle());
     if (handle >= list_pool.items.len) return false;
@@ -11476,6 +11496,7 @@ fn valueToInternIdRawWithMode(
     v: Value,
     mode: ListSerializeMode,
 ) VMError!InternId {
+    try stack_guard.check();
     if (v.kind() == .nil) return pool.intern("") catch error.OutOfMemory;
     if (v.kind() == .boolean) {
         return pool.intern(if (v.p64Of() != 0) "true" else "false") catch error.OutOfMemory;
@@ -11998,6 +12019,7 @@ fn valueToInternIdInterpolated(
     slash_list_preserve: ?*const std.AutoHashMapUnmanaged(u32, void),
     v: Value,
 ) VMError!InternId {
+    try stack_guard.check();
     const value = v;
     if (value.kind() == .nil) return pool.intern("") catch error.OutOfMemory;
 
@@ -12071,6 +12093,7 @@ fn valueToInternIdDeclWithMode(
     custom_property: bool,
     mode: ListSerializeMode,
 ) VMError!InternId {
+    try stack_guard.check();
     if (v.kind() == .nil) return pool.intern("") catch error.OutOfMemory;
 
     if (v.isString()) {
@@ -13028,6 +13051,7 @@ fn appendSerializedDeclStringImpl(
     quote_char: ?u8,
     collapse_quoted_segment_newlines: bool,
 ) VMError!void {
+    try stack_guard.check();
     var i: usize = 0;
     var prev_was_hex_escape = false;
     while (i < raw.len) {
@@ -17567,6 +17591,7 @@ fn compileWithAstCacheToCss(
         null,
         null,
         null,
+        null,
     );
     defer if (!r.borrowed_color_pool) r.color_pool.deinit(allocator);
     defer r.resolved.deinit();
@@ -17604,6 +17629,7 @@ fn compileWithSharedPoolCrossEntryToCss(
         load_paths,
         null,
         pool,
+        null,
         null,
         null,
         null,
@@ -17736,6 +17762,7 @@ test "vm: cross-entry seed preserves load-css configured-load guard" {
         &.{root},
         null,
         &pool,
+        null,
         null,
         null,
         null,

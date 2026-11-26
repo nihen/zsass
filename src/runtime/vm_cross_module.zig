@@ -1,4 +1,6 @@
 const std = @import("std");
+const resource_budget = @import("resource_budget.zig");
+const stack_guard = @import("stack_guard.zig");
 const lexer_mod = @import("../frontend/lexer.zig");
 const parser_mod = @import("../frontend/parser.zig");
 const compiler_mod = @import("../ir/compiler.zig");
@@ -296,6 +298,7 @@ fn parseLoadCssWithConfig(self: anytype, with_v: Value) !LoadCssConfig {
 }
 
 fn cloneValueForLoadCssChild(self: anytype, child: anytype, v: Value) !Value {
+    try stack_guard.check();
     if (v.kind() == .list) {
         const src_handle = v.listHandle();
         if (src_handle >= self.list_pool.items.len) return error.BuiltinType;
@@ -845,10 +848,18 @@ pub const LoadCssRunOptions = struct {
     quiet: bool = false,
 };
 
+/// A failed load of the module is a Sass error unless a limit stopped it.
+fn loadCssFailure(err: anyerror) (std.mem.Allocator.Error || resource_budget.LimitError || error{SassError}) {
+    if (err == error.OutOfMemory) return error.OutOfMemory;
+    if (resource_budget.isLimitError(err)) return @errorCast(err);
+    return error.SassError;
+}
+
 pub fn runLoadCssModule(self: anytype, resolved_path: []const u8, config: LoadCssConfig, opts: LoadCssRunOptions) !void {
     perf.note(.vm_module_run);
     const source = try readFileToStringAlloc(self, resolved_path);
     defer self.allocator.free(source);
+    if (self.budget) |b| try b.checkSourceBytes(source.len);
 
     var scratch = std.heap.ArenaAllocator.init(self.allocator);
     defer scratch.deinit();
@@ -874,15 +885,14 @@ pub fn runLoadCssModule(self: anytype, resolved_path: []const u8, config: LoadCs
     var parser = parser_mod.Parser.init(sa, self.intern_pool, tokens, source);
     parser.is_indented_syntax = is_sass_source;
     parser.is_plain_css = is_plain_css_source;
+    if (self.budget) |b| parser.max_syntax_depth = b.limits.max_syntax_depth;
     defer parser.deinit();
-    var ast = parser.parse() catch return error.SassError;
+    var ast = parser.parse() catch |err| return loadCssFailure(err);
     ast.is_indented_syntax = is_sass_source;
     defer ast.deinit();
 
-    var resolved = resolver_mod.resolveWithEntryPathAndColorPool(self.allocator, &ast, self.intern_pool, resolved_path, self.program.load_paths, self.color_pool) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.SassError,
-    };
+    // The child draws on the same budget and file policy as this compilation.
+    var resolved = resolver_mod.resolveWithEntryPathColorPoolCachesAndPersistent(self.allocator, &ast, self.intern_pool, resolved_path, self.program.load_paths, self.color_pool, null, null, null, null, null, self.budget) catch |err| return loadCssFailure(err);
     defer resolved.deinit();
 
     var child_program = compiler_mod.compile(self.allocator, self.intern_pool, &resolved, self.color_pool) catch |err| switch (err) {

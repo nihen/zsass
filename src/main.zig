@@ -30,4 +30,7 @@ test {
     _ = @import("ir/source_map.zig");
     _ = @import("runtime/value_format.zig");
     _ = @import("selector/extend_tests.zig");
+    _ = @import("runtime/resource_budget.zig");
+    _ = @import("runtime/stack_guard.zig");
+    _ = @import("api_limits_test.zig");
 }

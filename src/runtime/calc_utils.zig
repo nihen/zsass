@@ -1,6 +1,7 @@
 //! Calc normalization and arithmetic text helpers shared by VM and resolver.
 
 const std = @import("std");
+const stack_guard = @import("stack_guard.zig");
 const calculation = @import("../color/calculation.zig");
 const expr_scan = @import("expr_scan.zig");
 const css_utils = @import("css_utils.zig");
@@ -488,6 +489,7 @@ fn removeUnnecessaryCalcParensImpl(
     expr: []const u8,
     preserve_trailing_additive_after_plus: bool,
 ) ![]const u8 {
+    try stack_guard.check();
     // Scan for parenthesized groups and check if they can be removed
     var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
@@ -655,6 +657,7 @@ fn removeUnnecessaryCalcParensImpl(
 /// parentheses around additive groups such as `(0.5rem + 2px)`, but still
 /// drops wrappers around purely multiplicative terms like `(30px / 2)`.
 fn removeNonAdditiveCalcParens(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
+    try stack_guard.check();
     var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
     var i: usize = 0;
@@ -984,6 +987,7 @@ fn normalizeCssSpecialFunctionWhitespace(allocator: std.mem.Allocator, call: []c
 /// Scientific notation `3e-5` / `3e+2` and CSS custom property idents
 /// (`--name`) are left intact. Strings/comments are passed through unchanged.
 fn normalizeCalcOperatorSpacing(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
+    try stack_guard.check();
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     var i: usize = 0;
@@ -1381,6 +1385,7 @@ fn normalizeCalcInDeclValueImpl(
 }
 
 pub fn flattenNestedCalc(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
+    try stack_guard.check();
     // Search for "calc(" (not preceded by an identifier char)
     var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
@@ -1490,6 +1495,7 @@ pub fn flattenNestedCalc(allocator: std.mem.Allocator, expr: []const u8) ![]cons
 /// `calc(0.75em - 1px)`) it is preserved as `calc(...)` because the `calc`
 /// keyword came from an interpolated variable and official Sass CLI preserves it.
 fn flattenNestedCalcForInterpolated(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
+    try stack_guard.check();
     var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
     var i: usize = 0;

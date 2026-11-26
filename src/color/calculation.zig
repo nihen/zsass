@@ -1,4 +1,5 @@
 const std = @import("std");
+const stack_guard = @import("../runtime/stack_guard.zig");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const units = @import("../runtime/units.zig");
@@ -316,6 +317,7 @@ const Parser = struct {
 
     // atom = number | '(' expression ')' | ident '(' args ')' | variable
     fn parseAtom(self: *Parser) ParseError!*CalcValue {
+        try stack_guard.check();
         if (self.current == .number) {
             const n = self.current.number;
             _ = self.advance();
@@ -541,6 +543,7 @@ fn discardBothUnits(allocator: Allocator, left: TakenUnit, right: TakenUnit) voi
 }
 
 pub fn simplify(allocator: Allocator, value: *const CalcValue) !*CalcValue {
+    try stack_guard.check();
     if (value.* == .number) {
         const node = try allocator.create(CalcValue);
         node.* = value.*;
@@ -992,6 +995,7 @@ fn writeCss(
     parent_op: ?Operator,
     is_right_child: bool,
 ) !void {
+    try stack_guard.check();
     if (value.* == .number) {
         const n = value.number;
         const special_with_unit = n.unit != null and (std.math.isNan(n.value) or std.math.isInf(n.value));

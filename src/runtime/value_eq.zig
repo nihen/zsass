@@ -1,4 +1,5 @@
 const std = @import("std");
+const stack_guard = @import("stack_guard.zig");
 const color_mod = @import("../color/color.zig");
 const value_mod = @import("value.zig");
 const intern_pool_mod = @import("intern_pool.zig");
@@ -152,6 +153,7 @@ fn mapListsEqual(env: anytype, a_items: []const Value, b_items: []const Value) b
 }
 
 fn valueEqInner(env: anytype, a: Value, b: Value) bool {
+    if (stack_guard.overflowed()) return false;
     if (a.kind() != b.kind()) {
         if (a.kind() == .string and b.kind() == .color) {
             const color_pool = env.colorPool() orelse return false;

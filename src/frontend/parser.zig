@@ -22,8 +22,10 @@ const BinOp = ast_flat.BinOp;
 const UnaryOp = ast_flat.UnaryOp;
 const error_format = @import("../runtime/error_format.zig");
 const css_utils = @import("../runtime/css_utils.zig");
+const resource_budget = @import("../runtime/resource_budget.zig");
+const syntax_nesting_message = resource_budget.syntax_nesting_message;
 
-const ParseError = error{ UnexpectedEof, OutOfMemory, SyntaxError, HardSyntaxError };
+const ParseError = error{ UnexpectedEof, OutOfMemory, SyntaxError, HardSyntaxError, SyntaxNestingLimit };
 
 /// Identifier tokens that leave the parser in unary-operator context when they
 /// appear immediately before `+` / `-` / `/`. Covers logical operators
@@ -116,6 +118,12 @@ pub const Parser = struct {
     /// instead of silently rewinding to raw passthrough.
     saw_incomplete_binary_rhs: bool = false,
 
+    /// Recursive productions entered so far, counting each folded binary
+    /// operator as one level so that operator chains are bounded as well.
+    /// Sub-parsers start from the parent's depth.
+    syntax_depth: u32 = 0,
+    max_syntax_depth: u32 = resource_budget.default_max_syntax_depth,
+
     pub fn init(
         allocator: std.mem.Allocator,
         intern_pool: *InternPool,
@@ -146,7 +154,29 @@ pub const Parser = struct {
         sub.is_indented_syntax = self.is_indented_syntax;
         sub.is_plain_css = self.is_plain_css;
         sub.in_interpolation_body = self.in_interpolation_body;
+        sub.inheritSyntaxDepth(self);
         return sub;
+    }
+
+    fn inheritSyntaxDepth(self: *Parser, parent: *const Parser) void {
+        self.syntax_depth = parent.syntax_depth;
+        self.max_syntax_depth = parent.max_syntax_depth;
+    }
+
+    /// Enter one level of syntax nesting. Pair with `leaveSyntax` through
+    /// `defer` so that error paths restore the depth.
+    fn enterSyntax(self: *Parser) ParseError!void {
+        if (self.syntax_depth >= self.max_syntax_depth) {
+            error_format.setContextMessage(syntax_nesting_message);
+            const span = self.currentTokenSpan();
+            error_format.recordErrorSpanIfUnset(span.start, span.end, 0);
+            return error.SyntaxNestingLimit;
+        }
+        self.syntax_depth += 1;
+    }
+
+    fn leaveSyntax(self: *Parser) void {
+        self.syntax_depth -= 1;
     }
 
     /// CLI-FIX-E Step 2b: Call from errdefer and return "the span of the token that was most recently processed".
@@ -4621,6 +4651,8 @@ pub const Parser = struct {
     /// statements.  On entry, `self.pos` must index `.lbrace`.  Returns
     /// an extra-pool offset pointing at a len-prefixed NodeIndex list.
     fn parseBlockBody(self: *Parser, ast: *Ast) ParseError!BlockBodyResult {
+        try self.enterSyntax();
+        defer self.leaveSyntax();
         if (!self.isAtEnd() and self.current().tag == .lbrace) {
             if (self.is_indented_syntax) return error.SyntaxError;
             return self.parseBraceBlockBody(ast);
@@ -4631,6 +4663,8 @@ pub const Parser = struct {
     /// Same as `parseBlockBody`, but with indented syntax body judgment
     /// Anchor to the line indentation of `header_start`.
     fn parseBlockBodyAnchored(self: *Parser, ast: *Ast, header_start: u32) ParseError!BlockBodyResult {
+        try self.enterSyntax();
+        defer self.leaveSyntax();
         if (!self.isAtEnd() and self.current().tag == .lbrace) {
             if (self.is_indented_syntax) return error.SyntaxError;
             return self.parseBraceBlockBody(ast);
@@ -5589,6 +5623,7 @@ pub const Parser = struct {
             sub.call_arg_depth = self.call_arg_depth;
             sub.is_indented_syntax = self.is_indented_syntax;
             sub.is_plain_css = self.is_plain_css;
+            sub.inheritSyntaxDepth(self);
             defer sub.deinit();
 
             const node = try sub.parseExpression(ast);
@@ -6194,6 +6229,10 @@ pub const Parser = struct {
     }
 
     fn parseBinaryExprRest(self: *Parser, ast: *Ast, initial_left: NodeIndex, min_bp: u8) ParseError!NodeIndex {
+        // Each operator folded here deepens the left operand by one level, and
+        // later passes recurse through it, so the chain counts as nesting.
+        const entry_depth = self.syntax_depth;
+        defer self.syntax_depth = entry_depth;
         var left = initial_left;
         while (true) {
             // Comments between operands behave as whitespace for operator
@@ -6217,6 +6256,7 @@ pub const Parser = struct {
                 if (bp.left < min_bp) break;
                 self.advance();
                 const rhs_start_pos = self.pos;
+                try self.enterSyntax();
                 const right = self.parseBinaryExpr(ast, bp.right) catch |err| {
                     self.noteIncompleteBinaryRhsOnError(cur.tag, rhs_start_pos, err);
                     return err;
@@ -6238,6 +6278,7 @@ pub const Parser = struct {
                 if (cur.tag == .slash) {
                     self.advance();
                     const rhs_start_pos = self.pos;
+                    try self.enterSyntax();
                     const right = self.parseBinaryExpr(ast, bp.right) catch |err| {
                         self.noteIncompleteBinaryRhsOnError(cur.tag, rhs_start_pos, err);
                         return err;
@@ -6289,6 +6330,7 @@ pub const Parser = struct {
                 };
                 self.advance();
                 const rhs_start_pos = self.pos;
+                try self.enterSyntax();
                 const right = self.parseBinaryExpr(ast, bp.right) catch |err| {
                     self.noteIncompleteBinaryRhsOnError(cur.tag, rhs_start_pos, err);
                     return err;
@@ -6331,6 +6373,7 @@ pub const Parser = struct {
                             else
                                 try self.parseUnaryOrAtom(ast);
                             const right = try self.parseBinaryExprRest(ast, right_head, add_bp.right);
+                            try self.enterSyntax();
                             left = try emitBinaryOp(ast, op, left, right);
                             continue;
                         }
@@ -6347,6 +6390,8 @@ pub const Parser = struct {
     /// Unary prefix handling: `not`, `-`, `+`.  Falls through to
     /// `parsePrimary` when no prefix matches.
     fn parseUnaryOrAtom(self: *Parser, ast: *Ast) ParseError!NodeIndex {
+        try self.enterSyntax();
+        defer self.leaveSyntax();
         // Block comments before an expression atom are treated as
         // whitespace, so `1 +/**/2` parses with `2` as the right
         // operand of `+`.  See `operators/minus.hrx::syntax/comment/right`.
@@ -7119,6 +7164,7 @@ pub const Parser = struct {
         sub.is_indented_syntax = self.is_indented_syntax;
         sub.is_plain_css = self.is_plain_css;
         sub.in_interpolation_body = true;
+        sub.inheritSyntaxDepth(self);
         defer sub.deinit();
 
         const nodes_before = ast.nodes.len;
