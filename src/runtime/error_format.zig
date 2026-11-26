@@ -32,7 +32,7 @@ pub fn ansiDiagnosticsEnabled() bool {
     return cli_diag_ansi;
 }
 
-pub fn unicodeDiagnosticsEnabled() bool {
+fn unicodeDiagnosticsEnabled() bool {
     return cli_diag_unicode;
 }
 

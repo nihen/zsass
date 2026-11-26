@@ -140,17 +140,6 @@ pub const ComplexSelector = struct {
         self.components.deinit(self.allocator);
     }
 
-    /// Populate the CSS cache if not yet set.  Must be called through a
-    /// mutable pointer (i.e. on a selector that lives in an ArrayList, not
-    /// on a for-loop value copy).  The cached string is freed in `deinit()`.
-    pub fn ensureCachedCss(self: *ComplexSelector) std.mem.Allocator.Error!void {
-        if (self.cached_css == null) {
-            const css = try complexSelectorToCss(self.allocator, self);
-            self.cached_css = css;
-            self.cached_css_trimmed = std.mem.trim(u8, css, " \t\n\r");
-        }
-    }
-
     pub fn clone(self: *const ComplexSelector, allocator: std.mem.Allocator) !ComplexSelector {
         var result = ComplexSelector.init(allocator);
         // OOM mid-loop must release every component already cloned into
@@ -209,7 +198,7 @@ pub const SelectorList = struct {
 // Helper functions for deep clone / deinit of SimpleSelector
 // ============================================================================
 
-pub fn deinitSimpleSelector(ss: *SimpleSelector, allocator: std.mem.Allocator) void {
+fn deinitSimpleSelector(ss: *SimpleSelector, allocator: std.mem.Allocator) void {
     switch (ss.*) {
         .type_selector => |name| allocator.free(name),
         .class => |name| allocator.free(name),
@@ -229,13 +218,6 @@ pub fn deinitSimpleSelector(ss: *SimpleSelector, allocator: std.mem.Allocator) v
         },
         .parent, .universal => {},
     }
-}
-
-/// Build a `.class` `SimpleSelector` from a borrowed name slice. The
-/// returned selector owns the duplicated name so callers can embed it in a
-/// `CompoundSelector` whose `deinit` will free the class string.
-pub fn classSimpleFromName(allocator: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!SimpleSelector {
-    return .{ .class = try allocator.dupe(u8, name) };
 }
 
 pub fn cloneSimpleSelector(ss: SimpleSelector, allocator: std.mem.Allocator) std.mem.Allocator.Error!SimpleSelector {
@@ -1164,17 +1146,6 @@ pub fn pseudoBaseName(name: []const u8) []const u8 {
         }
     }
     return name;
-}
-
-/// Return the vendor prefix of a pseudo (including surrounding dashes), or empty.
-/// E.g. "-ms-matches"  ->  "-ms-", "matches"  ->  ""
-pub fn pseudoVendorPrefix(name: []const u8) []const u8 {
-    if (name.len > 1 and name[0] == '-') {
-        if (std.mem.findScalar(u8, name[1..], '-')) |pos| {
-            return name[0 .. pos + 2];
-        }
-    }
-    return "";
 }
 
 /// Return true if this pseudo takes An+B of <selector-list> syntax.

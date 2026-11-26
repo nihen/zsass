@@ -1763,6 +1763,7 @@ fn replaceInvalidEscapeCodePointsImpl(
 /// caller must keep ownership of `text` regardless and may compare `.ptr` to
 /// decide whether to free the new allocation.
 pub fn normalizeInterpolatedEscapedHyphens(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    if (std.mem.findScalar(u8, text, '\\') == null) return text;
     if (std.mem.find(u8, text, "\\-") == null) return text;
 
     var buf: std.ArrayList(u8) = .empty;

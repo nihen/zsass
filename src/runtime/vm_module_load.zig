@@ -83,7 +83,7 @@ pub fn makeUserModuleRef(vm: anytype, module_id: u32) !Value {
     return makeModuleRefValue(vm, moduleDisplayNamespace(path), path);
 }
 
-pub fn moduleIdForPath(vm: anytype, path: []const u8) ?u32 {
+fn moduleIdForPath(vm: anytype, path: []const u8) ?u32 {
     for (vm.program.modules, 0..) |mod, i| {
         if (std.mem.eql(u8, mod.module_path, path)) return @intCast(i);
     }
@@ -112,7 +112,7 @@ fn reportMissingNamespace(namespace: []const u8) error{SassError} {
 }
 
 /// Look up `namespace` among the current module's `@use` bindings.
-pub fn moduleTargetForNamespace(vm: anytype, namespace: []const u8) error{SassError}!ModuleRefTarget {
+fn moduleTargetForNamespace(vm: anytype, namespace: []const u8) error{SassError}!ModuleRefTarget {
     if (vm.current_module >= vm.program.modules.len) return error.SassError;
     const mod = &vm.program.modules[vm.current_module];
     const binding = mod.use_map.get(namespace) orelse return reportMissingNamespace(namespace);

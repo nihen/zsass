@@ -4066,10 +4066,6 @@ const SourceOrderLoweringMode = enum {
     fn emitsCloseOnMidClose(self: @This()) bool {
         return self == .maybe;
     }
-
-    fn forceSuppressAfterRuleBoundary(self: @This()) bool {
-        return self == .direct;
-    }
 };
 
 const SourceOrderLoweringState = struct {

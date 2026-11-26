@@ -31,7 +31,7 @@ pub const meta_get_mixin_id: Id = meta_dispatch_abi.meta_get_mixin_id;
 /// Dispatch id for `meta.load` (function).
 pub const meta_load_id: Id = meta_dispatch_abi.meta_load_id;
 /// Dispatch id for `meta.get-module` (function).
-pub const meta_get_module_id: Id = meta_dispatch_abi.meta_get_module_id;
+const meta_get_module_id: Id = meta_dispatch_abi.meta_get_module_id;
 /// Dispatch id for `meta.css` (mixin).
 pub const meta_css_mixin_id: Id = meta_dispatch_abi.meta_css_mixin_id;
 

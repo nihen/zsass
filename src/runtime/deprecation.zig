@@ -47,7 +47,7 @@ pub const DeprecationKind = enum {
     }
 };
 
-pub const SassVersion = struct {
+const SassVersion = struct {
     major: u16,
     minor: u16,
     patch: u16,
@@ -186,16 +186,6 @@ pub const DeprecationOpts = struct {
     quiet: bool = false,
     /// When true, deprecation warnings print a stack trace when available (dart `--trace`).
     trace_deprecation: bool = false,
-
-    pub fn warnDeprecationOnceShown(opts: *DeprecationOpts) void {
-        if (opts.verbose) return;
-        if (opts.quiet) return;
-        var err_file = std.Io.File.stderr();
-        var err_buf: [512]u8 = undefined;
-        var err_w = err_file.writer(zsass_io.io, err_buf[0..]);
-        err_w.interface.writeAll("DEPRECATION WARNING: Use of deprecated Sass features detected. Run with --verbose to see per-invocation details.\n") catch return;
-        err_w.interface.flush() catch return;
-    }
 };
 
 /// Pre-dedup record of one `emitDeprecation` call, captured while an

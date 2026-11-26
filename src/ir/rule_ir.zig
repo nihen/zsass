@@ -1798,38 +1798,6 @@ pub const RuleIR = struct {
         private_placeholders,
     };
 
-    fn pruneEmptyStyleRulesRuleIR(self: *RuleIR) !void {
-        _ = try self.pruneEmptyStyleRulesInRangeRuleIR(0, self.nodes.items.len);
-    }
-
-    fn filterPlaceholdersRuleIR(
-        self: *RuleIR,
-        allocator: std.mem.Allocator,
-        intern_pool: *InternPool,
-    ) !void {
-        _ = try self.filterSelectorsInRangeRuleIR(
-            allocator,
-            intern_pool,
-            0,
-            self.nodes.items.len,
-            .placeholders,
-        );
-    }
-
-    fn filterPrivatePlaceholdersRuleIR(
-        self: *RuleIR,
-        allocator: std.mem.Allocator,
-        intern_pool: *InternPool,
-    ) !void {
-        _ = try self.filterSelectorsInRangeRuleIR(
-            allocator,
-            intern_pool,
-            0,
-            self.nodes.items.len,
-            .private_placeholders,
-        );
-    }
-
     fn pruneEmptyStyleRulesInRangeRuleIR(
         self: *RuleIR,
         start_idx: usize,
@@ -2496,10 +2464,6 @@ pub const RuleIR = struct {
             i = item_end;
         }
         return false;
-    }
-
-    fn segmentsShareFirstSelector(self: *const RuleIR, seg_a: RebuiltBuffers, seg_b: RebuiltBuffers) bool {
-        return self.segmentsShareFirstSelectorNodes(seg_a.nodes.items, seg_b.nodes.items);
     }
 
     fn segmentsShareFirstSelectorNodes(self: *const RuleIR, nodes_a: []const Node, nodes_b: []const Node) bool {
@@ -3209,63 +3173,6 @@ pub const RuleIR = struct {
             .rule_begin, .at_rule_begin, .at_rule_simple => true,
             else => false,
         };
-    }
-
-    fn findLastRenderableStyleRuleInDirectRange(
-        self: *const RuleIR,
-        start_idx: usize,
-        end_idx: usize,
-    ) ?usize {
-        var idx = end_idx;
-        while (idx > start_idx) {
-            const current = idx - 1;
-            switch (self.nodes.items[current].kind) {
-                .rule_end, .at_rule_end => {
-                    var block_start = current;
-                    while (block_start > start_idx) {
-                        block_start -= 1;
-                        const kind = self.nodes.items[block_start].kind;
-                        if ((kind == .rule_begin or kind == .at_rule_begin) and
-                            (self.findMatchingBlockEnd(block_start) orelse return null) == current)
-                        {
-                            break;
-                        }
-                    }
-                    if (self.nodes.items[block_start].kind == .rule_begin) return block_start;
-                    if (self.nodes.items[block_start].kind == .at_rule_begin) return null;
-                    idx = current;
-                },
-                .rule_begin => return current,
-                .decl, .decl_raw, .comment, .at_rule_simple, .at_rule_begin, .stream_chunk => return null,
-                .stmt_gap, .group_boundary, .sourcemap_gap => idx = current,
-            }
-        }
-        return null;
-    }
-
-    fn rangeHasDirectRenderableOutputRuleIR(self: *const RuleIR, start_idx: usize, end_idx: usize) bool {
-        var i = start_idx;
-        while (i < end_idx) {
-            const item_end = self.topLevelItemEnd(i) catch return false;
-            switch (self.nodes.items[i].kind) {
-                .decl, .decl_raw, .comment, .rule_begin, .at_rule_begin, .at_rule_simple, .stream_chunk => return true,
-                .stmt_gap, .group_boundary, .sourcemap_gap => {},
-                .rule_end, .at_rule_end => return false,
-            }
-            i = item_end;
-        }
-        return false;
-    }
-
-    fn lastRenderableStyleRuleSuppressesRuleIR(self: *const RuleIR, start_idx: usize, end_idx: usize) bool {
-        const idx = self.findLastRenderableStyleRuleInDirectRange(start_idx, end_idx) orelse return false;
-        return self.getSuppressFollowingStmtGapBlankAt(idx);
-    }
-
-    fn markLastRenderableStyleRuleSuppressFollowingBlankRuleIR(self: *RuleIR, start_idx: usize, end_idx: usize) bool {
-        const idx = self.findLastRenderableStyleRuleInDirectRange(start_idx, end_idx) orelse return false;
-        self.setSuppressFollowingStmtGapBlankAt(idx, true);
-        return true;
     }
 
     pub fn hoistTopLevelCssImportsRuleIR(self: *RuleIR, evaluator: anytype) !void {
@@ -4644,25 +4551,6 @@ pub const RuleIR = struct {
         };
         if (!raw_contains) return false;
         return null;
-    }
-
-    fn ruleBodyIsCommentOnly(
-        self: *const RuleIR,
-        skip: []const bool,
-        begin_idx: usize,
-        end_idx: usize,
-    ) bool {
-        var saw_comment = false;
-        var idx = begin_idx + 1;
-        while (idx < end_idx) : (idx += 1) {
-            if (skip[idx]) continue;
-            switch (self.nodes.items[idx].kind) {
-                .comment => saw_comment = true,
-                .stmt_gap, .group_boundary, .sourcemap_gap => {},
-                else => return false,
-            }
-        }
-        return saw_comment;
     }
 
     /// Case where official Sass CLI merges into 1 block among adjacent `rule_end`  <->  `rule_begin`
@@ -7026,50 +6914,6 @@ pub const RuleIR = struct {
                 const inner = std.mem.trim(u8, trimmed[2 .. trimmed.len - 2], " \t\n\r");
                 return std.mem.startsWith(u8, inner, "# sourceMappingURL=") or
                     std.mem.startsWith(u8, inner, "# sourceURL=");
-            }
-
-            /// parser writes `.sass` loud comment with `/* ...` (without the terminating `*/`)
-            /// Normalize the retained case to CSS block comment.
-            fn normalizeUnterminatedBlockComment(
-                allocator: std.mem.Allocator,
-                text: []const u8,
-            ) ![]const u8 {
-                const trimmed = std.mem.trim(u8, text, " \t\r\n");
-                if (!std.mem.startsWith(u8, trimmed, "/*")) return text;
-                if (std.mem.endsWith(u8, trimmed, "*/")) return text;
-                if (std.mem.findScalar(u8, trimmed, '\n') == null) return text;
-
-                var content_lines: std.ArrayListUnmanaged([]const u8) = .empty;
-                defer content_lines.deinit(allocator);
-
-                var line_it = std.mem.splitScalar(u8, trimmed, '\n');
-                var line_idx: usize = 0;
-                while (line_it.next()) |line_raw| : (line_idx += 1) {
-                    const line = std.mem.trim(u8, line_raw, " \t\r");
-                    if (line.len == 0) continue;
-
-                    if (line_idx == 0) {
-                        if (!std.mem.startsWith(u8, line, "/*")) return text;
-                        const first_payload = std.mem.trim(u8, line[2..], " \t");
-                        if (first_payload.len > 0) try content_lines.append(allocator, first_payload);
-                        continue;
-                    }
-
-                    try content_lines.append(allocator, line);
-                }
-
-                if (content_lines.items.len == 0) return allocator.dupe(u8, "/* */");
-
-                var out: std.ArrayListUnmanaged(u8) = .empty;
-                errdefer out.deinit(allocator);
-                try out.appendSlice(allocator, "/* ");
-                try out.appendSlice(allocator, content_lines.items[0]);
-                for (content_lines.items[1..]) |line| {
-                    try out.appendSlice(allocator, "\n * ");
-                    try out.appendSlice(allocator, line);
-                }
-                try out.appendSlice(allocator, " */");
-                return out.toOwnedSlice(allocator);
             }
 
             const SelectorEmitHints = struct {

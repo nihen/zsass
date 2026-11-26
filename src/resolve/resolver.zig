@@ -118,7 +118,7 @@ const meta_variable_exists_builtin_id: u32 = 127;
 
 pub const SlotId = data_mod.SlotId;
 pub const MixinId = data_mod.MixinId;
-pub const FunctionId = data_mod.FunctionId;
+const FunctionId = data_mod.FunctionId;
 pub const ExprIndex = data_mod.ExprIndex;
 pub const StmtIndex = data_mod.StmtIndex;
 pub const call_arg_splat_sentinel = data_mod.call_arg_splat_sentinel;
@@ -127,22 +127,22 @@ pub const CallableTarget = data_mod.CallableTarget;
 pub const VarTarget = data_mod.VarTarget;
 pub const BinOp = data_mod.BinOp;
 pub const UnaryOp = data_mod.UnaryOp;
-pub const ExprKind = data_mod.ExprKind;
-pub const LiteralColor = data_mod.LiteralColor;
-pub const PreboundCallableKind = data_mod.PreboundCallableKind;
+const ExprKind = data_mod.ExprKind;
+const LiteralColor = data_mod.LiteralColor;
+const PreboundCallableKind = data_mod.PreboundCallableKind;
 pub const ResolvedExpr = data_mod.ResolvedExpr;
 pub const StmtKind = data_mod.StmtKind;
-pub const ResolvedStmt = data_mod.ResolvedStmt;
-pub const SelectorRuleKind = data_mod.SelectorRuleKind;
-pub const DeclPropKind = data_mod.DeclPropKind;
+const ResolvedStmt = data_mod.ResolvedStmt;
+const SelectorRuleKind = data_mod.SelectorRuleKind;
+const DeclPropKind = data_mod.DeclPropKind;
 pub const RuleData = data_mod.RuleData;
 pub const AtRootBehavior = data_mod.AtRootBehavior;
-pub const ResolvedContentBlock = data_mod.ResolvedContentBlock;
-pub const FlowLocalFallback = data_mod.FlowLocalFallback;
-pub const CommentData = data_mod.CommentData;
-pub const DeclData = data_mod.DeclData;
-pub const ResolvedMixin = data_mod.ResolvedMixin;
-pub const ResolvedFunction = data_mod.ResolvedFunction;
+const ResolvedContentBlock = data_mod.ResolvedContentBlock;
+const FlowLocalFallback = data_mod.FlowLocalFallback;
+const CommentData = data_mod.CommentData;
+const DeclData = data_mod.DeclData;
+const ResolvedMixin = data_mod.ResolvedMixin;
+const ResolvedFunction = data_mod.ResolvedFunction;
 pub const ResolvedProgram = data_mod.ResolvedProgram;
 pub const UseBinding = data_mod.UseBinding;
 pub const local_module_id_sentinel = data_mod.local_module_id_sentinel;
@@ -827,10 +827,6 @@ const Ctx = struct {
 
     fn lookupStarFunction(self: *Ctx, name: []const u8) ?CrossCallableTarget {
         return lookupStarFunctionMapInsensitive(self, name);
-    }
-
-    fn lookupStarPlaceholder(self: *Ctx, name: []const u8) ?u32 {
-        return self.star_placeholders.get(name);
     }
 
     fn getStaticConfigVar(self: *const Ctx, name: []const u8) ?value_mod.Value {

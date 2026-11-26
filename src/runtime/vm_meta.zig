@@ -535,11 +535,11 @@ fn reportMissingNamespace(namespace: []const u8) BuiltinError {
     return error.SassError;
 }
 
-pub fn makeBuiltinModuleRef(ctx: *BuiltinContext, name: []const u8) BuiltinError!Value {
+fn makeBuiltinModuleRef(ctx: *BuiltinContext, name: []const u8) BuiltinError!Value {
     return vm_module_load.makeBuiltinModuleRef(getVM(ctx), name);
 }
 
-pub fn makeUserModuleRef(ctx: *BuiltinContext, module_id: u32) BuiltinError!Value {
+fn makeUserModuleRef(ctx: *BuiltinContext, module_id: u32) BuiltinError!Value {
     return vm_module_load.makeUserModuleRef(getVM(ctx), module_id);
 }
 

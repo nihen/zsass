@@ -23,7 +23,6 @@ pub const StmtIndex = u32;
 pub const call_arg_splat_sentinel: InternId = @fromBackingInt(@intCast(std.math.maxInt(u32)));
 pub const media_prelude_has_interp_flag: u8 = 1;
 pub const media_prelude_interp_at_start_flag: u8 = 2;
-pub const media_prelude_compact_dynamic_feature_colon_flag: u8 = 4;
 
 pub const Span = struct { start: u32, end: u32 };
 

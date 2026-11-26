@@ -2935,26 +2935,6 @@ fn isTargetLabLikeLightnessMissing(target_space: color_mod.ColorSpace, missing: 
     };
 }
 
-fn hasMissingPolarHueEntry(entry: *const value_mod.ColorEntry) bool {
-    return switch (entry.space) {
-        .lch, .oklch => (entry.missing & 0x4) != 0,
-        .hsl, .hwb => (entry.missing & 0x1) != 0,
-        else => false,
-    };
-}
-
-fn isSemanticHslSourceEntry(entry: *const value_mod.ColorEntry) bool {
-    return entry.space == .hsl;
-}
-
-fn hasMissingLightnessEntry(entry: *const value_mod.ColorEntry) bool {
-    return switch (entry.space) {
-        .lab, .oklab, .lch, .oklch => (entry.missing & 0x1) != 0,
-        .hsl => (entry.missing & 0x4) != 0,
-        else => false,
-    };
-}
-
 const ProjectedChannelRead = struct {
     color: color_mod.Color,
     missing: ColorMissingMask,
