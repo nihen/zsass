@@ -217,6 +217,23 @@ pub const ResourceBudget = struct {
         return self.refuelVm();
     }
 
+    /// Charge work that costs about one instruction per unit, such as
+    /// comparing two values, done inside a single instruction.
+    pub fn chargeVmSteps(self: *ResourceBudget, n: u64) LimitError!void {
+        var left = n;
+        while (left > 0) {
+            if (self.vm_fuel >= left) {
+                self.vm_fuel -= left;
+                return;
+            }
+            left -= self.vm_fuel;
+            self.vm_fuel = 0;
+            // Consumes one step of a new slice.
+            try self.refuelVm();
+            left -= 1;
+        }
+    }
+
     fn refuelVm(self: *ResourceBudget) LimitError!void {
         @branchHint(.cold);
         // `vm_steps` counts instructions already granted by earlier fuel.
@@ -604,4 +621,12 @@ test "shared limited allocator refuses past its limit" {
     try std.testing.expectEqual(error.MemoryLimit, sla.mapError(error.OutOfMemory));
     a.free(first);
     try std.testing.expectEqual(@as(usize, 0), sla.used.load(.monotonic));
+}
+
+test "bulk vm steps stop at the limit like single ones" {
+    var b = ResourceBudget.init(.{ .max_vm_steps = 2500 }, null, null);
+    try b.chargeVmSteps(2000);
+    try b.chargeVmSteps(500);
+    try std.testing.expectEqual(@as(u64, 2500), b.vmStepsUsed());
+    try std.testing.expectError(error.ExecutionLimit, b.chargeVmSteps(1));
 }

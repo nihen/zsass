@@ -718,3 +718,15 @@ test "numbers: integers past the 64-bit range are refused, not converted" {
         try compile(a, "@use \"sass:string\"; a { a: string.slice(\"abc\", 2, 9223372036854775807); b: string.slice(\"abc\", -9223372036854775808); c: string.insert(\"abc\", \"x\", 9223372036854775808); d: string.slice(\"abc\", 9223372036854775808); }", "", &.{}, quiet),
     );
 }
+
+test "limits: comparing map keys counts as execution" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var src: std.ArrayList(u8) = .empty;
+    try src.appendSlice(a, "$m: (");
+    for (0..3000) |i| try src.print(a, "{s}{d}px: a", .{ if (i == 0) "" else ", ", i });
+    try src.appendSlice(a, "); a { x: length($m); }");
+    try std.testing.expectEqualStrings("a {\n  x: 3000;\n}\n", try compile(a, src.items, "", &.{}, quiet));
+    try std.testing.expectError(error.ExecutionLimit, compile(a, src.items, "", &.{}, withLimits(.{ .max_vm_steps = 1_000_000 })));
+}
