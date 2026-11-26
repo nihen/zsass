@@ -242,6 +242,12 @@ pub fn buildAll(alloc: std.mem.Allocator, paths: []const []const u8) !void {
 }
 ```
 
+Workers share `zsass.io_facility.io`. It starts as Zig's single-threaded
+`Io`, which does not support several threads at once, so `compileFiles`
+compiles one entry at a time until the embedder installs a thread-capable
+one, for example `zsass.io_facility.io = init.io;` in `main`, as the
+examples do.
+
 `results.len == paths.len` and the order is preserved. When `source_map` is
 `false`, `result.source_map_json` is `null`. Failed entries leave
 `result.err` non-null and `result.css` `null` - `compileFiles` itself returns

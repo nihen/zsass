@@ -138,6 +138,8 @@ pub const CompileFilesOptions = struct {
     /// after the entry's own directory.
     load_paths: []const []const u8 = &.{},
     /// Worker thread count. `0` means "use `std.Thread.getCpuCount()`".
+    /// Workers share `io_facility.io`; while it is the default single-threaded
+    /// instance, entries are compiled one at a time whatever this says.
     jobs: usize = 0,
     /// Limits applied to each entry separately.
     limits: resource_budget.CompileLimits = .{},
@@ -220,7 +222,9 @@ pub fn compileFiles(
 
     const cpu_count = std.Thread.getCpuCount() catch 4;
     const requested = if (opts.jobs == 0) cpu_count else opts.jobs;
-    const worker_count = @min(paths.len, requested);
+    // The default Io does not support threads; parallel workers need the
+    // embedder to install one that does, as the CLI does.
+    const worker_count = if (zsass_io.supportsThreads()) @min(paths.len, requested) else 1;
 
     var ts_alloc = ThreadSafeAlloc{ .child = alloc };
     const safe_alloc = ts_alloc.allocator();
