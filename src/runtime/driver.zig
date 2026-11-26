@@ -23,6 +23,7 @@ const source_map_mod = @import("../ir/source_map.zig");
 const syntax_override_mod = @import("syntax_override.zig");
 const resource_budget = @import("resource_budget.zig");
 const stack_guard = @import("stack_guard.zig");
+const batch_reuse = @import("batch_reuse.zig");
 
 const zsass_io_mod = @import("io.zig");
 const watch_backend_mod = @import("watch_backend.zig");
@@ -2444,70 +2445,6 @@ fn envFlagDisabled(name: [:0]const u8) bool {
     return std.mem.eql(u8, s, "0");
 }
 
-fn sourceMayConfigureModule(source: []const u8) bool {
-    if (std.mem.indexOf(u8, source, "with") == null) return false;
-    return std.mem.indexOf(u8, source, "@use") != null or
-        std.mem.indexOf(u8, source, "@forward") != null;
-}
-
-fn sourceMayReachUnknownConfiguration(source: []const u8) bool {
-    if (sourceMayConfigureModule(source)) return true;
-    if (std.mem.indexOf(u8, source, "@import") == null) return false;
-    return !sourceImportsArePlainCssOnly(source);
-}
-
-fn importTailHasOnlyWhitespaceBeforeSemicolon(source: []const u8, start: usize) bool {
-    var k = start;
-    while (k < source.len) : (k += 1) {
-        if (source[k] == ';') return true;
-        if (!std.ascii.isWhitespace(source[k])) return false;
-    }
-    return true;
-}
-
-/// True when every `@import` occurrence in `source` is a plain-CSS import
-/// (url(...), an http(s)/protocol-relative URL, or a quoted path ending in
-/// .css). Plain-CSS imports pass through to the output without loading a
-/// Sass module, so they cannot inject configuration into module resolution.
-/// Anything ambiguous (quoted Sass partials, media-suffixed quoted imports,
-/// "@import" text inside strings or comments) answers false, keeping the
-/// caller on the conservative path.
-fn sourceImportsArePlainCssOnly(source: []const u8) bool {
-    var i: usize = 0;
-    while (std.mem.indexOfPos(u8, source, i, "@import")) |pos| {
-        i = pos + "@import".len;
-        var j = i;
-        while (j < source.len and std.ascii.isWhitespace(source[j])) j += 1;
-        if (j >= source.len) return false;
-        if (std.mem.startsWith(u8, source[j..], "url(")) continue;
-        if (source[j] == '"' or source[j] == '\'') {
-            const quote = source[j];
-            const rest = source[j + 1 ..];
-            const end = std.mem.indexOfScalar(u8, rest, quote) orelse return false;
-            const path = rest[0..end];
-            const after_quote = j + 1 + end + 1;
-            if (!importTailHasOnlyWhitespaceBeforeSemicolon(source, after_quote)) return false;
-            if (std.mem.startsWith(u8, path, "http://") or
-                std.mem.startsWith(u8, path, "https://") or
-                std.mem.startsWith(u8, path, "//"))
-            {
-                continue;
-            }
-            if (std.mem.endsWith(u8, path, ".css")) continue;
-            return false;
-        }
-        return false;
-    }
-    return true;
-}
-
-test "driver: plain-css import probe rejects quoted media suffixes" {
-    try std.testing.expect(sourceImportsArePlainCssOnly("@import \"theme.css\";"));
-    try std.testing.expect(sourceImportsArePlainCssOnly("@import \"https://example.com/theme.css\";"));
-    try std.testing.expect(!sourceImportsArePlainCssOnly("@import \"theme.css\" screen;"));
-    try std.testing.expect(!sourceImportsArePlainCssOnly("@import \"theme\";"));
-}
-
 fn runEnd2EndWithPool(
     allocator: std.mem.Allocator,
     input_path: []const u8,
@@ -2614,7 +2551,7 @@ fn runEnd2EndWithBudget(
     var program_ptr: *compiler_mod.Program = undefined;
     if (shared_pool) |pool| {
         const persistent_ctx: ?compiler_mod.PersistentCompileContext = if (persistent_state) |ps|
-            if (sourceMayReachUnknownConfiguration(source)) null else ps.compileContext()
+            if (batch_reuse.sourceMayReachUnknownConfiguration(source)) null else ps.compileContext()
         else
             null;
         // Import-preamble checkpoints serve exactly the entries the persistent
@@ -2734,7 +2671,7 @@ fn runEnd2EndWithBudget(
     if (cross_entry_states != null and
         resolved_sm_mode == .off and
         opts.stdin_source == null and
-        !sourceMayReachUnknownConfiguration(source) and
+        !batch_reuse.sourceMayReachUnknownConfiguration(source) and
         !envFlagDisabled("ZSASS_CROSS_ENTRY"))
     {
         vm.cross_entry_states = cross_entry_states;

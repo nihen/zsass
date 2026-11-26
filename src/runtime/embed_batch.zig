@@ -29,6 +29,7 @@ const zsass_io = @import("io.zig");
 const error_format = @import("error_format.zig");
 const resource_budget = @import("resource_budget.zig");
 const stack_guard = @import("stack_guard.zig");
+const batch_reuse = @import("batch_reuse.zig");
 const file_access_mod = @import("../resolve/file_access.zig");
 
 /// Spin-lock-guarded wrapper around an arbitrary `std.mem.Allocator`. Used so
@@ -450,7 +451,9 @@ fn compileOnePathFallible(
     var deprecation_opts: @import("deprecation.zig").DeprecationOpts = .{};
     deprecation_opts.quiet = opts.quiet;
 
-    const persistent_ctx = persistent_state.compileContext();
+    // As in the CLI: an entry that may configure a shared module compiles
+    // without the results other entries left behind, and leaves none.
+    const persistent_ctx: ?compiler_mod.PersistentCompileContext = if (batch_reuse.sourceMayReachUnknownConfiguration(source)) null else persistent_state.compileContext();
     var borrowed = try compiler_mod.parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
         work_alloc,
         source,

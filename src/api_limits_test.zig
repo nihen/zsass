@@ -730,3 +730,71 @@ test "limits: comparing map keys counts as execution" {
     try std.testing.expectEqualStrings("a {\n  x: 3000;\n}\n", try compile(a, src.items, "", &.{}, quiet));
     try std.testing.expectError(error.ExecutionLimit, compile(a, src.items, "", &.{}, withLimits(.{ .max_vm_steps = 1_000_000 })));
 }
+
+test "batch: an entry that configures a module does not change another entry" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeFile(tmp.dir, "_lib.scss", "$c: blue !default; .lib { c: $c; }");
+    try writeFile(tmp.dir, "_cfg.scss", "$c: green;");
+    try writeFile(tmp.dir, "a_configured.scss", "@use \"lib\" with ($c: red);");
+    try writeFile(tmp.dir, "b_default.scss", "@use \"lib\";");
+    try writeFile(tmp.dir, "c_import.scss", "@import \"cfg\"; @import \"lib\";");
+    try writeFile(tmp.dir, "d_default.scss", "@import \"lib\";");
+    const root = try tmpPath(a, &tmp);
+    const names = [_][]const u8{ "a_configured.scss", "b_default.scss", "c_import.scss", "d_default.scss" };
+    var paths: [names.len][]const u8 = undefined;
+    for (names, &paths) |n, *p| p.* = try std.fs.path.join(a, &.{ root, n });
+    const expected = [_][]const u8{ ".lib {\n  c: red;\n}\n", ".lib {\n  c: blue;\n}\n", ".lib {\n  c: green;\n}\n", ".lib {\n  c: blue;\n}\n" };
+    // Each order, so every entry has a chance to come after another.
+    const orders = [_][4]usize{ .{ 0, 1, 2, 3 }, .{ 1, 0, 3, 2 }, .{ 2, 3, 0, 1 }, .{ 3, 2, 1, 0 } };
+    for (orders) |order| {
+        var ordered: [4][]const u8 = undefined;
+        for (order, &ordered) |i, *p| p.* = paths[i];
+        const results = try api.compileFiles(a, &ordered, .{ .quiet = true, .jobs = 1 });
+        for (order, results) |i, r| try std.testing.expectEqualStrings(expected[i], r.css orelse return error.TestUnexpectedResult);
+    }
+}
+
+test "batch: a module configured through another one keeps each entry's value" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeFile(tmp.dir, "_lib.scss", "$c: blue !default; @function c() { @return $c; }");
+    try writeFile(tmp.dir, "_util.scss", "@use \"lib\"; .util { c: lib.c(); }");
+    try writeFile(tmp.dir, "_fwd.scss", "@forward \"lib\" with ($c: purple !default);");
+    try writeFile(tmp.dir, "_fwduser.scss", "@use \"fwd\"; .fwd { c: fwd.c(); }");
+    try writeFile(tmp.dir, "e1.scss", "@use \"lib\" with ($c: red); @use \"util\";");
+    try writeFile(tmp.dir, "e2.scss", "@use \"util\";");
+    try writeFile(tmp.dir, "e3.scss", "@use \"fwd\" with ($c: orange); @use \"fwduser\";");
+    try writeFile(tmp.dir, "e4.scss", "@use \"fwduser\";");
+    try writeFile(tmp.dir, "e5.scss", "$c: pink; @import \"util\";");
+    const root = try tmpPath(a, &tmp);
+    const names = [_][]const u8{ "e1.scss", "e2.scss", "e3.scss", "e4.scss", "e5.scss" };
+    var solo: [names.len][]const u8 = undefined;
+    var paths: [names.len][]const u8 = undefined;
+    for (names, &paths, &solo) |n, *p, *o| {
+        p.* = try std.fs.path.join(a, &.{ root, n });
+        const one = [_][]const u8{p.*};
+        const r = try api.compileFiles(a, &one, .{ .quiet = true, .jobs = 1 });
+        o.* = r[0].css orelse "ERR";
+    }
+    // The official CLI writes purple for e4, the default its @forward sets.
+    try std.testing.expectEqualStrings(".fwd {\n  c: purple;\n}\n", solo[3]);
+    var orders: [3][5]usize = .{ .{ 0, 1, 2, 3, 4 }, .{ 4, 3, 2, 1, 0 }, .{ 1, 3, 0, 2, 4 } };
+    for (&orders) |*order| {
+        var ordered: [5][]const u8 = undefined;
+        for (order, &ordered) |i, *p| p.* = paths[i];
+        const results = try api.compileFiles(a, &ordered, .{ .quiet = true, .jobs = 1 });
+        for (order, results) |i, r| {
+            const got = r.css orelse "ERR";
+            try std.testing.expectEqualStrings(solo[i], got);
+        }
+    }
+}
