@@ -207,7 +207,7 @@ pub inline fn isLegacyColorSpace(space: color_mod.ColorSpace) bool {
 
 /// CSS Color 4 treats NaN channels, negative zero, and infinite polar hues
 /// as zero, so colors never store them.
-pub fn normalizeColorEntryChannels(entry: *ColorEntry) void {
+fn normalizeColorEntryChannels(entry: *ColorEntry) void {
     const hue_idx: ?usize = switch (entry.space) {
         .hsl, .hwb => 0,
         .lch, .oklch => 2,
@@ -458,27 +458,12 @@ pub const Value = extern struct {
         return listWithMeta(handle, separator, is_bracketed, false);
     }
 
-    pub inline fn listWithPool(handle: ListHandle, separator: ListSeparator, is_bracketed: bool, pool: *ListMetaPool) Value {
-        _ = pool;
-        return listWithMeta(handle, separator, is_bracketed, false);
-    }
-
     pub inline fn listWithMetaEx(handle: ListHandle, separator: ListSeparator, is_bracketed: bool, is_map: bool, slash_coercible: bool) Value {
         const aux: u8 = @truncate(packListFlagsMetaEx(separator, is_bracketed, is_map, slash_coercible));
         return .{ .bits = packTagged(.list, aux, handle) };
     }
 
-    pub inline fn listWithMetaExPool(handle: ListHandle, separator: ListSeparator, is_bracketed: bool, is_map: bool, slash_coercible: bool, pool: *ListMetaPool) Value {
-        _ = pool;
-        return listWithMetaEx(handle, separator, is_bracketed, is_map, slash_coercible);
-    }
-
     pub inline fn listWithMeta(handle: ListHandle, separator: ListSeparator, is_bracketed: bool, is_map: bool) Value {
-        return listWithMetaEx(handle, separator, is_bracketed, is_map, false);
-    }
-
-    pub inline fn listWithMetaPool(handle: ListHandle, separator: ListSeparator, is_bracketed: bool, is_map: bool, pool: *ListMetaPool) Value {
-        _ = pool;
         return listWithMetaEx(handle, separator, is_bracketed, is_map, false);
     }
 
@@ -486,26 +471,11 @@ pub const Value = extern struct {
         return listWith(handle, .comma, is_bracketed);
     }
 
-    pub inline fn listWithCommaPool(handle: ListHandle, is_bracketed: bool, pool: *ListMetaPool) Value {
-        _ = pool;
-        return listWith(handle, .comma, is_bracketed);
-    }
-
     pub inline fn listWithSpace(handle: ListHandle, is_bracketed: bool) Value {
         return listWith(handle, .space, is_bracketed);
     }
 
-    pub inline fn listWithSpacePool(handle: ListHandle, is_bracketed: bool, pool: *ListMetaPool) Value {
-        _ = pool;
-        return listWith(handle, .space, is_bracketed);
-    }
-
     pub inline fn listWithSlash(handle: ListHandle, is_bracketed: bool) Value {
-        return listWith(handle, .slash, is_bracketed);
-    }
-
-    pub inline fn listWithSlashPool(handle: ListHandle, is_bracketed: bool, pool: *ListMetaPool) Value {
-        _ = pool;
         return listWith(handle, .slash, is_bracketed);
     }
 
@@ -579,13 +549,6 @@ pub const Value = extern struct {
         return listSeparatorCssFrom(self.listSeparator(pool));
     }
 
-    pub inline fn listItems(self: Value, ctx: *const ValueContext) []const Value {
-        if (self.kind() != .list) return &.{};
-        const h = self.listHandle();
-        if (h >= ctx.list_pool.items.len) return &.{};
-        return ctx.list_pool.items[h].items;
-    }
-
     pub inline fn calcFragment(handle: u32) Value {
         return .{ .bits = packTagged(.calc_fragment, 0, handle) };
     }
@@ -644,11 +607,6 @@ pub const Value = extern struct {
     pub inline fn moduleRefKey(self: Value) InternId {
         std.debug.assert(self.kind() == .module);
         return @fromBackingInt(@intCast(@as(u32, @truncate(self.bits & handle_mask))));
-    }
-
-    pub inline fn callablePoolHandle(self: Value) u32 {
-        std.debug.assert(self.kind() == .callable);
-        return @truncate(self.bits & handle_mask);
     }
 
     pub inline fn callableHandle(self: Value, pool: *const CallablePayloadPool) u32 {
@@ -736,17 +694,6 @@ pub const Value = extern struct {
         std.debug.assert(h < pool.items.len);
         return &pool.items[h];
     }
-
-    pub inline fn colorAsPrimitive(self: Value, pool: *const ColorPool) color_mod.Color {
-        const entry = self.colorEntry(pool);
-        return color_mod.Color.init(
-            entry.channels[0],
-            entry.channels[1],
-            entry.channels[2],
-            entry.channels[3],
-            entry.space,
-        );
-    }
 };
 
 pub fn listSeparatorCssFrom(separator: ListSeparator) []const u8 {
@@ -757,44 +704,6 @@ pub fn listSeparatorCssFrom(separator: ListSeparator) []const u8 {
         .undecided => " ",
     };
 }
-
-const KeywordMapHandle = u32;
-
-const KeywordPair = struct {
-    key: InternId,
-    value: Value,
-};
-
-const KeywordEntry = struct {
-    pairs: []KeywordPair,
-    refcount: u32 = 1,
-};
-
-const KeywordPool = std.ArrayListUnmanaged(KeywordEntry);
-
-const ListPoolEntry = struct {
-    items: []Value,
-    separator: ListSeparator,
-    bracketed: bool,
-    is_map: bool = false,
-    is_arg_list: bool = false,
-    slash_coercible: bool = false,
-    keywords: ?KeywordMapHandle = null,
-    refcount: u32 = 1,
-};
-
-const ListPool = std.ArrayListUnmanaged(ListPoolEntry);
-const SlashListPreserve = std.AutoHashMapUnmanaged(u32, void);
-
-const ValueContext = struct {
-    allocator: std.mem.Allocator,
-    intern_pool: *intern_pool_mod.InternPool,
-    list_pool: *ListPool,
-    color_pool: *ColorPool,
-    keyword_pool: *KeywordPool,
-    number_pool: *NumberPool,
-    slash_list_preserve: ?*const SlashListPreserve = null,
-};
 
 pub const InspectLogicalListView = struct {
     items: []const Value,

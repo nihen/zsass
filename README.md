@@ -298,7 +298,6 @@ src/
     lexer.zig
     parser.zig
     ast_flat.zig
-    sass_converter.zig
   resolve/                  # AST -> ResolvedProgram (scope, @use/@forward,
                             # @import expansion, mixin/function decls)
     resolver.zig            # main entry; statement handlers split into stmt_*.zig

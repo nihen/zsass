@@ -51,17 +51,6 @@ pub fn deinitAll(self: *ModuleResolver) void {
     }
 }
 
-/// For cross-entry resolve/compile artifact reuse (plan C).
-/// records / id_by_path / import_origins / static_eval_store is **retained** (with cross-entry
-/// append-only accumulation). Clear other per-entry state (visiting / config_seed_accum).
-/// Design: `.plans/ideal/20260502-cross-entry-resolve-reuse-design.md`
-pub fn resetEntrySpecific(self: *ModuleResolver) void {
-    // Visiting: Anti-circulation stack during resolve. It should be empty (cleared to defensive) at the end of entry.
-    self.visiting.clearRetainingCapacity();
-    // config_seed_accum: per-entry seed aggregation for `@use ... with`.
-    self.config_seed_accum.clearRetainingCapacity();
-}
-
 pub fn appendImportOrigin(self: *ModuleResolver, source_path: []const u8, parent_import_origin: OriginId) error{OutOfMemory}!OriginId {
     const owned_path = try self.records_alloc.dupe(u8, source_path);
     const idx_u32: u32 = @intCast(self.import_origins_ptr.items.len);
@@ -72,11 +61,6 @@ pub fn appendImportOrigin(self: *ModuleResolver, source_path: []const u8, parent
         .parent_import_origin = parent_import_origin,
     });
     return @fromBackingInt(@intCast(idx_u32));
-}
-
-pub fn getExports(self: *const ModuleResolver, module_id: u32) ?*const ModuleExports {
-    if (module_id >= self.records_ptr.items.len) return null;
-    return &self.records_ptr.items[module_id].exports;
 }
 
 pub fn isVisiting(self: *const ModuleResolver, path: []const u8) bool {

@@ -473,7 +473,7 @@ const ParentWrappedRuleRange = struct {
     inner_payload: u32,
 };
 
-pub fn wrapRuleIrTopLevelAmpRulesWithParent(self: anytype, start_idx: usize, parent_selector: InternId) !void {
+fn wrapRuleIrTopLevelAmpRulesWithParent(self: anytype, start_idx: usize, parent_selector: InternId) !void {
     if (start_idx >= self.rule_ir.nodes.items.len) return;
     const parent_raw = self.intern_pool.get(parent_selector);
     if (std.mem.trim(u8, parent_raw, " \t\r\n").len == 0) return;
@@ -602,7 +602,7 @@ fn isStyleRuleGroupAtRuleName(name: []const u8) bool {
 /// prepended, and a comment at the top level or directly inside `@media` /
 /// `@supports` is wrapped in a rule of its own. Keyframe selectors are not
 /// style rules and stay as written.
-pub fn prefixRuleIrRangeTopLevelRules(self: anytype, start_idx: usize, parent_selector: InternId) !void {
+fn prefixRuleIrRangeTopLevelRules(self: anytype, start_idx: usize, parent_selector: InternId) !void {
     if (start_idx >= self.rule_ir.nodes.items.len) return;
     const parent_raw = self.intern_pool.get(parent_selector);
     if (std.mem.trim(u8, parent_raw, " \t\r\n").len == 0) return;

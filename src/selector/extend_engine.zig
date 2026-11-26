@@ -1278,14 +1278,6 @@ fn twoLinks(a: Allocator, first: Link, second: Link) Error![]const Link {
     return out;
 }
 
-/// How many links the first group has.
-fn groupEnd(links: []const Link) usize {
-    for (links, 0..) |link, index| {
-        if (link.combinator == .descendant) return index + 1;
-    }
-    return links.len;
-}
-
 /// The runs of links held together by combinators other than descendant.
 fn groupsOf(a: Allocator, links: []const Link) Error![]const []const Link {
     var groups: std.ArrayList([]const Link) = .empty;

@@ -25,7 +25,7 @@ fn copyStaticEvalLists(allocator: std.mem.Allocator, lists: []const []const valu
 
 /// Flat-buffer view of copied import origins. The `origins` slice references
 /// `path_bytes`; freeing requires releasing both slices.
-pub const CopiedOrigins = struct {
+const CopiedOrigins = struct {
     origins: []CssOrigin,
     path_bytes: []u8,
 };

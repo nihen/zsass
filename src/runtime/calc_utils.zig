@@ -654,7 +654,7 @@ fn removeUnnecessaryCalcParensImpl(
 /// For calc text assembled through interpolation, official Sass CLI keeps explicit
 /// parentheses around additive groups such as `(0.5rem + 2px)`, but still
 /// drops wrappers around purely multiplicative terms like `(30px / 2)`.
-pub fn removeNonAdditiveCalcParens(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
+fn removeNonAdditiveCalcParens(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
     var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
     var i: usize = 0;
@@ -1489,7 +1489,7 @@ pub fn flattenNestedCalc(allocator: std.mem.Allocator, expr: []const u8) ![]cons
 /// `(var(--x))`).  When the inner expression contains operators (e.g.
 /// `calc(0.75em - 1px)`) it is preserved as `calc(...)` because the `calc`
 /// keyword came from an interpolated variable and official Sass CLI preserves it.
-pub fn flattenNestedCalcForInterpolated(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
+fn flattenNestedCalcForInterpolated(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
     var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
     var i: usize = 0;
@@ -1549,69 +1549,6 @@ pub fn flattenNestedCalcForInterpolated(allocator: std.mem.Allocator, expr: []co
         return expr;
     }
     return result.toOwnedSlice(allocator);
-}
-
-pub fn normalizeCalcInDeclValueForInterpolated(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    var i: usize = 0;
-    var any_changed = false;
-    while (i < expr.len) {
-        const c = expr[i];
-        if (c == '"' or c == '\'') {
-            const q = c;
-            try out.append(allocator, q);
-            i += 1;
-            while (i < expr.len) {
-                if (expr[i] == '\\' and i + 1 < expr.len) {
-                    try out.append(allocator, expr[i]);
-                    try out.append(allocator, expr[i + 1]);
-                    i += 2;
-                    continue;
-                }
-                const b = expr[i];
-                try out.append(allocator, b);
-                i += 1;
-                if (b == q) break;
-            }
-            continue;
-        }
-        if (i + 5 <= expr.len and std.mem.eql(u8, expr[i .. i + 5], "calc(")) {
-            const prev_is_ident = i > 0 and
-                (std.ascii.isAlphanumeric(expr[i - 1]) or expr[i - 1] == '-' or expr[i - 1] == '_');
-            if (!prev_is_ident) {
-                var depth: u32 = 1;
-                var j: usize = i + 5;
-                while (j < expr.len and depth > 0) : (j += 1) {
-                    if (expr[j] == '(') depth += 1;
-                    if (expr[j] == ')') depth -= 1;
-                }
-                if (depth == 0) {
-                    const inner_raw = expr[i + 5 .. j - 1];
-                    const inner = std.mem.trim(u8, inner_raw, " \t\n\r");
-                    const after_flatten = try flattenNestedCalcForInterpolated(allocator, inner);
-                    defer if (!sameSliceStorage(after_flatten, inner)) allocator.free(after_flatten);
-                    const optimized = try removeNonAdditiveCalcParens(allocator, after_flatten);
-                    defer if (!sameSliceStorage(optimized, after_flatten)) allocator.free(optimized);
-                    const spaced = try normalizeCalcOperatorSpacing(allocator, optimized);
-                    defer if (!sameSliceStorage(spaced, optimized)) allocator.free(spaced);
-                    try out.appendSlice(allocator, "calc(");
-                    try out.appendSlice(allocator, spaced);
-                    try out.append(allocator, ')');
-                    if (spaced.len != inner_raw.len or !std.mem.eql(u8, spaced, inner_raw)) any_changed = true;
-                    i = j;
-                    continue;
-                }
-            }
-        }
-        try out.append(allocator, c);
-        i += 1;
-    }
-    if (!any_changed) {
-        out.deinit(allocator);
-        return expr;
-    }
-    return out.toOwnedSlice(allocator);
 }
 
 pub fn calcExprHasAdditiveOp(expr: []const u8) bool {

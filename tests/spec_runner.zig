@@ -275,13 +275,6 @@ fn isSeparatorLine(content: []const u8, pos: usize) bool {
 // Test Runner
 // ============================================================
 
-pub const TestResult = enum {
-    pass,
-    fail,
-    skip,
-    error_result,
-};
-
 pub const TestSummary = struct {
     total: u32 = 0,
     passed: u32 = 0,

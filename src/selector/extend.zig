@@ -11,7 +11,7 @@ const extend_engine = @import("extend_engine.zig");
 const cloneSimpleSelector = selector_mod.cloneSimpleSelector;
 const simpleSelectorEql = specificity.simpleSelectorEql;
 const compoundSelectorEql = specificity.compoundSelectorEql;
-pub const complexSelectorEql = specificity.complexSelectorEql;
+const complexSelectorEql = specificity.complexSelectorEql;
 const getLastCompound = specificity.getLastCompound;
 pub const compoundContainsTarget = specificity.compoundContainsTarget;
 
@@ -53,27 +53,6 @@ pub const Extension = struct {
         self.target.deinit();
     }
 };
-
-fn isTransparentSelectorPseudo(name: []const u8) bool {
-    const base = selector_mod.pseudoBaseName(name);
-    return std.ascii.eqlIgnoreCase(base, "is") or
-        std.ascii.eqlIgnoreCase(base, "where") or
-        std.ascii.eqlIgnoreCase(base, "matches") or
-        std.ascii.eqlIgnoreCase(base, "any");
-}
-
-fn transparentPseudoOnly(complex: *const ComplexSelector) ?PseudoSelector {
-    if (complex.components.items.len != 1) return null;
-    const compound = switch (complex.components.items[0]) {
-        .compound => |c| c,
-        .combinator => return null,
-    };
-    if (compound.simple_selectors.items.len != 1) return null;
-    return switch (compound.simple_selectors.items[0]) {
-        .pseudo_class => |ps| if (isTransparentSelectorPseudo(ps.name) and ps.selector != null) ps else null,
-        else => null,
-    };
-}
 
 // SAFETY: `@TypeOf` only inspects the compile-time type of `Extension.span`.
 // The `undefined` value is never read at runtime.
@@ -1214,18 +1193,6 @@ fn compoundsShareSimpleSelector(a: *const CompoundSelector, b: *const CompoundSe
 // ============================================================================
 // Core Algorithm
 // ============================================================================
-
-fn prefixHasSiblingCombinator(components: []const ComplexSelectorComponent) bool {
-    for (components) |component| {
-        if (component != .combinator) continue;
-        if (component.combinator == .next_sibling or component.combinator == .general_sibling) return true;
-    }
-    return false;
-}
-
-fn complexHasSiblingCombinator(complex: *const ComplexSelector) bool {
-    return prefixHasSiblingCombinator(complex.components.items);
-}
 
 fn compoundContainsTargetInComplex(complex: *const ComplexSelector, target: *const CompoundSelector) bool {
     for (complex.components.items) |comp| {

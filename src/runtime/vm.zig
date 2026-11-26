@@ -8987,13 +8987,6 @@ fn unaryPrefixValue(self: *VM, prefix: []const u8, v: Value, calc_policy: UnaryC
     return Value.string(id, false);
 }
 
-fn callArgNamesContainSplat(arg_names: []const InternId) bool {
-    for (arg_names) |name_id| {
-        if (name_id == call_arg_splat_sentinel) return true;
-    }
-    return false;
-}
-
 const CallArgNamesSeen = struct { named: bool, splat: bool };
 
 inline fn scanCallArgNames(arg_names: []const InternId) CallArgNamesSeen {
@@ -10951,6 +10944,8 @@ fn normalizeSelectorAdjacentQuotedFragments(alloc: std.mem.Allocator, text: []co
 }
 
 fn normalizeInterpolatedUrlSingleQuotes(alloc: std.mem.Allocator, text: []const u8) VMError![]const u8 {
+    // One scan for the quote settles almost every value.
+    if (std.mem.findScalar(u8, text, '\'') == null) return text;
     if (std.mem.find(u8, text, "url('") == null and
         std.mem.find(u8, text, "URL('") == null and
         std.mem.find(u8, text, "Url('") == null)
@@ -13350,21 +13345,31 @@ fn stringNeedsDeclEscape(raw: []const u8) bool {
             if (j >= raw.len or raw[j] != '(') return true;
         } else if (std.ascii.isDigit(raw[0]) and (std.ascii.isAlphabetic(raw[1]) or raw[1] == '_')) return true;
     }
+    var has_non_ascii = false;
     var scan_i: usize = 0;
     while (scan_i < raw.len) {
-        if (std.mem.startsWith(u8, raw[scan_i..], calc_interp_preserve_start)) {
+        const c = raw[scan_i];
+        // The preserve marker begins with a control character, so only a
+        // control character needs the longer comparison.
+        if (c == calc_interp_preserve_start[0] and std.mem.startsWith(u8, raw[scan_i..], calc_interp_preserve_start)) {
             const body_start = scan_i + calc_interp_preserve_start.len;
             if (std.mem.indexOf(u8, raw[body_start..], calc_interp_preserve_end)) |end_rel| {
                 scan_i = body_start + end_rel + calc_interp_preserve_end.len;
                 continue;
             }
         }
-        const c = raw[scan_i];
-        if (c == '\\' or (c >= 0x00 and c <= 0x1F) or c == 0x7F) return true;
+        if (c == '\\' or c <= 0x1F or c == 0x7F) return true;
+        if (c >= 0x80) has_non_ascii = true;
         scan_i += 1;
     }
+    // Private-use code points are never ASCII.
+    if (!has_non_ascii) return false;
     var i: usize = 0;
     while (i < raw.len) {
+        if (raw[i] < 0x80) {
+            i += 1;
+            continue;
+        }
         const seq_len = std.unicode.utf8ByteSequenceLength(raw[i]) catch {
             i += 1;
             continue;

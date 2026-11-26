@@ -1,11 +1,11 @@
 const std = @import("std");
 
 /// Family of a CSS unit (used by `comparableUnitInfoCi` for cross-unit math).
-pub const UnitFamily = enum { length, angle, time, frequency, resolution };
+const UnitFamily = enum { length, angle, time, frequency, resolution };
 
 /// Result of `comparableUnitInfoCi`. `factor` converts `1 unit` to canonical
 /// (px / deg / s / Hz / dppx).
-pub const ComparableUnitInfo = struct {
+const ComparableUnitInfo = struct {
     family: UnitFamily,
     factor: f64,
 };
@@ -25,7 +25,7 @@ pub fn unitsMatch(unit_a: ?[]const u8, unit_b: ?[]const u8) bool {
 
 /// Case-insensitive lookup of family + canonical-conversion factor for
 /// `unit`. Returns `null` for unknown / non-comparable units.
-pub fn comparableUnitInfoCi(unit: []const u8) ?ComparableUnitInfo {
+fn comparableUnitInfoCi(unit: []const u8) ?ComparableUnitInfo {
     // Length (canonical: px)
     if (std.ascii.eqlIgnoreCase(unit, "px")) return .{ .family = .length, .factor = 1.0 };
     if (std.ascii.eqlIgnoreCase(unit, "in")) return .{ .family = .length, .factor = 96.0 };
@@ -67,12 +67,6 @@ pub fn canonicalComparableFactorCi(unit: []const u8) ?CanonicalComparableFactor 
         .resolution => "dppx",
     };
     return .{ .name = name, .factor = info.factor };
-}
-
-/// Case-insensitive `value * canonicalFactor(unit)`. `null` for unknown unit.
-pub fn toComparableCanonicalCi(value: f64, unit: []const u8) ?f64 {
-    const info = comparableUnitInfoCi(unit) orelse return null;
-    return value * info.factor;
 }
 
 /// Case-insensitive cross-unit conversion. Returns `null` if either unit is
