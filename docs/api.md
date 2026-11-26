@@ -272,10 +272,11 @@ and the caches its entries share have one more `max_memory_bytes` of their
 own.
 Syntax depth counts blocks, parentheses, brackets, interpolation, unary
 operators, each operator of a chain such as `a + b + c`, and the brackets of
-a selector. `max_selector_candidates` bounds the selectors made while one
-selector is extended (or one `@extend` is registered); a selector counts once
-per compound and combinator, because the memory it takes grows with its
-length. The defaults leave wide
+a selector, which is parsed again at run time. `max_selector_candidates`
+bounds the selectors `@extend` holds at once: the extenders registered for
+the rules being written, plus what extending one selector makes along the
+way. A selector counts once per compound and combinator, because the memory
+it takes grows with its length. The defaults leave wide
 room over the sass-spec suite and a corpus of real-world projects; raise a
 limit when a trusted stylesheet needs more, or use `CompileLimits.unlimited()`.
 `isLimitError(err)` tells these errors apart from Sass errors, and the final

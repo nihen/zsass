@@ -635,11 +635,19 @@ fn prefixRuleIrRangeTopLevelRules(self: anytype, start_idx: usize, parent_select
     // Open `@keyframes` blocks.
     var keyframes_depth: usize = 0;
     var wrapped_comments: usize = 0;
+    // Runs of wrapped comments; consecutive ones share one rule, with only
+    // gaps between them, as in the rebuild below.
+    var wrapped_runs: usize = 0;
+    var in_run = false;
 
     var rule_depth: usize = 0;
     var i = start_idx;
     while (i < self.rule_ir.nodes.items.len) : (i += 1) {
         const node = self.rule_ir.nodes.items[i];
+        switch (node.kind) {
+            .comment, .stmt_gap, .group_boundary, .sourcemap_gap => {},
+            else => in_run = false,
+        }
         switch (node.kind) {
             .rule_begin => {
                 if (rule_depth == 0 and keyframes_depth == 0) {
@@ -676,7 +684,13 @@ fn prefixRuleIrRangeTopLevelRules(self: anytype, start_idx: usize, parent_select
             .comment => {
                 // The nearest enclosing at-rule decides.
                 const stack = at_rule_stack.items;
-                if (rule_depth == 0 and (stack.len == 0 or stack[stack.len - 1] == .style_group)) wrapped_comments += 1;
+                if (rule_depth == 0 and (stack.len == 0 or stack[stack.len - 1] == .style_group)) {
+                    wrapped_comments += 1;
+                    if (!in_run) wrapped_runs += 1;
+                    in_run = true;
+                } else {
+                    in_run = false;
+                }
             },
             .decl,
             .decl_raw,
@@ -689,8 +703,8 @@ fn prefixRuleIrRangeTopLevelRules(self: anytype, start_idx: usize, parent_select
         }
     }
     if (wrapped_comments == 0) return;
-    // At most one rule opened and closed per comment.
-    if (self.rule_ir.budget) |b| try b.chargeIrNodes(2 * wrapped_comments);
+    // One rule opened and closed per run.
+    if (self.rule_ir.budget) |b| try b.chargeIrNodes(2 * wrapped_runs);
 
     // Rebuild the tail of both node buffers in one pass; inserting two nodes
     // per comment in place would move the rest of the buffer every time.

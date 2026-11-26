@@ -50,12 +50,18 @@ const Allocator = std.mem.Allocator;
 pub const Error = Allocator.Error || resource_budget.LimitError;
 const Budget = resource_budget.ResourceBudget;
 
-/// Start counting candidates for one operation: the selectors one selector
-/// is extended into, or the extenders one `@extend` registers. The limit
-/// bounds an operation, so a long stylesheet that extends many selectors a
-/// little does not add up to it.
-fn beginOperation(budget: ?*Budget) void {
-    if (budget) |b| b.beginSelectorOperation();
+/// The candidates charged so far, to give back with `endOperation` once an
+/// operation's intermediates are freed. Extending one selector is such an
+/// operation, so a long stylesheet that extends many selectors a little does
+/// not add up to the limit, while what an engine keeps registered does.
+fn beginOperation(budget: ?*Budget) usize {
+    const b = budget orelse return 0;
+    return b.selector_candidates;
+}
+
+fn endOperation(budget: ?*Budget, mark: usize) void {
+    const b = budget orelse return;
+    b.releaseSelectorCandidates(b.selector_candidates -| mark);
 }
 
 /// Charge `n` selector candidates, made or about to be made. A selector
@@ -297,7 +303,8 @@ pub fn trimUnion(allocator: Allocator, list: *SelectorList, details: *std.ArrayL
 /// extends with. Empty when there is none. The results belong to
 /// `allocator`.
 pub fn unifyComplexes(allocator: Allocator, budget: ?*Budget, first: *const ComplexSelector, second: *const ComplexSelector) Error![]ComplexSelector {
-    beginOperation(budget);
+    const mark = beginOperation(budget);
+    defer endOperation(budget, mark);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -371,6 +378,8 @@ pub const Engine = struct {
     replace: bool = false,
     /// Charged for every selector the engine makes along the way.
     budget: ?*Budget = null,
+    /// Candidates registration charged; given back in `deinit`.
+    registered: usize = 0,
 
     pub const Mode = enum {
         /// `@extend`s of one module, as they were written.
@@ -399,12 +408,17 @@ pub const Engine = struct {
     }
 
     pub fn deinit(self: *Engine, backing: Allocator) void {
+        if (self.budget) |b| b.releaseSelectorCandidates(self.registered);
         self.arena.deinit();
         backing.destroy(self);
     }
 
     fn register(self: *Engine, source: Source) Error!void {
-        beginOperation(self.budget);
+        // What registration charges stays with the engine until `deinit`.
+        const mark = beginOperation(self.budget);
+        defer if (self.budget) |b| {
+            self.registered += b.selector_candidates -| mark;
+        };
         const resolved = self.mode != .written;
         const by_function = self.mode == .function or self.mode == .replace;
         const a = self.arena.allocator();
@@ -610,7 +624,8 @@ pub const Engine = struct {
     /// The same, also telling of every resulting selector whether the rule
     /// was written with it and how specific its extenders are.
     pub fn extendSelectorDetailed(self: *Engine, out: Allocator, list: *const SelectorList, snapshot: u32, details: ?*std.ArrayList(Detail)) Error!SelectorList {
-        beginOperation(self.budget);
+        const mark = beginOperation(self.budget);
+        defer endOperation(self.budget, mark);
         var scratch = std.heap.ArenaAllocator.init(self.arena.child_allocator);
         defer scratch.deinit();
         const a = scratch.allocator();

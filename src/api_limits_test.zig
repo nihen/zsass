@@ -283,7 +283,7 @@ test "limits: independent extends stop at the selector budget" {
     const fourteen = try independentExtends(a, 14);
     try std.testing.expectError(error.SelectorExpansionLimit, compile(a, fourteen, "", &.{}, quiet));
     // A higher limit lets it through, with every combination.
-    const css = try compile(a, fourteen, "", &.{}, withLimits(.{ .max_selector_candidates = 2_000_000 }));
+    const css = try compile(a, fourteen, "", &.{}, withLimits(.{ .max_selector_candidates = 2_000_000, .max_memory_bytes = std.math.maxInt(usize) }));
     try std.testing.expectEqual(@as(usize, 16384), std.mem.count(u8, css[0..std.mem.indexOfScalar(u8, css, '{').?], ",") + 1);
 }
 
@@ -592,4 +592,84 @@ test "file policy: a link out of a root tells nothing about its target" {
     try f.tmp.dir.symLink(zsass_io.io, "dir", "allowed/alias", .{});
     const css = try compile(a, "@use \"alias\";", f.entry, &.{}, opts);
     try std.testing.expect(std.mem.indexOf(u8, css, ".index") != null);
+}
+
+test "limits: registered extenders add up while the engine keeps them" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var src: std.ArrayList(u8) = .empty;
+    try src.appendSlice(a, ".x {\n");
+    for (0..2000) |i| try src.print(a, "  @extend .t{d} !optional;\n", .{i});
+    try src.appendSlice(a, "}\n");
+    try std.testing.expectError(error.SelectorExpansionLimit, compile(a, src.items, "", &.{}, withLimits(.{ .max_selector_candidates = 1000 })));
+    _ = try compile(a, src.items, "", &.{}, withLimits(.{ .max_selector_candidates = 10_000 }));
+}
+
+test "limits: extending while writing counts toward the memory limit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var src: std.ArrayList(u8) = .empty;
+    for (0..100) |k| {
+        for (0..10) |i| try src.print(a, ".a{d} ", .{i});
+        try src.print(a, ".q{d} {{ x: y; }}\n", .{k});
+    }
+    for (0..10) |i| try src.print(a, ".x{d} {{ @extend .a{d}; }}\n", .{ i, i });
+    try std.testing.expectError(error.MemoryLimit, compile(a, src.items, "", &.{}, withLimits(.{ .max_memory_bytes = 64 * 1024 * 1024 })));
+}
+
+test "limits: a raised syntax depth lets selectors nest deeper" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const runtime = try repeat(a, &.{ "@use \"sass:selector\"; a { x: selector.parse(\"", ":is(", "b", ")", "\"); }" }, &.{ 1, 520, 1, 520, 1 });
+    try std.testing.expectError(error.NestingLimit, compile(a, runtime, "", &.{}, quiet));
+    // Debug builds take about 8 KiB of stack per level here.
+    _ = try compile(a, runtime, "", &.{}, withLimits(.{ .max_syntax_depth = 1000, .stack_bytes = 6 * 1024 * 1024 }));
+}
+
+test "limits: consecutive comments loaded into a rule share one wrapper" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeFile(tmp.dir, "_c.scss", "/**//**/");
+    const root = try tmpPath(a, &tmp);
+    const entry = try std.fs.path.join(a, &.{ root, "entry.scss" });
+    _ = try compile(a, "@use \"sass:meta\"; a { @include meta.load-css(\"c\"); }", entry, &.{}, withLimits(.{ .max_ir_nodes = 6 }));
+}
+
+test "batch: a memory limit too small for the shared caches is a memory limit" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeFile(tmp.dir, "one.scss", "a { b: c; }");
+    const root = try tmpPath(a, &tmp);
+    const paths = [_][]const u8{try std.fs.path.join(a, &.{ root, "one.scss" })};
+    try std.testing.expectError(error.MemoryLimit, api.compileFiles(a, &paths, .{ .quiet = true, .limits = .{ .max_memory_bytes = 1 } }));
+}
+
+test "file policy: a root given through a link accepts links spelled that way" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try PolicyFixture.init(a);
+    defer f.deinit();
+    try f.tmp.dir.symLink(zsass_io.io, "allowed", "via", .{});
+    const via = try std.fs.path.join(a, &.{ f.root, "via" });
+    const target = try std.fs.path.join(a, &.{ via, "_partial.scss" });
+    try f.tmp.dir.symLink(zsass_io.io, target, "allowed/_abs.scss", .{});
+    const roots = [_][]const u8{via};
+    var opts = api.CompileOptions.forUntrustedInput(&roots);
+    opts.quiet = true;
+    const entry = try std.fs.path.join(a, &.{ via, "entry.scss" });
+    const css = try compile(a, "@use \"abs\";", entry, &.{}, opts);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".partial") != null);
 }

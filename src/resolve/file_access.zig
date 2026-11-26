@@ -88,12 +88,12 @@ pub const FileAccess = struct {
     }
 
     pub const Placement = enum {
-        /// The path leads to an entry inside a root, or to nothing yet
-        /// whose parent is inside one.
+        /// The path leads to an entry inside a root.
         inside,
         /// The path, or a symbolic link on it, leads outside the roots.
         outside,
-        /// Something inside a root on the way does not exist.
+        /// The path, or something on the way to it, does not exist; what was
+        /// looked at lies inside a root.
         missing,
     };
 
@@ -110,9 +110,18 @@ pub const FileAccess = struct {
         var buf: [4 * std.fs.max_path_bytes]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&buf);
         const a = fba.allocator();
-        var abs: []const u8 = std.fs.path.resolve(a, &.{ self.cwd, path }) catch return .outside;
+        // The path being followed, kept apart from the scratch space that each
+        // hop starts afresh, so a chain of links does not run out of room.
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var abs: []const u8 = blk: {
+            const resolved = std.fs.path.resolve(a, &.{ self.cwd, path }) catch return .outside;
+            if (resolved.len > path_buf.len) return .outside;
+            @memcpy(path_buf[0..resolved.len], resolved);
+            break :blk path_buf[0..resolved.len];
+        };
         var hops: usize = 0;
         while (true) {
+            fba.reset();
             // Rewrite a path under a root as given to the same path under the
             // root with its links resolved.
             const root, const rest = self.splitAtRoot(abs) orelse return .outside;
@@ -134,8 +143,11 @@ pub const FileAccess = struct {
             const next = followed orelse return .inside;
             hops += 1;
             if (hops > 40) return .outside;
-            if (!insideAny(self.canonical_roots, next)) return .outside;
-            abs = next;
+            // A link may name the root as it was given, not only resolved.
+            if (self.splitAtRoot(next) == null) return .outside;
+            if (next.len > path_buf.len) return .outside;
+            @memcpy(path_buf[0..next.len], next);
+            abs = path_buf[0..next.len];
         }
     }
 

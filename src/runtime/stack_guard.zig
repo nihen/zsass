@@ -17,20 +17,31 @@ const builtin = @import("builtin");
 
 threadlocal var floor: usize = 0;
 threadlocal var tripped_flag: bool = false;
+threadlocal var nesting_limit: u32 = std.math.maxInt(u32);
 
 pub const Scope = struct {
     prev_floor: usize,
     prev_tripped: bool,
+    prev_nesting_limit: u32,
 
     pub fn end(self: Scope) void {
         floor = self.prev_floor;
         tripped_flag = self.prev_tripped;
+        nesting_limit = self.prev_nesting_limit;
     }
 };
 
-/// Start guarding recursion below the caller's frame. Pair with `end`.
-pub fn begin(stack_bytes: usize) Scope {
-    const scope: Scope = .{ .prev_floor = floor, .prev_tripped = tripped_flag };
+/// The syntax depth the outermost scope allows, for nesting found in text
+/// that is parsed at run time, such as a selector.
+pub fn nestingLimit() u32 {
+    return nesting_limit;
+}
+
+/// Start guarding recursion below the caller's frame, and nesting found at run
+/// time beyond `max_nesting`. Pair with `end`.
+pub fn begin(stack_bytes: usize, max_nesting: u32) Scope {
+    const scope: Scope = .{ .prev_floor = floor, .prev_tripped = tripped_flag, .prev_nesting_limit = nesting_limit };
+    if (scope.prev_floor == 0 or max_nesting < nesting_limit) nesting_limit = max_nesting;
     const here = @frameAddress();
     const candidate = here -| stack_bytes;
     // The stack grows down on every supported target; keep the higher floor.
@@ -85,7 +96,7 @@ comptime {
 }
 
 test "check fails below the floor and marks the thread" {
-    const scope = begin(64 * 1024);
+    const scope = begin(64 * 1024, 512);
     defer scope.end();
     try check();
     try std.testing.expect(!tripped());
@@ -104,9 +115,9 @@ test "check fails below the floor and marks the thread" {
 }
 
 test "a nested scope keeps the outer floor" {
-    const outer = begin(64 * 1024);
+    const outer = begin(64 * 1024, 512);
     const outer_floor = floor;
-    const inner = begin(1024 * 1024);
+    const inner = begin(1024 * 1024, 512);
     try std.testing.expectEqual(outer_floor, floor);
     inner.end();
     outer.end();

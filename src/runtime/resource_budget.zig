@@ -28,9 +28,10 @@ pub const CompileLimits = struct {
     max_syntax_depth: u32 = default_max_syntax_depth,
     /// VM instructions executed by the whole compilation.
     max_vm_steps: u64 = default_max_vm_steps,
-    /// Selectors produced while extending one selector (or registering one
-    /// `@extend`), intermediates included, each counted by its number of
-    /// compounds and combinators.
+    /// Selectors held at once while extending: the extenders every live
+    /// `@extend` engine has registered, plus the candidates of the selector
+    /// being extended, intermediates included. Each selector counts once per
+    /// compound and combinator.
     max_selector_candidates: usize = default_max_selector_candidates,
     /// Rule, declaration, and other output nodes the VM emits.
     max_ir_nodes: usize = default_max_ir_nodes,
@@ -158,6 +159,9 @@ pub const ResourceBudget = struct {
     selector_candidates: usize = 0,
     ir_nodes: usize = 0,
     output_bytes: usize = 0,
+    /// Bytes held through every `LimitedAllocator` of this compilation.
+    memory_used: usize = 0,
+    memory_peak: usize = 0,
     /// Steps left before `chargeVmStep` next takes its slow path. Kept here
     /// so that the hot path is a single compare and decrement.
     vm_fuel: u64 = 0,
@@ -240,9 +244,9 @@ pub const ResourceBudget = struct {
         return self.vm_steps - self.vm_fuel;
     }
 
-    /// Start a new selector operation; the selector limit bounds each one.
-    pub fn beginSelectorOperation(self: *ResourceBudget) void {
-        self.selector_candidates = 0;
+    /// Give back selector candidates whose selectors are freed again.
+    pub fn releaseSelectorCandidates(self: *ResourceBudget, n: usize) void {
+        self.selector_candidates -|= n;
     }
 
     pub fn chargeSelectorCandidates(self: *ResourceBudget, n: usize) LimitError!void {
@@ -275,8 +279,6 @@ pub const ResourceBudget = struct {
 pub const LimitedAllocator = struct {
     budget: *ResourceBudget,
     child: std.mem.Allocator,
-    used: usize = 0,
-    peak: usize = 0,
     /// Count what is freed or shrunk as still held. Use it when `child` is an
     /// arena, which keeps freed memory until it is reset.
     monotonic: bool = false,
@@ -291,7 +293,7 @@ pub const LimitedAllocator = struct {
     }
 
     fn release(self: *LimitedAllocator, n: usize) void {
-        if (!self.monotonic) self.used -|= n;
+        if (!self.monotonic) self.budget.memory_used -|= n;
     }
 
     pub fn allocator(self: *LimitedAllocator) std.mem.Allocator {
@@ -299,7 +301,8 @@ pub const LimitedAllocator = struct {
     }
 
     fn reserve(self: *LimitedAllocator, n: usize) bool {
-        const total = std.math.add(usize, self.used, n) catch {
+        const b = self.budget;
+        const total = std.math.add(usize, b.memory_used, n) catch {
             self.budget.noteExceeded(error.MemoryLimit);
             return false;
         };
@@ -307,8 +310,8 @@ pub const LimitedAllocator = struct {
             self.budget.noteExceeded(error.MemoryLimit);
             return false;
         }
-        self.used = total;
-        if (total > self.peak) self.peak = total;
+        b.memory_used = total;
+        if (total > b.memory_peak) b.memory_peak = total;
         return true;
     }
 
@@ -316,7 +319,7 @@ pub const LimitedAllocator = struct {
         const self: *LimitedAllocator = @ptrCast(@alignCast(ctx));
         if (!self.reserve(len)) return null;
         const ptr = self.child.rawAlloc(len, alignment, ret_addr) orelse {
-            self.used -= len;
+            self.budget.memory_used -|= len;
             return null;
         };
         return ptr;
@@ -326,7 +329,7 @@ pub const LimitedAllocator = struct {
         const self: *LimitedAllocator = @ptrCast(@alignCast(ctx));
         if (new_len > memory.len and !self.reserve(new_len - memory.len)) return false;
         if (!self.child.rawResize(memory, alignment, new_len, ret_addr)) {
-            if (new_len > memory.len) self.used -= new_len - memory.len;
+            if (new_len > memory.len) self.budget.memory_used -|= new_len - memory.len;
             return false;
         }
         if (new_len < memory.len) self.release(memory.len - new_len);
@@ -337,7 +340,7 @@ pub const LimitedAllocator = struct {
         const self: *LimitedAllocator = @ptrCast(@alignCast(ctx));
         if (new_len > memory.len and !self.reserve(new_len - memory.len)) return null;
         const ptr = self.child.rawRemap(memory, alignment, new_len, ret_addr) orelse {
-            if (new_len > memory.len) self.used -= new_len - memory.len;
+            if (new_len > memory.len) self.budget.memory_used -|= new_len - memory.len;
             return null;
         };
         if (new_len < memory.len) self.release(memory.len - new_len);
@@ -577,7 +580,7 @@ test "limited allocator refuses what would exceed the limit" {
     a.free(first);
     const again = try a.alloc(u8, 1000);
     a.free(again);
-    try std.testing.expectEqual(@as(usize, 0), la.used);
+    try std.testing.expectEqual(@as(usize, 0), b.memory_used);
     try std.testing.expectEqual(error.MemoryLimit, b.mapError(error.OutOfMemory));
 }
 

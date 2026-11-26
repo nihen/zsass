@@ -772,11 +772,6 @@ pub const Parser = struct {
         return true;
     }
 
-    /// Walk tokens from the current position up to the opening `{` of
-    /// a style rule, respecting paren / bracket / interpolation depth.
-    /// Returns the raw byte span of the selector text (trailing
-    /// trivia trimmed).  On successful return, `self.pos` points at
-    /// the `{` token.
     /// Record an open bracket of a selector. Brackets count toward the syntax
     /// depth: the selector is parsed again at run time, one level at a time.
     fn pushSelectorBracket(self: *Parser, stack: *std.ArrayListUnmanaged(u8), bracket: u8) ParseError!void {
@@ -789,10 +784,15 @@ pub const Parser = struct {
         try stack.append(self.allocator, bracket);
     }
 
+    /// Walk tokens from the current position up to the opening `{` of
+    /// a style rule, respecting paren / bracket / interpolation depth.
+    /// Returns the raw byte span of the selector text (trailing
+    /// trivia trimmed).  On successful return, `self.pos` points at
+    /// the `{` token.
     fn collectSelectorSpan(self: *Parser) ParseError!Span {
         if (self.isAtEnd()) return error.SyntaxError;
         const start = self.current().span.start;
-        // Track opening bracket kinds on a small stack so `)` only
+        // Track opening bracket kinds on a stack so `)` only
         // closes `(` and `]` only closes `[` -- otherwise an unbalanced
         // `[a#{"..."}) {...}` would silently pop the outer `[` and treat
         // the following `{` as the style-rule body.

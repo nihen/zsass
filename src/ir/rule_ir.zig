@@ -6066,7 +6066,11 @@ pub const RuleIR = struct {
         opts: WriteToWithSourceMapOpts,
     ) !void {
         _ = opts.source_map_url_override;
-        var temp_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        // Extending selectors while writing can take far more memory than
+        // the rules themselves; it counts toward the compilation's limit.
+        var write_limiter: ?resource_budget.LimitedAllocator = if (self.budget) |b| resource_budget.LimitedAllocator.init(b, std.heap.page_allocator) else null;
+        const write_alloc: std.mem.Allocator = if (write_limiter) |*l| l.allocator() else std.heap.page_allocator;
+        var temp_arena = std.heap.ArenaAllocator.init(write_alloc);
         defer temp_arena.deinit();
         const temp = temp_arena.allocator();
 
@@ -6074,7 +6078,7 @@ pub const RuleIR = struct {
         // SAFETY: Assigned in the `.compressed` branch before `effective_writer` dereferences it.
         var compress_aw: std.Io.Writer.Allocating = undefined;
         const effective_writer: *std.Io.Writer = if (output_style == .compressed) blk: {
-            compress_aw = std.Io.Writer.Allocating.fromArrayList(std.heap.page_allocator, &compress_buf);
+            compress_aw = std.Io.Writer.Allocating.fromArrayList(write_alloc, &compress_buf);
             break :blk &compress_aw.writer;
         } else writer;
 
@@ -11633,7 +11637,7 @@ pub const RuleIR = struct {
                 try writer.writeAll(compressed);
                 try writer.writeAll("\n");
             }
-            compress_buf.deinit(std.heap.page_allocator);
+            compress_buf.deinit(write_alloc);
         }
     }
 

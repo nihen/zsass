@@ -189,7 +189,7 @@ pub fn compileFiles(
     if (paths.len == 1) {
         var pool_arena = std.heap.ArenaAllocator.init(shared_alloc);
         defer pool_arena.deinit();
-        var shared_pool = try intern_pool_mod.InternPool.init(pool_arena.allocator());
+        var shared_pool = intern_pool_mod.InternPool.init(pool_arena.allocator()) catch |err| return shared_limiter.mapError(err);
         defer shared_pool.deinit(pool_arena.allocator());
         var ast_cache = ast_cache_mod.ParsedAstCache.init(shared_alloc, &shared_pool);
         defer ast_cache.deinit();
@@ -283,7 +283,7 @@ pub fn compileFiles(
                 defer pool_arena.deinit();
                 const pool_alloc = pool_arena.allocator();
                 var shared_pool = intern_pool_mod.InternPool.init(pool_alloc) catch |err| {
-                    failAllRemaining(state, err);
+                    failAllRemaining(state, state.shared_limiter.mapError(err));
                     return;
                 };
                 defer shared_pool.deinit(pool_alloc);
@@ -363,7 +363,7 @@ fn compileOnePath(
     // A fresh budget per entry: one entry cannot use up another's allowance.
     var budget = resource_budget.ResourceBudget.init(opts.limits, opts.cancellation_check, opts.cancellation_ctx);
     budget.file_access = file_access;
-    const guard = stack_guard.begin(opts.limits.stack_bytes);
+    const guard = stack_guard.begin(opts.limits.stack_bytes, opts.limits.max_syntax_depth);
     defer guard.end();
     // `work_alloc` is an arena that keeps what is freed until the entry ends.
     var limited_alloc = resource_budget.LimitedAllocator.initOverArena(&budget, work_alloc);
