@@ -2977,7 +2977,7 @@ fn cssCacheRoot(allocator: std.mem.Allocator) ![]const u8 {
         const raw = std.mem.sliceTo(raw_z, 0);
         if (raw.len != 0) return try allocator.dupe(u8, raw);
     }
-    return try allocator.dupe(u8, ".zig-cache/zsass-css-cache-v3");
+    return try allocator.dupe(u8, ".zig-cache/zsass-css-cache-v4");
 }
 
 fn appendU64KeyMaterial(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, value: u64) !void {
@@ -2992,6 +2992,17 @@ fn appendI128KeyMaterial(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Al
     try buf.appendSlice(allocator, &tmp);
 }
 
+fn appendPathKeyMaterial(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, label: []const u8, path: []const u8) !void {
+    try buf.appendSlice(allocator, label);
+    try buf.appendSlice(allocator, path);
+    try buf.append(allocator, '\t');
+    if (zsass_io_mod.realPathAlloc(std.Io.Dir.cwd(), path, allocator)) |real| {
+        defer allocator.free(real);
+        try buf.appendSlice(allocator, real);
+    } else |_| {}
+    try buf.append(allocator, '\n');
+}
+
 fn cssCacheKeyHex(
     allocator: std.mem.Allocator,
     input_path: []const u8,
@@ -2999,21 +3010,26 @@ fn cssCacheKeyHex(
 ) ![64]u8 {
     var material: std.ArrayListUnmanaged(u8) = .empty;
     defer material.deinit(allocator);
-    try material.appendSlice(allocator, "zsass-css-cache-v3\n");
+    try material.appendSlice(allocator, "zsass-css-cache-v4\n");
     try material.appendSlice(allocator, builtin.zig_version_string);
     try material.append(allocator, '\n');
     try material.appendSlice(allocator, @tagName(builtin.mode));
     try material.append(allocator, '\n');
-    try material.appendSlice(allocator, input_path);
+    // Relative paths name different files in different projects, so the
+    // key holds where they lead, not only how they are spelled.
+    try appendPathKeyMaterial(&material, allocator, "cwd:", ".");
+    try appendPathKeyMaterial(&material, allocator, "in:", input_path);
+    for (opts.load_paths) |lp| try appendPathKeyMaterial(&material, allocator, "I:", lp);
+    // Every option that changes the CSS, or whether the compile succeeds.
+    try material.print(allocator, "style:{s}\nsyntax:{s}\n", .{
+        @tagName(opts.output_style),
+        if (opts.syntax_override) |o| @tagName(o) else "auto",
+    });
+    try material.appendSlice(allocator, "fatal:");
+    try material.appendSlice(allocator, std.mem.asBytes(&opts.deprecation.fatal));
+    try material.appendSlice(allocator, "\nlimits:");
+    try material.appendSlice(allocator, std.mem.asBytes(&opts.limits));
     try material.append(allocator, '\n');
-    var lp_total: usize = 0;
-    for (opts.load_paths) |lp| lp_total += lp.len;
-    try material.ensureUnusedCapacity(allocator, lp_total + opts.load_paths.len * 3);
-    for (opts.load_paths) |lp| {
-        material.appendSliceAssumeCapacity("I:");
-        material.appendSliceAssumeCapacity(lp);
-        material.appendAssumeCapacity('\n');
-    }
     try material.appendSlice(allocator, "charset:");
     try material.append(allocator, if (opts.charset) '1' else '0');
     try material.append(allocator, '\n');
@@ -3112,7 +3128,7 @@ fn manifestDepsStillFresh(allocator: std.mem.Allocator, manifest_bytes: []const 
     const header = lines.next() orelse return false;
     // v1, v2, and unknown headers are treated as stale; this is graceful
     // invalidation when the manifest format bumps.
-    if (!std.mem.eql(u8, header, "zsass-css-cache-v3")) return false;
+    if (!std.mem.eql(u8, header, "zsass-css-cache-v4")) return false;
     const strict = cssCacheStrict();
     while (lines.next()) |line| {
         if (line.len == 0) continue;
@@ -3181,7 +3197,7 @@ fn storeCssCache(
 
     var manifest: std.ArrayListUnmanaged(u8) = .empty;
     defer manifest.deinit(allocator);
-    try manifest.appendSlice(allocator, "zsass-css-cache-v3\n");
+    try manifest.appendSlice(allocator, "zsass-css-cache-v4\n");
     for (program.modules) |mod| {
         if (mod.module_path.len == 0) continue;
         const st = std.Io.Dir.cwd().statFile(zsass_io_mod.io, mod.module_path, .{}) catch return;
@@ -3824,4 +3840,26 @@ test "currentLocalTimestamp reads the C library's clock and calendar" {
     try std.testing.expect(hour <= 23);
     try std.testing.expect(minute <= 59);
     try std.testing.expect(second <= 60);
+}
+
+test "css cache key depends on the output style and on where paths lead" {
+    const alloc = std.testing.allocator;
+    const expanded = try cssCacheKeyHex(alloc, "in.scss", .{});
+    const compressed = try cssCacheKeyHex(alloc, "in.scss", .{ .output_style = .compressed });
+    try std.testing.expect(!std.mem.eql(u8, &expanded, &compressed));
+    var fatal_opts: RunOpts = .{};
+    fatal_opts.deprecation.fatal.insert(.import);
+    const fatal = try cssCacheKeyHex(alloc, "in.scss", fatal_opts);
+    try std.testing.expect(!std.mem.eql(u8, &expanded, &fatal));
+
+    // The same spelling names another file in another directory.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(zsass_io_mod.io, .{ .sub_path = "in.scss", .data = "a{b:c}" });
+    const dir = try zsass_io_mod.realPathAlloc(tmp.dir, ".", alloc);
+    defer alloc.free(dir);
+    const absolute = try std.fs.path.join(alloc, &.{ dir, "in.scss" });
+    defer alloc.free(absolute);
+    const there = try cssCacheKeyHex(alloc, absolute, .{});
+    try std.testing.expect(!std.mem.eql(u8, &expanded, &there));
 }
