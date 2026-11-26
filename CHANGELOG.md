@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Security
+- Compilation stops with an error instead of crashing, hanging, or running
+  out of memory on small hostile inputs: deeply nested syntax, values or
+  selectors nested at run time, endless loops, and `@extend`s whose
+  combinations multiply. Limits on syntax depth, VM steps, generated rules,
+  `@extend` expansion, source size, and output size apply by default. Each
+  has a stable diagnostic code, such as `ZSASS_LIMIT_VM_STEPS`, and fails
+  with exit code 65.
+- The CLI's Docker image runs as an unprivileged user.
+
+### Added
+- `CompileOptions.limits` and `CompileFilesOptions.limits`
+  (`CompileLimits`), with `CompileLimits.unlimited()`, and `--no-limits` for
+  the CLI.
+- `CompileOptions.cancellation_check` stops a compilation from the caller,
+  for example at a deadline.
+- `CompileOptions.file_import_policy` (`.disabled`, `.unrestricted`, or
+  `.roots`) decides which files `@use`, `@forward`, `@import`, and
+  `meta.load-css()` may read; `CompileOptions.forUntrustedInput(roots)` sets
+  it with the default limits. The default stays `.unrestricted`, as in Sass.
+
 ## 0.4.4 (2026-11-26)
 
 ### Changed
