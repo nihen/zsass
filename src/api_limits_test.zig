@@ -357,6 +357,21 @@ test "file policy: files inside the roots load" {
     try std.testing.expect(std.mem.indexOf(u8, css, ".plain") != null);
 }
 
+test "file policy: an absolute path resolves like the official CLI" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try PolicyFixture.init(a);
+    defer f.deinit();
+    const use = try std.fmt.allocPrint(a, "@use \"{s}/outside/secret\";", .{f.root});
+    try std.testing.expectEqualStrings(".secret {\n  x: y;\n}\n", try compile(a, use, f.entry, &.{}, quiet));
+    const index = try std.fmt.allocPrint(a, "@use \"{s}/dir\";", .{f.allowed});
+    try std.testing.expectEqualStrings(".index {\n  x: y;\n}\n", try compile(a, index, f.entry, &.{}, quiet));
+    const missing = try std.fmt.allocPrint(a, "@use \"{s}/outside/nothing\";", .{f.root});
+    try std.testing.expectError(error.UsermoduleNotFound, compile(a, missing, f.entry, &.{}, quiet));
+}
+
 test "file policy: escapes from the roots are refused" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -371,6 +386,7 @@ test "file policy: escapes from the roots are refused" {
         "@forward \"../outside/secret\";",
         "@import \"../outside/secret\";",
         "@use \"sass:meta\"; a { @include meta.load-css(\"../outside/secret\"); }",
+        absolute,
         "@use \"pkg:anything\";",
         // A module inside the root cannot reach out either.
         "@use \"reaches_out\";",
@@ -379,11 +395,6 @@ test "file policy: escapes from the roots are refused" {
     for (sources) |src| {
         try std.testing.expectError(error.FileImportDenied, compile(a, src, f.entry, &.{}, opts));
     }
-    // zsass does not resolve an absolute path in `@use`; it must not load
-    // the file either way.
-    if (compile(a, absolute, f.entry, &.{}, opts)) |css| {
-        try std.testing.expect(std.mem.indexOf(u8, css, ".secret") == null);
-    } else |_| {}
     // Load paths only say where to look; they grant nothing.
     const outside = try std.fs.path.join(a, &.{ f.root, "outside" });
     try std.testing.expectError(error.FileImportDenied, compile(a, "@use \"secret\";", f.entry, &.{outside}, opts));

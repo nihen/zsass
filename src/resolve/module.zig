@@ -295,6 +295,24 @@ fn resolveUrlProbed(
         return null;
     }
 
+    // An absolute path names a file directly; load paths are not consulted.
+    if (std.fs.path.isAbsolute(url)) {
+        const abs = try std.fs.path.resolve(allocator, &.{url});
+        defer allocator.free(abs);
+        const abs_base = std.fs.path.dirname(abs) orelse "/";
+        const abs_file = std.fs.path.basename(abs);
+        if (is_import) {
+            inline for ([_]CandidateKind{ .import_non_index, .normal_non_index, .import_index, .normal_index }) |kind| {
+                if (try tryCandidatePhase(allocator, probe, abs_base, abs_file, kind)) |path| {
+                    return .{ .path = path, .allocator = allocator };
+                }
+            }
+        } else if (try tryCandidates(allocator, probe, abs_base, abs_file)) |path| {
+            return .{ .path = path, .allocator = allocator };
+        }
+        return null;
+    }
+
     // 1. Resolve relative to from_path's directory.
     const dir = std.fs.path.dirname(from_path) orelse ".";
 

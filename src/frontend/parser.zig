@@ -781,8 +781,8 @@ pub const Parser = struct {
         // closes `(` and `]` only closes `[` -- otherwise an unbalanced
         // `[a#{"..."}) {...}` would silently pop the outer `[` and treat
         // the following `{` as the style-rule body.
-        var stack: [32]u8 = undefined;
-        var depth: usize = 0;
+        var stack: std.ArrayListUnmanaged(u8) = .empty;
+        defer stack.deinit(self.allocator);
         var interp_depth: u32 = 0;
         var last_significant_end: u32 = start;
 
@@ -807,26 +807,20 @@ pub const Parser = struct {
             }
 
             if (tok.tag == .lparen) {
-                if (depth < stack.len) {
-                    stack[depth] = '(';
-                    depth += 1;
-                }
+                try stack.append(self.allocator, '(');
                 last_significant_end = tok.span.end;
                 self.advance();
                 continue;
             }
             if (tok.tag == .lbracket) {
-                if (depth < stack.len) {
-                    stack[depth] = '[';
-                    depth += 1;
-                }
+                try stack.append(self.allocator, '[');
                 last_significant_end = tok.span.end;
                 self.advance();
                 continue;
             }
             if (tok.tag == .rparen) {
-                if (depth > 0 and stack[depth - 1] == '(') {
-                    depth -= 1;
+                if (stack.items.len > 0 and stack.items[stack.items.len - 1] == '(') {
+                    _ = stack.pop();
                     last_significant_end = tok.span.end;
                     self.advance();
                     continue;
@@ -834,15 +828,15 @@ pub const Parser = struct {
                 return error.SyntaxError;
             }
             if (tok.tag == .rbracket) {
-                if (depth > 0 and stack[depth - 1] == '[') {
-                    depth -= 1;
+                if (stack.items.len > 0 and stack.items[stack.items.len - 1] == '[') {
+                    _ = stack.pop();
                     last_significant_end = tok.span.end;
                     self.advance();
                     continue;
                 }
                 return error.SyntaxError;
             }
-            if (depth > 0) {
+            if (stack.items.len > 0) {
                 last_significant_end = tok.span.end;
                 self.advance();
                 continue;

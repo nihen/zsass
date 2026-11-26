@@ -2227,6 +2227,21 @@ test "api: a signed number right after a word is added to it" {
     , css);
 }
 
+test "api: a selector nests :is() more than 32 levels deep" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // The official CLI writes the selector as it is, at any depth.
+    var src: std.ArrayList(u8) = .empty;
+    for (0..40) |_| try src.appendSlice(alloc, ":is(");
+    try src.append(alloc, 'a');
+    for (0..40) |_| try src.append(alloc, ')');
+    const selector = try alloc.dupe(u8, src.items);
+    try src.appendSlice(alloc, "{x:y}");
+    const css = try compileSourceToCss(alloc, src.items, "", &.{}, .{});
+    try std.testing.expectEqualStrings(try std.mem.concat(alloc, u8, &.{ selector, " {\n  x: y;\n}\n" }), css);
+}
+
 test "api: a target repeated in ten compounds is extended in every combination" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

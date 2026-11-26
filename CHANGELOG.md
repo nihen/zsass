@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `meta.load-css()` may read; `CompileOptions.forUntrustedInput(roots)` sets
   it with the default limits. The default stays `.unrestricted`, as in Sass.
 
+### Fixed
+- A selector with `:is()`, `:not()`, or another pseudo-class nested more than
+  32 levels deep is no longer an "Invalid CSS syntax" error.
+- `@use`, `@forward`, `@import`, and `meta.load-css()` load a stylesheet
+  named by an absolute path, as the official CLI does.
+
 ## 0.4.4 (2026-11-26)
 
 ### Changed
