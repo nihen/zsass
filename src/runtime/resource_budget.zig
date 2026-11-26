@@ -6,6 +6,7 @@
 //! so a child module or VM cannot start from fresh counters.
 
 const std = @import("std");
+const file_access_mod = @import("../resolve/file_access.zig");
 
 pub const default_max_source_bytes: usize = 128 * 1024 * 1024;
 pub const default_max_syntax_depth: u32 = 512;
@@ -67,9 +68,12 @@ pub const LimitError = error{
     IrNodeLimit,
     OutputSizeLimit,
     CompilationCancelled,
+    /// The file import policy refused every candidate for a URL.
+    FileImportDenied,
 };
 
-/// True for an error that a resource limit or cancellation raised. Code that
+/// True for an error that a resource limit, cancellation, or the file import
+/// policy raised. Code that
 /// converts errors into a generic failure must pass these through unchanged.
 pub fn isLimitError(err: anyerror) bool {
     return switch (err) {
@@ -81,6 +85,7 @@ pub fn isLimitError(err: anyerror) bool {
         error.IrNodeLimit,
         error.OutputSizeLimit,
         error.CompilationCancelled,
+        error.FileImportDenied,
         => true,
         else => false,
     };
@@ -94,6 +99,7 @@ pub const selector_expansion_message = "Selector expansion limit exceeded.";
 pub const ir_node_message = "Generated output node limit exceeded.";
 pub const output_size_message = "Output size limit exceeded.";
 pub const cancelled_message = "Compilation cancelled.";
+pub const file_import_denied_message = "This file is not allowed to be loaded.";
 
 /// User-facing message for a limit error, or null for any other error.
 pub fn limitMessage(err: anyerror) ?[]const u8 {
@@ -106,6 +112,7 @@ pub fn limitMessage(err: anyerror) ?[]const u8 {
         error.IrNodeLimit => ir_node_message,
         error.OutputSizeLimit => output_size_message,
         error.CompilationCancelled => cancelled_message,
+        error.FileImportDenied => file_import_denied_message,
         else => null,
     };
 }
@@ -121,6 +128,7 @@ pub fn limitCode(err: anyerror) ?[]const u8 {
         error.IrNodeLimit => "ZSASS_LIMIT_IR_NODES",
         error.OutputSizeLimit => "ZSASS_LIMIT_OUTPUT_BYTES",
         error.CompilationCancelled => "ZSASS_CANCELLED",
+        error.FileImportDenied => "ZSASS_IMPORT_DENIED",
         else => null,
     };
 }
@@ -132,6 +140,8 @@ pub const ResourceBudget = struct {
     limits: CompileLimits = .{},
     cancellation_check: ?CancellationCheck = null,
     cancellation_ctx: ?*anyopaque = null,
+    /// The stylesheets the compilation may read; null leaves them open.
+    file_access: ?*const file_access_mod.FileAccess = null,
 
     vm_steps: u64 = 0,
     selector_candidates: usize = 0,
@@ -203,6 +213,11 @@ pub const ResourceBudget = struct {
         const slice = @min(remaining, cancellation_interval);
         self.vm_steps += slice;
         return slice;
+    }
+
+    pub fn fileAccess(budget: ?*const ResourceBudget) ?*const file_access_mod.FileAccess {
+        const b = budget orelse return null;
+        return b.file_access;
     }
 
     /// Instructions executed so far.

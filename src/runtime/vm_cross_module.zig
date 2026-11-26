@@ -1,4 +1,5 @@
 const std = @import("std");
+const file_access_mod = @import("../resolve/file_access.zig");
 const resource_budget = @import("resource_budget.zig");
 const stack_guard = @import("stack_guard.zig");
 const lexer_mod = @import("../frontend/lexer.zig");
@@ -392,6 +393,18 @@ fn fileExists(path: []const u8) bool {
 
 fn resolvePlainCssPath(self: anytype, from_path: []const u8, url: []const u8) !?[]u8 {
     if (isAbsoluteOrExternalLoadCssUrl(url)) return null;
+    var probe: file_access_mod.Probe = .{ .access = resource_budget.ResourceBudget.fileAccess(self.budget) };
+    const found = try resolvePlainCssPathProbed(self, &probe, from_path, url);
+    if (found) |path| {
+        if (probe.allowsFile(path)) return path;
+        self.allocator.free(path);
+        return error.FileImportDenied;
+    }
+    if (probe.denied) return error.FileImportDenied;
+    return null;
+}
+
+fn resolvePlainCssPathProbed(self: anytype, probe: *file_access_mod.Probe, from_path: []const u8, url: []const u8) !?[]u8 {
     const base_dir = std.fs.path.dirname(from_path) orelse ".";
     {
         const abs = if (std.fs.path.isAbsolute(url))
@@ -402,7 +415,7 @@ fn resolvePlainCssPath(self: anytype, from_path: []const u8, url: []const u8) !?
             error.OutOfMemory => return error.OutOfMemory,
         };
         errdefer self.allocator.free(candidate);
-        if (fileExists(candidate)) return candidate;
+        if (probe.allows(candidate) and fileExists(candidate)) return candidate;
         self.allocator.free(candidate);
     }
     if (std.fs.path.isAbsolute(url)) return null;
@@ -411,7 +424,7 @@ fn resolvePlainCssPath(self: anytype, from_path: []const u8, url: []const u8) !?
             error.OutOfMemory => return error.OutOfMemory,
         };
         errdefer self.allocator.free(candidate);
-        if (fileExists(candidate)) return candidate;
+        if (probe.allows(candidate) and fileExists(candidate)) return candidate;
         self.allocator.free(candidate);
     }
     return null;
@@ -426,8 +439,12 @@ fn resolveLoadCssPath(self: anytype, url: []const u8) !?[]const u8 {
         return resolvePlainCssPath(self, from_path, url);
     }
 
-    return resolver_mod.resolveUserModulePath(self.allocator, from_path, url, self.program.load_paths, .{ .pkg_importer_enabled = self.program.pkg_importer_enabled }) catch |err| switch (err) {
+    return resolver_mod.resolveUserModulePath(self.allocator, from_path, url, self.program.load_paths, .{
+        .pkg_importer_enabled = self.program.pkg_importer_enabled,
+        .file_access = resource_budget.ResourceBudget.fileAccess(self.budget),
+    }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.FileImportDenied => return error.FileImportDenied,
     };
 }
 

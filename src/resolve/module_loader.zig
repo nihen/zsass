@@ -59,8 +59,12 @@ pub fn resolveEntryAst(self: *ModuleResolver, ast: *const ast_flat.Ast, entry_pa
 pub fn resolveUserModule(self: *ModuleResolver, from_path: []const u8, url: []const u8, resolve_parsed: ResolveParsedModuleFn) ResolveError!u32 {
     if (url.len == 0) return error.UsermodulePathEmpty;
     const t_path = perf.timeBegin();
-    const resolved_raw = resolveUserModulePath(self.alloc, from_path, url, self.load_paths, .{ .pkg_importer_enabled = self.pkg_importer_enabled }) catch |err| switch (err) {
+    const resolved_raw = resolveUserModulePath(self.alloc, from_path, url, self.load_paths, .{
+        .pkg_importer_enabled = self.pkg_importer_enabled,
+        .file_access = resource_budget.ResourceBudget.fileAccess(self.budget),
+    }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.FileImportDenied => return error.FileImportDenied,
     } orelse return error.UsermoduleNotFound;
     defer self.alloc.free(resolved_raw);
     const resolved = std.fs.path.resolve(self.alloc, &.{resolved_raw}) catch |err| switch (err) {

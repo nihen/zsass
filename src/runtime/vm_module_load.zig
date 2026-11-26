@@ -1,5 +1,6 @@
 //! First-class modules: module reference values, `meta.load()` and `meta.css()`.
 const std = @import("std");
+const resource_budget = @import("resource_budget.zig");
 const value_mod = @import("value.zig");
 const intern_pool_mod = @import("intern_pool.zig");
 
@@ -351,7 +352,10 @@ pub fn invokeMetaLoad(self: anytype, ctx: anytype, args: []const Value, arg_name
         from_path,
         url,
         self.program.load_paths,
-        .{ .pkg_importer_enabled = self.program.pkg_importer_enabled },
+        .{
+            .pkg_importer_enabled = self.program.pkg_importer_enabled,
+            .file_access = resource_budget.ResourceBudget.fileAccess(self.budget),
+        },
     );
     const resolved_raw = maybe_resolved orelse {
         setMessage("Can't find stylesheet to import.", .{});

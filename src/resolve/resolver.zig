@@ -3131,7 +3131,14 @@ fn noteMetaLoadTarget(
     const loader = ctx.loader orelse return;
     if (ctx.module_path.len == 0) return;
 
-    const resolved_raw = (try resolveUserModulePath(ctx.a, ctx.module_path, url, loader.load_paths, .{ .pkg_importer_enabled = loader.pkg_importer_enabled })) orelse return;
+    // A refused URL is reported where `meta.load-css()` runs.
+    const resolved_raw = (resolveUserModulePath(ctx.a, ctx.module_path, url, loader.load_paths, .{
+        .pkg_importer_enabled = loader.pkg_importer_enabled,
+        .file_access = resource_budget.ResourceBudget.fileAccess(loader.budget),
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.FileImportDenied => return,
+    }) orelse return;
     defer ctx.a.free(resolved_raw);
     const canonical = try std.fs.path.resolve(ctx.a, &.{resolved_raw});
     defer ctx.a.free(canonical);
@@ -10951,9 +10958,14 @@ fn preambleFirstImportKey(
                 std.mem.indexOfAny(u8, prefix, "\r\n") != null) return null;
         }
     }
-    return try resolveImportModulePathWithPolicy(ctx.a, ctx.module_path, url_inner, mr.load_paths, true, .{
+    // A refused URL takes the normal path, which reports it.
+    return resolveImportModulePathWithPolicy(ctx.a, ctx.module_path, url_inner, mr.load_paths, true, .{
         .pkg_importer_enabled = mr.pkg_importer_enabled,
-    });
+        .file_access = resource_budget.ResourceBudget.fileAccess(mr.budget),
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.FileImportDenied => return null,
+    };
 }
 
 /// True when this entry's per-entry sidecar stores are empty: pools, color

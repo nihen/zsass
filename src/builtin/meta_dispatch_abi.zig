@@ -120,6 +120,7 @@ pub const Status = enum(u8) {
     ir_node_limit = 11,
     output_size_limit = 12,
     compilation_cancelled = 13,
+    file_import_denied = 14,
 };
 
 pub fn statusFromBuiltinError(err: BuiltinError) Status {
@@ -138,6 +139,7 @@ pub fn statusFromBuiltinError(err: BuiltinError) Status {
         error.IrNodeLimit => .ir_node_limit,
         error.OutputSizeLimit => .output_size_limit,
         error.CompilationCancelled => .compilation_cancelled,
+        error.FileImportDenied => .file_import_denied,
     };
 }
 
@@ -157,5 +159,6 @@ pub fn builtinErrorFromStatus(status: Status) BuiltinError {
         .ir_node_limit => error.IrNodeLimit,
         .output_size_limit => error.OutputSizeLimit,
         .compilation_cancelled => error.CompilationCancelled,
+        .file_import_denied => error.FileImportDenied,
     };
 }

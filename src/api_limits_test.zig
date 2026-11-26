@@ -1,4 +1,5 @@
-//! Resource limits and cancellation, through the embedding API. Deep or large inputs are generated here rather than
+//! Resource limits, cancellation, and the file import policy, through the
+//! embedding API. Deep or large inputs are generated here rather than
 //! stored in the repository.
 
 const std = @import("std");
@@ -300,6 +301,141 @@ test "limits: selector functions and extends from another module share the budge
     const root = try tmpPath(a, &tmp);
     const entry = try std.fs.path.join(a, &.{ root, "entry.scss" });
     try std.testing.expectError(error.SelectorExpansionLimit, compile(a, extends.items, entry, &.{}, opts));
+}
+
+// ---------------------------------------------------------------------
+// File import policy
+// ---------------------------------------------------------------------
+
+const PolicyFixture = struct {
+    tmp: std.testing.TmpDir,
+    root: []const u8,
+    allowed: []const u8,
+    roots: [1][]const u8,
+    entry: []const u8,
+
+    fn init(a: std.mem.Allocator) !PolicyFixture {
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        try writeFile(tmp.dir, "outside/_secret.scss", ".secret { x: y; }");
+        try writeFile(tmp.dir, "allowed/_partial.scss", ".partial { x: y; }");
+        try writeFile(tmp.dir, "allowed/dir/_index.scss", ".index { x: y; }");
+        try writeFile(tmp.dir, "allowed/plain.css", ".plain { x: y; }");
+        try writeFile(tmp.dir, "allowed/_reaches_out.scss", "@use \"../outside/secret\";");
+        const root = try tmpPath(a, &tmp);
+        const allowed = try std.fs.path.join(a, &.{ root, "allowed" });
+        return .{
+            .tmp = tmp,
+            .root = root,
+            .allowed = allowed,
+            .roots = .{allowed},
+            .entry = try std.fs.path.join(a, &.{ allowed, "entry.scss" }),
+        };
+    }
+
+    fn deinit(self: *PolicyFixture) void {
+        self.tmp.cleanup();
+    }
+
+    fn opts(self: *const PolicyFixture) api.CompileOptions {
+        var o = api.CompileOptions.forUntrustedInput(&self.roots);
+        o.quiet = true;
+        return o;
+    }
+};
+
+test "file policy: files inside the roots load" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try PolicyFixture.init(a);
+    defer f.deinit();
+    const css = try compile(a, "@use \"partial\"; @use \"dir\"; @import \"plain\";", f.entry, &.{}, f.opts());
+    try std.testing.expect(std.mem.indexOf(u8, css, ".partial") != null);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".index") != null);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".plain") != null);
+}
+
+test "file policy: escapes from the roots are refused" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try PolicyFixture.init(a);
+    defer f.deinit();
+    const opts = f.opts();
+    const absolute = try std.fmt.allocPrint(a, "@use \"{s}/outside/secret\";", .{f.root});
+    const sources = [_][]const u8{
+        "@use \"../outside/secret\";",
+        "@forward \"../outside/secret\";",
+        "@import \"../outside/secret\";",
+        "@use \"sass:meta\"; a { @include meta.load-css(\"../outside/secret\"); }",
+        "@use \"pkg:anything\";",
+        // A module inside the root cannot reach out either.
+        "@use \"reaches_out\";",
+        "@use \"sass:meta\"; a { @include meta.load-css(\"reaches_out\"); }",
+    };
+    for (sources) |src| {
+        try std.testing.expectError(error.FileImportDenied, compile(a, src, f.entry, &.{}, opts));
+    }
+    // zsass does not resolve an absolute path in `@use`; it must not load
+    // the file either way.
+    if (compile(a, absolute, f.entry, &.{}, opts)) |css| {
+        try std.testing.expect(std.mem.indexOf(u8, css, ".secret") == null);
+    } else |_| {}
+    // Load paths only say where to look; they grant nothing.
+    const outside = try std.fs.path.join(a, &.{ f.root, "outside" });
+    try std.testing.expectError(error.FileImportDenied, compile(a, "@use \"secret\";", f.entry, &.{outside}, opts));
+}
+
+test "file policy: a symbolic link out of a root is refused" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try PolicyFixture.init(a);
+    defer f.deinit();
+    try f.tmp.dir.symLink(zsass_io.io, "../outside/_secret.scss", "allowed/_link.scss", .{});
+    try f.tmp.dir.symLink(zsass_io.io, "../outside", "allowed/linkdir", .{});
+    const opts = f.opts();
+    try std.testing.expectError(error.FileImportDenied, compile(a, "@use \"link\";", f.entry, &.{}, opts));
+    try std.testing.expectError(error.FileImportDenied, compile(a, "@use \"linkdir/secret\";", f.entry, &.{}, opts));
+}
+
+test "file policy: the refusal does not tell whether the file exists" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try PolicyFixture.init(a);
+    defer f.deinit();
+    var existing: CapturedCode = .{};
+    var missing: CapturedCode = .{};
+    var opts = f.opts();
+    opts.diagnostic_sink = CapturedCode.sink;
+    opts.diagnostic_ctx = &existing;
+    try std.testing.expectError(error.FileImportDenied, compile(a, "@use \"../outside/secret\";", f.entry, &.{}, opts));
+    const existing_message = try a.dupe(u8, existing.message);
+    opts.diagnostic_ctx = &missing;
+    try std.testing.expectError(error.FileImportDenied, compile(a, "@use \"../outside/nothing\";", f.entry, &.{}, opts));
+    try std.testing.expectEqualStrings(existing_message, missing.message);
+    try std.testing.expectEqualStrings("ZSASS_IMPORT_DENIED", missing.code.?);
+    try std.testing.expect(std.mem.indexOf(u8, existing_message, "outside") == null);
+}
+
+test "file policy: disabled imports keep the built-in modules" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var opts = api.CompileOptions.forUntrustedInput(&.{});
+    opts.quiet = true;
+    const css = try compile(a, "@use \"sass:math\"; a { x: math.div(4, 2); }", "/virtual/in.scss", &.{}, opts);
+    try std.testing.expectEqualStrings("a {\n  x: 2;\n}\n", css);
+    try std.testing.expectError(error.FileImportDenied, compile(a, "@use \"other\";", "/virtual/in.scss", &.{}, opts));
+    // A CSS import is left in the output, not read.
+    const plain = try compile(a, "@import \"theme.css\";", "/virtual/in.scss", &.{}, opts);
+    try std.testing.expectEqualStrings("@import \"theme.css\";\n", plain);
 }
 
 test "batch: each entry has its own budget" {

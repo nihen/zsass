@@ -29,6 +29,7 @@ const zsass_io = @import("io.zig");
 const error_format = @import("error_format.zig");
 const resource_budget = @import("resource_budget.zig");
 const stack_guard = @import("stack_guard.zig");
+const file_access_mod = @import("../resolve/file_access.zig");
 
 /// Spin-lock-guarded wrapper around an arbitrary `std.mem.Allocator`. Used so
 /// the caller's allocator is safe to share across worker threads even when its
@@ -144,6 +145,9 @@ pub const CompileFilesOptions = struct {
     /// `error.CompilationCancelled`. Called from worker threads.
     cancellation_check: ?resource_budget.CancellationCheck = null,
     cancellation_ctx: ?*anyopaque = null,
+    /// Which files the entries may load; see `CompileOptions.file_import_policy`.
+    /// The entry paths themselves are read whatever it says.
+    file_import_policy: file_access_mod.FileImportPolicy = .unrestricted,
 };
 
 /// Compile each path in `paths` and return one `CompileFileResult` per entry,
@@ -171,6 +175,10 @@ pub fn compileFiles(
     var source_cache = source_cache_mod.SharedSourceCache.init(std.heap.c_allocator);
     defer source_cache.deinit();
 
+    // Roots are canonicalized once for the batch; workers only read it.
+    var file_access = try file_access_mod.FileAccess.init(std.heap.c_allocator, opts.file_import_policy);
+    defer file_access.deinit(std.heap.c_allocator);
+
     const order = try buildOrderByFileSize(alloc, paths);
     defer alloc.free(order);
 
@@ -195,6 +203,7 @@ pub fn compileFiles(
             work_arena.allocator(),
             paths[0],
             opts,
+            &file_access,
             &shared_pool,
             &source_cache,
             &ast_cache,
@@ -216,6 +225,7 @@ pub fn compileFiles(
         paths: []const []const u8,
         order: []const usize,
         opts: CompileFilesOptions,
+        file_access: *const file_access_mod.FileAccess,
         source_cache: *source_cache_mod.SharedSourceCache,
         results: []CompileFileResult,
         // Snapshot of the caller thread's syntax override; each worker
@@ -232,6 +242,7 @@ pub fn compileFiles(
         .paths = paths,
         .order = order,
         .opts = opts,
+        .file_access = &file_access,
         .source_cache = &source_cache,
         .results = results,
         .syntax_override = syntax_override_mod.get(),
@@ -294,6 +305,7 @@ pub fn compileFiles(
                         work_arena.allocator(),
                         state.paths[slot],
                         state.opts,
+                        state.file_access,
                         &shared_pool,
                         state.source_cache,
                         &local_ast_cache,
@@ -326,6 +338,7 @@ fn compileOnePath(
     work_alloc: std.mem.Allocator,
     input_path: []const u8,
     opts: CompileFilesOptions,
+    file_access: *const file_access_mod.FileAccess,
     shared_pool: *intern_pool_mod.InternPool,
     source_cache: *source_cache_mod.SharedSourceCache,
     ast_cache: *ast_cache_mod.ParsedAstCache,
@@ -338,6 +351,7 @@ fn compileOnePath(
     error_format.clearErrorContext();
     // A fresh budget per entry: one entry cannot use up another's allowance.
     var budget = resource_budget.ResourceBudget.init(opts.limits, opts.cancellation_check, opts.cancellation_ctx);
+    budget.file_access = file_access;
     const guard = stack_guard.begin(opts.limits.stack_bytes);
     defer guard.end();
     compileOnePathFallible(out_alloc, work_alloc, input_path, opts, shared_pool, source_cache, ast_cache, persistent_state, out, &budget) catch |caught| {

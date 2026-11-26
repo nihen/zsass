@@ -1,6 +1,7 @@
-//!zsass embedding API. You can receive CSS by simply passing source from spec_runner or external embedder
-//!memory-only compile entry point. driver.zig is only for CLI (file path input/output), and this file is
-//!Does not have file I/O.
+//!zsass embedding API: compile Sass source held in memory and receive CSS.
+//!driver.zig is the CLI (file input and output). This API writes no files,
+//!but it reads the stylesheets that `@use`, `@forward`, `@import`, and
+//!`meta.load-css()` load, as Sass does.
 //!
 //!Design intent:
 //!- Consolidated spec_runner into a single fn so that it can be called in the same way as `compile` in legacy `src/compiler.zig`
@@ -20,6 +21,11 @@ const perf_mod = @import("runtime/perf.zig");
 const embed_batch_mod = @import("runtime/embed_batch.zig");
 const resource_budget = @import("runtime/resource_budget.zig");
 const stack_guard = @import("runtime/stack_guard.zig");
+const file_access_mod = @import("resolve/file_access.zig");
+
+/// Which stylesheets `@use`, `@forward`, `@import`, and `meta.load-css()`
+/// may read. See `CompileOptions.file_import_policy`.
+pub const FileImportPolicy = file_access_mod.FileImportPolicy;
 
 /// Limits on the work and output of one compilation. See `CompileOptions.limits`.
 pub const CompileLimits = resource_budget.CompileLimits;
@@ -95,6 +101,24 @@ pub const CompileOptions = struct {
     cancellation_check: ?CancellationCheck = null,
     /// Opaque pointer passed to `cancellation_check`.
     cancellation_ctx: ?*anyopaque = null,
+    /// Which files the stylesheet may load. `file_path` and `load_paths`
+    /// only decide where URLs are looked up; they do not confine them, so
+    /// `.unrestricted` (the default, as in Sass) lets a stylesheet read any
+    /// Sass or CSS file the process can. Use `.disabled` or `.roots` for
+    /// input you do not trust; a refused URL fails with
+    /// `error.FileImportDenied`.
+    file_import_policy: FileImportPolicy = .unrestricted,
+
+    /// Options for a stylesheet you do not trust: the default resource
+    /// limits, and file imports confined to `import_roots`, or disabled when
+    /// it is empty. Built-in `sass:` modules stay available. Set the other
+    /// fields on the result as needed.
+    pub fn forUntrustedInput(import_roots: []const []const u8) CompileOptions {
+        return .{
+            .limits = .{},
+            .file_import_policy = if (import_roots.len == 0) .disabled else .{ .roots = import_roots },
+        };
+    }
 };
 
 threadlocal var diagnostic_sink_tls: ?DiagnosticSink = null;
@@ -223,7 +247,12 @@ pub fn compileSourceToCss(
     // as the lists built-in functions return, have no other owner.
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
+    var file_access = file_access_mod.FileAccess.init(arena.allocator(), opts.file_import_policy) catch |err| {
+        reportFinalErrorDiagnostic(err, file_path, opts);
+        return err;
+    };
     var budget = resource_budget.ResourceBudget.init(opts.limits, opts.cancellation_check, opts.cancellation_ctx);
+    budget.file_access = &file_access;
     const guard = stack_guard.begin(opts.limits.stack_bytes);
     defer guard.end();
     // Declared after the arena so it runs first: the message may point into
@@ -302,7 +331,12 @@ pub fn compileSourceToCssWithSourceMap(
 ) anyerror!CompileCssWithSourceMapResult {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
+    var file_access = file_access_mod.FileAccess.init(arena.allocator(), opts.file_import_policy) catch |err| {
+        reportFinalErrorDiagnostic(err, file_path, opts);
+        return err;
+    };
     var budget = resource_budget.ResourceBudget.init(opts.limits, opts.cancellation_check, opts.cancellation_ctx);
+    budget.file_access = &file_access;
     const guard = stack_guard.begin(opts.limits.stack_bytes);
     defer guard.end();
     const result = compileSourceToCssWithSourceMapInArena(arena.allocator(), source, file_path, load_paths, source_map_output_css_path, opts, &budget) catch |caught| {
