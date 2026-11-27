@@ -1,4 +1,5 @@
 const std = @import("std");
+const supports_prelude = @import("supports_prelude.zig");
 const prelude = @import("prelude.zig");
 const css_utils = @import("../runtime/css_utils.zig");
 
@@ -283,11 +284,22 @@ pub fn normalizeImportConditionText(allocator: std.mem.Allocator, cond: []const 
             const use_custom_prop_spacing = std.mem.startsWith(u8, trimmed_inner, "--");
             const normalized_inner = if (use_custom_prop_spacing) inner else trimmed_inner;
             try out.appendSlice(allocator, work[i .. open_paren + 1]);
-            if (tryUnwrapSupportsDeclParenInner(allocator, normalized_inner)) |uw| {
+            // A condition in parentheses drops the ones that add nothing,
+            // as in `@supports`: `((x))` is `(x)`.
+            const collapsed: ?[]const u8 = if (!use_custom_prop_spacing and normalized_inner.len > 0 and normalized_inner[0] == '(')
+                supports_prelude.prepare(allocator, normalized_inner, true) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.SassError => null,
+                }
+            else
+                null;
+            defer if (collapsed) |c| allocator.free(c);
+            const condition = collapsed orelse normalized_inner;
+            if (tryUnwrapSupportsDeclParenInner(allocator, condition)) |uw| {
                 defer allocator.free(uw);
                 try out.appendSlice(allocator, uw);
             } else {
-                try out.appendSlice(allocator, normalized_inner);
+                try out.appendSlice(allocator, condition);
             }
             try out.append(allocator, ')');
             i = close + 1;

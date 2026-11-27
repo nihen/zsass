@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proportion to its length. Each append copied the whole list, so 25000
   appends needed about 2.5 GB and hit the memory limit; they now take
   10 MB.
+- `@supports` drops parentheses around a single parenthesized condition
+  inside `and`/`or` too, such as `((x)) and ((y))`, and so does the
+  `supports()` condition of a plain-CSS `@import`, as the official CLI
+  does.
 - `list.nth()` and `list.set-nth()` refuse an index that is not an int,
   such as `1.5`, instead of rounding it down, and `math.min()` and
   `math.max()` refuse numbers with incompatible units, such as `1px` and
