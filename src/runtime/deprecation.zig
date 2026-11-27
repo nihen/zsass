@@ -16,6 +16,8 @@ pub const DeprecationKind = enum {
     duplicate_var_flags, // !default + !global repeat
     null_alpha, // null alpha (rgb(... / null) etc.)
     css_function_mixin, // CSS level/mixin name conflict
+    global_builtin, // a global built-in function with a module equivalent
+    if_function, // the Sass if() function syntax
 
     pub fn kindName(k: DeprecationKind) []const u8 {
         return switch (k) {
@@ -30,6 +32,8 @@ pub const DeprecationKind = enum {
             .duplicate_var_flags => "duplicate-var-flags",
             .null_alpha => "null-alpha",
             .css_function_mixin => "css-function-mixin",
+            .global_builtin => "global-builtin",
+            .if_function => "if-function",
         };
     }
 
@@ -371,6 +375,7 @@ fn stripOuterParens(text: []const u8) []const u8 {
 /// Whether a deprecation of `kind` may be written or fail the compilation,
 /// before a caller builds its message.
 pub fn mayReport(opts: *const DeprecationOpts, kind: DeprecationKind) bool {
+    if (active_recorder != null) return true;
     if (opts.fatal.contains(kind)) return true;
     return !opts.quiet and !opts.silenced.contains(kind);
 }
@@ -565,6 +570,9 @@ fn writeWarningLocation(path: []const u8, line: u32, col: u32, end_col: u32) voi
         }
     }
     const end = if (end_col > col) end_col else col + 1;
+    // Sass writes a path relative to the working directory without "./".
+    var shown = path;
+    while (std.mem.startsWith(u8, shown, "./")) shown = shown[2..];
     // While the resolver loads modules, its frames are the trace: each
     // module loaded at its `@use`/`@forward`/`@import`, the innermost at
     // the warning.
@@ -575,7 +583,7 @@ fn writeWarningLocation(path: []const u8, line: u32, col: u32, end_col: u32) voi
         root_label = outer_root_label;
     }
     const stack = error_format.error_state.error_stack[0..error_format.error_state.error_stack_len];
-    if (stack.len > 0 and std.mem.eql(u8, stack[stack.len - 1].path, path)) {
+    if (stack.len > 0 and std.mem.eql(u8, stack[stack.len - 1].path, shown)) {
         for (stack[0 .. stack.len - 1], 0..) |frame, i| {
             if (n + 1 >= frames.len) break;
             const pos = offsetLineCol(frame.source, if (frame.has_span) frame.span_start else 0);
@@ -584,9 +592,9 @@ fn writeWarningLocation(path: []const u8, line: u32, col: u32, end_col: u32) voi
             n += 1;
         }
         const label = if (stack.len == 1) root_label else stack[stack.len - 1].label;
-        error_format.fillTraceFrame(&frames[n], path, label, line, col, line, end, line_text);
+        error_format.fillTraceFrame(&frames[n], shown, label, line, col, line, end, line_text);
     } else {
-        error_format.fillTraceFrame(&frames[n], path, root_label, line, col, line, end, line_text);
+        error_format.fillTraceFrame(&frames[n], shown, root_label, line, col, line, end, line_text);
     }
     n += 1;
     error_format.writeTraceFrames(std.heap.c_allocator, frames[0..n], line_text.len != 0, "    ") catch {};

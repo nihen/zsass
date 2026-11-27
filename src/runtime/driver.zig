@@ -2831,7 +2831,16 @@ fn runEnd2EndWithBudget(
         // Reflect the function/mixin name in the inner frame label.
         var call_sites: [error_format.max_error_stack]vm_mod.VM.CallSite = undefined;
         const call_count = vm.callSites(&call_sites);
-        if (frame_info.has_frame and (call_count > 0 or !file_id_is_entry) and
+        // Code an @import brought in is placed in the imported file, reached
+        // through each @import.
+        const imported_frames = if (ctx.has_value)
+            vm.importedErrorTrace(&error_format.error_state.error_stack_snapshot, ctx.file_id, ctx.span_start, ctx.span_end)
+        else
+            null;
+        if (imported_frames) |count| {
+            error_format.error_state.error_stack_snapshot_len = count;
+            error_format.writeStackTrace(diag_alloc) catch {};
+        } else if (frame_info.has_frame and (call_count > 0 or !file_id_is_entry) and
             buildVmErrorTrace(&vm, program_ptr, frame_info.source.?, frame_info.path, ctx.span_start, ctx.span_end, module_path, call_sites[0..call_count]))
         {
             error_format.writeStackTrace(diag_alloc) catch {

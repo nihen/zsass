@@ -344,6 +344,9 @@ pub const ResolvedProgram = struct {
         /// deprecations a statically evaluated call raises.
         span_start: u32 = std.math.maxInt(u32),
         span_end: u32 = std.math.maxInt(u32),
+        /// The name it was called by when that is a global function's,
+        /// for the `global-builtin` deprecation.
+        global_name: InternId = .none,
     }) = .empty,
     cross_var_refs: std.ArrayListUnmanaged(struct { module_id: u32, slot: SlotId }) = .empty,
     /// Modules named by a literal `meta.load()` URL in this module. They are

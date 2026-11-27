@@ -380,6 +380,8 @@ const PendingCallableDefault = struct {
     callable_id: u32,
     param_index: u32,
     expr_text: []const u8,
+    /// Where `expr_text` starts in the module's source.
+    expr_offset: u32 = 0,
     use_bindings: []const PendingUseBinding,
 };
 
@@ -506,6 +508,12 @@ const Ctx = struct {
     calc_arg_mode: bool = false,
     /// Resolving the arguments of a CSS calculation function.
     in_calculation_args: bool = false,
+    /// How far `ast.source` is from the source spans refer to, inside a
+    /// sub-parse: a position there plus this is one in the module's source.
+    sub_source_delta: i64 = 0,
+    /// The source of the file being resolved: the module's, or that of a
+    /// file an @import brought in, which the module's line table is not for.
+    file_source: []const u8 = "",
     /// `infinity` / `pi` etc. in CSS math call arguments such as clamp/hypot
     /// Use number-ish identifier for numerical resolution without turning it into a marker.
     calc_arg_allow_numberish_ident_literals: bool = false,
@@ -4116,6 +4124,7 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
         }
     }
     if (ns_id == .none and identifierEq(name_slice, "if")) {
+        try warnLegacyIfFunction(ast, ctx, off, arg_count, span);
         return resolveLegacyIfBuiltinExpr(ctx, arg_buf.items, arg_name_buf.items, span);
     }
     const local_fid = lookupIdentifierIdInsensitive(&ctx.prog.function_names, name_slice);
@@ -4188,6 +4197,7 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
                 .prebound_accepts_content = prebound.accepts_content,
                 .prebound_capture_callers_locals = prebound.captures_callers_locals,
                 .prebound_name = prebound.name,
+                .global_name = try ctx.pool.intern(name_slice),
             });
             return try appendExpr(ctx.prog, ctx.a, .{
                 .kind = .builtin_call,
@@ -5281,6 +5291,13 @@ fn subParseError(err: anyerror) ResolveError {
 }
 
 fn parseSubExpr(ctx: *Ctx, inner: []const u8, outer_span: Span) ResolveError!ExprIndex {
+    return parseSubExprAt(ctx, inner, outer_span, null);
+}
+
+/// `parseSubExpr` of a copy of the text at `base` in the source spans
+/// refer to; null when `inner` is a slice of the current source, or is
+/// placed at `outer_span`.
+fn parseSubExprAt(ctx: *Ctx, inner: []const u8, outer_span: Span, base: ?u32) ResolveError!ExprIndex {
     var sub_ast = ast_flat.Ast.init(ctx.a, inner, .none);
     defer sub_ast.deinit();
     var lexer = lexer_mod.Lexer.init(ctx.a, inner);
@@ -5330,12 +5347,42 @@ fn parseSubExpr(ctx: *Ctx, inner: []const u8, outer_span: Span) ResolveError!Exp
         .resolving_callable_default = ctx.resolving_callable_default,
         .deferred_callable_default_use_bindings = ctx.deferred_callable_default_use_bindings,
         .mixin_accepts_content = ctx.mixin_accepts_content,
+        .sub_source_delta = subSourceDelta(ctx, inner, 0, base),
+        .file_source = ctx.file_source,
     };
     const expr_base = ctx.prog.exprs.items.len;
     const call_base = ctx.prog.builtin_calls.items.len;
     const result = try resolveExpr(&sub_ast, &sub_ctx, expr_root);
-    rebaseSubExprSpans(ctx, inner, 0, outer_span, expr_base, call_base);
+    if (base) |b| {
+        shiftSubExprSpans(ctx, b, expr_base, call_base);
+    } else {
+        rebaseSubExprSpans(ctx, inner, 0, outer_span, expr_base, call_base);
+    }
     return result;
+}
+
+/// How far the source a sub-parse of `inner` (after `prefix_len` bytes of
+/// its own) reads is from the one spans refer to: `base` when it is a copy
+/// of the text there, else from where `inner` lies in the current source.
+fn subSourceDelta(ctx: *const Ctx, inner: []const u8, prefix_len: u32, base: ?u32) i64 {
+    if (base) |b| return @as(i64, b) - @as(i64, prefix_len);
+    const source = ctx.ast.source;
+    const src_start = @intFromPtr(source.ptr);
+    const inner_start = @intFromPtr(inner.ptr);
+    if (inner_start < src_start or inner_start + inner.len > src_start + source.len) return ctx.sub_source_delta;
+    return ctx.sub_source_delta + @as(i64, @intCast(inner_start - src_start)) - @as(i64, prefix_len);
+}
+
+fn shiftSubExprSpans(ctx: *Ctx, base: u32, expr_base: usize, call_base: usize) void {
+    for (ctx.prog.exprs.items[expr_base..]) |*e| {
+        e.span.start += base;
+        e.span.end += base;
+    }
+    for (ctx.prog.builtin_calls.items[call_base..]) |*c| {
+        if (c.span_start == std.math.maxInt(u32)) continue;
+        c.span_start += base;
+        c.span_end += base;
+    }
 }
 
 /// The expressions a sub-parse made are spanned within the text it parsed,
@@ -7515,6 +7562,58 @@ fn resolveCssIfValueExpr(ctx: *Ctx, text: []const u8, span: Span) ResolveError!E
     return parseSubExpr(ctx, normalized, span) catch resolveInterpolatedTextExpr(ctx, normalized, span, true);
 }
 
+/// The `if-function` deprecation for the Sass `if()` at `span`, as the
+/// official CLI writes it when parsing: with positional arguments, the CSS
+/// `if()` that replaces it (`if(sass(c): a; else: b)`, without the `else`
+/// when it is `null`).
+fn warnLegacyIfFunction(ast: *const ast_flat.Ast, ctx: *Ctx, call_extra: ExtraIndex, arg_count: u32, span: Span) ResolveError!void {
+    const loader = ctx.loader orelse return;
+    const opts = loader.deprecation_opts orelse return;
+    if (!deprecation_mod.mayReport(opts, .if_function)) return;
+    const source = ast.source;
+    const head = "The Sass if() syntax is deprecated in favor of the modern CSS syntax.";
+    const more_info = "More info: https://sass-lang.com/d/if-function";
+    var suggestion: ?[]u8 = null;
+    defer if (suggestion) |text| ctx.a.free(text);
+    if (arg_count == 3) {
+        const arg_nodes_start: ExtraIndex = call_extra + 3;
+        const arg_names_start: ExtraIndex = arg_nodes_start + arg_count;
+        var texts: [3][]const u8 = undefined;
+        var positional = true;
+        for (0..3) |i| {
+            const name: InternId = @fromBackingInt(@intCast(ast.getExtraU32(arg_names_start + @as(u32, @intCast(i)))));
+            if (name != .none) positional = false;
+            const node = ast.getNode(@fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start + @as(u32, @intCast(i))))));
+            if (node.span_end > source.len or node.span_start > node.span_end) positional = false;
+            if (positional) texts[i] = std.mem.trim(u8, source[node.span_start..node.span_end], " \t\r\n");
+        }
+        if (positional) {
+            suggestion = if (std.mem.eql(u8, texts[2], "null"))
+                try std.fmt.allocPrint(ctx.a, "if(sass({s}): {s})", .{ texts[0], texts[1] })
+            else
+                try std.fmt.allocPrint(ctx.a, "if(sass({s}): {s}; else: {s})", .{ texts[0], texts[1], texts[2] });
+        }
+    }
+    const msg = if (suggestion) |text|
+        try std.fmt.allocPrint(ctx.a, "{s}\n\nSuggestion: {s}\n\n{s}", .{ head, text, more_info })
+    else
+        try std.fmt.allocPrint(ctx.a, "{s}\n\n{s}", .{ head, more_info });
+    defer ctx.a.free(msg);
+    // Inside a sub-parse, positions are moved into the module's source.
+    const start: u32 = @intCast(@as(i64, span.start) + ctx.sub_source_delta);
+    const end: u32 = @intCast(@as(i64, span.end) + ctx.sub_source_delta);
+    const file_source = if (ctx.file_source.len > 0) ctx.file_source else source;
+    const pos = sourceLineCol(file_source, start);
+    const end_pos = sourceLineCol(file_source, end);
+    deprecation_mod.emitDeprecationSpan(opts, .if_function, msg, ctx.module_path, pos.line, pos.col, if (end_pos.line == pos.line) end_pos.col else 0) catch |err| switch (err) {
+        error.FatalDeprecation => {
+            error_format.recordErrorSpan(start, end, 0);
+            return error.SassError;
+        },
+        else => return error.SassError,
+    };
+}
+
 fn appendIfBuiltinExpr(ctx: *Ctx, cond: ExprIndex, if_true: ExprIndex, if_false: ExprIndex, span: Span) ResolveError!ExprIndex {
     const astart: u32 = @intCast(ctx.prog.call_args.items.len);
     try ctx.prog.call_args.append(ctx.a, cond);
@@ -9664,6 +9763,7 @@ fn resolveExprFromSourceText(ctx: *Ctx, raw_src: []const u8) ResolveError!ExprIn
 
     var sub_ctx = ctx.*;
     sub_ctx.ast = &sub_ast;
+    sub_ctx.sub_source_delta = subSourceDelta(ctx, raw_src, 0, null);
     const expr_base = ctx.prog.exprs.items.len;
     const call_base = ctx.prog.builtin_calls.items.len;
     const result = try resolveExprMaybeStaticLiteral(&sub_ast, &sub_ctx, expr_root);
@@ -9732,6 +9832,7 @@ fn resolveIncludeArgsFromSource(ctx: *Ctx, inner_src: []const u8) ResolveError!R
 
     var sub_ctx = ctx.*;
     sub_ctx.ast = &sub_ast;
+    sub_ctx.sub_source_delta = subSourceDelta(ctx, inner_src, "__zsass_include(".len, null);
     const expr_base = ctx.prog.exprs.items.len;
     const call_base = ctx.prog.builtin_calls.items.len;
     defer rebaseSubExprSpans(ctx, inner_src, "__zsass_include(".len, null, expr_base, call_base);
@@ -10047,6 +10148,11 @@ fn queueCallableDefaultNodes(
     for (default_nodes, 0..) |maybe_node, i| {
         const node = maybe_node orelse continue;
         const text = try dupExprNodeTextTrimmed(ctx, node);
+        const node_start = ctx.ast.getNode(node).span_start;
+        const leading = if (node_start < ctx.ast.source.len)
+            (std.mem.indexOfNone(u8, ctx.ast.source[node_start..], " \t\r\n") orelse 0)
+        else
+            0;
         const use_bindings = captured_use_bindings orelse blk: {
             const snap = try snapshotStringMap(UseBinding, ctx.a, &ctx.prog.use_map);
             captured_use_bindings = snap;
@@ -10057,6 +10163,7 @@ fn queueCallableDefaultNodes(
             .callable_id = callable_id,
             .param_index = @intCast(i),
             .expr_text = text,
+            .expr_offset = @intCast(@as(i64, node_start) + @as(i64, @intCast(leading)) + ctx.sub_source_delta),
             .use_bindings = use_bindings,
         });
     }
@@ -10065,6 +10172,7 @@ fn queueCallableDefaultNodes(
 fn resolveDeferredCallableDefaultExpr(
     ctx: *Ctx,
     expr_text: []const u8,
+    expr_offset: u32,
     use_bindings: []const PendingUseBinding,
     param_names: []const InternId,
     param_slots: []const SlotId,
@@ -10099,10 +10207,10 @@ fn resolveDeferredCallableDefaultExpr(
     ctx.deferred_callable_default_use_bindings = use_bindings;
     defer ctx.deferred_callable_default_use_bindings = saved_use_bindings;
 
-    return try parseSubExpr(ctx, expr_text, .{
-        .start = 0,
-        .end = @intCast(expr_text.len),
-    });
+    return try parseSubExprAt(ctx, expr_text, .{
+        .start = expr_offset,
+        .end = expr_offset + @as(u32, @intCast(expr_text.len)),
+    }, expr_offset);
 }
 
 fn resolvePendingCallableDefaults(ctx: *Ctx) ResolveError!void {
@@ -10116,6 +10224,7 @@ fn resolvePendingCallableDefaults(ctx: *Ctx) ResolveError!void {
                 const de = resolveDeferredCallableDefaultExpr(
                     ctx,
                     pending.expr_text,
+                    pending.expr_offset,
                     pending.use_bindings,
                     mixin.param_names,
                     mixin.param_slots,
@@ -10133,6 +10242,7 @@ fn resolvePendingCallableDefaults(ctx: *Ctx) ResolveError!void {
                 const de = resolveDeferredCallableDefaultExpr(
                     ctx,
                     pending.expr_text,
+                    pending.expr_offset,
                     pending.use_bindings,
                     func.param_names,
                     func.param_slots,
@@ -10720,6 +10830,8 @@ const preamble_ctx_default_only = [_][]const u8{
     "allow_unknown_var_literal",
     "calc_arg_mode",
     "in_calculation_args",
+    "sub_source_delta",
+    "file_source",
     "calc_arg_allow_numberish_ident_literals",
     "in_declaration_value",
     "slash_paren_depth",
@@ -11474,6 +11586,7 @@ fn resolveSingleAst(
         .static_eval_store = static_eval_store,
         .color_pool = color_pool,
         .initial_config_entries = mr.active_initial_config_entries,
+        .file_source = ast.source,
     };
     errdefer ctx.deinitScopes(a2);
 
@@ -13091,4 +13204,10 @@ test "resolver: nested !global member stays exported" {
         \\a {b: other.$member}
     , entry_path);
     defer bundle.deinit();
+}
+
+fn sourceLineCol(source: []const u8, offset: u32) struct { line: u32, col: u32 } {
+    const end = @min(@as(usize, offset), source.len);
+    const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..end], '\n')) |nl| nl + 1 else 0;
+    return .{ .line = @intCast(std.mem.count(u8, source[0..line_start], "\n") + 1), .col = @intCast(end - line_start + 1) };
 }

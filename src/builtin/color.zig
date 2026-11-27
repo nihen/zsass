@@ -10,6 +10,8 @@ const intern_pool_mod = @import("../runtime/intern_pool.zig");
 const shared = @import("shared.zig");
 const error_format = @import("../runtime/error_format.zig");
 const value_format = @import("../runtime/value_format.zig");
+const color_diagnose = @import("color_diagnose.zig");
+const builtin_mod = @import("mod.zig");
 
 const Value = shared.Value;
 const ColorMissingMask = shared.ColorMissingMask;
@@ -535,6 +537,34 @@ fn coerceModernConstructorArityToType(space: color_mod.ColorSpace, args: []const
     return args[0].kind() == .list;
 }
 
+/// A color constructor's arguments, positional and named both, put in the
+/// order of the overload that takes them, all by position.
+const OverloadArgs = struct {
+    args_buf: [4]Value,
+    names_buf: [4]InternId,
+
+    const Bound = struct { args: []const Value, names: []const InternId };
+
+    fn bind(self: *OverloadArgs, ctx: *BuiltinContext, name: []const u8, args: []const Value, arg_names: []const InternId) Bound {
+        var order: [4]usize = undefined;
+        if (arg_names.len != args.len) return .{ .args = args, .names = arg_names };
+        const n = builtin_mod.colorConstructorArgumentOrder(ctx.intern_pool, "color", name, arg_names, &order, true) orelse
+            return .{ .args = args, .names = arg_names };
+        for (order[0..n], 0..) |index, i| {
+            self.args_buf[i] = args[index];
+            self.names_buf[i] = .none;
+        }
+        return .{ .args = self.args_buf[0..n], .names = self.names_buf[0..n] };
+    }
+};
+
+/// A constructor's failure, with the official CLI's reason when it gave
+/// none.
+fn explainedColorError(ctx: *BuiltinContext, ctor: color_diagnose.Constructor, args: []const Value, arg_names: []const InternId, err: BuiltinError) BuiltinError {
+    if (err != error.OutOfMemory and error_format.currentContextMessage() == null) color_diagnose.explain(ctx, ctor, args, arg_names);
+    return normalizeColorUserError(err);
+}
+
 fn normalizeColorUserError(err: BuiltinError) BuiltinError {
     return switch (err) {
         error.BuiltinType, error.BuiltinArity => error.SassError,
@@ -728,11 +758,15 @@ fn color_rgbImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
 }
 
 pub fn color_rgb(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return color_rgbImpl(ctx, args, arg_names, "rgb") catch |err| normalizeColorUserError(err);
+    var buf: OverloadArgs = undefined;
+    const a = buf.bind(ctx, "rgb", args, arg_names);
+    return color_rgbImpl(ctx, a.args, a.names, "rgb") catch |err| explainedColorError(ctx, .rgb, a.args, a.names, err);
 }
 
 pub fn color_rgba(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return color_rgbImpl(ctx, args, arg_names, "rgba") catch |err| normalizeColorUserError(err);
+    var buf: OverloadArgs = undefined;
+    const a = buf.bind(ctx, "rgba", args, arg_names);
+    return color_rgbImpl(ctx, a.args, a.names, "rgba") catch |err| explainedColorError(ctx, .rgb, a.args, a.names, err);
 }
 
 fn serializeFallbackFunction(ctx: *BuiltinContext, name: []const u8, args: []const Value) BuiltinError!Value {
@@ -1137,11 +1171,15 @@ fn color_hslImpl(
 }
 
 pub fn color_hsl(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return color_hslImpl(ctx, args, arg_names, "hsl") catch |err| normalizeColorUserError(err);
+    var buf: OverloadArgs = undefined;
+    const a = buf.bind(ctx, "hsl", args, arg_names);
+    return color_hslImpl(ctx, a.args, a.names, "hsl") catch |err| explainedColorError(ctx, .hsl, a.args, a.names, err);
 }
 
 pub fn color_hsla(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return color_hslImpl(ctx, args, arg_names, "hsla") catch |err| normalizeColorUserError(err);
+    var buf: OverloadArgs = undefined;
+    const a = buf.bind(ctx, "hsla", args, arg_names);
+    return color_hslImpl(ctx, a.args, a.names, "hsla") catch |err| explainedColorError(ctx, .hsl, a.args, a.names, err);
 }
 
 fn parseLegacyHueOrMissing(ctx: *BuiltinContext, arg: Value) ?ParsedColorComponent {
@@ -1306,7 +1344,17 @@ fn color_hwbImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
 }
 
 pub fn color_hwb(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return color_hwbImpl(ctx, args, arg_names) catch |err| normalizeColorUserError(err);
+    var buf: OverloadArgs = undefined;
+    const a = buf.bind(ctx, "hwb", args, arg_names);
+    return color_hwbImpl(ctx, a.args, a.names) catch |err| explainedColorError(ctx, .hwb, a.args, a.names, err);
+}
+
+/// The global hwb() has only the one-argument form; its arguments are
+/// otherwise bound as color.hwb() binds them.
+pub fn global_hwb(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    if (args.len != 1) return error.BuiltinArity;
+    if (arg_names.len > 0 and arg_names[0] != .none and !shared.argNameMatches(ctx, arg_names[0], "channels")) return error.BuiltinArity;
+    return color_hwb(ctx, args, arg_names);
 }
 
 const MixHueMethod = enum {
@@ -1614,30 +1662,78 @@ fn parseLegacyPercentAmount(ctx: *BuiltinContext, arg: Value) BuiltinError!f64 {
     return value;
 }
 
-fn emitColorDeprecation(ctx: *BuiltinContext, func_name: []const u8) BuiltinError!void {
+const ColorFunctionKind = enum { lighten, darken, saturate, desaturate, opacify, transparentize, adjust_hue };
+
+/// The `color-functions` deprecation as the official CLI writes it: the
+/// call by the name it was made, with the color.scale() and color.adjust()
+/// calls that do the same to this color.
+fn emitColorFunctionDeprecation(ctx: *BuiltinContext, default_name: []const u8, kind: ColorFunctionKind, c: Value, amount: f64) BuiltinError!void {
     const opts = ctx.deprecation_opts orelse return;
-    try deprecation_mod.emitDeprecation(opts, .color_functions, func_name, "", 0, 0);
+    if (!deprecation_mod.mayReport(opts, .color_functions)) return;
+    const name = if (ctx.call_name.len != 0) ctx.call_name else default_name;
+    const more_info = "More info: https://sass-lang.com/d/color-functions";
+    var buf: [512]u8 = undefined;
+    if (kind == .adjust_hue) {
+        const deg = try formatColorFunctionAmount(ctx, amount, "deg");
+        defer ctx.allocator.free(deg);
+        const msg = std.fmt.bufPrint(&buf, "{s}() is deprecated. Suggestion:\n\ncolor.adjust($color, $hue: {s})\n\n{s}", .{ name, deg, more_info }) catch return;
+        return deprecation_mod.emitDeprecation(opts, .color_functions, msg, "", 0, 0);
+    }
+    const hsl = colorToHsl(ctx, c);
+    const alpha = std.math.clamp(colorEntryOf(ctx, c).channels[3], 0.0, 1.0);
+    const channel: []const u8 = switch (kind) {
+        .lighten, .darken => "lightness",
+        .saturate, .desaturate => "saturation",
+        else => "alpha",
+    };
+    const negative = kind == .darken or kind == .desaturate or kind == .transparentize;
+    const signed = if (negative) -amount else amount;
+    // How far toward the end of the channel's range the change goes.
+    const scale: f64 = switch (kind) {
+        .lighten => if (hsl[2] >= 100.0) 100.0 else amount / (100.0 - hsl[2]) * 100.0,
+        .darken => if (hsl[2] <= 0.0) -100.0 else -amount / hsl[2] * 100.0,
+        .saturate => if (hsl[1] >= 100.0) 100.0 else amount / (100.0 - hsl[1]) * 100.0,
+        .desaturate => if (hsl[1] <= 0.0) -100.0 else -amount / hsl[1] * 100.0,
+        .opacify => if (alpha >= 1.0) 100.0 else amount / (1.0 - alpha) * 100.0,
+        .transparentize => if (alpha <= 0.0) -100.0 else -amount / alpha * 100.0,
+        .adjust_hue => unreachable,
+    };
+    const adjust_unit: ?[]const u8 = if (kind == .opacify or kind == .transparentize) null else "%";
+    const adjust_text = try formatColorFunctionAmount(ctx, signed, adjust_unit);
+    defer ctx.allocator.free(adjust_text);
+    if (amount == 0.0) {
+        const msg = std.fmt.bufPrint(&buf, "{s}() is deprecated. Suggestion:\n\ncolor.adjust($color, ${s}: {s})\n\n{s}", .{ name, channel, adjust_text, more_info }) catch return;
+        return deprecation_mod.emitDeprecation(opts, .color_functions, msg, "", 0, 0);
+    }
+    const scale_text = try formatColorFunctionAmount(ctx, @max(-100.0, @min(100.0, scale)), "%");
+    defer ctx.allocator.free(scale_text);
+    const msg = std.fmt.bufPrint(&buf, "{s}() is deprecated. Suggestions:\n\ncolor.scale($color, ${s}: {s})\ncolor.adjust($color, ${s}: {s})\n\n{s}", .{ name, channel, scale_text, channel, adjust_text, more_info }) catch return;
+    return deprecation_mod.emitDeprecation(opts, .color_functions, msg, "", 0, 0);
+}
+
+fn formatColorFunctionAmount(ctx: *BuiltinContext, value: f64, unit: ?[]const u8) BuiltinError![]const u8 {
+    return value_format.formatNumberWithUnit(ctx.allocator, value, unit) catch error.OutOfMemory;
 }
 
 pub fn color_lighten(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
-    try emitColorDeprecation(ctx, "lighten() is deprecated; use color.adjust() with $lightness instead");
     try expectArity(args, 2);
     const c = tryCoerceColorArg(ctx, args[0]) orelse return reportArgumentTypeMismatch(ctx, "color", args[0], "color");
     const amt = parseLegacyPercentAmount(ctx, args[1]) catch |err| switch (err) {
         error.BuiltinType => return reportArgumentTypeMismatch(ctx, "amount", args[1], "number"),
         else => return err,
     };
+    try emitColorFunctionDeprecation(ctx, "lighten", .lighten, c, amt);
     return hslAdjustedColor(ctx, c, 0.0, 0.0, amt);
 }
 
 pub fn color_darken(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
-    try emitColorDeprecation(ctx, "darken() is deprecated; use color.adjust() with $lightness instead");
     try expectArity(args, 2);
     const c = tryCoerceColorArg(ctx, args[0]) orelse return reportArgumentTypeMismatch(ctx, "color", args[0], "color");
     const amt = parseLegacyPercentAmount(ctx, args[1]) catch |err| switch (err) {
         error.BuiltinType => return reportArgumentTypeMismatch(ctx, "amount", args[1], "number"),
         else => return err,
     };
+    try emitColorFunctionDeprecation(ctx, "darken", .darken, c, amt);
     return hslAdjustedColor(ctx, c, 0.0, 0.0, -amt);
 }
 
@@ -1669,34 +1765,34 @@ pub fn color_saturate(ctx: *BuiltinContext, args: []const Value) BuiltinError!Va
         }
         return error.BuiltinType;
     }
-    try emitColorDeprecation(ctx, "saturate() is deprecated; use color.adjust() with $saturation instead");
     try expectArity(args, 2);
     const c = tryCoerceColorArg(ctx, args[0]) orelse return reportArgumentTypeMismatch(ctx, "color", args[0], "color");
     const amt = parseLegacyPercentAmount(ctx, args[1]) catch |err| switch (err) {
         error.BuiltinType => return reportArgumentTypeMismatch(ctx, "amount", args[1], "number"),
         else => return err,
     };
+    try emitColorFunctionDeprecation(ctx, "saturate", .saturate, c, amt);
     return hslAdjustedColor(ctx, c, 0.0, amt, 0.0);
 }
 
 pub fn color_desaturate(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
-    try emitColorDeprecation(ctx, "desaturate() is deprecated; use color.adjust() with $saturation instead");
     try expectArity(args, 2);
     const c = tryCoerceColorArg(ctx, args[0]) orelse return reportArgumentTypeMismatch(ctx, "color", args[0], "color");
     const amt = parseLegacyPercentAmount(ctx, args[1]) catch |err| switch (err) {
         error.BuiltinType => return reportArgumentTypeMismatch(ctx, "amount", args[1], "number"),
         else => return err,
     };
+    try emitColorFunctionDeprecation(ctx, "desaturate", .desaturate, c, amt);
     return hslAdjustedColor(ctx, c, 0.0, -amt, 0.0);
 }
 
 pub fn color_adjust_hue(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
-    try emitColorDeprecation(ctx, "adjust-hue() is deprecated; use color.adjust() with $hue instead");
     try expectArity(args, 2);
     const c = tryCoerceColorArg(ctx, args[0]) orelse return reportArgumentTypeMismatch(ctx, "color", args[0], "color");
     const parsed_delta = parseLegacyHueOrMissing(ctx, args[1]) orelse return reportArgumentTypeMismatch(ctx, "degrees", args[1], "number");
     if (parsed_delta.missing) return reportArgumentTypeMismatch(ctx, "degrees", args[1], "number");
     const delta = parsed_delta.value;
+    try emitColorFunctionDeprecation(ctx, "adjust-hue", .adjust_hue, c, delta);
     return hslAdjustedColor(ctx, c, delta, 0.0, 0.0);
 }
 
@@ -1871,8 +1967,9 @@ fn parseColorOpArgs(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
         const name_id: InternId = if (i < arg_names.len) arg_names[i] else .none;
         if (name_id == .none) {
             if (out.color == null) {
-                out.color = tryCoerceColorArg(ctx, arg) orelse return error.BuiltinType;
+                out.color = tryCoerceColorArg(ctx, arg) orelse return reportArgumentTypeMismatch(ctx, "color", arg, "color");
             } else {
+                error_format.setContextMessage("Only one positional argument is allowed. All other arguments must be passed by name.");
                 return error.BuiltinType;
             }
             continue;
@@ -1880,7 +1977,7 @@ fn parseColorOpArgs(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
 
         if (argNameMatches(ctx, name_id, "color")) {
             if (out.color != null) return error.BuiltinType;
-            out.color = tryCoerceColorArg(ctx, arg) orelse return error.BuiltinType;
+            out.color = tryCoerceColorArg(ctx, arg) orelse return reportArgumentTypeMismatch(ctx, "color", arg, "color");
             continue;
         }
 
@@ -1890,13 +1987,10 @@ fn parseColorOpArgs(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
             if (arg.kind() == .nil) {
                 out.space = null;
                 out.legacy_rgb_channels = false;
-            } else if (arg.isString()) {
-                if (arg.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
-                const parsed_space = try parseColorSpaceArgString(ctx.intern_pool.get(arg.stringIntern()));
+            } else {
+                const parsed_space = try parseSpaceArgNamed(ctx, arg, "space");
                 out.space = parsed_space.space;
                 out.legacy_rgb_channels = parsed_space.legacy_rgb_alias;
-            } else {
-                return error.BuiltinType;
             }
             continue;
         }
@@ -1911,7 +2005,13 @@ fn parseColorOpArgs(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
             .is_none = isNoneColorToken(ctx, arg),
             .number = if (arg.kind() == .number) arg.asF64(ctx.number_pool) else null,
         });
-        if (out.first_channel == null and key != .alpha) out.first_channel = key;
+        // Hue is in both hsl and hwb, so a later channel only one legacy
+        // format has decides the space.
+        if (key != .alpha and (out.first_channel == null or
+            (out.first_channel.? == .hue and legacyChannelFamily(key) != .none)))
+        {
+            out.first_channel = key;
+        }
         switch (key) {
             .red, .green, .blue => out.has_rgb_channel = true,
             .saturation, .lightness => out.has_hsl_channel = true,
@@ -1920,9 +2020,23 @@ fn parseColorOpArgs(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
         }
     }
 
-    if (out.color == null) return error.BuiltinType;
-    if (out.has_rgb_channel and (out.has_hsl_channel or out.has_hwb_channel)) return colorOpSemanticError();
-    if (out.has_hwb_channel and out.has_hsl_channel) return colorOpSemanticError();
+    if (out.color == null) return shared.reportMissingArgument("color");
+    if ((out.has_rgb_channel and (out.has_hsl_channel or out.has_hwb_channel)) or (out.has_hwb_channel and out.has_hsl_channel)) {
+        // Legacy channels of two formats: the space is the first one's that
+        // only one format has (hue is in both hsl and hwb), and the first
+        // channel it lacks is reported.
+        var first_family: LegacyChannelFamily = .none;
+        for (entries.items) |entry| {
+            first_family = legacyChannelFamily(entry.key);
+            if (first_family != .none) break;
+        }
+        for (entries.items) |entry| {
+            const family = legacyChannelFamily(entry.key);
+            const lacking = if (entry.key == .hue) first_family == .rgb else family != .none and family != first_family;
+            if (lacking) return reportNoSuchChannel(entry.key, @tagName(first_family));
+        }
+        return colorOpSemanticError();
+    }
     out.entries = try entries.toOwnedSlice(ctx.allocator);
     return out;
 }
@@ -1931,6 +2045,24 @@ const ColorScaleRange = struct {
     min: f64,
     max: f64,
 };
+
+const LegacyChannelFamily = enum { none, rgb, hsl, hwb };
+
+fn legacyChannelFamily(key: ColorOpChannel) LegacyChannelFamily {
+    return switch (key) {
+        .red, .green, .blue => .rgb,
+        .saturation, .lightness => .hsl,
+        .whiteness, .blackness => .hwb,
+        else => .none,
+    };
+}
+
+fn reportNoSuchChannel(key: ColorOpChannel, space_name: []const u8) BuiltinError {
+    var buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "${s}: Color space {s} doesn't have a channel with this name.", .{ colorOpChannelParamLabel(key), space_name }) catch return colorOpSemanticError();
+    error_format.setContextMessage(msg);
+    return colorOpSemanticError();
+}
 
 fn colorOpSemanticError() BuiltinError {
     // evalGenericColorOperation* in legacy src/builtin/color.zig is
@@ -2037,6 +2169,19 @@ fn setColorOpScalePercentRangeError(ctx: *BuiltinContext, key: ColorOpChannel, n
     error_format.setContextMessage(msg);
 }
 
+/// `$<channel>: <text>` as the error, with `{s}` in `text` the number.
+fn colorOpChannelError(ctx: *BuiltinContext, key: ColorOpChannel, number: Value, comptime text: []const u8) BuiltinError {
+    const raw = number.asF64(ctx.number_pool);
+    const unit_id = number.unitId(ctx.number_pool);
+    const unit = if (unit_id == .none) null else ctx.intern_pool.get(unit_id);
+    const val_s = value_format.formatNumberWithUnit(ctx.allocator, raw, unit) catch return colorOpSemanticError();
+    defer ctx.allocator.free(val_s);
+    const msg = ctx.allocator.print("${s}: " ++ text, .{ colorOpChannelParamLabel(key), val_s }) catch return colorOpSemanticError();
+    defer ctx.allocator.free(msg);
+    error_format.setContextMessage(msg);
+    return colorOpSemanticError();
+}
+
 fn validateColorOpNumber(
     ctx: *BuiltinContext,
     kind: ColorOpKind,
@@ -2045,14 +2190,17 @@ fn validateColorOpNumber(
     number: Value,
     legacy_rgb_channels: bool,
 ) BuiltinError!f64 {
-    if (number.kind() != .number) return error.BuiltinType;
+    if (number.kind() != .number) {
+        if (kind == .change) return shared.reportArgumentMismatchPhrase(ctx, colorOpChannelParamLabel(key), number, "not a number or unquoted \"none\"");
+        return reportArgumentTypeMismatch(ctx, colorOpChannelParamLabel(key), number, "number");
+    }
 
     const raw = number.asF64(ctx.number_pool);
     const unit = if (number.unitId(ctx.number_pool) == .none) null else ctx.intern_pool.get(number.unitId(ctx.number_pool));
 
     if (key == .alpha) {
         if (kind == .scale) {
-            if (unit == null or !std.mem.eql(u8, unit.?, "%")) return colorOpSemanticError();
+            if (unit == null or !std.mem.eql(u8, unit.?, "%")) return colorOpChannelError(ctx, key, number, "Expected {s} to have unit \"%\".");
             if (raw < -100.0 or raw > 100.0) {
                 setColorOpScalePercentRangeError(ctx, key, number);
                 return colorOpSemanticError();
@@ -2062,11 +2210,12 @@ fn validateColorOpNumber(
         if (kind == .adjust) {
             return raw;
         }
-        const alpha_value = if (unit) |u|
-            if (std.mem.eql(u8, u, "%")) raw / 100.0 else raw
-        else
-            raw;
-        if (alpha_value < 0.0 or alpha_value > 1.0) return colorOpSemanticError();
+        const percent = unit != null and std.mem.eql(u8, unit.?, "%");
+        const alpha_value = if (percent) raw / 100.0 else raw;
+        if (alpha_value < 0.0 or alpha_value > 1.0) {
+            if (percent) return colorOpChannelError(ctx, key, number, "Expected {s} to be within 0% and 100%.");
+            return colorOpChannelError(ctx, key, number, "Expected {s} to be within 0 and 1.");
+        }
         return alpha_value;
     }
 
@@ -2075,9 +2224,14 @@ fn validateColorOpNumber(
     const is_hue_channel = (((family == .hsl or family == .hwb) and idx == 0) or
         (family == .lch and idx == 2));
     if (is_hue_channel) {
-        if (kind == .scale) return colorOpSemanticError();
+        if (kind == .scale) {
+            var buf: [96]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "${s}: Channel isn't scalable.", .{colorOpChannelParamLabel(key)}) catch return colorOpSemanticError();
+            error_format.setContextMessage(msg);
+            return colorOpSemanticError();
+        }
         if (unit) |u| {
-            if (std.mem.eql(u8, u, "%")) return colorOpSemanticError();
+            if (std.mem.eql(u8, u, "%")) return colorOpChannelError(ctx, key, number, "Expected {s} to have an angle unit (deg, grad, rad, turn).");
         }
         return color_mod.convertAngleToDeg(raw, unit);
     }
@@ -2093,9 +2247,9 @@ fn validateColorOpNumber(
     };
 
     if (require_percent) {
-        if (unit == null or !std.mem.eql(u8, unit.?, "%")) return colorOpSemanticError();
+        if (unit == null or !std.mem.eql(u8, unit.?, "%")) return colorOpChannelError(ctx, key, number, "Expected {s} to have unit \"%\".");
     } else if (!accepts_legacy_percentless and unit != null and !std.mem.eql(u8, unit.?, "%")) {
-        return colorOpSemanticError();
+        return colorOpChannelError(ctx, key, number, "Expected {s} to have unit \"%\" or no units.");
     }
 
     if (kind == .scale) {
@@ -2144,10 +2298,11 @@ fn applyColorOpEntry(
     projected_alpha: *f64,
     projected_missing: *ColorMissingMask,
 ) BuiltinError!void {
-    const idx = colorOpChannelIndex(working_space, entry.key) orelse return colorOpSemanticError();
+    const idx = colorOpChannelIndex(working_space, entry.key) orelse
+        return reportNoSuchChannel(entry.key, if (legacy_rgb_channels) "rgb" else colorSpaceArgName(working_space));
 
     if (entry.is_none) {
-        if (kind != .change) return colorOpSemanticError();
+        if (kind != .change) return reportArgumentTypeMismatch(ctx, colorOpChannelParamLabel(entry.key), entry.value, "number");
         if (idx < 3) {
             projected_missing.* |= @as(ColorMissingMask, 1) << @intCast(idx);
             projected_channels[idx] = 0.0;
@@ -2762,7 +2917,7 @@ fn color_colorImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const
 }
 
 pub fn color_color(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return color_colorImpl(ctx, args, arg_names) catch |err| normalizeColorUserError(err);
+    return color_colorImpl(ctx, args, arg_names) catch |err| explainedColorError(ctx, .color, args, arg_names, err);
 }
 
 fn colorSpaceNameEq(name: []const u8, canonical: []const u8) bool {
@@ -2794,6 +2949,11 @@ fn parseColorSpaceName(name: []const u8) ?color_mod.ColorSpace {
     if (colorSpaceNameEq(t, "hsl")) return .hsl;
     if (colorSpaceNameEq(t, "hwb")) return .hwb;
     return null;
+}
+
+/// The space's name as an argument writes it (`srgb`, not the CSS `rgb`).
+fn colorSpaceArgName(space: color_mod.ColorSpace) []const u8 {
+    return if (space == .srgb) "srgb" else colorSpaceCssName(space);
 }
 
 fn colorSpaceCssName(space: color_mod.ColorSpace) []const u8 {
@@ -3939,6 +4099,11 @@ fn opacifyImpl(ctx: *BuiltinContext, args: []const Value, comptime alpha_sign: f
     if (args[1].kind() != .number) return error.BuiltinType;
     const amount = args[1].asF64(ctx.number_pool);
     if (std.math.isNan(amount) or amount < 0.0 or amount > 1.0) return error.BuiltinType;
+    if (alpha_sign > 0) {
+        try emitColorFunctionDeprecation(ctx, "opacify", .opacify, c, amount);
+    } else {
+        try emitColorFunctionDeprecation(ctx, "transparentize", .transparentize, c, amount);
+    }
     const source_entry = colorEntryOf(ctx, c);
     const alpha = std.math.clamp(source_entry.channels[3] + alpha_sign * amount, 0.0, 1.0);
     if ((source_entry.space == .hsl or source_entry.space == .hwb) and source_entry.missing == 0) {
@@ -3963,12 +4128,14 @@ fn opacifyImpl(ctx: *BuiltinContext, args: []const Value, comptime alpha_sign: f
 }
 
 pub fn color_opacify(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
-    try emitColorDeprecation(ctx, "opacify()/fade-in() is deprecated; use color.adjust() with $alpha instead");
+    // Its arguments are bound before it warns.
+    if (args.len != 2) return badArity(2, args.len);
     return opacifyImpl(ctx, args, 1.0);
 }
 
 pub fn color_transparentize(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
-    try emitColorDeprecation(ctx, "transparentize()/fade-out() is deprecated; use color.adjust() with $alpha instead");
+    // Its arguments are bound before it warns.
+    if (args.len != 2) return badArity(2, args.len);
     return opacifyImpl(ctx, args, -1.0);
 }
 
@@ -4079,24 +4246,25 @@ fn parseColorSpaceArgString(raw: []const u8) BuiltinError!ParsedColorSpaceArg {
 }
 
 fn parseOptionalSpaceValue(ctx: *BuiltinContext, maybe_value: ?Value) BuiltinError!?color_mod.ColorSpace {
-    const value = maybe_value orelse return null;
-    if (value.kind() == .nil) return null;
-    if (value.isString()) {
-        if (value.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
-        const raw = ctx.intern_pool.get(value.stringIntern());
-        return (try parseColorSpaceArgString(raw)).space;
-    }
-    return error.BuiltinType;
+    const parsed = (try parseOptionalSpaceArgValue(ctx, maybe_value)) orelse return null;
+    return parsed.space;
 }
 
 fn parseOptionalSpaceArgValue(ctx: *BuiltinContext, maybe_value: ?Value) BuiltinError!?ParsedColorSpaceArg {
     const value = maybe_value orelse return null;
     if (value.kind() == .nil) return null;
-    if (value.isString()) {
-        if (value.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
-        return try parseColorSpaceArgString(ctx.intern_pool.get(value.stringIntern()));
+    return try parseSpaceArgNamed(ctx, value, "space");
+}
+
+/// A color space argument, with Sass's errors: it must be an unquoted
+/// string naming a known space.
+fn parseSpaceArgNamed(ctx: *BuiltinContext, value: Value, param_name: []const u8) BuiltinError!ParsedColorSpaceArg {
+    if (!value.isString()) return reportArgumentTypeMismatch(ctx, param_name, value, "string");
+    const raw = ctx.intern_pool.get(value.stringIntern());
+    if (value.stringQuoted(ctx.string_flags_pool.items)) {
+        return shared.reportArgumentMessage(param_name, "Expected \"{s}\" to be an unquoted string.", .{raw});
     }
-    return error.BuiltinType;
+    return parseColorSpaceArgString(raw) catch shared.reportArgumentMessage(param_name, "Unknown color space \"{s}\".", .{raw});
 }
 
 fn parseRequiredSpaceArgValue(ctx: *BuiltinContext, value: Value) BuiltinError!ParsedColorSpaceArg {
@@ -4353,19 +4521,19 @@ fn colorModernConstructor(
 }
 
 pub fn color_lab(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return colorModernConstructor(ctx, args, arg_names, "lab", .lab) catch |err| normalizeColorUserError(err);
+    return colorModernConstructor(ctx, args, arg_names, "lab", .lab) catch |err| explainedColorError(ctx, .lab, args, arg_names, err);
 }
 
 pub fn color_lch(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return colorModernConstructor(ctx, args, arg_names, "lch", .lch) catch |err| normalizeColorUserError(err);
+    return colorModernConstructor(ctx, args, arg_names, "lch", .lch) catch |err| explainedColorError(ctx, .lch, args, arg_names, err);
 }
 
 pub fn color_oklab(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return colorModernConstructor(ctx, args, arg_names, "oklab", .oklab) catch |err| normalizeColorUserError(err);
+    return colorModernConstructor(ctx, args, arg_names, "oklab", .oklab) catch |err| explainedColorError(ctx, .oklab, args, arg_names, err);
 }
 
 pub fn color_oklch(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return colorModernConstructor(ctx, args, arg_names, "oklch", .oklch) catch |err| normalizeColorUserError(err);
+    return colorModernConstructor(ctx, args, arg_names, "oklch", .oklch) catch |err| explainedColorError(ctx, .oklch, args, arg_names, err);
 }
 
 fn channelIndexForSpaceStrict(space: color_mod.ColorSpace, ch_name: []const u8) ?usize {

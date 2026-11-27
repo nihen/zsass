@@ -44,6 +44,9 @@ pub const ListTail = struct {
 };
 
 pub const BuiltinContext = struct {
+    /// The global name the function was called by, when it was called by
+    /// one (`fade-in`, not `opacify`), for its deprecation's wording.
+    call_name: []const u8 = "",
     allocator: std.mem.Allocator,
     intern_pool: *InternPool,
     list_pool: *std.ArrayListUnmanaged([]Value),
@@ -276,7 +279,7 @@ pub fn reportArgumentMismatchPhraseExpected(ctx: *BuiltinContext, param_name: []
     return error.BuiltinType;
 }
 
-fn valueToInspectionString(ctx: *BuiltinContext, v: Value) BuiltinError![]const u8 {
+pub fn valueToInspectionString(ctx: *BuiltinContext, v: Value) BuiltinError![]const u8 {
     var inspect_ctx: value_inspect.Context = .{
         .allocator = ctx.allocator,
         .intern_pool = ctx.intern_pool,

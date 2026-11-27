@@ -8,6 +8,9 @@ const color = @import("color.zig");
 const list = @import("list.zig");
 const map = @import("map.zig");
 const meta_dispatch_abi = @import("meta_dispatch_abi.zig");
+const signatures = @import("signatures.zig");
+const global_builtins = @import("global_builtins.zig");
+const error_format = @import("../runtime/error_format.zig");
 
 const Value = shared.Value;
 const InternId = shared.InternId;
@@ -156,6 +159,9 @@ pub fn sassFunctionForCssMathGlobal(id: Id) Id {
     };
 }
 
+/// The global hwb(), which unlike color.hwb() takes only `$channels`.
+pub const global_hwb_id: Id = 191;
+
 pub fn resolveLegacyGlobal(name: []const u8) ?Id {
     // `scale()` is frequently used as a CSS transform function and is a Sass legacy global
     // Not builtin. Only `scale-color()` is builtin resolved.
@@ -177,6 +183,7 @@ pub fn resolveLegacyGlobal(name: []const u8) ?Id {
     if (shared.identifierEq(name, "alpha")) return 185;
     if (shared.identifierEq(name, "opacity")) return 186;
     if (shared.identifierEq(name, "grayscale")) return 187;
+    if (shared.identifierEq(name, "hwb")) return global_hwb_id;
     if (shared.identifierEq(name, "scale-color")) return 49;
     if (shared.identifierEq(name, "adjust-color")) return 50;
     if (shared.identifierEq(name, "change-color")) return 51;
@@ -270,6 +277,293 @@ fn resolveCaseSensitive(module: []const u8, name: []const u8) ?Id {
 
 /// Resolve plain (unnamespaced) legacy global mixin names (`apply`, `load-css`)
 /// to their meta-module dispatch ids. Used when a `@include` has no module prefix.
+/// A built-in call failed without a message: when its arguments do not fit
+/// the function, the official CLI's message for that ("Only 2 arguments
+/// allowed, but 3 were passed.", "Missing argument $color."), from the
+/// signatures the CLI reports.
+pub fn reportSignatureMismatch(pool: anytype, id: Id, args_len: usize, arg_names: []const InternId) void {
+    if (hasSpreadArgument(arg_names)) return;
+    const row = signatureFor(id) orelse return;
+    if (overloadsFor(row)) |overloads| {
+        var buf_o: [160]u8 = undefined;
+        const msg = overloadMismatch(pool, overloads, args_len, arg_names, &buf_o) orelse return;
+        error_format.setContextMessage(msg);
+        return;
+    }
+    var positional: usize = 0;
+    for (0..args_len) |i| {
+        if (i >= arg_names.len or arg_names[i] == .none) positional += 1;
+    }
+    var buf: [160]u8 = undefined;
+    if (row.max >= 0 and positional > @as(usize, @intCast(row.max))) {
+        const msg = error_format.formatTooManyArguments(&buf, @intCast(row.max), args_len) catch return;
+        error_format.setContextMessage(msg);
+        return;
+    }
+    for (row.required, 0..) |param, idx| {
+        if (idx < positional) continue;
+        var named = false;
+        for (arg_names) |name_id| {
+            if (name_id == .none) continue;
+            const raw = pool.get(name_id);
+            const bare = if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
+            if (shared.identifierEq(bare, param)) named = true;
+        }
+        if (named) continue;
+        const msg = std.fmt.bufPrint(&buf, "Missing argument ${s}.", .{param}) catch return;
+        error_format.setContextMessage(msg);
+        return;
+    }
+}
+
+/// 1 + the row of `global_builtins.rows` for the global function `name`,
+/// or 0 when calling it by that name does not warn.
+pub fn globalBuiltinRow(name: []const u8) u16 {
+    for (global_builtins.rows, 0..) |row, i| {
+        if (shared.identifierEq(name, row.name)) return @intCast(i + 1);
+    }
+    return 0;
+}
+
+pub fn globalBuiltinReplacement(row: u16) []const u8 {
+    return global_builtins.rows[row - 1].replacement;
+}
+
+pub fn globalBuiltinName(row: u16) []const u8 {
+    return global_builtins.rows[row - 1].name;
+}
+
+/// Whether arguments fit the function, as far as its signature says.
+pub fn signatureFits(pool: anytype, id: Id, args_len: usize, arg_names: []const InternId) bool {
+    // Spread arguments are not counted here; the function binds them.
+    if (hasSpreadArgument(arg_names)) return true;
+    const row = signatureFor(id) orelse return true;
+    if (overloadsFor(row)) |overloads| {
+        var buf_o: [160]u8 = undefined;
+        return overloadMismatch(pool, overloads, args_len, arg_names, &buf_o) == null;
+    }
+    var positional: usize = 0;
+    for (0..args_len) |i| {
+        if (i >= arg_names.len or arg_names[i] == .none) positional += 1;
+    }
+    if (row.max >= 0 and positional > @as(usize, @intCast(row.max))) return false;
+    for (row.required, 0..) |param, idx| {
+        if (idx < positional) continue;
+        var named = false;
+        for (arg_names) |name_id| {
+            if (name_id == .none) continue;
+            const raw = pool.get(name_id);
+            const bare = if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
+            if (shared.identifierEq(bare, param)) named = true;
+        }
+        if (!named) return false;
+    }
+    return true;
+}
+
+/// One way to call an overloaded function: its parameters, of which the
+/// first `required` must be passed.
+const Overload = struct { params: []const []const u8, required: usize };
+
+// The color constructors' overloads, as the Sass documentation lists them.
+// The official CLI also binds three channels apart from the four with
+// $alpha (it reports `rgb(1, 2, 3, $alpha: 1, $x: 1)` with "No parameters
+// named $alpha or $x."). The order is the one it tries them in.
+const rgb_overloads = [_]Overload{
+    .{ .params = &.{"channels"}, .required = 1 },
+    .{ .params = &.{ "red", "green", "blue" }, .required = 3 },
+    .{ .params = &.{ "red", "green", "blue", "alpha" }, .required = 3 },
+    .{ .params = &.{ "color", "alpha" }, .required = 2 },
+};
+const hsl_overloads = [_]Overload{
+    .{ .params = &.{"channels"}, .required = 1 },
+    .{ .params = &.{ "hue", "saturation", "lightness" }, .required = 3 },
+    .{ .params = &.{ "hue", "saturation", "lightness", "alpha" }, .required = 3 },
+    // Binds so that the function can say $lightness is missing.
+    .{ .params = &.{ "hue", "saturation" }, .required = 2 },
+};
+const hwb_overloads = [_]Overload{
+    .{ .params = &.{"channels"}, .required = 1 },
+    .{ .params = &.{ "hue", "whiteness", "blackness", "alpha" }, .required = 3 },
+};
+
+/// Whether one of a color constructor's overloads takes the arguments;
+/// `module` is empty for the global function.
+pub fn colorConstructorArgumentsBind(pool: anytype, module: []const u8, name: []const u8, args_len: usize, arg_names: []const InternId) bool {
+    const row: signatures.Row = .{ .module = module, .name = name, .max = -1, .required = &.{} };
+    const overloads = overloadsFor(&row) orelse return true;
+    var buf: [160]u8 = undefined;
+    return overloadMismatch(pool, overloads, args_len, arg_names, &buf) == null;
+}
+
+/// For a color constructor called with named arguments, the arguments in
+/// the order of the overload that takes them: the index into the arguments
+/// of each parameter it is passed, written to `order`. Null when no
+/// overload takes them, none is named, or `mixed_only` and none is
+/// positional.
+pub fn colorConstructorArgumentOrder(pool: anytype, module: []const u8, name: []const u8, arg_names: []const InternId, order: []usize, mixed_only: bool) ?usize {
+    const row: signatures.Row = .{ .module = module, .name = name, .max = -1, .required = &.{} };
+    const overloads = overloadsFor(&row) orelse return null;
+    if (hasSpreadArgument(arg_names)) return null;
+    var positional: usize = 0;
+    var named: usize = 0;
+    for (arg_names) |name_id| {
+        if (name_id == .none) positional += 1 else named += 1;
+    }
+    if (named == 0 or (mixed_only and positional == 0)) return null;
+    // Positional arguments need not come first once a spread is expanded.
+    var positional_index: [8]usize = undefined;
+    if (positional > positional_index.len) return null;
+    var k: usize = 0;
+    for (arg_names, 0..) |name_id, j| {
+        if (name_id != .none) continue;
+        positional_index[k] = j;
+        k += 1;
+    }
+    var buf: [160]u8 = undefined;
+    for (overloads) |o| {
+        if (bindError(pool, o, positional, named, arg_names, &buf) != null) continue;
+        if (o.params.len > order.len) return null;
+        var n: usize = 0;
+        for (o.params, 0..) |param, i| {
+            const index: ?usize = if (i < positional) positional_index[i] else blk: {
+                for (arg_names, 0..) |name_id, j| {
+                    if (name_id != .none and shared.identifierEq(bareName(pool, name_id), param)) break :blk j;
+                }
+                break :blk null;
+            };
+            // Only a trailing optional parameter may be left out.
+            order[n] = index orelse break;
+            n += 1;
+        }
+        return if (n == positional + named) n else null;
+    }
+    return null;
+}
+
+fn overloadsFor(row: *const signatures.Row) ?[]const Overload {
+    const name = row.name;
+    if (std.mem.eql(u8, name, "rgb") or std.mem.eql(u8, name, "rgba")) return &rgb_overloads;
+    if (std.mem.eql(u8, name, "hsl") or std.mem.eql(u8, name, "hsla")) return &hsl_overloads;
+    // The global hwb() has only the one-argument form.
+    if (std.mem.eql(u8, name, "hwb") and row.module.len != 0) return &hwb_overloads;
+    return null;
+}
+
+/// Why no overload takes the arguments, as the official CLI says it: the
+/// error binding the first overload whose parameters fit the positional
+/// arguments, else the one taking the most, else the first. Null when one
+/// takes them.
+fn overloadMismatch(pool: anytype, overloads: []const Overload, args_len: usize, arg_names: []const InternId, buf: []u8) ?[]const u8 {
+    var positional: usize = 0;
+    var named: usize = 0;
+    for (0..args_len) |i| {
+        if (i >= arg_names.len or arg_names[i] == .none) positional += 1 else named += 1;
+    }
+    for (overloads) |o| {
+        if (bindError(pool, o, positional, named, arg_names, buf) == null) return null;
+    }
+    var widest = overloads[0];
+    for (overloads) |o| {
+        if (o.params.len > widest.params.len) widest = o;
+    }
+    const chosen = blk: {
+        for (overloads) |o| {
+            if (o.required <= positional and positional <= o.params.len) break :blk o;
+        }
+        break :blk if (positional > widest.params.len) widest else overloads[0];
+    };
+    return bindError(pool, chosen, positional, named, arg_names, buf);
+}
+
+fn bindError(pool: anytype, o: Overload, positional: usize, named: usize, arg_names: []const InternId, buf: []u8) ?[]const u8 {
+    for (o.params[0..@min(positional, o.params.len)]) |param| {
+        if (isNamed(pool, arg_names, param)) return std.fmt.bufPrint(buf, "Argument ${s} was passed both by position and by name.", .{param}) catch null;
+    }
+    if (positional > o.params.len) {
+        const kind = if (named > 0) " positional" else "";
+        const noun = if (o.params.len == 1) "argument" else "arguments";
+        const verb = if (positional == 1) "was" else "were";
+        return std.fmt.bufPrint(buf, "Only {d}{s} {s} allowed, but {d} {s} passed.", .{ o.params.len, kind, noun, positional, verb }) catch null;
+    }
+    for (o.params[0..o.required], 0..) |param, i| {
+        if (i < positional) continue;
+        if (!isNamed(pool, arg_names, param)) return std.fmt.bufPrint(buf, "Missing argument ${s}.", .{param}) catch null;
+    }
+    var unknown: [8][]const u8 = undefined;
+    var n_unknown: usize = 0;
+    for (arg_names) |name_id| {
+        if (name_id == .none) continue;
+        const bare = bareName(pool, name_id);
+        var known = false;
+        for (o.params) |param| {
+            if (shared.identifierEq(bare, param)) known = true;
+        }
+        if (!known and n_unknown < unknown.len) {
+            unknown[n_unknown] = bare;
+            n_unknown += 1;
+        }
+    }
+    if (n_unknown == 0) return null;
+    if (n_unknown == 1) return std.fmt.bufPrint(buf, "No parameter named ${s}.", .{unknown[0]}) catch null;
+    var w: std.Io.Writer = .fixed(buf);
+    w.writeAll("No parameters named ") catch return null;
+    for (unknown[0..n_unknown], 0..) |u, i| {
+        if (i > 0) w.writeAll(if (i == n_unknown - 1) " or " else ", ") catch return null;
+        w.print("${s}", .{u}) catch return null;
+    }
+    w.writeAll(".") catch return null;
+    return w.buffered();
+}
+
+fn bareName(pool: anytype, name_id: InternId) []const u8 {
+    const raw = pool.get(name_id);
+    return if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
+}
+
+fn isNamed(pool: anytype, arg_names: []const InternId, param: []const u8) bool {
+    for (arg_names) |name_id| {
+        if (name_id == .none) continue;
+        if (shared.identifierEq(bareName(pool, name_id), param)) return true;
+    }
+    return false;
+}
+
+/// Whether a name is the marker of a `$args...` spread, which no pool holds.
+fn hasSpreadArgument(arg_names: []const InternId) bool {
+    for (arg_names) |name_id| {
+        if (@backingInt(name_id) == std.math.maxInt(u32)) return true;
+    }
+    return false;
+}
+
+fn signatureFor(id: Id) ?*const signatures.Row {
+    if (id >= signature_by_id.len) return null;
+    const row = signature_by_id[id];
+    return if (row == no_signature) null else &signatures.rows[row];
+}
+
+const no_signature = std.math.maxInt(u16);
+
+/// The signature row of each built-in id, built when compiling: a module
+/// function's row before a global's, as they share an id when they are the
+/// same function.
+const signature_by_id: [512]u16 = blk: {
+    @setEvalBranchQuota(10_000_000);
+    var table: [512]u16 = @splat(no_signature);
+    for (signatures.rows, 0..) |row, i| {
+        if (row.module.len == 0) continue;
+        const id = resolve(row.module, row.name) orelse continue;
+        if (id < table.len and table[id] == no_signature) table[id] = i;
+    }
+    for (signatures.rows, 0..) |row, i| {
+        if (row.module.len != 0) continue;
+        const id = resolveLegacyGlobal(row.name) orelse continue;
+        if (id < table.len and table[id] == no_signature) table[id] = i;
+    }
+    break :blk table;
+};
+
 pub fn resolveLegacyGlobalMixin(name: []const u8) ?Id {
     if (shared.identifierEq(name, "apply")) return meta_apply_mixin_id;
     if (shared.identifierEq(name, "load-css")) return meta_load_css_mixin_id;
@@ -566,6 +860,7 @@ pub fn dispatch(ctx: *BuiltinContext, id: Id, args: []const Value, arg_names: []
         89 => color.color_transparentize(ctx, args),
         90 => color.color_ie_hex_str(ctx, args),
         91 => color.color_hwb(ctx, args, arg_names),
+        global_hwb_id => color.global_hwb(ctx, args, arg_names),
         60 => list.list_append(ctx, args, arg_names),
         61 => list.list_index(ctx, args, arg_names),
         62 => list.list_join(ctx, args, arg_names),

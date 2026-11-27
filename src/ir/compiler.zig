@@ -87,6 +87,9 @@ pub const Chunk = struct {
         /// Scoped local slot hint for `meta.variable-exists($name)` call-site.
         /// If not set, `std.math.maxInt(u32)`.
         local_slot_hint: u32 = std.math.maxInt(u32),
+        /// 1 + the row in `global_builtins.rows` when it is called by a
+        /// global name that warns; 0 otherwise.
+        global_replacement: u16 = 0,
     };
 
     /// Slot bundle for one fused `@for` loop (for_test / for_step operand).
@@ -1242,6 +1245,7 @@ fn peepholeFuseSuperinstructions(
 fn applySuperinstructionPeephole(temp_alloc: std.mem.Allocator, arena: std.mem.Allocator, chunk: *Chunk) CompileError!void {
     const old_code_len = chunk.code.len;
     const old_source_locs = chunk.source_locs;
+    const old_code_origin = chunk.code_origin;
     const fused = try peepholeFuseSuperinstructions(temp_alloc, arena, chunk.code);
     chunk.code = fused.code;
     chunk.fused_cmp_meta = fused.fused_cmp_meta;
@@ -1258,6 +1262,17 @@ fn applySuperinstructionPeephole(temp_alloc: std.mem.Allocator, arena: std.mem.A
         chunk.source_locs = mapped;
     } else {
         chunk.source_locs = &.{};
+    }
+    // Each instruction's origin (the file an @import brought it from) is
+    // kept through the fusion too, or none is known for the chunk.
+    if (old_code_origin.len == old_code_len and fused.new_to_old.len == fused.code.len) {
+        const mapped = try arena.alloc(OriginId, fused.code.len);
+        for (fused.new_to_old, 0..) |old_idx, i| {
+            mapped[i] = if (old_idx < old_code_origin.len) old_code_origin[old_idx] else .invalid;
+        }
+        chunk.code_origin = mapped;
+    } else {
+        chunk.code_origin = &.{};
     }
 }
 
@@ -2619,6 +2634,9 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
                 try compileExpr(ctx, ai);
             }
             const meta_idx = try addBuiltinCallMeta(ctx, c.arg_start, c.arg_count, remapLocalSlotHint(ctx, c.local_slot_hint));
+            if (c.global_name != .none) {
+                ctx.cb.builtin_call_meta.items[meta_idx].global_replacement = builtin_mod.globalBuiltinRow(ctx.pool.get(c.global_name));
+            }
             try ctx.cb.emit(.call_builtin, try checkedU16(c.builtin_id, "builtin id"), meta_idx);
         },
         .cross_var_ref => {
@@ -5744,6 +5762,7 @@ fn buildOrigins(arena: std.mem.Allocator, bundle: *const ResolvedBundle) Compile
             .source_path = origin.source_path,
             .module_id = origin.module_id,
             .parent_import_origin = parent_import_origin,
+            .import_offset = origin.import_offset,
         };
     }
     return origins;

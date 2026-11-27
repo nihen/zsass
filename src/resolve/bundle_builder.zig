@@ -63,6 +63,7 @@ fn copyOrigins(allocator: std.mem.Allocator, origins: []const CssOrigin) !Copied
             .source_path = path_slice,
             .module_id = origin.module_id,
             .parent_import_origin = origin.parent_import_origin,
+            .import_offset = origin.import_offset,
         };
     }
     return .{ .origins = out, .path_bytes = path_bytes };

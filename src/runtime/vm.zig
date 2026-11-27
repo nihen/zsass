@@ -502,6 +502,8 @@ pub const VM = struct {
     /// The VM whose `meta.load-css()` runs this one, whose trace continues
     /// this one's.
     diag_parent: ?*VM = null,
+    /// The global name of the built-in being called, when called by one.
+    current_builtin_call_name: []const u8 = "",
     /// The module the code at `current_source_span` belongs to.
     current_source_module: u32 = 0,
     /// The `@use`/`@forward` that is running each module running now,
@@ -2847,9 +2849,18 @@ pub const VM = struct {
             },
             .coerce_slash_free => try self.opCoerceSlashFree(),
 
-            .add => try self.opAdd(chunk),
-            .sub => try self.opSub(chunk),
-            .mul => try self.opMul(chunk),
+            .add => {
+                const operands = self.peekOperands();
+                self.opAdd(chunk) catch |e| return self.undefinedOperation(e, operands, "+");
+            },
+            .sub => {
+                const operands = self.peekOperands();
+                self.opSub(chunk) catch |e| return self.undefinedOperation(e, operands, "-");
+            },
+            .mul => {
+                const operands = self.peekOperands();
+                self.opMul(chunk) catch |e| return self.undefinedOperation(e, operands, "*");
+            },
             .div => {
                 const b = try self.maybeResolveParentSelectorValue(try self.pop());
                 const a = try self.maybeResolveParentSelectorValue(try self.pop());
@@ -2874,7 +2885,7 @@ pub const VM = struct {
                     };
                 };
                 defer if (slash_dep) |site| if (site.message) |msg| self.allocator.free(msg);
-                try self.push(try divValues(
+                const quotient = divValues(
                     self.intern_pool,
                     &self.number_pool,
                     self.allocator,
@@ -2886,19 +2897,23 @@ pub const VM = struct {
                     self.pendingCssMathCallPreserveContext(chunk),
                     slash_dep,
                     inst.arg_a != 0,
-                ));
+                ) catch |e| return self.undefinedOperation(e, .{ a, b }, "/");
+                try self.push(quotient);
             },
             .mod => {
                 const b = try self.maybeResolveParentSelectorValue(try self.pop());
                 const a = try self.maybeResolveParentSelectorValue(try self.pop());
-                try self.push(try modValues(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, a, b));
+                const result = modValues(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, a, b) catch |e|
+                    return self.undefinedOperation(e, .{ a, b }, "%");
+                try self.push(result);
             },
             .neg => {
                 const a = try self.maybeResolveParentSelectorValue(try self.pop());
                 if (a.kind() == .number) {
                     try self.push(try Value.number(-a.asF64(&self.number_pool), a.unitId(&self.number_pool), &self.number_pool, self.allocator));
                 } else {
-                    try self.push(try unaryPrefixValue(self, "-", a, .require_non_calc));
+                    const result = unaryPrefixValue(self, "-", a, .require_non_calc) catch |e| return self.undefinedUnaryOperation(e, a, "-");
+                    try self.push(result);
                 }
             },
             .pos => {
@@ -2906,21 +2921,35 @@ pub const VM = struct {
                 if (a.kind() == .number) {
                     try self.push(a);
                 } else {
-                    try self.push(try unaryPrefixValue(self, "+", a, .require_non_calc));
+                    const result = unaryPrefixValue(self, "+", a, .require_non_calc) catch |e| return self.undefinedUnaryOperation(e, a, "+");
+                    try self.push(result);
                 }
             },
             .slash_prefix => {
                 const a = try self.maybeResolveParentSelectorValue(try self.pop());
-                try self.push(try unaryPrefixValue(self, "/", a, .allow_calc));
+                const result = unaryPrefixValue(self, "/", a, .allow_calc) catch |e| return self.undefinedUnaryOperation(e, a, "/");
+                try self.push(result);
             },
             .not_op => try self.opNotOp(),
 
             .eq => try self.cmpOp(.eq),
             .neq => try self.cmpOp(.neq),
-            .lt => try self.cmpOp(.lt),
-            .gt => try self.cmpOp(.gt),
-            .le => try self.cmpOp(.le),
-            .ge => try self.cmpOp(.ge),
+            .lt => {
+                const operands = self.peekOperands();
+                self.cmpOp(.lt) catch |e| return self.undefinedOperation(e, operands, "<");
+            },
+            .gt => {
+                const operands = self.peekOperands();
+                self.cmpOp(.gt) catch |e| return self.undefinedOperation(e, operands, ">");
+            },
+            .le => {
+                const operands = self.peekOperands();
+                self.cmpOp(.le) catch |e| return self.undefinedOperation(e, operands, "<=");
+            },
+            .ge => {
+                const operands = self.peekOperands();
+                self.cmpOp(.ge) catch |e| return self.undefinedOperation(e, operands, ">=");
+            },
 
             .and_op => try self.opAndOp(),
             .or_op => try self.opOrOp(),
@@ -4131,6 +4160,11 @@ pub const VM = struct {
             else
                 try self.coerceSlashFreeValue(resolved);
         }
+        // Spread arguments are bound once expanded, below.
+        if (meta.global_replacement != 0 and !names_seen.splat) try self.warnGlobalBuiltin(builtin_id, meta.global_replacement, args, arg_names);
+        const saved_call_name = self.current_builtin_call_name;
+        self.current_builtin_call_name = if (meta.global_replacement != 0) builtin_mod.globalBuiltinName(meta.global_replacement) else "";
+        defer self.current_builtin_call_name = saved_call_name;
         const prev_slot_hint = self.current_builtin_local_slot_hint;
         self.current_builtin_local_slot_hint = meta.local_slot_hint;
         defer self.current_builtin_local_slot_hint = prev_slot_hint;
@@ -4140,6 +4174,7 @@ pub const VM = struct {
         } else {
             const expanded = try self.expandCallArgsWithSplat(args, arg_names);
             defer self.freeExpandedCallArgs(expanded);
+            if (meta.global_replacement != 0) try self.warnGlobalBuiltin(builtin_id, meta.global_replacement, expanded.args, expanded.arg_names);
             const raw_out = try self.dispatchBuiltinArgs(builtin_id, expanded.args, expanded.arg_names);
             const out = try self.maybeSerializeDirectBuiltinColorWithSplat(builtin_id, true, raw_out);
             try self.push(out);
@@ -6574,6 +6609,74 @@ pub const VM = struct {
         return try acc.toOwnedSlice(self.allocator);
     }
 
+    /// The two operands on top of the stack, before an operator takes them.
+    inline fn peekOperands(self: *const VM) [2]Value {
+        const items = self.stack.items;
+        if (items.len < 2) return .{ Value.nil_v, Value.nil_v };
+        return .{ items[items.len - 2], items[items.len - 1] };
+    }
+
+    /// An operator failed without a message: Sass's for an operation its
+    /// operands do not support, `Undefined operation "2px + red".`.
+    fn undefinedOperation(self: *VM, err: VMError, operands: [2]Value, op: []const u8) VMError {
+        if (err != error.SassError or error_format.currentContextMessage() != null) return err;
+        // `+`, `-`, and `/` join other values as text: a map or an empty
+        // list there is not CSS.
+        if (std.mem.eql(u8, op, "+") or std.mem.eql(u8, op, "-") or std.mem.eql(u8, op, "/")) {
+            for (operands) |operand| {
+                self.ensureCssDeclarationValue(operand, false) catch |css_err| return css_err;
+            }
+        }
+        const lhs = self.inspectForMessage(operands[0]) catch return err;
+        const rhs = self.inspectForMessage(operands[1]) catch return err;
+        var buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Undefined operation \"{s} {s} {s}\".", .{ lhs, op, rhs }) catch return err;
+        error_format.setContextMessage(msg);
+        return err;
+    }
+
+    /// As `undefinedOperation`, for a unary operator: a negated value is
+    /// written in parentheses unless it is a calculation.
+    fn undefinedUnaryOperation(self: *VM, err: VMError, operand: Value, op: []const u8) VMError {
+        if (err != error.SassError or error_format.currentContextMessage() != null) return err;
+        const text = self.inspectForMessage(operand) catch return err;
+        const parens = std.mem.eql(u8, op, "-") and !std.mem.startsWith(u8, text, "calc(");
+        var buf: [512]u8 = undefined;
+        const msg = (if (parens)
+            std.fmt.bufPrint(&buf, "Undefined operation \"-({s})\".", .{text})
+        else
+            std.fmt.bufPrint(&buf, "Undefined operation \"{s}{s}\".", .{ op, text })) catch return err;
+        error_format.setContextMessage(msg);
+        return err;
+    }
+
+    /// The `global-builtin` deprecation for a call by a global name, once
+    /// its arguments are bound, as the official CLI warns: not when they do
+    /// not fit, nor for a CSS filter function (`grayscale(50%)`).
+    fn warnGlobalBuiltin(self: *VM, builtin_id: u32, row: u16, args: []const Value, arg_names: []const InternId) VMError!void {
+        if (!deprecation_mod.mayReport(&self.deprecation_opts, .global_builtin)) return;
+        if (!builtin_mod.signatureFits(self.intern_pool, builtin_id, args.len, arg_names)) return;
+        const replacement = builtin_mod.globalBuiltinReplacement(row);
+        const filter_names = [_][]const u8{ "grayscale", "invert", "saturate", "opacity", "alpha" };
+        const name = builtin_mod.globalBuiltinName(row);
+        for (filter_names) |filter| {
+            if (std.mem.eql(u8, name, filter) and (args.len == 0 or !self.isColorArgument(args[0]))) return;
+        }
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Global built-in functions are deprecated and will be removed in Dart Sass 3.0.0.\nUse {s} instead.\n\nMore info and automated migrator: https://sass-lang.com/d/import", .{replacement}) catch return;
+        const site = vm_dispatch.builtinCallSiteOf(self) orelse return;
+        const saved_site = deprecation_mod.builtin_call_site;
+        deprecation_mod.builtin_call_site = site;
+        defer deprecation_mod.builtin_call_site = saved_site;
+        try deprecation_mod.emitDeprecation(&self.deprecation_opts, .global_builtin, msg, "", 0, 0);
+    }
+
+    fn isColorArgument(self: *const VM, v: Value) bool {
+        if (v.kind() == .color) return true;
+        if (!v.isString() or v.stringQuoted(self.string_flags_pool.items)) return false;
+        return color_mod.lookupNamedColor(self.intern_pool.get(v.stringIntern())) != null;
+    }
+
     /// A value as `meta.inspect()` writes it; the text is interned.
     fn inspectForMessage(self: *VM, v: Value) VMError![]const u8 {
         const inspect_id = builtin_mod.resolve("meta", "inspect") orelse return error.InternalError;
@@ -8777,6 +8880,7 @@ pub const VM = struct {
                 .span_end = loc.end,
                 .chunk = r,
                 .chunk_name = chunk.name,
+                .origin = if (chunk.code_origin.len == chunk.code.len) chunk.code_origin[pc_idx] else .invalid,
             };
             n += 1;
         }
@@ -8819,6 +8923,22 @@ pub const VM = struct {
         return @intCast(self.current_source_span.file_id);
     }
 
+    /// The trace of an error at `span_start..span_end` of the module
+    /// `file_id`, when the code running there is one an @import brought in;
+    /// null otherwise, as the module's own frames place it.
+    pub fn importedErrorTrace(self: *VM, out: []error_format.ErrorTraceFrame, file_id: u32, span_start: u32, span_end: u32) ?usize {
+        if (self.diagnosticModuleIndex() != file_id or file_id >= self.program.modules.len) return null;
+        const m = &self.program.modules[file_id];
+        if (self.importedOrigin(self.current_origin, m.module_path) == null) return null;
+        const saved = self.current_source_span;
+        defer self.current_source_span = saved;
+        self.current_source_span.start = span_start;
+        self.current_source_span.end = span_end;
+        const n = self.buildDiagnosticTrace(out);
+        if (n == 0 or out[n - 1].line_text_len == 0) return null;
+        return n;
+    }
+
     pub fn buildDiagnosticTrace(self: *VM, out: []error_format.ErrorTraceFrame) usize {
         if (out.len == 0) return 0;
         const fid: usize = self.diagnosticModuleIndex();
@@ -8854,29 +8974,48 @@ pub const VM = struct {
         const site_count = self.callSites(sites[0..max_sites]);
         var label_buf: [64]u8 = undefined;
         for (sites[0..site_count], 0..) |site, i| {
+            // One frame stays for the innermost position.
+            if (n + 1 >= out.len) break;
             if (site.module_id >= self.program.modules.len) return 0;
             const m = &self.program.modules[site.module_id];
-            const label = if (i == 0 and site.chunk == .top) top_label else diagnosticCallLabel(site.chunk, site.chunk_name, &label_buf);
+            var label = if (i == 0 and site.chunk == .top) top_label else diagnosticCallLabel(site.chunk, site.chunk_name, &label_buf);
+            // A call in code an @import brought in is in the imported file,
+            // reached through each @import when it is at the top.
+            if (self.importedOrigin(site.origin, m.module_path)) |origin_index| {
+                const origin_path = self.program.origins[origin_index].source_path;
+                if (i == 0 and site.chunk == .top) {
+                    n = self.appendImportFrames(out[0 .. out.len - 1], n, site.module_id, m.module_path, top_label, origin_index);
+                    label = "@import";
+                }
+                if (n + 1 >= out.len) break;
+                const file_source = self.diagnosticSource(null, origin_path) orelse return 0;
+                const pos = sourceLineCol(file_source, site.span_start);
+                error_format.fillTraceFrame(&out[n], origin_path, label, pos.line, pos.col, pos.line, pos.col, "");
+                n += 1;
+                continue;
+            }
             const start = self.diagnosticLineCol(site.module_id, m, site.span_start) orelse return 0;
             error_format.fillTraceFrame(&out[n], m.module_path, label, start.line, start.col, start.line, start.col, "");
             n += 1;
         }
 
-        // Code an `@import` brought in is spanned in the imported file.
+        // Code an `@import` brought in is spanned in the imported file; the
+        // trace runs through each @import that brought it, outermost first.
         var path: []const u8 = inner_mod.module_path;
         var module_id: ?u32 = @intCast(fid);
-        const origin_index: usize = @backingInt(self.current_origin);
-        if (self.current_origin != .invalid and origin_index < self.program.origins.len and
-            self.program.origins[origin_index].kind == .import_stylesheet)
-        {
-            const origin_path = self.program.origins[origin_index].source_path;
-            if (origin_path.len != 0 and !std.mem.eql(u8, origin_path, inner_mod.module_path)) {
-                path = origin_path;
-                module_id = null;
-            }
+        var imported = false;
+        if (self.importedOrigin(self.current_origin, inner_mod.module_path)) |origin_index| {
+            path = self.program.origins[origin_index].source_path;
+            module_id = null;
+            imported = true;
+            if (site_count == 0) n = self.appendImportFrames(out, n, @intCast(fid), inner_mod.module_path, top_label, origin_index);
         }
+        if (n >= out.len) return n;
         const inner_ref = self.innerMostChunkRef();
-        const inner_label = if (inner_ref == .top) top_label else diagnosticCallLabel(inner_ref, self.innerMostChunkName(), &label_buf);
+        const inner_label = if (inner_ref == .top)
+            (if (imported and site_count == 0) "@import" else top_label)
+        else
+            diagnosticCallLabel(inner_ref, self.innerMostChunkName(), &label_buf);
         const source = self.diagnosticSource(module_id, path) orelse {
             // No source to show: the position alone, from the module's line
             // table when the code is the module's own.
@@ -8905,6 +9044,58 @@ pub const VM = struct {
     fn slashDivMessage(self: *VM, module_id: u32, path: []const u8, direct_value: bool) ?[]u8 {
         const source = self.diagnosticSource(module_id, path) orelse return null;
         return deprecation_mod.slashDivMessage(self.allocator, source, self.current_source_span.start, self.current_source_span.end, direct_value);
+    }
+
+    /// The origin's index when it is an @import of a file other than the
+    /// module's own.
+    fn importedOrigin(self: *VM, origin: OriginId, module_path: []const u8) ?usize {
+        const index: usize = @backingInt(origin);
+        if (origin == .invalid or index >= self.program.origins.len) return null;
+        const o = self.program.origins[index];
+        if (o.kind != .import_stylesheet or o.source_path.len == 0) return null;
+        if (std.mem.eql(u8, o.source_path, module_path)) return null;
+        return index;
+    }
+
+    fn sourceLineCol(source: []const u8, offset: u32) struct { line: u32, col: u32 } {
+        const end = @min(@as(usize, offset), source.len);
+        const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..end], '\n')) |nl| nl + 1 else 0;
+        return .{ .line = @intCast(std.mem.count(u8, source[0..line_start], "\n") + 1), .col = @intCast(end - line_start + 1) };
+    }
+
+    /// The frames of the @import rules that brought in the code of
+    /// `origin_index`, outermost first: the module's own at its first rule,
+    /// then each imported file at the rule importing the next.
+    fn appendImportFrames(self: *VM, out: []error_format.ErrorTraceFrame, start: usize, module_id: u32, module_path: []const u8, module_label: []const u8, origin_index: usize) usize {
+        var chain: [error_format.max_error_stack]usize = undefined;
+        var depth: usize = 0;
+        var cursor: usize = origin_index;
+        while (depth < chain.len) {
+            chain[depth] = cursor;
+            depth += 1;
+            const parent = self.program.origins[cursor].parent_import_origin;
+            const parent_index: usize = @backingInt(parent);
+            if (parent == .invalid or parent_index >= self.program.origins.len) break;
+            cursor = parent_index;
+        }
+        var n = start;
+        var i: usize = depth;
+        while (i > 0) : (i -= 1) {
+            if (n + 1 >= out.len) break;
+            const origin = self.program.origins[chain[i - 1]];
+            const is_outermost = i == depth;
+            const file_path = if (is_outermost) module_path else self.program.origins[chain[i]].source_path;
+            const file_source = (if (is_outermost) self.diagnosticSource(module_id, file_path) else self.diagnosticSource(null, file_path)) orelse return start;
+            if (origin.import_offset == std.math.maxInt(u32)) return start;
+            const end = @min(@as(usize, origin.import_offset), file_source.len);
+            const line_start = if (std.mem.lastIndexOfScalar(u8, file_source[0..end], '\n')) |nl| nl + 1 else 0;
+            const line_no: u32 = @intCast(std.mem.count(u8, file_source[0..line_start], "\n") + 1);
+            const col_no: u32 = @intCast(end - line_start + 1);
+            const label = if (is_outermost) module_label else "@import";
+            error_format.fillTraceFrame(&out[n], file_path, label, line_no, col_no, line_no, col_no, "");
+            n += 1;
+        }
+        return n;
     }
 
     fn moduleRunLabel(site: ModuleRunSite) []const u8 {
@@ -8940,6 +9131,8 @@ pub const VM = struct {
         /// The chunk the call is in, which names the trace line.
         chunk: ChunkRef,
         chunk_name: []const u8,
+        /// The `@import` the call's code came from, if any.
+        origin: OriginId = .invalid,
     };
 
     /// CLI-FIX-E Step 2c+ Phase 3: inner chunk name where error occurred (= function name / mixin name /
@@ -9380,6 +9573,7 @@ inline fn builtinSkipsSlashFreeCoercion(builtin_id: u32) bool {
         42,
         52,
         91,
+        builtin_mod.global_hwb_id,
         92,
         93,
         94,
