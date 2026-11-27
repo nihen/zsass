@@ -2847,9 +2847,18 @@ pub const VM = struct {
             },
             .coerce_slash_free => try self.opCoerceSlashFree(),
 
-            .add => try self.opAdd(chunk),
-            .sub => try self.opSub(chunk),
-            .mul => try self.opMul(chunk),
+            .add => {
+                const operands = self.peekOperands();
+                self.opAdd(chunk) catch |e| return self.undefinedOperation(e, operands, "+");
+            },
+            .sub => {
+                const operands = self.peekOperands();
+                self.opSub(chunk) catch |e| return self.undefinedOperation(e, operands, "-");
+            },
+            .mul => {
+                const operands = self.peekOperands();
+                self.opMul(chunk) catch |e| return self.undefinedOperation(e, operands, "*");
+            },
             .div => {
                 const b = try self.maybeResolveParentSelectorValue(try self.pop());
                 const a = try self.maybeResolveParentSelectorValue(try self.pop());
@@ -2874,7 +2883,7 @@ pub const VM = struct {
                     };
                 };
                 defer if (slash_dep) |site| if (site.message) |msg| self.allocator.free(msg);
-                try self.push(try divValues(
+                const quotient = divValues(
                     self.intern_pool,
                     &self.number_pool,
                     self.allocator,
@@ -2886,19 +2895,23 @@ pub const VM = struct {
                     self.pendingCssMathCallPreserveContext(chunk),
                     slash_dep,
                     inst.arg_a != 0,
-                ));
+                ) catch |e| return self.undefinedOperation(e, .{ a, b }, "/");
+                try self.push(quotient);
             },
             .mod => {
                 const b = try self.maybeResolveParentSelectorValue(try self.pop());
                 const a = try self.maybeResolveParentSelectorValue(try self.pop());
-                try self.push(try modValues(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, a, b));
+                const result = modValues(self.intern_pool, &self.number_pool, self.allocator, &self.list_pool, self.color_pool, &self.slash_list_preserve, a, b) catch |e|
+                    return self.undefinedOperation(e, .{ a, b }, "%");
+                try self.push(result);
             },
             .neg => {
                 const a = try self.maybeResolveParentSelectorValue(try self.pop());
                 if (a.kind() == .number) {
                     try self.push(try Value.number(-a.asF64(&self.number_pool), a.unitId(&self.number_pool), &self.number_pool, self.allocator));
                 } else {
-                    try self.push(try unaryPrefixValue(self, "-", a, .require_non_calc));
+                    const result = unaryPrefixValue(self, "-", a, .require_non_calc) catch |e| return self.undefinedUnaryOperation(e, a, "-");
+                    try self.push(result);
                 }
             },
             .pos => {
@@ -2906,21 +2919,35 @@ pub const VM = struct {
                 if (a.kind() == .number) {
                     try self.push(a);
                 } else {
-                    try self.push(try unaryPrefixValue(self, "+", a, .require_non_calc));
+                    const result = unaryPrefixValue(self, "+", a, .require_non_calc) catch |e| return self.undefinedUnaryOperation(e, a, "+");
+                    try self.push(result);
                 }
             },
             .slash_prefix => {
                 const a = try self.maybeResolveParentSelectorValue(try self.pop());
-                try self.push(try unaryPrefixValue(self, "/", a, .allow_calc));
+                const result = unaryPrefixValue(self, "/", a, .allow_calc) catch |e| return self.undefinedUnaryOperation(e, a, "/");
+                try self.push(result);
             },
             .not_op => try self.opNotOp(),
 
             .eq => try self.cmpOp(.eq),
             .neq => try self.cmpOp(.neq),
-            .lt => try self.cmpOp(.lt),
-            .gt => try self.cmpOp(.gt),
-            .le => try self.cmpOp(.le),
-            .ge => try self.cmpOp(.ge),
+            .lt => {
+                const operands = self.peekOperands();
+                self.cmpOp(.lt) catch |e| return self.undefinedOperation(e, operands, "<");
+            },
+            .gt => {
+                const operands = self.peekOperands();
+                self.cmpOp(.gt) catch |e| return self.undefinedOperation(e, operands, ">");
+            },
+            .le => {
+                const operands = self.peekOperands();
+                self.cmpOp(.le) catch |e| return self.undefinedOperation(e, operands, "<=");
+            },
+            .ge => {
+                const operands = self.peekOperands();
+                self.cmpOp(.ge) catch |e| return self.undefinedOperation(e, operands, ">=");
+            },
 
             .and_op => try self.opAndOp(),
             .or_op => try self.opOrOp(),
@@ -6572,6 +6599,47 @@ pub const VM = struct {
         }
         if (bracketed) try acc.append(self.allocator, ']');
         return try acc.toOwnedSlice(self.allocator);
+    }
+
+    /// The two operands on top of the stack, before an operator takes them.
+    inline fn peekOperands(self: *const VM) [2]Value {
+        const items = self.stack.items;
+        if (items.len < 2) return .{ Value.nil_v, Value.nil_v };
+        return .{ items[items.len - 2], items[items.len - 1] };
+    }
+
+    /// An operator failed without a message: Sass's for an operation its
+    /// operands do not support, `Undefined operation "2px + red".`.
+    fn undefinedOperation(self: *VM, err: VMError, operands: [2]Value, op: []const u8) VMError {
+        if (err != error.SassError or error_format.currentContextMessage() != null) return err;
+        // `+`, `-`, and `/` join other values as text: a map or an empty
+        // list there is not CSS.
+        if (std.mem.eql(u8, op, "+") or std.mem.eql(u8, op, "-") or std.mem.eql(u8, op, "/")) {
+            for (operands) |operand| {
+                self.ensureCssDeclarationValue(operand, false) catch |css_err| return css_err;
+            }
+        }
+        const lhs = self.inspectForMessage(operands[0]) catch return err;
+        const rhs = self.inspectForMessage(operands[1]) catch return err;
+        var buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Undefined operation \"{s} {s} {s}\".", .{ lhs, op, rhs }) catch return err;
+        error_format.setContextMessage(msg);
+        return err;
+    }
+
+    /// As `undefinedOperation`, for a unary operator: a negated value is
+    /// written in parentheses unless it is a calculation.
+    fn undefinedUnaryOperation(self: *VM, err: VMError, operand: Value, op: []const u8) VMError {
+        if (err != error.SassError or error_format.currentContextMessage() != null) return err;
+        const text = self.inspectForMessage(operand) catch return err;
+        const parens = std.mem.eql(u8, op, "-") and !std.mem.startsWith(u8, text, "calc(");
+        var buf: [512]u8 = undefined;
+        const msg = (if (parens)
+            std.fmt.bufPrint(&buf, "Undefined operation \"-({s})\".", .{text})
+        else
+            std.fmt.bufPrint(&buf, "Undefined operation \"{s}{s}\".", .{ op, text })) catch return err;
+        error_format.setContextMessage(msg);
+        return err;
     }
 
     /// A value as `meta.inspect()` writes it; the text is interned.
