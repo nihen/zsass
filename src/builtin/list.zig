@@ -137,16 +137,67 @@ fn resolveOneBasedListIndex(len: usize, raw_idx: i64) ?usize {
     return @intCast(resolved - 1);
 }
 
+/// Lists shorter than this are copied on append; the reuse pays off only
+/// for lists built up item by item.
+const append_reuse_min_len = 16;
+
+/// `list.append` for a plain list, without copying its items when the list
+/// was itself made by `list.append` and nothing has appended to it since.
+/// Item slices stay immutable: the new item goes into room past the end of
+/// every existing list that shares the storage. Null when the reuse does
+/// not apply.
+fn appendReusingTail(
+    ctx: *BuiltinContext,
+    list_value: Value,
+    new_value: Value,
+    separator: ListSeparator,
+    bracketed: bool,
+) BuiltinError!?Value {
+    const tails = ctx.list_append_tails orelse return null;
+    if (list_value.kind() != .list or list_value.listIsMap(ctx.list_meta_pool.items)) return null;
+    const handle = list_value.listHandle();
+    const items = ctx.list_pool.items[handle];
+    const view = logicalListView(ctx, list_value) orelse return null;
+    // A bracketed list that wraps another one shows that one's items.
+    if (view.items.ptr != items.ptr or view.items.len != items.len) return null;
+    if (items.len < append_reuse_min_len) return null;
+
+    var buf: []Value = &.{};
+    var fresh = false;
+    const query = ctx.list_parent_sel_none_query;
+    if (tails.fetchRemove(handle)) |kv| {
+        if (kv.value.buf.ptr == items.ptr and kv.value.used == items.len and kv.value.used < kv.value.buf.len) {
+            buf = kv.value.buf;
+        }
+    }
+    if (buf.len == 0) {
+        buf = try ctx.allocator.alloc(Value, items.len * 2);
+        @memcpy(buf[0..items.len], items);
+        fresh = true;
+    }
+    errdefer if (fresh) ctx.allocator.free(buf);
+    buf[items.len] = new_value;
+    const slice = buf[0 .. items.len + 1];
+
+    const new_handle: u32 = @intCast(ctx.list_pool.items.len);
+    try ctx.list_pool.append(ctx.allocator, slice);
+    errdefer _ = ctx.list_pool.pop();
+    if (fresh or query == null) {
+        try shared.maybeNoteListParentSelNoneHook(ctx, new_handle, slice);
+    } else if (query.?(ctx.vm, handle)) {
+        // Every earlier item is known to hold no `&`, so the new one decides.
+        try shared.maybeNoteListParentSelNoneHook(ctx, new_handle, slice[items.len..]);
+    }
+    // Losing the entry only means the next append copies.
+    tails.put(ctx.allocator, new_handle, .{ .buf = buf, .used = slice.len }) catch {};
+    return Value.listWithMeta(new_handle, separator, bracketed, false);
+}
+
 pub fn list_append(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
     if (args.len > 3) return badArity(2, args.len);
     const bound = try bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{ "list", "val", "separator" }, 2);
     const list_value = bound[0].?;
     const new_value = bound[1].?;
-
-    var appended: std.ArrayListUnmanaged(Value) = .empty;
-    defer appended.deinit(ctx.allocator);
-    try appendListLikeItems(ctx, &appended, list_value);
-    try appended.append(ctx.allocator, new_value);
 
     const view = logicalListView(ctx, list_value);
     var separator: ListSeparator = if (view) |v|
@@ -162,6 +213,12 @@ pub fn list_append(ctx: *BuiltinContext, args: []const Value, arg_names: []const
     if (bound[2]) |separator_value| {
         if (try parseListSeparatorArg(ctx, "separator", separator_value)) |sep| separator = sep;
     }
+    if (try appendReusingTail(ctx, list_value, new_value, separator, bracketed)) |reused| return reused;
+
+    var appended: std.ArrayListUnmanaged(Value) = .empty;
+    defer appended.deinit(ctx.allocator);
+    try appendListLikeItems(ctx, &appended, list_value);
+    try appended.append(ctx.allocator, new_value);
     return pushListWithMeta(ctx, appended.items, separator, bracketed, false);
 }
 

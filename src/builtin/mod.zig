@@ -17,6 +17,7 @@ pub const BuiltinError = shared.BuiltinError;
 /// Re-export: per-call context (allocator + intern/color pools + diagnostics).
 pub const BuiltinContext = shared.BuiltinContext;
 pub const ListIndexCacheKey = shared.ListIndexCacheKey;
+pub const ListTail = shared.ListTail;
 /// Re-export: opaque builtin dispatch id (stable across a single build).
 pub const Id = shared.Id;
 

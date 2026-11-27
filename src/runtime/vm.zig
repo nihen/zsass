@@ -478,6 +478,7 @@ pub const VM = struct {
     map_lookup_index_cache: std.AutoHashMapUnmanaged(u32, ?*std.StringHashMapUnmanaged(u32)) = .empty,
     /// Repeated `list.index()` over immutable list handles.
     list_index_cache: std.AutoHashMapUnmanaged(builtin_mod.ListIndexCacheKey, Value) = .empty,
+    list_append_tails: std.AutoHashMapUnmanaged(u32, builtin_mod.ListTail) = .empty,
     /// Legacy global builtin lookup cache for Indirect CSS/string callable fallback.
     /// value=maxInt(u32) is miss sentinel.
     legacy_global_builtin_cache: std.AutoHashMapUnmanaged(InternId, u32) = .empty,
@@ -772,6 +773,11 @@ pub const VM = struct {
     /// sidecar bitset configuration hook entity called from builtin. `BuiltinContext.vm`
     /// Cast (`*anyopaque`) to VM and delegate to sidecar inspection method.
     /// fn pointer to set on `BuiltinContext.list_parent_sel_none_hook`.
+    pub fn builtinListSidecarQuery(vm_opaque: *const anyopaque, handle: u32) bool {
+        const self: *const VM = @ptrCast(@alignCast(vm_opaque));
+        return self.listHandleParentSelNone(handle);
+    }
+
     pub fn builtinListSidecarHook(
         vm_opaque: *anyopaque,
         handle: u32,
@@ -831,6 +837,7 @@ pub const VM = struct {
             self.map_lookup_index_cache.deinit(self.allocator);
         }
         self.list_index_cache.deinit(self.allocator);
+        self.list_append_tails.deinit(self.allocator);
         self.legacy_global_builtin_cache.deinit(self.allocator);
         self.selector_stack.deinit(self.allocator);
         self.selector_owner_stack.deinit(self.allocator);

@@ -893,3 +893,33 @@ test "limits: comparing values counts the values visited" {
     try std.testing.expectEqualStrings("a {\n  x: 200;\n}\n", try compile(a, src.items, "", &.{}, quiet));
     try std.testing.expectError(error.ExecutionLimit, compile(a, src.items, "", &.{}, withLimits(.{ .max_vm_steps = 1_000_000 })));
 }
+
+test "limits: a list built by appending in a loop stays within memory" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src =
+        \\@use "sass:list";
+        \\$l: ();
+        \\@for $i from 1 through 25000 { $l: list.append($l, $i); }
+        \\a { b: list.length($l); c: list.nth($l, -1); }
+    ;
+    // Each append used to copy the whole list: about 2.5 GB here.
+    try std.testing.expectEqualStrings("a {\n  b: 25000;\n  c: 25000;\n}\n", try compile(a, src, "", &.{}, withLimits(.{ .max_memory_bytes = 64 * 1024 * 1024 })));
+}
+
+test "list.append: appending twice to one list keeps both results apart" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src =
+        \\@use "sass:list";
+        \\$base: ();
+        \\@for $i from 1 through 20 { $base: list.append($base, $i); }
+        \\$a: list.append($base, a);
+        \\$b: list.append($base, b);
+        \\$a2: list.append($a, a2);
+        \\x { a: list.nth($a, -1); b: list.nth($b, -1); a2: list.nth($a2, -2) list.nth($a2, -1); n: list.length($base) list.length($a) list.length($b); }
+    ;
+    try std.testing.expectEqualStrings("x {\n  a: a;\n  b: b;\n  a2: a a2;\n  n: 20 21 21;\n}\n", try compile(a, src, "", &.{}, quiet));
+}
