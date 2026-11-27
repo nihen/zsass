@@ -80,6 +80,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `sass:selector` functions accept comments in a selector argument,
   such as `selector.parse(".a /* note */ .b")`, as the official CLI does.
 
+### Changed
+
+- `@extend` with many extenders of one selector is about 20% faster: each
+  extension step's copy of the selector is amortized instead of repeated,
+  and the duplicate-extender check looks only at entries with an equal
+  extender. Memory stays within a fixed multiple of the live selector.
+
+
 ## 0.5.1 (2026-11-27)
 
 ### Changed
