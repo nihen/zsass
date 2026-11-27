@@ -962,7 +962,7 @@ fn unitFamily(unit: []const u8) ?UnitFamily {
     if (std.mem.eql(u8, unit, "px") or std.mem.eql(u8, unit, "in") or
         std.mem.eql(u8, unit, "cm") or std.mem.eql(u8, unit, "mm") or
         std.mem.eql(u8, unit, "pt") or std.mem.eql(u8, unit, "pc") or
-        std.mem.eql(u8, unit, "Q") or std.mem.eql(u8, unit, "q"))
+        std.mem.eql(u8, unit, "q"))
         return .length;
     if (std.mem.eql(u8, unit, "deg") or std.mem.eql(u8, unit, "rad") or
         std.mem.eql(u8, unit, "grad") or std.mem.eql(u8, unit, "turn"))

@@ -87,7 +87,7 @@ pub fn toCanonical(value: f64, unit: []const u8) ?f64 {
     if (std.mem.eql(u8, unit, "mm")) return value * 96.0 / 25.4;
     if (std.mem.eql(u8, unit, "pt")) return value * 96.0 / 72.0;
     if (std.mem.eql(u8, unit, "pc")) return value * 96.0 / 6.0;
-    if (std.mem.eql(u8, unit, "Q") or std.mem.eql(u8, unit, "q")) return value * 96.0 / 101.6;
+    if (std.mem.eql(u8, unit, "q")) return value * 96.0 / 101.6;
     // Angle  ->  you
     if (std.mem.eql(u8, unit, "deg")) return value;
     if (std.mem.eql(u8, unit, "rad")) return value * 180.0 / std.math.pi;
@@ -114,7 +114,7 @@ pub fn fromCanonical(value: f64, unit: []const u8) ?f64 {
     if (std.mem.eql(u8, unit, "mm")) return value * 25.4 / 96.0;
     if (std.mem.eql(u8, unit, "pt")) return value * 72.0 / 96.0;
     if (std.mem.eql(u8, unit, "pc")) return value * 6.0 / 96.0;
-    if (std.mem.eql(u8, unit, "Q") or std.mem.eql(u8, unit, "q")) return value * 101.6 / 96.0;
+    if (std.mem.eql(u8, unit, "q")) return value * 101.6 / 96.0;
     // Angle: canonical = deg
     if (std.mem.eql(u8, unit, "deg")) return value;
     if (std.mem.eql(u8, unit, "rad")) return value * std.math.pi / 180.0;

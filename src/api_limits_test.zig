@@ -1076,5 +1076,5 @@ test "units: CSS math keeps units differing in case" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectEqualStrings("a {\n  b: min(2px, 3PX);\n  c: calc(2px + 3PX);\n  d: calc(1em + 2EM);\n}\n", try compile(a, "a { b: min(2px, 3PX); c: calc(2px + 3PX); d: calc(1em + 2EM); }", "", &.{}, quiet));
+    try std.testing.expectEqualStrings("a {\n  b: min(2px, 3PX);\n  c: calc(2px + 3PX);\n  d: calc(1em + 2EM);\n  e: calc(2q + 3Q);\n}\n", try compile(a, "a { b: min(2px, 3PX); c: calc(2px + 3PX); d: calc(1em + 2EM); e: calc(2q + 3Q); }", "", &.{}, quiet));
 }

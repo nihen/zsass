@@ -39,7 +39,7 @@ fn classifyCalcUnit(unit: []const u8) CalcUnitCategory {
     if (unit.len == 0) return .unitless;
     if (std.mem.eql(u8, unit, "%")) return .percent;
 
-    const abs_lengths = [_][]const u8{ "px", "cm", "mm", "in", "pt", "pc", "q", "Q" };
+    const abs_lengths = [_][]const u8{ "px", "cm", "mm", "in", "pt", "pc", "q" };
     for (abs_lengths) |l| {
         if (std.mem.eql(u8, unit, l)) return .abs_length;
     }

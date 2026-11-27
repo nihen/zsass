@@ -4643,7 +4643,7 @@ fn comparableUnitInfo(unit: []const u8) ?struct { family: enum { length, angle, 
     if (std.mem.eql(u8, unit, "mm")) return .{ .family = .length, .factor = 96.0 / 25.4 };
     if (std.mem.eql(u8, unit, "pt")) return .{ .family = .length, .factor = 96.0 / 72.0 };
     if (std.mem.eql(u8, unit, "pc")) return .{ .family = .length, .factor = 16.0 };
-    if (std.mem.eql(u8, unit, "Q") or std.mem.eql(u8, unit, "q")) return .{ .family = .length, .factor = 96.0 / 101.6 };
+    if (std.mem.eql(u8, unit, "q")) return .{ .family = .length, .factor = 96.0 / 101.6 };
 
     // Angle
     if (std.mem.eql(u8, unit, "deg")) return .{ .family = .angle, .factor = 1.0 };
