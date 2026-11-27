@@ -22,9 +22,38 @@ env:
   TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
+  # Release only a tag that names a version on main, from a run started at
+  # that tag: the signing certificate names the run's ref, and users verify
+  # against the tag. Later jobs check out the commit verified here.
+  verify:
+    name: Verify the release tag
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.check.outputs.sha }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the tag
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] || fail "not a vX.Y.Z tag: ${TAG}"
+          [[ "${GITHUB_REF}" == "refs/tags/${TAG}" ]] || fail "run from ${GITHUB_REF}, not refs/tags/${TAG}; dispatch with: gh workflow run release.yml --ref ${TAG} -f tag=${TAG}"
+          sha="$(git rev-parse --verify "refs/tags/${TAG}^{commit}")" || fail "no tag ${TAG}"
+          git merge-base --is-ancestor "${sha}" origin/main || fail "${TAG} is not on main"
+          version="$(git show "${sha}:build.zig.zon" | awk -F '"' '/^[[:space:]]*\.version[[:space:]]*=/{print $2; exit}')"
+          [[ "v${version}" == "${TAG}" ]] || fail "build.zig.zon version ${version} does not match ${TAG}"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runs_on }}
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
@@ -59,7 +88,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ needs.verify.outputs.sha }}
           submodules: recursive
           persist-credentials: false
 
@@ -124,14 +153,15 @@ jobs:
   publish:
     name: Sign and publish release
     runs-on: ubuntu-latest
-    needs: build
+    needs: [verify, build]
+    environment: release
     permissions:
       contents: write
       id-token: write    # required for sigstore keyless signing (cosign sign-blob)
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ needs.verify.outputs.sha }}
           persist-credentials: false
 
       - name: Download all build artifacts
@@ -185,18 +215,6 @@ jobs:
           for sha in zsass-v*.sha256; do
             sha256sum -c "${sha}"
           done
-
-      # The signing certificate names the ref the run started from, and
-      # users verify against the tag. A run dispatched from a branch would
-      # sign with the branch's name, so refuse it.
-      - name: Check that the run started at the tag
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "${GITHUB_REF}" != "refs/tags/${TAG}" ]]; then
-            echo "::error::release.yml must run at refs/tags/${TAG}, not ${GITHUB_REF}; dispatch it with: gh workflow run release.yml --ref ${TAG} -f tag=${TAG}"
-            exit 1
-          fi
 
       - name: Install cosign
         uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9  # v3
@@ -252,14 +270,15 @@ jobs:
   container:
     name: Publish GHCR image
     runs-on: ubuntu-latest
-    needs: publish
+    needs: [verify, publish]
+    environment: release
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ needs.verify.outputs.sha }}
           persist-credentials: false
 
       - name: Derive image version
@@ -315,7 +334,8 @@ jobs:
   homebrew:
     name: Update homebrew-tap formula
     runs-on: ubuntu-latest
-    needs: publish
+    needs: [verify, publish]
+    environment: release
     # Co-locating the tap update in the same workflow as `publish` is
     # what makes the chain self-driving: the previous standalone
     # workflow listened for `release: published`, but releases minted
@@ -339,7 +359,7 @@ jobs:
         if: steps.token.outputs.skip != 'true'
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ needs.verify.outputs.sha }}
           path: zsass
           persist-credentials: false
 

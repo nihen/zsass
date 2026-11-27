@@ -1,0 +1,12 @@
+# Keeps the commit-pinned Actions and the Dockerfile's digest-pinned base
+# image up to date; the version stays in the comment after each pin.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
