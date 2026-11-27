@@ -1123,3 +1123,11 @@ test "errors: incompatible units name the operands as the official CLI does" {
     try expectCompileMessage(a, "a { b: min(1px * 1px, 1s); }", "Number calc(1px * 1px) isn't compatible with CSS calculations.");
     try std.testing.expectEqualStrings("a {\n  b: calc(1px + 1em + 1s);\n  c: 1.92cm;\n}\n", try compile(a, "a { b: calc(1px + 1em + 1s); c: 7cm % 1in; }", "", &.{}, quiet));
 }
+
+test "errors: a calc() with variables checks their units" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try expectCompileMessage(a, "$x: 1px; a { b: calc($x + 1s); }", "1px and 1s are incompatible.");
+    try std.testing.expectEqualStrings("a {\n  b: calc(1px + 1s);\n}\n", try compile(a, "$x: 1px; a { b: calc(#{$x} + 1s); }", "", &.{}, quiet));
+}

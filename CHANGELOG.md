@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lengths such as `em` count as lengths, and `x` is an unknown unit.
 - clamp() rejects a unitless argument mixed with ones that have units,
   and `clamp(1PX, 1s, 2px)` fails as `1PX and 1s` instead of being kept.
+- A calc() with variables, such as `calc($x + 1s)` with `$x: 1px`, fails
+  with "1px and 1s are incompatible." instead of being kept; interpolated
+  text is still not checked.
 - `%` between numbers with compatible units converts the right operand:
   `7cm % 1in` is `1.92cm` instead of an error.
 

@@ -8121,6 +8121,9 @@ pub const VM = struct {
         if (self.hasTopLevelCommaInCalcText(trimmed)) return error.SassError;
         if (calc_utils.calcHasBadWhitespace(trimmed)) return error.SassError;
         if (calcTextHasComplexNestedCalcAddend(trimmed)) return error.SassError;
+        // Values substituted for variables are numbers like any other; text
+        // that came from interpolation is not checked.
+        if (!source_interp_marked and calc_utils.recordCalcIncompatibleTermsMessage(self.allocator, trimmed)) return error.SassError;
 
         const has_special_var_call =
             std.mem.indexOf(u8, trimmed, "var(") != null or
