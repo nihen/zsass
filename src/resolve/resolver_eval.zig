@@ -189,7 +189,14 @@ fn evalBinary(env: anytype, prog: anytype, payload: u32) Error!Value {
         .add => try addValues(env, lhs, rhs),
         .sub => try subValues(env, lhs, rhs),
         .mul => try mulValues(env, lhs, rhs),
-        .div => try divValues(env, lhs, rhs, b.lhs_written_slash),
+        .div => blk: {
+            // Dividing numbers with `/` is deprecated: folding it would lose
+            // the warning, so the VM divides them and warns.
+            if (@hasDecl(@TypeOf(env.*), "probeDeprecations")) {
+                if (env.probeDeprecations() and lhs.kind() == .number and rhs.kind() == .number) return error.NonStaticExpr;
+            }
+            break :blk try divValues(env, lhs, rhs, b.lhs_written_slash);
+        },
         .mod => try modValues(env, lhs, rhs),
         .eq => if (valueEq(env, lhs, rhs)) Value.true_v else Value.false_v,
         .neq => if (!valueEq(env, lhs, rhs)) Value.true_v else Value.false_v,

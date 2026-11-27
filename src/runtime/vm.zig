@@ -257,6 +257,12 @@ pub const FrameSlotPool = struct {
     }
 };
 
+pub const ModuleRunSite = struct {
+    module_id: u32,
+    offset: u32,
+    forward: bool,
+};
+
 const ParamDefaultCtx = struct {
     module_id: u32,
     declared: []const bool,
@@ -496,6 +502,11 @@ pub const VM = struct {
     /// The VM whose `meta.load-css()` runs this one, whose trace continues
     /// this one's.
     diag_parent: ?*VM = null,
+    /// The module the code at `current_source_span` belongs to.
+    current_source_module: u32 = 0,
+    /// The `@use`/`@forward` that is running each module running now,
+    /// outermost first: in which module and where, for warnings' traces.
+    module_run_sites: std.ArrayListUnmanaged(ModuleRunSite) = .empty,
     /// Legacy global builtin lookup cache for Indirect CSS/string callable fallback.
     /// value=maxInt(u32) is miss sentinel.
     legacy_global_builtin_cache: std.AutoHashMapUnmanaged(InternId, u32) = .empty,
@@ -825,6 +836,7 @@ pub const VM = struct {
     }
 
     pub fn deinit(self: *VM) void {
+        self.module_run_sites.deinit(self.allocator);
         {
             var it = self.diag_sources.iterator();
             while (it.next()) |entry| {
@@ -2401,12 +2413,14 @@ pub const VM = struct {
                 .end = loc.end,
                 .file_id = self.load_css_module_tag_override orelse loc.module_id,
             };
+            self.current_source_module = loc.module_id;
         } else {
             self.current_source_span = .{
                 .start = 0,
                 .end = 0,
                 .file_id = self.load_css_module_tag_override orelse self.current_module,
             };
+            self.current_source_module = self.current_module;
         }
         if (self.histogram) |h| h.tick(inst.opcode());
         perf.note(.vm_step);
@@ -2627,12 +2641,14 @@ pub const VM = struct {
                 .end = loc.end,
                 .file_id = self.load_css_module_tag_override orelse loc.module_id,
             };
+            self.current_source_module = loc.module_id;
         } else {
             self.current_source_span = .{
                 .start = 0,
                 .end = 0,
                 .file_id = self.load_css_module_tag_override orelse self.current_module,
             };
+            self.current_source_module = self.current_module;
         }
         if (self.histogram) |h| h.tick(inst.opcode());
         perf.note(.vm_step);
@@ -2838,18 +2854,24 @@ pub const VM = struct {
                 const b = try self.maybeResolveParentSelectorValue(try self.pop());
                 const a = try self.maybeResolveParentSelectorValue(try self.pop());
                 const slash_dep: ?deprecation_mod.SlashDivDeprecationSite = blk: {
-                    const fid: usize = @intCast(self.current_source_span.file_id);
+                    const fid: usize = self.diagnosticModuleIndex();
                     if (fid >= self.program.modules.len) break :blk null;
-                    const mod = self.program.modules[fid];
+                    const mod = &self.program.modules[fid];
                     if (mod.module_path.len == 0) break :blk null;
-                    const pos = sourceOffsetToLineColVm(mod.line_starts, mod.source_len, self.current_source_span.start);
+                    const pos = self.diagnosticLineCol(@intCast(fid), mod, self.current_source_span.start) orelse break :blk null;
+                    const message = if (a.kind() == .number and b.kind() == .number and deprecation_mod.mayReport(&self.deprecation_opts, .slash_div))
+                        self.slashDivMessage(@intCast(fid), mod.module_path, inst.arg_b != 0)
+                    else
+                        null;
                     break :blk .{
                         .opts = &self.deprecation_opts,
                         .path = mod.module_path,
-                        .line = pos.line + 1,
-                        .col = pos.col + 1,
+                        .line = pos.line,
+                        .col = pos.col,
+                        .message = message,
                     };
                 };
+                defer if (slash_dep) |site| if (site.message) |msg| self.allocator.free(msg);
                 try self.push(try divValues(
                     self.intern_pool,
                     &self.number_pool,
@@ -4903,7 +4925,7 @@ pub const VM = struct {
                 // A string is shown as its text; any other value as
                 // meta.inspect() writes it.
                 const msg = if (val.isString()) try self.valueToDiagnosticMessage(val, false) else try self.inspectForMessage(val);
-                const file_id: usize = @intCast(self.current_source_span.file_id);
+                const file_id: usize = self.diagnosticModuleIndex();
                 if (file_id < self.program.modules.len) {
                     const module = self.program.modules[file_id];
                     const pos = sourceOffsetToLineColVm(module.line_starts, module.source_len, self.current_source_span.start);
@@ -5675,7 +5697,7 @@ pub const VM = struct {
     }
 
     fn printCurrentVmErrorSource(self: *const VM) void {
-        const file_id: usize = @intCast(self.current_source_span.file_id);
+        const file_id: usize = self.diagnosticModuleIndex();
         if (file_id >= self.program.modules.len) return;
         const module = self.program.modules[file_id];
         const start = sourceOffsetToLineColVm(module.line_starts, module.source_len, self.current_source_span.start);
@@ -5726,7 +5748,7 @@ pub const VM = struct {
     }
 
     fn currentSourceUsesIndentedSyntax(self: *const VM) bool {
-        const file_id: usize = @intCast(self.current_source_span.file_id);
+        const file_id: usize = self.diagnosticModuleIndex();
         if (file_id >= self.program.modules.len) return false;
         const path = self.program.modules[file_id].module_path;
         return std.mem.endsWith(u8, path, ".sass");
@@ -5963,7 +5985,7 @@ pub const VM = struct {
     }
 
     fn currentSourceUsesPlainCss(self: *const VM) bool {
-        const file_id: usize = @intCast(self.current_source_span.file_id);
+        const file_id: usize = self.diagnosticModuleIndex();
         if (file_id < self.program.modules.len) {
             const path = self.program.modules[file_id].module_path;
             if (std.mem.endsWith(u8, path, ".css")) return true;
@@ -5975,7 +5997,7 @@ pub const VM = struct {
     }
 
     fn currentSourceSpanLooksNested(self: *const VM) bool {
-        const file_id: usize = @intCast(self.current_source_span.file_id);
+        const file_id: usize = self.diagnosticModuleIndex();
         if (file_id >= self.program.modules.len) return false;
         const module = &self.program.modules[file_id];
         if (self.current_source_span.start >= module.source_len) return true;
@@ -8791,7 +8813,7 @@ pub const VM = struct {
     /// The module the current position is in. Under `meta.load-css()` the
     /// span's file id is the source-map tag of the module, not its index.
     pub fn diagnosticModuleIndex(self: *const VM) usize {
-        if (self.load_css_module_tag_override != null) return self.current_module;
+        if (self.load_css_module_tag_override != null) return self.current_source_module;
         return @intCast(self.current_source_span.file_id);
     }
 
@@ -8808,7 +8830,22 @@ pub const VM = struct {
             n = parent.buildDiagnosticTrace(out[0 .. out.len - 1]);
         }
         // The top of a module `meta.load-css()` runs is labelled after it.
-        const top_label = if (self.diag_parent != null) "load-css()" else "root stylesheet";
+        const root_label = if (self.diag_parent != null) "load-css()" else "root stylesheet";
+        // Each module a `@use`/`@forward` is running, at that rule; the
+        // first at the root's top, each later at the top of the one before.
+        for (self.module_run_sites.items, 0..) |run_site, i| {
+            if (n + 1 >= out.len) break;
+            if (run_site.module_id >= self.program.modules.len) return 0;
+            const m = &self.program.modules[run_site.module_id];
+            const label = if (i == 0) root_label else moduleRunLabel(self.module_run_sites.items[i - 1]);
+            const pos = self.diagnosticLineCol(run_site.module_id, m, run_site.offset) orelse return 0;
+            error_format.fillTraceFrame(&out[n], m.module_path, label, pos.line, pos.col, pos.line, pos.col, "");
+            n += 1;
+        }
+        const top_label = if (self.module_run_sites.items.len > 0)
+            moduleRunLabel(self.module_run_sites.items[self.module_run_sites.items.len - 1])
+        else
+            root_label;
 
         var sites: [error_format.max_error_stack]CallSite = undefined;
         const max_sites = @min(sites.len, out.len - 1 - n);
@@ -8827,7 +8864,9 @@ pub const VM = struct {
         var path: []const u8 = inner_mod.module_path;
         var module_id: ?u32 = @intCast(fid);
         const origin_index: usize = @backingInt(self.current_origin);
-        if (self.current_origin != .invalid and origin_index < self.program.origins.len) {
+        if (self.current_origin != .invalid and origin_index < self.program.origins.len and
+            self.program.origins[origin_index].kind == .import_stylesheet)
+        {
             const origin_path = self.program.origins[origin_index].source_path;
             if (origin_path.len != 0 and !std.mem.eql(u8, origin_path, inner_mod.module_path)) {
                 path = origin_path;
@@ -8857,6 +8896,87 @@ pub const VM = struct {
         error_format.fillTraceFrame(&out[n], path, inner_label, line_no, col_no, line_no, end_col, line_text);
         n += 1;
         return n;
+    }
+
+    /// The slash-div warning as the official CLI writes it, with its
+    /// recommendation built from the division's source text: `math.div(a,
+    /// b)`, and `calc(a / b)` too unless the division is the whole value of
+    /// a variable or `@return`. Null when the source is not at hand.
+    fn slashDivMessage(self: *VM, module_id: u32, path: []const u8, direct_value: bool) ?[]u8 {
+        const source = self.diagnosticSource(module_id, path) orelse return null;
+        const start: usize = self.current_source_span.start;
+        const end: usize = self.current_source_span.end;
+        if (end <= start or end > source.len) return null;
+        const spanned = std.mem.trim(u8, source[start..end], " \t\r\n");
+        // The span may take in the parentheses written around it; then it
+        // is not the whole value either.
+        const text = stripOuterParens(spanned);
+        const before = std.mem.trimEnd(u8, source[0..start], " \t\r\n");
+        const parenthesized = text.len != spanned.len or (before.len > 0 and before[before.len - 1] == '(');
+        const slash = topLevelSlash(text) orelse return null;
+        const lhs = stripOuterParens(std.mem.trim(u8, text[0..slash], " \t\r\n"));
+        const rhs = stripOuterParens(std.mem.trim(u8, text[slash + 1 ..], " \t\r\n"));
+        const more_info = "More info and automated migrator: https://sass-lang.com/d/slash-div";
+        // Only two numbers written out, as the whole value, are warned
+        // about without calc(): `$x: 6px / 2`, not `$x: $a / 2`.
+        if (direct_value and !parenthesized and isNumberLiteralText(lhs) and isNumberLiteralText(rhs)) {
+            return std.fmt.allocPrint(self.allocator, "Using / for division is deprecated and will be removed in Dart Sass 2.0.0.\n\nRecommendation: math.div({s}, {s})\n\n{s}", .{ lhs, rhs, more_info }) catch null;
+        }
+        return std.fmt.allocPrint(self.allocator, "Using / for division outside of calc() is deprecated and will be removed in Dart Sass 2.0.0.\n\nRecommendation: math.div({s}, {s}) or calc({s})\n\n{s}", .{ lhs, rhs, text, more_info }) catch null;
+    }
+
+    /// `text` is a number as written: digits, a point, an exponent, a unit.
+    fn isNumberLiteralText(text: []const u8) bool {
+        var i: usize = 0;
+        if (i < text.len and (text[i] == '+' or text[i] == '-')) i += 1;
+        const digits_start = i;
+        while (i < text.len and (std.ascii.isDigit(text[i]) or text[i] == '.')) : (i += 1) {}
+        if (i == digits_start) return false;
+        while (i < text.len and (std.ascii.isAlphabetic(text[i]) or text[i] == '%')) : (i += 1) {}
+        return i == text.len;
+    }
+
+    /// The last `/` outside parentheses, brackets, and strings.
+    fn topLevelSlash(text: []const u8) ?usize {
+        var depth: u32 = 0;
+        var quote: u8 = 0;
+        var found: ?usize = null;
+        var i: usize = 0;
+        while (i < text.len) : (i += 1) {
+            const c = text[i];
+            if (quote != 0) {
+                if (c == '\\') i += 1 else if (c == quote) quote = 0;
+                continue;
+            }
+            switch (c) {
+                '"', '\'' => quote = c,
+                '(', '[' => depth += 1,
+                ')', ']' => depth -|= 1,
+                '/' => if (depth == 0) {
+                    found = i;
+                },
+                else => {},
+            }
+        }
+        return found;
+    }
+
+    /// `text` without one pair of parentheses around all of it.
+    fn stripOuterParens(text: []const u8) []const u8 {
+        if (text.len < 2 or text[0] != '(' or text[text.len - 1] != ')') return text;
+        var depth: u32 = 0;
+        for (text, 0..) |c, i| {
+            if (c == '(') depth += 1;
+            if (c == ')') {
+                depth -= 1;
+                if (depth == 0 and i != text.len - 1) return text;
+            }
+        }
+        return std.mem.trim(u8, text[1 .. text.len - 1], " \t\r\n");
+    }
+
+    fn moduleRunLabel(site: ModuleRunSite) []const u8 {
+        return if (site.forward) "@forward" else "@use";
     }
 
     /// 1-based line and column of `offset` in module `module_id`, from its
@@ -10453,7 +10573,7 @@ fn divValues(
             try deprecation_mod.emitDeprecation(
                 site.opts,
                 .slash_div,
-                "Using / for division is deprecated and will be removed in official Sass CLI 3.0.0.",
+                site.message orelse "Using / for division outside of calc() is deprecated and will be removed in Dart Sass 2.0.0.\n\nMore info and automated migrator: https://sass-lang.com/d/slash-div",
                 site.path,
                 site.line,
                 site.col,

@@ -117,7 +117,9 @@ fn builtinCallSite(self: anytype) ?deprecation_mod.CallSite {
     // Code an `@import` brought in runs in the importing module but was
     // written, and is spanned, in the imported file.
     const origin_index: usize = @backingInt(self.current_origin);
-    if (self.current_origin != .invalid and origin_index < self.program.origins.len) {
+    if (self.current_origin != .invalid and origin_index < self.program.origins.len and
+        self.program.origins[origin_index].kind == .import_stylesheet)
+    {
         const origin_path = self.program.origins[origin_index].source_path;
         if (origin_path.len != 0 and !std.mem.eql(u8, origin_path, mod.module_path)) {
             return .{ .path = origin_path, .line_starts = &.{}, .offset = self.current_source_span.start, .read_source = true };

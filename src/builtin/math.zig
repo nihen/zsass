@@ -1771,27 +1771,31 @@ fn minmaxVariadic(ctx: *BuiltinContext, args: []const Value, is_min: bool, css_n
     return minmaxVariadicMode(ctx, args, is_min, css_name, .css);
 }
 
-/// A CSS math function checks each later argument against the first for
-/// units known to be incompatible (`min(1em, 1px, 1s)` fails on `1em and
-/// 1s`; `min(1, 2s, 3px)` is 1). A unitless argument mixed with one that
-/// has a unit is incompatible too when `unitless_incompatible` (clamp), and
-/// otherwise left to the function (min, max).
-fn checkCalcArgsKnownCompatible(ctx: *BuiltinContext, values: []const Value, unitless_incompatible: bool) BuiltinError!void {
-    if (values.len == 0) return;
-    for (values[1..]) |later| {
-        const later_unit = unitSlice(ctx, later.unitId(ctx.number_pool));
-        if (later_unit != null and isGeneratedUnitDescription(later_unit.?)) continue;
-        for (values[0..1]) |earlier| {
-            const earlier_unit = unitSlice(ctx, earlier.unitId(ctx.number_pool));
-            if (earlier_unit != null and isGeneratedUnitDescription(earlier_unit.?)) continue;
+/// The arguments of a CSS math function kept as CSS must not hold two
+/// numbers known to be incompatible, a unitless number with one that has
+/// a unit included; pairs are checked in order, each argument against
+/// every later one (`min(1em, 1px, 1s)` fails on `1em and 1s`).
+fn checkCalcArgsKnownCompatible(ctx: *BuiltinContext, values: []const Value) BuiltinError!void {
+    for (values, 0..) |earlier, i| {
+        if (earlier.kind() != .number) continue;
+        const earlier_unit = unitSlice(ctx, earlier.unitId(ctx.number_pool));
+        if (earlier_unit != null and isGeneratedUnitDescription(earlier_unit.?)) continue;
+        for (values[i + 1 ..]) |later| {
+            if (later.kind() != .number) continue;
+            const later_unit = unitSlice(ctx, later.unitId(ctx.number_pool));
+            if (later_unit != null and isGeneratedUnitDescription(later_unit.?)) continue;
             if (earlier_unit == null and later_unit == null) continue;
-            if (earlier_unit == null or later_unit == null) {
-                if (unitless_incompatible) return reportCalcIncompatible(ctx, earlier, later);
-                continue;
-            }
+            if (earlier_unit == null or later_unit == null) return reportCalcIncompatible(ctx, earlier, later);
             if (knownCalculationUnitsIncompatible(earlier_unit, later_unit)) return reportCalcIncompatible(ctx, earlier, later);
         }
     }
+}
+
+/// min()/max() left as CSS: the comparison of each argument with the best
+/// so far failed, so the arguments are checked as a calculation's.
+fn keepCssMinMax(ctx: *BuiltinContext, css_name: []const u8, args: []const Value, values: []const Value) BuiltinError!Value {
+    try checkCalcArgsKnownCompatible(ctx, values);
+    return buildCssMathCall(ctx, css_name, args);
 }
 
 fn reportNotCalcCompatible(ctx: *BuiltinContext, number: Value) BuiltinError {
@@ -1872,7 +1876,7 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
 
     for (values) |arg| {
         if (arg.kind() != .number) {
-            if (preserve_css) return buildCssMathCall(ctx, css_name, args);
+            if (preserve_css) return keepCssMinMax(ctx, css_name, args, values);
             if (mode == .module) return shared.reportArgumentMismatchPhraseUnnamed(ctx, arg, "is not a number");
             return error.BuiltinType;
         }
@@ -1892,7 +1896,6 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
         }
     }
     if (saw_unitless_after_unknown_pair) return error.SassError;
-    if (mode == .css) try checkCalcArgsKnownCompatible(ctx, values, false);
 
     const first = values[0];
 
@@ -1923,12 +1926,13 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
         }
         if (cssMathUnitsNeedPassthrough(best_unit, arg_unit, false)) {
             if (mode == .module) return reportIncompatibleUnits(ctx, best, arg);
-            return buildCssMathCall(ctx, css_name, args);
+            return keepCssMinMax(ctx, css_name, args, values);
         }
         const converted = minMaxComparableValue(ctx, arg, best.unitId(ctx.number_pool)) catch |e| switch (e) {
             error.BuiltinArity => {
-                if (preserve_css) return buildCssMathCall(ctx, css_name, args);
+                if (preserve_css) return keepCssMinMax(ctx, css_name, args, values);
                 if (mode == .module) return reportIncompatibleUnits(ctx, best, arg);
+                try checkCalcArgsKnownCompatible(ctx, values);
                 return error.BuiltinArity;
             },
             else => return e,
@@ -2702,7 +2706,7 @@ pub fn math_clamp(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
     }
 
     // Also rejects a unitless argument mixed with ones that have units.
-    try checkCalcArgsKnownCompatible(ctx, &.{ min_value, number, max_value }, true);
+    try checkCalcArgsKnownCompatible(ctx, &.{ min_value, number, max_value });
     if (cssMathUnitsNeedPassthrough(min_unit_slice, number_unit_slice, false) or
         cssMathUnitsNeedPassthrough(min_unit_slice, max_unit_slice, false) or
         cssMathUnitsNeedPassthrough(number_unit_slice, max_unit_slice, false))

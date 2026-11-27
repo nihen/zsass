@@ -223,7 +223,16 @@ pub const SlashDivDeprecationSite = struct {
     path: []const u8,
     line: u32,
     col: u32,
+    /// The warning with its recommendation, built from the source.
+    message: ?[]const u8 = null,
 };
+
+/// Whether a deprecation of `kind` may be written or fail the compilation,
+/// before a caller builds its message.
+pub fn mayReport(opts: *const DeprecationOpts, kind: DeprecationKind) bool {
+    if (opts.fatal.contains(kind)) return true;
+    return !opts.quiet and !opts.silenced.contains(kind);
+}
 
 pub const DeprecationOpts = struct {
     /// Takes the warnings written and counted by `other`, a copy these
@@ -236,14 +245,19 @@ pub const DeprecationOpts = struct {
         self.seen_len = other.seen_len;
     }
 
-    /// Records `key`; true when it was recorded before.
+    /// Records `key`; true when it was recorded before. An open-addressed
+    /// table: once it is full, a new key is reported as unseen.
     fn alreadyWarned(self: *DeprecationOpts, key: u64) bool {
-        for (self.seen[0..self.seen_len]) |k| {
-            if (k == key) return true;
-        }
-        if (self.seen_len < self.seen.len) {
-            self.seen[self.seen_len] = key;
-            self.seen_len += 1;
+        var slot: usize = @intCast(key % self.seen.len);
+        var probes: usize = 0;
+        while (probes < self.seen.len) : (probes += 1) {
+            if (self.seen[slot] == key) return true;
+            if (self.seen[slot] == 0) {
+                self.seen[slot] = key;
+                self.seen_len += 1;
+                return false;
+            }
+            slot = (slot + 1) % self.seen.len;
         }
         return false;
     }
@@ -495,7 +509,7 @@ const max_repeated_warnings: u32 = 5;
 
 /// Distinct warnings remembered for de-duplication; past it, a repeat may
 /// be written again.
-const max_seen_warnings = 1024;
+const max_seen_warnings = 2048;
 
 fn warningKey(kind: DeprecationKind, msg: []const u8, path: []const u8, line: u32, col: u32) u64 {
     var h = std.hash.Wyhash.init(@backingInt(kind));

@@ -57,6 +57,14 @@ const identifierEq = builtin_shared.identifierEq;
 
 pub fn runDependencyBody(self: anytype, module_id: u32, rerun_each_call: bool, is_forward: bool) !void {
     if (module_id >= self.program.modules.len) return error.InternalError;
+    // Where this `@use`/`@forward` is, for the trace of a warning raised
+    // while the module runs.
+    try self.module_run_sites.append(self.allocator, .{
+        .module_id = @intCast(self.diagnosticModuleIndex()),
+        .offset = self.current_source_span.start,
+        .forward = is_forward,
+    });
+    defer _ = self.module_run_sites.pop();
     const shadow_copy = rerun_each_call or
         (self.load_css_module_tag_override != null and self.load_css_module_tag_override.? != self.current_module);
     const saved_state = self.saveState();
@@ -932,7 +940,9 @@ pub fn runLoadCssModule(self: anytype, resolved_path: []const u8, config: LoadCs
     defer ast.deinit();
 
     // The child draws on the same budget and file policy as this compilation.
-    var resolved = resolver_mod.resolveWithEntryPathColorPoolCachesAndPersistent(self.allocator, &ast, self.intern_pool, resolved_path, self.program.load_paths, self.color_pool, null, null, null, null, null, self.budget) catch |err| return loadCssFailure(err);
+    // The module's own configurations and imports warn under this
+    // compilation's deprecation options.
+    var resolved = resolver_mod.resolveWithEntryPathColorPoolCachesAndPersistent(self.allocator, &ast, self.intern_pool, resolved_path, self.program.load_paths, self.color_pool, null, null, null, &self.deprecation_opts, null, self.budget) catch |err| return loadCssFailure(err);
     defer resolved.deinit();
 
     var child_program = compiler_mod.compile(self.allocator, self.intern_pool, &resolved, self.color_pool) catch |err| switch (err) {

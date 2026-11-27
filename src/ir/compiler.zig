@@ -1284,6 +1284,9 @@ const CompileCtx = struct {
     /// Set while compiling the prelude of a non-`@media` at-rule: that text is
     /// emitted as written, so its escapes stay untouched.
     keep_escapes: bool = false,
+    /// The whole value of the `$variable:` or `@return` being compiled: a
+    /// `/` division there is warned about without suggesting calc().
+    direct_value: ?ExprIndex = null,
     /// True while compiling an `@function` body. Functions can't emit CSS,
     /// so the blank-retention `emit_stmt_gap` markers between sibling
     /// statements are dead weight there (the VM either early-outs on them or
@@ -2514,7 +2517,8 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
             }
             try compileExpr(ctx, b.lhs);
             try compileExpr(ctx, b.rhs);
-            try ctx.cb.emit(mapBinOpcode(b.op), @intFromBool(b.op == .div and b.lhs_written_slash), 0);
+            const direct_value = b.op == .div and ctx.direct_value != null and ctx.direct_value.? == e;
+            try ctx.cb.emit(mapBinOpcode(b.op), @intFromBool(b.op == .div and b.lhs_written_slash), @intFromBool(direct_value));
         },
         .unary => {
             const u = resolved.unary_exprs.items[ex.payload];
@@ -2710,6 +2714,12 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
             }
         },
     }
+}
+
+fn assignValueCtx(ctx: CompileCtx, value_expr: ExprIndex) CompileCtx {
+    var out = ctx;
+    out.direct_value = value_expr;
+    return out;
 }
 
 fn compileStrictInterpPart(ctx: CompileCtx, e: ExprIndex) CompileError!void {
@@ -3933,7 +3943,9 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
         },
         .return_stmt => {
             const r = resolved.return_stmts.items[st.payload];
-            try compileExpr(ctx, r.value_expr);
+            var value_ctx = ctx;
+            value_ctx.direct_value = r.value_expr;
+            try compileExpr(value_ctx, r.value_expr);
             try ctx.cb.emit(.ret_value, 0, 0);
         },
         .assign_var => {
@@ -3948,7 +3960,7 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                 try ctx.cb.emit(.eq, 0, 0);
                 const j_else = ctx.cb.code.items.len;
                 try ctx.cb.emit(.jmp_if_false, 0, 0);
-                try compileExpr(ctx, a.value_expr);
+                try compileExpr(assignValueCtx(ctx, a.value_expr), a.value_expr);
                 try ctx.cb.emit(store_op, 0, remapLocalSlot(ctx, a.slot));
                 const j_after = ctx.cb.code.items.len;
                 try ctx.cb.emit(.jmp, 0, 0);
@@ -3963,7 +3975,7 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                 ctx.cb.patchJmp(j_else, else_pc);
                 ctx.cb.patchJmp(j_after, after_pc);
             } else {
-                try compileExpr(ctx, a.value_expr);
+                try compileExpr(assignValueCtx(ctx, a.value_expr), a.value_expr);
                 try ctx.cb.emit(store_op, 0, remapLocalSlot(ctx, a.slot));
             }
         },

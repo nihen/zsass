@@ -3669,7 +3669,9 @@ fn resolveExprParen(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Span)
         const ri = try resolveExpr(ast, ctx, rhs);
         const bidx: u32 = @intCast(ctx.prog.binary_exprs.items.len);
         try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = .div });
-        return try appendExpr(ctx.prog, ctx.a, .{ .kind = .binary, .payload = bidx, .span = span });
+        // Spanned as written inside the parentheses, as diagnostics show it.
+        const inner_span = Span{ .start = inner_node.span_start, .end = inner_node.span_end };
+        return try appendExpr(ctx.prog, ctx.a, .{ .kind = .binary, .payload = bidx, .span = inner_span });
     }
     return resolveExpr(ast, ctx, inner);
 }

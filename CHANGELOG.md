@@ -50,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prelude, which zsass wrote out as text.
 - `@debug` writes a value other than a string as `meta.inspect()` does:
   `()` and the quotes of strings inside a map were lost.
+- The slash-div deprecation reads as the official CLI's: "Using / for
+  division outside of calc() is deprecated ...", with the recommendation
+  `math.div(a, b) or calc(a / b)` built from the source (only
+  `math.div()` for two numbers that are the whole value of a variable or
+  `@return`), instead of a placeholder sentence. A division that zsass
+  folded ahead of time no longer loses it.
+- A warning in a module that a `@use` or `@forward` loads lists that
+  rule, and the ones above it, in its trace.
 - `%` between numbers with compatible units converts the right operand:
   `7cm % 1in` is `1.92cm` instead of an error.
 
