@@ -5987,6 +5987,7 @@ pub fn parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
 ) !ParseResolveCompileBorrowedPoolResult {
     const ctx = persistent_ctx orelse return parseResolveCompileOnce(allocator, source, source_path, load_paths, phase_timer, pool, source_cache, ast_cache, null, deprecation_opts, preamble_store, budget);
     const unsafe = ctx.resolve_ctx.config_unsafe;
+    const memory_before = if (budget) |b| b.memory_used else 0;
     if (parseResolveCompileOnce(allocator, source, source_path, load_paths, phase_timer, pool, source_cache, ast_cache, ctx, deprecation_opts, null, budget)) |result| {
         if (!unsafe.*) return result;
         var r = result;
@@ -5996,6 +5997,13 @@ pub fn parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
         if (!unsafe.*) return err;
     }
     error_format.clearErrorContext();
+    // An arena keeps what the abandoned attempt allocated. Raise the memory
+    // limit by that much, so the entry gets the same limit as a compile that
+    // never tried shared records.
+    if (budget) |b| {
+        const kept = b.memory_used -| memory_before;
+        b.limits.max_memory_bytes +|= kept;
+    }
     return parseResolveCompileOnce(allocator, source, source_path, load_paths, phase_timer, pool, source_cache, ast_cache, null, deprecation_opts, null, budget);
 }
 

@@ -41,7 +41,13 @@ fn sourceImportsArePlainCssOnly(source: []const u8) bool {
         var j = i;
         while (j < source.len and std.ascii.isWhitespace(source[j])) j += 1;
         if (j >= source.len) return false;
-        if (std.mem.startsWith(u8, source[j..], "url(")) continue;
+        if (std.mem.startsWith(u8, source[j..], "url(")) {
+            // Only a lone url(): a list such as `url(a.css), "b"` can
+            // import Sass after it.
+            const close = std.mem.indexOfScalarPos(u8, source, j, ')') orelse return false;
+            if (!importTailHasOnlyWhitespaceBeforeSemicolon(source, close + 1)) return false;
+            continue;
+        }
         if (source[j] == '"' or source[j] == '\'') {
             const quote = source[j];
             const rest = source[j + 1 ..];
@@ -68,4 +74,7 @@ test "batch_reuse: plain-css import probe rejects quoted media suffixes" {
     try std.testing.expect(sourceImportsArePlainCssOnly("@import \"https://example.com/theme.css\";"));
     try std.testing.expect(!sourceImportsArePlainCssOnly("@import \"theme.css\" screen;"));
     try std.testing.expect(!sourceImportsArePlainCssOnly("@import \"theme\";"));
+    try std.testing.expect(sourceImportsArePlainCssOnly("@import url(theme.css);"));
+    try std.testing.expect(!sourceImportsArePlainCssOnly("@import url(\"x.css\"), \"fwd\";"));
+    try std.testing.expect(!sourceImportsArePlainCssOnly("@import url(x.css) screen;"));
 }

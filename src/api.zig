@@ -255,7 +255,7 @@ pub fn compileSourceToCss(
         return err;
     };
     budget.file_access = &file_access;
-    const guard = stack_guard.begin(opts.limits.stack_bytes, opts.limits.max_syntax_depth);
+    const guard = stack_guard.begin(opts.limits.stack_bytes, opts.limits.max_syntax_depth, &budget);
     defer guard.end();
     // Declared after the arena so it runs first: the message may point into
     // memory the compile allocated. It also covers the copy below.
@@ -345,7 +345,7 @@ pub fn compileSourceToCssWithSourceMap(
         return err;
     };
     budget.file_access = &file_access;
-    const guard = stack_guard.begin(opts.limits.stack_bytes, opts.limits.max_syntax_depth);
+    const guard = stack_guard.begin(opts.limits.stack_bytes, opts.limits.max_syntax_depth, &budget);
     defer guard.end();
     const result = compileSourceToCssWithSourceMapInArena(arena.allocator(), source, file_path, load_paths, source_map_output_css_path, opts, &budget) catch |caught| {
         const err = budget.mapError(stack_guard.mapError(caught));

@@ -809,14 +809,17 @@ test "batch: a module that configures another one is not replayed from shared re
     try writeFile(tmp.dir, "_lib.scss", "$c: blue !default; .lib { c: $c; }");
     try writeFile(tmp.dir, "_configured.scss", "@use \"lib\" with ($c: red);");
     try writeFile(tmp.dir, "_imports.scss", "$c: green; @import \"lib\";");
+    try writeFile(tmp.dir, "_fwd.scss", "@forward \"lib\";");
+    try writeFile(tmp.dir, "_mixed.scss", "$c: red; @import url(\"external.css\"), \"fwd\";");
+    try writeFile(tmp.dir, "usemixed.scss", "@use \"mixed\";");
     try writeFile(tmp.dir, "via.scss", "@use \"configured\";");
     try writeFile(tmp.dir, "plain.scss", "@use \"lib\";");
     try writeFile(tmp.dir, "nested.scss", "@use \"imports\";");
     const root = try tmpPath(a, &tmp);
-    const names = [_][]const u8{ "via.scss", "plain.scss", "nested.scss" };
-    // The official CLI: red, blue, green.
-    const expected = [_][]const u8{ ".lib {\n  c: red;\n}\n", ".lib {\n  c: blue;\n}\n", ".lib {\n  c: green;\n}\n" };
-    const orders = [_][6]usize{ .{ 0, 0, 1, 2, 1, 0 }, .{ 1, 0, 1, 0, 2, 2 }, .{ 2, 1, 0, 0, 1, 2 } };
+    const names = [_][]const u8{ "via.scss", "plain.scss", "nested.scss", "usemixed.scss" };
+    // The official CLI: red, blue, green, red.
+    const expected = [_][]const u8{ ".lib {\n  c: red;\n}\n", ".lib {\n  c: blue;\n}\n", ".lib {\n  c: green;\n}\n", "@import url(\"external.css\");\n.lib {\n  c: red;\n}\n" };
+    const orders = [_][6]usize{ .{ 0, 0, 1, 2, 1, 3 }, .{ 1, 3, 3, 0, 2, 2 }, .{ 2, 1, 0, 3, 1, 3 } };
     for (orders) |order| {
         var paths: [6][]const u8 = undefined;
         for (order, &paths) |i, *p| p.* = try std.fs.path.join(a, &.{ root, names[i] });
@@ -864,15 +867,29 @@ test "batch: parallel workers give the same results as one at a time" {
     try std.testing.expectEqualStrings(".lib {\n  c: blue;\n}\n", parallel[1].css.?);
 }
 
-test "limits: comparing list keys counts their elements" {
+test "limits: comparing values counts the values visited" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    // Shared structure: each level holds the one below twice, so comparing
+    // two keys visits 2^14 values although the map has two pairs.
+    const shared =
+        \\$x: (1,);
+        \\@for $i from 1 through 14 { $x: ($x, $x); }
+        \\$m: (($x, 0): a, ($x, 1): b);
+        \\a { x: length($m); }
+    ;
+    try std.testing.expectEqualStrings("a {\n  x: 2;\n}\n", try compile(a, shared, "", &.{}, quiet));
+    try std.testing.expectError(error.ExecutionLimit, compile(a, shared, "", &.{}, withLimits(.{ .max_vm_steps = 10_000 })));
+    // Map-valued keys compare pair by pair.
     var src: std.ArrayList(u8) = .empty;
     try src.appendSlice(a, "$m: (");
-    for (0..1000) |i| try src.print(a, "{s}({d}, 1, 1, 1, 1, 1, 1, 1, 1, 1): a", .{ if (i == 0) "" else ", ", i });
+    for (0..200) |i| {
+        try src.appendSlice(a, if (i == 0) "(" else ", (");
+        for (0..50) |k| try src.print(a, "{s}k{d}: {d}", .{ if (k == 0) "" else ", ", k, if (k == 49) i else 0 });
+        try src.appendSlice(a, "): a");
+    }
     try src.appendSlice(a, "); a { x: length($m); }");
-    try std.testing.expectEqualStrings("a {\n  x: 1000;\n}\n", try compile(a, src.items, "", &.{}, quiet));
-    // About 1000 * 1000 / 2 comparisons of 11 values each.
-    try std.testing.expectError(error.ExecutionLimit, compile(a, src.items, "", &.{}, withLimits(.{ .max_vm_steps = 2_000_000 })));
+    try std.testing.expectEqualStrings("a {\n  x: 200;\n}\n", try compile(a, src.items, "", &.{}, quiet));
+    try std.testing.expectError(error.ExecutionLimit, compile(a, src.items, "", &.{}, withLimits(.{ .max_vm_steps = 1_000_000 })));
 }

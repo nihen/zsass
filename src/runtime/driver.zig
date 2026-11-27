@@ -2459,7 +2459,7 @@ fn runEnd2EndWithPool(
 ) !void {
     // Each entry gets its own budget, so one entry cannot use up another's.
     var budget = resource_budget.ResourceBudget.init(opts.limits, null, null);
-    const guard = stack_guard.begin(opts.limits.stack_bytes, opts.limits.max_syntax_depth);
+    const guard = stack_guard.begin(opts.limits.stack_bytes, opts.limits.max_syntax_depth, &budget);
     defer guard.end();
     // A batch worker passes an arena, which keeps what is freed.
     var limited_alloc = if (shared_pool != null)

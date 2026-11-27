@@ -372,7 +372,7 @@ fn compileOnePath(
     // A fresh budget per entry: one entry cannot use up another's allowance.
     var budget = resource_budget.ResourceBudget.init(opts.limits, opts.cancellation_check, opts.cancellation_ctx);
     budget.file_access = file_access;
-    const guard = stack_guard.begin(opts.limits.stack_bytes, opts.limits.max_syntax_depth);
+    const guard = stack_guard.begin(opts.limits.stack_bytes, opts.limits.max_syntax_depth, &budget);
     defer guard.end();
     // `work_alloc` is an arena that keeps what is freed until the entry ends.
     var limited_alloc = resource_budget.LimitedAllocator.initOverArena(&budget, work_alloc);

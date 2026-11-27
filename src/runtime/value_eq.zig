@@ -154,6 +154,9 @@ fn mapListsEqual(env: anytype, a_items: []const Value, b_items: []const Value) b
 
 fn valueEqInner(env: anytype, a: Value, b: Value) bool {
     if (stack_guard.overflowed()) return false;
+    // Comparing values that share structure, or many map pairs, can take
+    // far more work than the instruction that asked for it.
+    if (!stack_guard.chargeWork(1)) return false;
     if (a.kind() != b.kind()) {
         if (a.kind() == .string and b.kind() == .color) {
             const color_pool = env.colorPool() orelse return false;
@@ -170,6 +173,8 @@ fn valueEqInner(env: anytype, a: Value, b: Value) bool {
     if (a.isString()) {
         if (a.stringNamedColorLiteral(env.stringFlagsPool().items) != b.stringNamedColorLiteral(env.stringFlagsPool().items)) return false;
         if (a.stringIntern() == b.stringIntern()) return true;
+        // Scanning and comparing the text costs about one step per 8 bytes.
+        if (!stack_guard.chargeWork(@min(env.pool().get(a.stringIntern()).len, env.pool().get(b.stringIntern()).len) / 8)) return false;
         if (comparableStringsEqualFast(env.pool(), a, b)) |fast| return fast;
         const ca = comparableStringBytes(env.pool(), a);
         const cb = comparableStringBytes(env.pool(), b);

@@ -14,22 +14,37 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const resource_budget = @import("resource_budget.zig");
 
 threadlocal var floor: usize = 0;
 threadlocal var tripped_flag: bool = false;
 threadlocal var nesting_limit: u32 = std.math.maxInt(u32);
+/// The budget of the compilation running on this thread, for work done
+/// where no budget is passed, such as comparing two values.
+threadlocal var work_budget: ?*resource_budget.ResourceBudget = null;
 
 pub const Scope = struct {
     prev_floor: usize,
     prev_tripped: bool,
     prev_nesting_limit: u32,
+    prev_budget: ?*resource_budget.ResourceBudget,
 
     pub fn end(self: Scope) void {
         floor = self.prev_floor;
         tripped_flag = self.prev_tripped;
         nesting_limit = self.prev_nesting_limit;
+        work_budget = self.prev_budget;
     }
 };
+
+/// Charge `n` steps of work to the compilation on this thread. False once
+/// its step limit is spent: the caller stops and returns a fallback, and
+/// the budget records the limit, so the compilation still fails.
+pub fn chargeWork(n: u64) bool {
+    const b = work_budget orelse return true;
+    b.chargeVmSteps(n) catch return false;
+    return true;
+}
 
 /// The syntax depth the outermost scope allows, for nesting found in text
 /// that is parsed at run time, such as a selector.
@@ -39,8 +54,9 @@ pub fn nestingLimit() u32 {
 
 /// Start guarding recursion below the caller's frame, and nesting found at run
 /// time beyond `max_nesting`. Pair with `end`.
-pub fn begin(stack_bytes: usize, max_nesting: u32) Scope {
-    const scope: Scope = .{ .prev_floor = floor, .prev_tripped = tripped_flag, .prev_nesting_limit = nesting_limit };
+pub fn begin(stack_bytes: usize, max_nesting: u32, budget: ?*resource_budget.ResourceBudget) Scope {
+    const scope: Scope = .{ .prev_floor = floor, .prev_tripped = tripped_flag, .prev_nesting_limit = nesting_limit, .prev_budget = work_budget };
+    if (work_budget == null) work_budget = budget;
     if (scope.prev_floor == 0 or max_nesting < nesting_limit) nesting_limit = max_nesting;
     const here = @frameAddress();
     const candidate = here -| stack_bytes;
@@ -96,7 +112,7 @@ comptime {
 }
 
 test "check fails below the floor and marks the thread" {
-    const scope = begin(64 * 1024, 512);
+    const scope = begin(64 * 1024, 512, null);
     defer scope.end();
     try check();
     try std.testing.expect(!tripped());
@@ -115,9 +131,9 @@ test "check fails below the floor and marks the thread" {
 }
 
 test "a nested scope keeps the outer floor" {
-    const outer = begin(64 * 1024, 512);
+    const outer = begin(64 * 1024, 512, null);
     const outer_floor = floor;
-    const inner = begin(1024 * 1024, 512);
+    const inner = begin(1024 * 1024, 512, null);
     try std.testing.expectEqual(outer_floor, floor);
     inner.end();
     outer.end();

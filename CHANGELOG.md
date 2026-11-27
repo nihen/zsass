@@ -21,8 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   undefined behavior in a release build. 2^63 reads as the largest 64-bit
   integer, as in the official CLI. `math.random()` refuses a limit above
   2^32, as the official CLI does.
-- Comparing the keys of a map literal counts toward the step limit, by the
-  number of values each comparison visits.
+- Comparing values counts toward the step limit by the values and text it
+  visits, so equality on lists that share structure, map keys that are
+  maps or long strings, and large map literals stop at the limit.
 - The CLI's Docker image runs as an unprivileged user, is built from the
   release tag it is published for, and pins its base image by digest.
 
