@@ -1871,8 +1871,9 @@ fn parseColorOpArgs(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
         const name_id: InternId = if (i < arg_names.len) arg_names[i] else .none;
         if (name_id == .none) {
             if (out.color == null) {
-                out.color = tryCoerceColorArg(ctx, arg) orelse return error.BuiltinType;
+                out.color = tryCoerceColorArg(ctx, arg) orelse return reportArgumentTypeMismatch(ctx, "color", arg, "color");
             } else {
+                error_format.setContextMessage("Only one positional argument is allowed. All other arguments must be passed by name.");
                 return error.BuiltinType;
             }
             continue;
@@ -1880,7 +1881,7 @@ fn parseColorOpArgs(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
 
         if (argNameMatches(ctx, name_id, "color")) {
             if (out.color != null) return error.BuiltinType;
-            out.color = tryCoerceColorArg(ctx, arg) orelse return error.BuiltinType;
+            out.color = tryCoerceColorArg(ctx, arg) orelse return reportArgumentTypeMismatch(ctx, "color", arg, "color");
             continue;
         }
 
@@ -1890,13 +1891,10 @@ fn parseColorOpArgs(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
             if (arg.kind() == .nil) {
                 out.space = null;
                 out.legacy_rgb_channels = false;
-            } else if (arg.isString()) {
-                if (arg.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
-                const parsed_space = try parseColorSpaceArgString(ctx.intern_pool.get(arg.stringIntern()));
+            } else {
+                const parsed_space = try parseSpaceArgNamed(ctx, arg, "space");
                 out.space = parsed_space.space;
                 out.legacy_rgb_channels = parsed_space.legacy_rgb_alias;
-            } else {
-                return error.BuiltinType;
             }
             continue;
         }
@@ -1920,9 +1918,17 @@ fn parseColorOpArgs(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
         }
     }
 
-    if (out.color == null) return error.BuiltinType;
-    if (out.has_rgb_channel and (out.has_hsl_channel or out.has_hwb_channel)) return colorOpSemanticError();
-    if (out.has_hwb_channel and out.has_hsl_channel) return colorOpSemanticError();
+    if (out.color == null) return shared.reportMissingArgument("color");
+    if ((out.has_rgb_channel and (out.has_hsl_channel or out.has_hwb_channel)) or (out.has_hwb_channel and out.has_hsl_channel)) {
+        // Legacy channels of two formats: the first one's space has no
+        // channel of the other.
+        const first_family = legacyChannelFamily(out.first_channel orelse .red);
+        for (entries.items) |entry| {
+            const family = legacyChannelFamily(entry.key);
+            if (family != .none and family != first_family) return reportNoSuchChannel(entry.key, @tagName(first_family));
+        }
+        return colorOpSemanticError();
+    }
     out.entries = try entries.toOwnedSlice(ctx.allocator);
     return out;
 }
@@ -1931,6 +1937,24 @@ const ColorScaleRange = struct {
     min: f64,
     max: f64,
 };
+
+const LegacyChannelFamily = enum { none, rgb, hsl, hwb };
+
+fn legacyChannelFamily(key: ColorOpChannel) LegacyChannelFamily {
+    return switch (key) {
+        .red, .green, .blue => .rgb,
+        .saturation, .lightness => .hsl,
+        .whiteness, .blackness => .hwb,
+        else => .none,
+    };
+}
+
+fn reportNoSuchChannel(key: ColorOpChannel, space_name: []const u8) BuiltinError {
+    var buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "${s}: Color space {s} doesn't have a channel with this name.", .{ colorOpChannelParamLabel(key), space_name }) catch return colorOpSemanticError();
+    error_format.setContextMessage(msg);
+    return colorOpSemanticError();
+}
 
 fn colorOpSemanticError() BuiltinError {
     // evalGenericColorOperation* in legacy src/builtin/color.zig is
@@ -2037,6 +2061,19 @@ fn setColorOpScalePercentRangeError(ctx: *BuiltinContext, key: ColorOpChannel, n
     error_format.setContextMessage(msg);
 }
 
+/// `$<channel>: <text>` as the error, with `{s}` in `text` the number.
+fn colorOpChannelError(ctx: *BuiltinContext, key: ColorOpChannel, number: Value, comptime text: []const u8) BuiltinError {
+    const raw = number.asF64(ctx.number_pool);
+    const unit_id = number.unitId(ctx.number_pool);
+    const unit = if (unit_id == .none) null else ctx.intern_pool.get(unit_id);
+    const val_s = value_format.formatNumberWithUnit(ctx.allocator, raw, unit) catch return colorOpSemanticError();
+    defer ctx.allocator.free(val_s);
+    const msg = ctx.allocator.print("${s}: " ++ text, .{ colorOpChannelParamLabel(key), val_s }) catch return colorOpSemanticError();
+    defer ctx.allocator.free(msg);
+    error_format.setContextMessage(msg);
+    return colorOpSemanticError();
+}
+
 fn validateColorOpNumber(
     ctx: *BuiltinContext,
     kind: ColorOpKind,
@@ -2045,14 +2082,17 @@ fn validateColorOpNumber(
     number: Value,
     legacy_rgb_channels: bool,
 ) BuiltinError!f64 {
-    if (number.kind() != .number) return error.BuiltinType;
+    if (number.kind() != .number) {
+        if (kind == .change) return shared.reportArgumentMismatchPhrase(ctx, colorOpChannelParamLabel(key), number, "is not a number or unquoted \"none\"");
+        return reportArgumentTypeMismatch(ctx, colorOpChannelParamLabel(key), number, "number");
+    }
 
     const raw = number.asF64(ctx.number_pool);
     const unit = if (number.unitId(ctx.number_pool) == .none) null else ctx.intern_pool.get(number.unitId(ctx.number_pool));
 
     if (key == .alpha) {
         if (kind == .scale) {
-            if (unit == null or !std.mem.eql(u8, unit.?, "%")) return colorOpSemanticError();
+            if (unit == null or !std.mem.eql(u8, unit.?, "%")) return colorOpChannelError(ctx, key, number, "Expected {s} to have unit \"%\".");
             if (raw < -100.0 or raw > 100.0) {
                 setColorOpScalePercentRangeError(ctx, key, number);
                 return colorOpSemanticError();
@@ -2062,11 +2102,12 @@ fn validateColorOpNumber(
         if (kind == .adjust) {
             return raw;
         }
-        const alpha_value = if (unit) |u|
-            if (std.mem.eql(u8, u, "%")) raw / 100.0 else raw
-        else
-            raw;
-        if (alpha_value < 0.0 or alpha_value > 1.0) return colorOpSemanticError();
+        const percent = unit != null and std.mem.eql(u8, unit.?, "%");
+        const alpha_value = if (percent) raw / 100.0 else raw;
+        if (alpha_value < 0.0 or alpha_value > 1.0) {
+            if (percent) return colorOpChannelError(ctx, key, number, "Expected {s} to be within 0% and 100%.");
+            return colorOpChannelError(ctx, key, number, "Expected {s} to be within 0 and 1.");
+        }
         return alpha_value;
     }
 
@@ -2075,9 +2116,14 @@ fn validateColorOpNumber(
     const is_hue_channel = (((family == .hsl or family == .hwb) and idx == 0) or
         (family == .lch and idx == 2));
     if (is_hue_channel) {
-        if (kind == .scale) return colorOpSemanticError();
+        if (kind == .scale) {
+            var buf: [96]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "${s}: Channel isn't scalable.", .{colorOpChannelParamLabel(key)}) catch return colorOpSemanticError();
+            error_format.setContextMessage(msg);
+            return colorOpSemanticError();
+        }
         if (unit) |u| {
-            if (std.mem.eql(u8, u, "%")) return colorOpSemanticError();
+            if (std.mem.eql(u8, u, "%")) return colorOpChannelError(ctx, key, number, "Expected {s} to have an angle unit (deg, grad, rad, turn).");
         }
         return color_mod.convertAngleToDeg(raw, unit);
     }
@@ -2093,9 +2139,9 @@ fn validateColorOpNumber(
     };
 
     if (require_percent) {
-        if (unit == null or !std.mem.eql(u8, unit.?, "%")) return colorOpSemanticError();
+        if (unit == null or !std.mem.eql(u8, unit.?, "%")) return colorOpChannelError(ctx, key, number, "Expected {s} to have unit \"%\".");
     } else if (!accepts_legacy_percentless and unit != null and !std.mem.eql(u8, unit.?, "%")) {
-        return colorOpSemanticError();
+        return colorOpChannelError(ctx, key, number, "Expected {s} to have unit \"%\" or no units.");
     }
 
     if (kind == .scale) {
@@ -2144,10 +2190,11 @@ fn applyColorOpEntry(
     projected_alpha: *f64,
     projected_missing: *ColorMissingMask,
 ) BuiltinError!void {
-    const idx = colorOpChannelIndex(working_space, entry.key) orelse return colorOpSemanticError();
+    const idx = colorOpChannelIndex(working_space, entry.key) orelse
+        return reportNoSuchChannel(entry.key, if (legacy_rgb_channels) "rgb" else colorSpaceArgName(working_space));
 
     if (entry.is_none) {
-        if (kind != .change) return colorOpSemanticError();
+        if (kind != .change) return reportArgumentTypeMismatch(ctx, colorOpChannelParamLabel(entry.key), entry.value, "number");
         if (idx < 3) {
             projected_missing.* |= @as(ColorMissingMask, 1) << @intCast(idx);
             projected_channels[idx] = 0.0;
@@ -2794,6 +2841,11 @@ fn parseColorSpaceName(name: []const u8) ?color_mod.ColorSpace {
     if (colorSpaceNameEq(t, "hsl")) return .hsl;
     if (colorSpaceNameEq(t, "hwb")) return .hwb;
     return null;
+}
+
+/// The space's name as an argument writes it (`srgb`, not the CSS `rgb`).
+fn colorSpaceArgName(space: color_mod.ColorSpace) []const u8 {
+    return if (space == .srgb) "srgb" else colorSpaceCssName(space);
 }
 
 fn colorSpaceCssName(space: color_mod.ColorSpace) []const u8 {
@@ -4079,24 +4131,25 @@ fn parseColorSpaceArgString(raw: []const u8) BuiltinError!ParsedColorSpaceArg {
 }
 
 fn parseOptionalSpaceValue(ctx: *BuiltinContext, maybe_value: ?Value) BuiltinError!?color_mod.ColorSpace {
-    const value = maybe_value orelse return null;
-    if (value.kind() == .nil) return null;
-    if (value.isString()) {
-        if (value.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
-        const raw = ctx.intern_pool.get(value.stringIntern());
-        return (try parseColorSpaceArgString(raw)).space;
-    }
-    return error.BuiltinType;
+    const parsed = (try parseOptionalSpaceArgValue(ctx, maybe_value)) orelse return null;
+    return parsed.space;
 }
 
 fn parseOptionalSpaceArgValue(ctx: *BuiltinContext, maybe_value: ?Value) BuiltinError!?ParsedColorSpaceArg {
     const value = maybe_value orelse return null;
     if (value.kind() == .nil) return null;
-    if (value.isString()) {
-        if (value.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
-        return try parseColorSpaceArgString(ctx.intern_pool.get(value.stringIntern()));
+    return try parseSpaceArgNamed(ctx, value, "space");
+}
+
+/// A color space argument, with Sass's errors: it must be an unquoted
+/// string naming a known space.
+fn parseSpaceArgNamed(ctx: *BuiltinContext, value: Value, param_name: []const u8) BuiltinError!ParsedColorSpaceArg {
+    if (!value.isString()) return reportArgumentTypeMismatch(ctx, param_name, value, "string");
+    const raw = ctx.intern_pool.get(value.stringIntern());
+    if (value.stringQuoted(ctx.string_flags_pool.items)) {
+        return shared.reportArgumentMessage(param_name, "Expected \"{s}\" to be an unquoted string.", .{raw});
     }
-    return error.BuiltinType;
+    return parseColorSpaceArgString(raw) catch shared.reportArgumentMessage(param_name, "Unknown color space \"{s}\".", .{raw});
 }
 
 fn parseRequiredSpaceArgValue(ctx: *BuiltinContext, value: Value) BuiltinError!ParsedColorSpaceArg {
