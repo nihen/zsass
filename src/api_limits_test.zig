@@ -997,3 +997,11 @@ test "meta.get-function: the global min() is the Sass function" {
     if (compile(a, "@use \"sass:meta\"; a { b: meta.call(meta.get-function(\"min\"), 1px, 2em); }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
     try std.testing.expectEqualStrings("a {\n  b: 2px;\n}\n", try compile(a, "@use \"sass:meta\"; a { b: meta.call(meta.get-function(\"max\"), 1px, 2px); }", "", &.{}, quiet));
 }
+
+test "math.min/max: compound units are compared factor by factor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("a {\n  b: calc(1px * 1px);\n  c: calc(2px * 1px);\n  d: calc(1px * 1em);\n}\n", try compile(a, "@use \"sass:math\"; a { b: math.min(calc(1px * 1px), calc(2px * 1px)); c: math.max(1px * 1px, 2px * 1px); d: math.min(1px * 1em, 1em * 2px); }", "", &.{}, quiet));
+    if (compile(a, "@use \"sass:math\"; a { b: math.min(1px * 1px, 1px); }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+}

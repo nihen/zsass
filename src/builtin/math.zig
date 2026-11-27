@@ -4,6 +4,7 @@ const stack_guard = @import("../runtime/stack_guard.zig");
 const shared = @import("shared.zig");
 const error_format = @import("../runtime/error_format.zig");
 const float_int = @import("../runtime/float_int.zig");
+const value_format = @import("../runtime/value_format.zig");
 const deprecation_mod = @import("../runtime/deprecation.zig");
 const intern_pool_mod = @import("../runtime/intern_pool.zig");
 
@@ -384,6 +385,54 @@ fn convertAngleToRadians(value: f64, unit: ?[]const u8) f64 {
 fn numberToDeg(ctx: *BuiltinContext, value: f64) BuiltinError!Value {
     const deg = try internString(ctx, "deg");
     return numberLike(ctx, value, deg);
+}
+
+/// What a number in `from` units is multiplied by to be in `to` units, when
+/// either is a compound unit such as `px*px` or `px/s`: each factor has to
+/// convert to a factor of the other. Null when they are incompatible.
+fn compoundUnitFactor(ctx: *BuiltinContext, from: ?[]const u8, to: ?[]const u8) BuiltinError!?f64 {
+    if (from == null or to == null) return null;
+    var from_num: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer from_num.deinit(ctx.allocator);
+    var from_den: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer from_den.deinit(ctx.allocator);
+    var to_num: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer to_num.deinit(ctx.allocator);
+    var to_den: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer to_den.deinit(ctx.allocator);
+    appendUnitTextFactors(ctx.allocator, from.?, &from_num, &from_den, false) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    appendUnitTextFactors(ctx.allocator, to.?, &to_num, &to_den, false) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    if (from_num.items.len != to_num.items.len or from_den.items.len != to_den.items.len) return null;
+    var factor: f64 = 1;
+    factor *= (try matchUnitFactors(ctx, from_num.items, to_num.items)) orelse return null;
+    factor /= (try matchUnitFactors(ctx, from_den.items, to_den.items)) orelse return null;
+    return factor;
+}
+
+/// The product of the conversions that pair each of `from` with a distinct
+/// factor of `to`, or null when one has no partner.
+fn matchUnitFactors(ctx: *BuiltinContext, from: []const []const u8, to: []const []const u8) BuiltinError!?f64 {
+    const used = try ctx.allocator.alloc(bool, to.len);
+    defer ctx.allocator.free(used);
+    @memset(used, false);
+    var factor: f64 = 1;
+    outer: for (from) |f| {
+        for (to, 0..) |t, i| {
+            if (used[i]) continue;
+            const c = convertUnit(1.0, f, t) orelse continue;
+            used[i] = true;
+            factor *= c;
+            continue :outer;
+        }
+        return null;
+    }
+    return factor;
 }
 
 fn minMaxComparableValue(ctx: *BuiltinContext, source: Value, target_unit: InternId) BuiltinError!f64 {
@@ -1724,14 +1773,44 @@ fn minmaxVariadic(ctx: *BuiltinContext, args: []const Value, is_min: bool, css_n
 }
 
 fn reportIncompatibleUnits(ctx: *BuiltinContext, a: Value, b: Value) BuiltinError {
-    const sa = try valueToCssString(ctx, a);
+    const sa = try numberTextForMessage(ctx, a);
     defer ctx.allocator.free(sa);
-    const sb = try valueToCssString(ctx, b);
+    const sb = try numberTextForMessage(ctx, b);
     defer ctx.allocator.free(sb);
     var buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "{s} and {s} have incompatible units.", .{ sa, sb }) catch return error.SassError;
     error_format.setContextMessage(msg);
     return error.SassError;
+}
+
+/// A number as Sass shows it in a message: a compound unit as a calculation,
+/// `calc(1px * 1px)`.
+fn numberTextForMessage(ctx: *BuiltinContext, v: Value) BuiltinError![]const u8 {
+    const unit = unitSlice(ctx, v.unitId(ctx.number_pool)) orelse return valueToCssString(ctx, v);
+    if (!isGeneratedUnitDescription(unit)) return valueToCssString(ctx, v);
+    var num: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer num.deinit(ctx.allocator);
+    var den: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer den.deinit(ctx.allocator);
+    appendUnitTextFactors(ctx.allocator, unit, &num, &den, false) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return valueToCssString(ctx, v),
+    };
+    const core = value_format.formatNumberCore(ctx.allocator, v.asF64(ctx.number_pool)) catch return error.OutOfMemory;
+    defer ctx.allocator.free(core);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(ctx.allocator);
+    try out.appendSlice(ctx.allocator, "calc(");
+    try out.appendSlice(ctx.allocator, core);
+    var rest: []const []const u8 = num.items;
+    if (rest.len > 0) {
+        try out.appendSlice(ctx.allocator, rest[0]);
+        rest = rest[1..];
+    }
+    for (rest) |u| try out.print(ctx.allocator, " * 1{s}", .{u});
+    for (den.items) |u| try out.print(ctx.allocator, " / 1{s}", .{u});
+    try out.append(ctx.allocator, ')');
+    return out.toOwnedSlice(ctx.allocator);
 }
 
 fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, css_name: []const u8, mode: MinMaxMode) BuiltinError!Value {
@@ -1755,7 +1834,8 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
             return error.BuiltinType;
         }
         const arg_unit = unitSlice(ctx, arg.unitId(ctx.number_pool));
-        if (arg_unit != null and isGeneratedUnitDescription(arg_unit.?)) return error.SassError;
+        // Compound units are compared factor by factor below.
+        if (arg_unit != null and isGeneratedUnitDescription(arg_unit.?)) continue;
         if (arg_unit) |unit| {
             if (unitCategory(unit) == .unknown) {
                 if (first_unknown_unit) |prev_unit| {
@@ -1782,6 +1862,21 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
     for (values[1..]) |arg| {
         const best_unit = unitSlice(ctx, best.unitId(ctx.number_pool));
         const arg_unit = unitSlice(ctx, arg.unitId(ctx.number_pool));
+        const best_compound = best_unit != null and isGeneratedUnitDescription(best_unit.?);
+        const arg_compound = arg_unit != null and isGeneratedUnitDescription(arg_unit.?);
+        if (best_compound or arg_compound) {
+            const factor = (try compoundUnitFactor(ctx, arg_unit, best_unit)) orelse {
+                if (mode == .module) return reportIncompatibleUnits(ctx, best, arg);
+                return error.SassError;
+            };
+            const converted = arg.asF64(ctx.number_pool) * factor;
+            if (std.math.isNan(converted)) return numberLike(ctx, std.math.nan(f64), arg.unitId(ctx.number_pool));
+            if ((is_min and converted < best_converted) or (!is_min and converted > best_converted)) {
+                best = arg;
+                best_converted = best.asF64(ctx.number_pool);
+            }
+            continue;
+        }
         if (cssMathUnitsNeedPassthrough(best_unit, arg_unit, false)) {
             if (mode == .module) return reportIncompatibleUnits(ctx, best, arg);
             return buildCssMathCall(ctx, css_name, args);

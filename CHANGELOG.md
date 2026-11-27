@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- `min()`, `max()`, `math.min()`, and `math.max()` compare numbers with
+  compound units, such as `calc(1px * 1px)` or `1px / 1s`, when every
+  unit factor converts, instead of failing; incompatible ones report
+  `calc(1px * 1px) and 1px have incompatible units.` as the official CLI
+  does.
 - `meta.get-function("min")` and `"max"` return the Sass functions, which
   refuse incompatible units and `var()`, as the official CLI does; a plain
   `min()` call still stays as CSS.
