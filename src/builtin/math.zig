@@ -3,6 +3,7 @@ const std = @import("std");
 const stack_guard = @import("../runtime/stack_guard.zig");
 const shared = @import("shared.zig");
 const error_format = @import("../runtime/error_format.zig");
+const float_int = @import("../runtime/float_int.zig");
 const deprecation_mod = @import("../runtime/deprecation.zig");
 const intern_pool_mod = @import("../runtime/intern_pool.zig");
 
@@ -2433,7 +2434,9 @@ pub fn math_random(ctx: *BuiltinContext, args: []const Value, arg_names: []const
         if (limit_value.kind() != .number) return reportArgumentTypeMismatch(ctx, "limit", limit_value, "number");
         const raw = limit_value.asF64(ctx.number_pool);
         const rounded = shared.fuzzyInt(raw) orelse return shared.reportNotInt(ctx, "limit", limit_value);
-        if (rounded <= 0) return shared.reportArgumentMessage("limit", "Must be greater than 0, was {d}.", .{@as(i64, @intFromFloat(@max(rounded, -0x1p62)))});
+        // Past the 64-bit range a number is not an int either.
+        _ = float_int.toI64(rounded) orelse return shared.reportNotInt(ctx, "limit", limit_value);
+        if (rounded <= 0) return shared.reportArgumentMismatchPhraseCustom(ctx, "limit", limit_value, "Must be greater than 0, was ", ".");
         // The official CLI accepts limits from 1 through 2^32.
         if (rounded > 0x1p32) {
             var buf: [160]u8 = undefined;
