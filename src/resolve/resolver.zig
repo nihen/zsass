@@ -1086,6 +1086,8 @@ const ResolverEvalEnv = struct {
     /// Other static evaluations keep their value; the VM still runs the
     /// expression.
     probe_deprecations: bool = false,
+    /// The whole value being evaluated, for the slash-div warning's wording.
+    direct_value: ?ExprIndex = null,
     /// Evaluate string literals to their canonical text. Set when the result
     /// is a final value (a module configuration), not compiled again.
     canonical_literals: bool = false,
@@ -1100,6 +1102,35 @@ const ResolverEvalEnv = struct {
 
     pub fn probeDeprecations(self: *const ResolverEvalEnv) bool {
         return self.probe_deprecations;
+    }
+
+    /// The slash-div deprecation for division `expr_idx`, when this value
+    /// warns at all (a module configuration).
+    pub fn slashDivDeprecation(self: *const ResolverEvalEnv, expr_idx: ExprIndex) resolver_eval.Error!void {
+        const opts = self.deprecation_opts orelse return;
+        const ctx = self.ctx;
+        const span = ctx.prog.exprs.items[expr_idx].span;
+        const source = ctx.ast.source;
+        const direct = self.direct_value != null and self.direct_value.? == expr_idx;
+        const message = deprecation_mod.slashDivMessage(ctx.a, source, span.start, span.end, direct);
+        defer if (message) |m| ctx.a.free(m);
+        const pos = data_mod.spanStartLineColOneBased(source.len, ctx.prog.line_starts, span.start);
+        const end_pos = data_mod.spanStartLineColOneBased(source.len, ctx.prog.line_starts, span.end);
+        deprecation_mod.emitDeprecationSpan(
+            opts,
+            .slash_div,
+            message orelse "Using / for division outside of calc() is deprecated and will be removed in Dart Sass 2.0.0.",
+            ctx.module_path,
+            pos.line,
+            pos.col,
+            if (end_pos.line == pos.line) end_pos.col else 0,
+        ) catch |err| switch (err) {
+            error.FatalDeprecation => {
+                error_format.recordErrorSpan(span.start, span.end, 0);
+                return error.SassError;
+            },
+            else => return error.SassError,
+        };
     }
 
     pub fn builtinCallSite(self: *const ResolverEvalEnv, offset: u32, end_offset: u32) ?deprecation_mod.CallSite {
@@ -1924,6 +1955,7 @@ fn parseWithConfigEntries(ctx: *Ctx, config_extra: ExtraIndex) ResolveError![]Wi
             .allow_configurable_defaults = true,
             .canonical_literals = true,
             .deprecation_opts = if (ctx.loader) |loader| loader.deprecation_opts else null,
+            .direct_value = expr_idx,
         };
         const value = resolver_eval.eval(&env, ctx.prog, expr_idx) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,

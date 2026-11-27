@@ -1,5 +1,6 @@
 const std = @import("std");
 const file_access_mod = @import("../resolve/file_access.zig");
+const deprecation_mod = @import("deprecation.zig");
 const resource_budget = @import("resource_budget.zig");
 const stack_guard = @import("stack_guard.zig");
 const lexer_mod = @import("../frontend/lexer.zig");
@@ -941,8 +942,22 @@ pub fn runLoadCssModule(self: anytype, resolved_path: []const u8, config: LoadCs
 
     // The child draws on the same budget and file policy as this compilation.
     // The module's own configurations and imports warn under this
-    // compilation's deprecation options.
-    var resolved = resolver_mod.resolveWithEntryPathColorPoolCachesAndPersistent(self.allocator, &ast, self.intern_pool, resolved_path, self.program.load_paths, self.color_pool, null, null, null, &self.deprecation_opts, null, self.budget) catch |err| return loadCssFailure(err);
+    // compilation's deprecation options, located in the module and below
+    // the trace that reached `meta.load-css()`.
+    var resolved = blk: {
+        const saved_provider = deprecation_mod.trace_provider;
+        const saved_outer = deprecation_mod.outer_trace_provider;
+        const saved_label = deprecation_mod.outer_root_label;
+        deprecation_mod.outer_trace_provider = saved_provider;
+        deprecation_mod.outer_root_label = "load-css()";
+        deprecation_mod.trace_provider = null;
+        defer {
+            deprecation_mod.trace_provider = saved_provider;
+            deprecation_mod.outer_trace_provider = saved_outer;
+            deprecation_mod.outer_root_label = saved_label;
+        }
+        break :blk resolver_mod.resolveWithEntryPathColorPoolCachesAndPersistent(self.allocator, &ast, self.intern_pool, resolved_path, self.program.load_paths, self.color_pool, null, null, null, &self.deprecation_opts, null, self.budget) catch |err| return loadCssFailure(err);
+    };
     defer resolved.deinit();
 
     var child_program = compiler_mod.compile(self.allocator, self.intern_pool, &resolved, self.color_pool) catch |err| switch (err) {

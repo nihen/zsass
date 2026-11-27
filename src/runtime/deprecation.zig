@@ -188,6 +188,12 @@ pub const TraceProvider = struct {
 
 pub threadlocal var trace_provider: ?TraceProvider = null;
 
+/// While a module `meta.load-css()` loads is resolved: the trace that
+/// reached it, written outside the resolver's own frames, whose top is then
+/// labelled `outer_root_label`.
+pub threadlocal var outer_trace_provider: ?TraceProvider = null;
+pub threadlocal var outer_root_label: []const u8 = "root stylesheet";
+
 /// Whether a warning may read its file for the source line it shows. The
 /// embedding API turns it off: its sources need not be the files on disk.
 pub threadlocal var read_sources_for_warnings: bool = true;
@@ -226,6 +232,119 @@ pub const SlashDivDeprecationSite = struct {
     /// The warning with its recommendation, built from the source.
     message: ?[]const u8 = null,
 };
+
+/// The slash-div warning as the official CLI writes it, with its
+/// recommendation built from the division's source text: `math.div(a,
+/// b)`, and `calc(a / b)` too unless the division is the whole value of
+/// a variable or `@return`. Null when the source is not at hand.
+pub fn slashDivMessage(allocator: std.mem.Allocator, source: []const u8, span_start: u32, span_end: u32, direct_value: bool) ?[]u8 {
+    const start: usize = span_start;
+    const end: usize = span_end;
+    if (end <= start or end > source.len) return null;
+    const spanned = std.mem.trim(u8, source[start..end], " \t\r\n");
+    // The span may take in the parentheses written around it; then it
+    // is not the whole value either.
+    const text = stripOuterParens(spanned);
+    const before = std.mem.trimEnd(u8, source[0..start], " \t\r\n");
+    const parenthesized = text.len != spanned.len or (before.len > 0 and before[before.len - 1] == '(');
+    const slash = topLevelSlash(text) orelse return null;
+    var lhs_buf: [256]u8 = undefined;
+    var rhs_buf: [256]u8 = undefined;
+    // calc() takes the operands as written, math.div() without their
+    // parentheses; neither keeps comments.
+    const lhs_written = withoutComments(text[0..slash], &lhs_buf) orelse return null;
+    const rhs_written = withoutComments(text[slash + 1 ..], &rhs_buf) orelse return null;
+    const lhs = stripOuterParens(lhs_written);
+    const rhs = stripOuterParens(rhs_written);
+    const more_info = "More info and automated migrator: https://sass-lang.com/d/slash-div";
+    // Only two numbers written out, as the whole value, are warned
+    // about without calc(): `$x: 6px / 2`, not `$x: $a / 2`.
+    if (direct_value and !parenthesized and isNumberLiteralText(lhs) and isNumberLiteralText(rhs)) {
+        return std.fmt.allocPrint(allocator, "Using / for division is deprecated and will be removed in Dart Sass 2.0.0.\n\nRecommendation: math.div({s}, {s})\n\n{s}", .{ lhs, rhs, more_info }) catch null;
+    }
+    return std.fmt.allocPrint(allocator, "Using / for division outside of calc() is deprecated and will be removed in Dart Sass 2.0.0.\n\nRecommendation: math.div({s}, {s}) or calc({s} / {s})\n\n{s}", .{ lhs, rhs, lhs_written, rhs_written, more_info }) catch null;
+}
+
+/// `text` is a number as written: digits, a point, an exponent, a unit.
+fn isNumberLiteralText(text: []const u8) bool {
+    var i: usize = 0;
+    if (i < text.len and (text[i] == '+' or text[i] == '-')) i += 1;
+    const digits_start = i;
+    while (i < text.len and (std.ascii.isDigit(text[i]) or text[i] == '.')) : (i += 1) {}
+    if (i == digits_start) return false;
+    while (i < text.len and (std.ascii.isAlphabetic(text[i]) or text[i] == '%')) : (i += 1) {}
+    return i == text.len;
+}
+
+/// `text` trimmed, without its comments, in `buf`; null when it does
+/// not fit.
+fn withoutComments(text: []const u8, buf: []u8) ?[]const u8 {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (i + 1 < text.len and text[i] == '/' and text[i + 1] == '*') {
+            const close = std.mem.indexOfPos(u8, text, i + 2, "*/") orelse text.len;
+            i = @min(close + 2, text.len);
+            continue;
+        }
+        if (i + 1 < text.len and text[i] == '/' and text[i + 1] == '/') {
+            i = std.mem.indexOfScalarPos(u8, text, i, '\n') orelse text.len;
+            continue;
+        }
+        if (n == buf.len) return null;
+        buf[n] = text[i];
+        n += 1;
+        i += 1;
+    }
+    return std.mem.trim(u8, buf[0..n], " \t\r\n");
+}
+
+/// The last `/` outside parentheses, brackets, strings, and comments.
+fn topLevelSlash(text: []const u8) ?usize {
+    var depth: u32 = 0;
+    var quote: u8 = 0;
+    var found: ?usize = null;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (quote != 0) {
+            if (c == '\\') i += 1 else if (c == quote) quote = 0;
+            continue;
+        }
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '*') {
+            i = (std.mem.indexOfPos(u8, text, i + 2, "*/") orelse text.len) + 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '/') {
+            i = std.mem.indexOfScalarPos(u8, text, i, '\n') orelse text.len;
+            continue;
+        }
+        switch (c) {
+            '"', '\'' => quote = c,
+            '(', '[' => depth += 1,
+            ')', ']' => depth -|= 1,
+            '/' => if (depth == 0) {
+                found = i;
+            },
+            else => {},
+        }
+    }
+    return found;
+}
+
+/// `text` without one pair of parentheses around all of it.
+fn stripOuterParens(text: []const u8) []const u8 {
+    if (text.len < 2 or text[0] != '(' or text[text.len - 1] != ')') return text;
+    var depth: u32 = 0;
+    for (text, 0..) |c, i| {
+        if (c == '(') depth += 1;
+        if (c == ')') {
+            depth -= 1;
+            if (depth == 0 and i != text.len - 1) return text;
+        }
+    }
+    return std.mem.trim(u8, text[1 .. text.len - 1], " \t\r\n");
+}
 
 /// Whether a deprecation of `kind` may be written or fail the compilation,
 /// before a caller builds its message.
@@ -428,17 +547,24 @@ fn writeWarningLocation(path: []const u8, line: u32, col: u32, end_col: u32) voi
     // module loaded at its `@use`/`@forward`/`@import`, the innermost at
     // the warning.
     var n: usize = 0;
+    var root_label: []const u8 = "root stylesheet";
+    if (outer_trace_provider) |outer| {
+        n = outer.build(outer.ctx, frames[0 .. frames.len - 1]);
+        root_label = outer_root_label;
+    }
     const stack = error_format.error_state.error_stack[0..error_format.error_state.error_stack_len];
     if (stack.len > 0 and std.mem.eql(u8, stack[stack.len - 1].path, path)) {
-        for (stack[0 .. stack.len - 1]) |frame| {
+        for (stack[0 .. stack.len - 1], 0..) |frame, i| {
             if (n + 1 >= frames.len) break;
             const pos = offsetLineCol(frame.source, if (frame.has_span) frame.span_start else 0);
-            error_format.fillTraceFrame(&frames[n], frame.path, frame.label, pos.line, pos.col, pos.line, pos.col, "");
+            const label = if (i == 0) root_label else frame.label;
+            error_format.fillTraceFrame(&frames[n], frame.path, label, pos.line, pos.col, pos.line, pos.col, "");
             n += 1;
         }
-        error_format.fillTraceFrame(&frames[n], path, stack[stack.len - 1].label, line, col, line, end, line_text);
+        const label = if (stack.len == 1) root_label else stack[stack.len - 1].label;
+        error_format.fillTraceFrame(&frames[n], path, label, line, col, line, end, line_text);
     } else {
-        error_format.fillTraceFrame(&frames[n], path, "root stylesheet", line, col, line, end, line_text);
+        error_format.fillTraceFrame(&frames[n], path, root_label, line, col, line, end, line_text);
     }
     n += 1;
     error_format.writeTraceFrames(std.heap.c_allocator, frames[0..n], line_text.len != 0, "    ") catch {};

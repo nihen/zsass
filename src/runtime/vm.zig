@@ -8898,81 +8898,11 @@ pub const VM = struct {
         return n;
     }
 
-    /// The slash-div warning as the official CLI writes it, with its
-    /// recommendation built from the division's source text: `math.div(a,
-    /// b)`, and `calc(a / b)` too unless the division is the whole value of
-    /// a variable or `@return`. Null when the source is not at hand.
+    /// The slash-div warning for the division at the current position,
+    /// from its source. Null when the source is not at hand.
     fn slashDivMessage(self: *VM, module_id: u32, path: []const u8, direct_value: bool) ?[]u8 {
         const source = self.diagnosticSource(module_id, path) orelse return null;
-        const start: usize = self.current_source_span.start;
-        const end: usize = self.current_source_span.end;
-        if (end <= start or end > source.len) return null;
-        const spanned = std.mem.trim(u8, source[start..end], " \t\r\n");
-        // The span may take in the parentheses written around it; then it
-        // is not the whole value either.
-        const text = stripOuterParens(spanned);
-        const before = std.mem.trimEnd(u8, source[0..start], " \t\r\n");
-        const parenthesized = text.len != spanned.len or (before.len > 0 and before[before.len - 1] == '(');
-        const slash = topLevelSlash(text) orelse return null;
-        const lhs = stripOuterParens(std.mem.trim(u8, text[0..slash], " \t\r\n"));
-        const rhs = stripOuterParens(std.mem.trim(u8, text[slash + 1 ..], " \t\r\n"));
-        const more_info = "More info and automated migrator: https://sass-lang.com/d/slash-div";
-        // Only two numbers written out, as the whole value, are warned
-        // about without calc(): `$x: 6px / 2`, not `$x: $a / 2`.
-        if (direct_value and !parenthesized and isNumberLiteralText(lhs) and isNumberLiteralText(rhs)) {
-            return std.fmt.allocPrint(self.allocator, "Using / for division is deprecated and will be removed in Dart Sass 2.0.0.\n\nRecommendation: math.div({s}, {s})\n\n{s}", .{ lhs, rhs, more_info }) catch null;
-        }
-        return std.fmt.allocPrint(self.allocator, "Using / for division outside of calc() is deprecated and will be removed in Dart Sass 2.0.0.\n\nRecommendation: math.div({s}, {s}) or calc({s})\n\n{s}", .{ lhs, rhs, text, more_info }) catch null;
-    }
-
-    /// `text` is a number as written: digits, a point, an exponent, a unit.
-    fn isNumberLiteralText(text: []const u8) bool {
-        var i: usize = 0;
-        if (i < text.len and (text[i] == '+' or text[i] == '-')) i += 1;
-        const digits_start = i;
-        while (i < text.len and (std.ascii.isDigit(text[i]) or text[i] == '.')) : (i += 1) {}
-        if (i == digits_start) return false;
-        while (i < text.len and (std.ascii.isAlphabetic(text[i]) or text[i] == '%')) : (i += 1) {}
-        return i == text.len;
-    }
-
-    /// The last `/` outside parentheses, brackets, and strings.
-    fn topLevelSlash(text: []const u8) ?usize {
-        var depth: u32 = 0;
-        var quote: u8 = 0;
-        var found: ?usize = null;
-        var i: usize = 0;
-        while (i < text.len) : (i += 1) {
-            const c = text[i];
-            if (quote != 0) {
-                if (c == '\\') i += 1 else if (c == quote) quote = 0;
-                continue;
-            }
-            switch (c) {
-                '"', '\'' => quote = c,
-                '(', '[' => depth += 1,
-                ')', ']' => depth -|= 1,
-                '/' => if (depth == 0) {
-                    found = i;
-                },
-                else => {},
-            }
-        }
-        return found;
-    }
-
-    /// `text` without one pair of parentheses around all of it.
-    fn stripOuterParens(text: []const u8) []const u8 {
-        if (text.len < 2 or text[0] != '(' or text[text.len - 1] != ')') return text;
-        var depth: u32 = 0;
-        for (text, 0..) |c, i| {
-            if (c == '(') depth += 1;
-            if (c == ')') {
-                depth -= 1;
-                if (depth == 0 and i != text.len - 1) return text;
-            }
-        }
-        return std.mem.trim(u8, text[1 .. text.len - 1], " \t\r\n");
+        return deprecation_mod.slashDivMessage(self.allocator, source, self.current_source_span.start, self.current_source_span.end, direct_value);
     }
 
     fn moduleRunLabel(site: ModuleRunSite) []const u8 {

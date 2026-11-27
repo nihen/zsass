@@ -125,7 +125,7 @@ pub fn eval(env: anytype, prog: anytype, expr_idx: anytype) Error!Value {
             const cross = prog.cross_var_refs.items[ex.payload];
             break :blk env.lookupCrossVar(cross.module_id, cross.slot) orelse return error.NonStaticExpr;
         },
-        .binary => try evalBinary(env, prog, ex.payload),
+        .binary => try evalBinary(env, prog, ex.payload, expr_idx),
         .unary => try evalUnary(env, prog, ex.payload),
         .interp => try evalInterp(env, prog, ex.payload),
         .list => try evalList(env, prog, ex.payload),
@@ -181,7 +181,7 @@ fn evalLiteralColor(env: anytype, prog: anytype, payload: u32) Error!Value {
     return Value.colorWithHandle(handle);
 }
 
-fn evalBinary(env: anytype, prog: anytype, payload: u32) Error!Value {
+fn evalBinary(env: anytype, prog: anytype, payload: u32, expr_idx: anytype) Error!Value {
     const b = prog.binary_exprs.items[payload];
     const lhs = try eval(env, prog, b.lhs);
     const rhs = try eval(env, prog, b.rhs);
@@ -194,6 +194,10 @@ fn evalBinary(env: anytype, prog: anytype, payload: u32) Error!Value {
             // the warning, so the VM divides them and warns.
             if (@hasDecl(@TypeOf(env.*), "probeDeprecations")) {
                 if (env.probeDeprecations() and lhs.kind() == .number and rhs.kind() == .number) return error.NonStaticExpr;
+            }
+            // A value only the resolver evaluates warns here.
+            if (@hasDecl(@TypeOf(env.*), "slashDivDeprecation")) {
+                if (lhs.kind() == .number and rhs.kind() == .number) try env.slashDivDeprecation(expr_idx);
             }
             break :blk try divValues(env, lhs, rhs, b.lhs_written_slash);
         },
