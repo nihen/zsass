@@ -981,3 +981,11 @@ test "variables: a function or mixin reading a variable nothing set is an error"
     try std.testing.expectEqualStrings(".a {\n  b: 1px;\n}\n", try compile(a, "@mixin m { b: $u; } $u: 1px; .a { @include m; }", "", &.{}, quiet));
     try std.testing.expectEqualStrings(".a {\n  b: 2px;\n}\n", try compile(a, "@mixin m { b: $u; } $u: 2px !default; .a { @include m; }", "", &.{}, quiet));
 }
+
+test "string.unquote: an `&` it returns is text, not the parent selector" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings(".p {\n  z: &;\n  y: 1 2 &;\n}\n", try compile(a, "@use 'sass:list'; @use 'sass:string'; .p { z: string.unquote('&'); y: list.append((1 2), string.unquote('&')); }", "", &.{}, quiet));
+    try std.testing.expectEqualStrings(".p-x {\n  a: b;\n}\n", try compile(a, "@use 'sass:string'; .p { #{string.unquote('&')}-x { a: b; } }", "", &.{}, quiet));
+}

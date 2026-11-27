@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- `string.unquote("&")` gives the text `&`, not the parent selector,
+  as the official CLI does.
 - A list built up with `list.append()` in a loop takes memory and time in
   proportion to its length. Each append copied the whole list, so 25000
   appends needed about 2.5 GB and hit the memory limit; they now take
