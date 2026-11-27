@@ -1088,3 +1088,15 @@ test "units: CSS math rejects units known incompatible whatever their case" {
     }
     try std.testing.expectEqualStrings("a {\n  b: calc(1X + 1s);\n}\n", try compile(a, "a { b: calc(1X + 1s); }", "", &.{}, quiet));
 }
+
+test "calc: interpolated terms are not checked as numbers; runtime calc does not add incompatible units" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("a {\n  b: calc(2 * 1PX + 1s);\n}\n", try compile(a, "a { b: calc(#{2} * 1PX + 1s); }", "", &.{}, quiet));
+    const out = try compile(a, "$x: 1px; $t: 1ms; a { b: calc($t + 1s); c: calc($x + 2in); }", "", &.{}, quiet);
+    try std.testing.expectEqualStrings("a {\n  b: 1001ms;\n  c: 193px;\n}\n", out);
+    if (compile(a, "$x: 1px; a { b: calc($x + 2ms); }", "", &.{}, quiet)) |css| {
+        try std.testing.expect(std.mem.indexOf(u8, css, "1.002px") == null);
+    } else |_| {}
+}

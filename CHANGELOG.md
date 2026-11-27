@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- A `calc()` with a variable no longer adds units of different kinds as
+  if they converted: `calc($x + 2ms)` with `$x: 1px` gave `1.002px`.
+- A `calc()` with interpolation, such as `calc(#{2} * 1px + 1s)`, is kept
+  as CSS instead of failing.
 - Units are case-sensitive, as in the official CLI: `1PX + 1in` and
   `1Px + 1px` fail with incompatible units instead of converting, and the
   known units are spelled `q`, `Hz`, and `kHz`.

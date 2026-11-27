@@ -6764,11 +6764,12 @@ fn validateRawCalcCallSyntax(_: *Ctx, raw_text: []const u8) ResolveError!void {
     if (std.mem.trim(u8, inner, " \t\r\n").len == 0) return error.SassError;
     if (calcTextHasTopLevelComma(inner)) return error.SassError;
     if (calc_utils.calcHasBadWhitespace(inner)) return error.SassError;
-    if (calc_utils.calcHasKnownIncompatibleUnits(inner)) return error.SassError;
     if (calcHasModuloOperatorResolver(inner)) return error.SassError;
 
     // Expressions containing variables/interpolation are evaluated on the runtime side.
+    // Their terms are not numbers yet: `calc(#{2} * 1px + 1s)` is valid CSS.
     if (std.mem.findScalar(u8, inner, '$') != null or std.mem.indexOf(u8, inner, "#{") != null) return;
+    if (calc_utils.calcHasKnownIncompatibleUnits(inner)) return error.SassError;
 }
 
 fn resolveCssSpecialCallExprFromSourceText(ctx: *Ctx, raw_text: []const u8, span: Span) ResolveError!?ExprIndex {
