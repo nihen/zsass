@@ -4713,7 +4713,9 @@ const CalcIssueAt = struct { issue: CalcIssue, node: NodeIndex };
 /// side by side lack an operator between.
 fn isCalcMathOperand(ast: *const ast_flat.Ast, n: ast_flat.AstNode) bool {
     return switch (n.tag) {
-        .expr_number_literal, .expr_number_immediate, .expr_paren => true,
+        .expr_number_literal, .expr_number_immediate, .expr_binary_op, .expr_slash_expr => true,
+        // Parentheses are what they hold: (var(--y)) is text.
+        .expr_paren => isCalcMathOperand(ast, ast.getNode(@fromBackingInt(@intCast(n.payload)))),
         .expr_func_call => isCalculationCallNode(ast, n),
         else => false,
     };
@@ -4821,9 +4823,10 @@ fn calcArgMayExpand(ast: *const ast_flat.Ast, node: NodeIndex) bool {
                 std.ascii.startsWithIgnoreCase(text, "attr(");
         },
         .expr_unary_op => {
-            // `-#{...}` is an identifier.
+            // `-#{...}` is an identifier; `+#{...}` is not.
             const operand = ast.getNode(@fromBackingInt(@intCast(ast.getExtraU32(n.payload))));
-            return operand.tag == .expr_interp and operand.span_start == n.span_start + 1;
+            const op: ast_flat.UnaryOp = @fromBackingInt(@intCast(@as(u8, @truncate(ast.getExtraU32(n.payload + 1)))));
+            return op == .negate and operand.tag == .expr_interp and operand.span_start == n.span_start + 1;
         },
         .expr_paren => return calcArgMayExpand(ast, @fromBackingInt(@intCast(n.payload))),
         .expr_space_list => {
@@ -4894,8 +4897,10 @@ fn calculationIssue(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ?CalcI
             const o = ast.getNode(operand);
             // `+1px` and `-1px` are signed numbers, and `-#{$x}` is an
             // identifier.
-            const signed = (op == .negate or op == .positive) and o.span_start == n.span_start + 1 and
-                (o.tag == .expr_number_literal or o.tag == .expr_number_immediate or o.tag == .expr_interp);
+            const adjacent = o.span_start == n.span_start + 1;
+            const signed = adjacent and (((op == .negate or op == .positive) and
+                (o.tag == .expr_number_literal or o.tag == .expr_number_immediate)) or
+                (op == .negate and o.tag == .expr_interp));
             if (signed) return null;
             return .{ .issue = .expression, .node = node };
         },
