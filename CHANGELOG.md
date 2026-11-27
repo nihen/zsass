@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- A new variable assigned in a top-level `@if` or loop stays in that
+  block even when a function or mixin names a global of that name, so the
+  mixin's read is undefined, as in the official CLI.
 - `meta.load-css()` passes a configured number with a unit, such as
   `$with: (u: 2px)`, to the module; it was lost, leaving the default or
   nothing.

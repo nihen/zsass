@@ -814,9 +814,22 @@ const Ctx = struct {
         // If persistent scope exists, implicit global write will not be performed even if global has the same name
         // (passes global path only when `!global` is specified).
         if (self.nearestPersistentScopeIndex() == null) {
-            if (lookupGlobalSlot(self.prog, name)) |s| return s;
+            if (lookupGlobalSlot(self.prog, name)) |s| {
+                // A slot a callable's reference made is no variable yet: a
+                // new variable in the block stays the block's own.
+                if (self.isUndeclaredCallableGlobal(s, name)) return null;
+                return s;
+            }
         }
         return null;
+    }
+
+    fn isUndeclaredCallableGlobal(self: *const Ctx, slot: SlotId, name: []const u8) bool {
+        if (self.prog.declared_global_names.contains(name)) return false;
+        for (self.prog.unknown_global_slots.items) |s| {
+            if (s == slot) return true;
+        }
+        return false;
     }
 
     fn lookupStarVar(self: *Ctx, name_id: InternId) ?CrossVarTarget {

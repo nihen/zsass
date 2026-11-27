@@ -1020,3 +1020,11 @@ test "meta.load-css: a configured number with a unit reaches the module" {
     const results = try api.compileFiles(a, &.{main}, .{ .quiet = true, .jobs = 1 });
     try std.testing.expectEqualStrings(".a {\n  b: 2px;\n}\n", results[0].css orelse return error.TestUnexpectedResult);
 }
+
+test "variables: a new variable in a top-level block is not the global a mixin reads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    if (compile(a, "@mixin m { b: $u; } @if true { $u: 2px; } .a { @include m; }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expectEqualStrings(".a {\n  b: 2px;\n}\n", try compile(a, "@mixin m { b: $u; } $u: 1px; @if true { $u: 2px; } .a { @include m; }", "", &.{}, quiet));
+}
