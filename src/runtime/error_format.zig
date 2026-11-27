@@ -48,6 +48,23 @@ fn eprint(comptime fmt: []const u8, args: anytype) void {
     w.interface.flush() catch return;
 }
 
+/// `ch` written `n` times, a buffer at a time: a caret line under a long
+/// source line would otherwise cost one write per column.
+fn eprintRepeat(ch: u8, n: usize) void {
+    var chunk: [4096]u8 = undefined;
+    @memset(&chunk, ch);
+    var left = n;
+    var buf: [256]u8 = undefined;
+    var err_file = std.Io.File.stderr();
+    var w = err_file.writerStreaming(zsass_io.io, buf[0..]);
+    while (left > 0) {
+        const take = @min(left, chunk.len);
+        w.interface.writeAll(chunk[0..take]) catch return;
+        left -= take;
+    }
+    w.interface.flush() catch return;
+}
+
 /// CLI-FIX-E Step 2c+ Phase 2: context-aware error message. with callsite (builtin / VM exec)
 /// Thread-local rich messages such as `setContextMessage("1px and 1em have incompatible units.")`
 /// Save it in buffer, and `errorToUserMessage` returns this with priority. If not set
@@ -456,7 +473,8 @@ fn writeSourceFrameWithLabel(
         eprint("{s} | ", .{indicator_pad_str});
     }
     var col: usize = 0;
-    while (col < start_pos.col) : (col += 1) eprint(" ", .{});
+    eprintRepeat(' ', start_pos.col);
+    col = start_pos.col;
 
     // End-start number of bytes if span is within the same line (UTF-8 byte count ~ col in BMP range, assuming ASCII).
     // If multi-byte characters are included, dart is also column-based, so approximation is OK.
@@ -464,8 +482,7 @@ fn writeSourceFrameWithLabel(
         @max(end_pos.col -| start_pos.col, 1)
     else
         @max(line_text.len -| start_pos.col, 1);
-    var ci: usize = 0;
-    while (ci < caret_len) : (ci += 1) eprint("^", .{});
+    eprintRepeat('^', caret_len);
     eprint("\n", .{});
 
     // Bottom of source-frame bar.
@@ -545,8 +562,7 @@ pub fn writeStackTrace(allocator: std.mem.Allocator) !void {
         const label = f.label_buf[0..f.label_len];
         const pad = max_width - pieces[idx].len + 2;
         eprint("  {s}", .{pieces[idx]});
-        var p: usize = 0;
-        while (p < pad) : (p += 1) eprint(" ", .{});
+        eprintRepeat(' ', pad);
         eprint("{s}\n", .{label});
     }
 }
@@ -577,14 +593,14 @@ fn writeSourceFrameAsciiOnlyFromSnapshot(
         eprint("{s} | ", .{indicator_pad_str});
     }
     var col: u32 = 1;
-    while (col < col_no) : (col += 1) eprint(" ", .{});
+    eprintRepeat(' ', col_no -| col);
+    col = col_no;
 
     const caret_len: u32 = if (line_no == end_line_no)
         @max(end_col_no -| col_no, 1)
     else
         @max(@as(u32, @intCast(line_text.len)) -| (col_no - 1), 1);
-    var ci: u32 = 0;
-    while (ci < caret_len) : (ci += 1) eprint("^", .{});
+    eprintRepeat('^', caret_len);
     eprint("\n", .{});
 
     if (unicodeDiagnosticsEnabled()) {
@@ -608,8 +624,7 @@ pub fn formatDiagnosticAlloc(allocator: std.mem.Allocator, err: anyerror) ?[]u8 
 }
 
 fn writeSpaces(w: *std.Io.Writer, n: usize) !void {
-    var i: usize = 0;
-    while (i < n) : (i += 1) try w.writeAll(" ");
+    try w.splatByteAll(' ', n);
 }
 
 fn formatDiagnosticToWriter(w: *std.Io.Writer, err: anyerror) !void {
