@@ -1005,3 +1005,18 @@ test "math.min/max: compound units are compared factor by factor" {
     try std.testing.expectEqualStrings("a {\n  b: calc(1px * 1px);\n  c: calc(2px * 1px);\n  d: calc(1px * 1em);\n}\n", try compile(a, "@use \"sass:math\"; a { b: math.min(calc(1px * 1px), calc(2px * 1px)); c: math.max(1px * 1px, 2px * 1px); d: math.min(1px * 1em, 1em * 2px); }", "", &.{}, quiet));
     if (compile(a, "@use \"sass:math\"; a { b: math.min(1px * 1px, 1px); }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
 }
+
+test "meta.load-css: a configured number with a unit reaches the module" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeFile(tmp.dir, "_lib.scss", "$u: original !default; @mixin m { b: $u; } .a { @include m; }");
+    try writeFile(tmp.dir, "main.scss", "@use \"sass:meta\"; @include meta.load-css(\"lib\", $with: (u: 2px));");
+    const root = try tmpPath(a, &tmp);
+    const main = try std.fs.path.join(a, &.{ root, "main.scss" });
+    const results = try api.compileFiles(a, &.{main}, .{ .quiet = true, .jobs = 1 });
+    try std.testing.expectEqualStrings(".a {\n  b: 2px;\n}\n", results[0].css orelse return error.TestUnexpectedResult);
+}

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- `meta.load-css()` passes a configured number with a unit, such as
+  `$with: (u: 2px)`, to the module; it was lost, leaving the default or
+  nothing.
 - `min()`, `max()`, `math.min()`, and `math.max()` compare numbers with
   compound units, such as `calc(1px * 1px)` or `1px / 1s`, when every
   unit factor converts, instead of failing; incompatible ones report

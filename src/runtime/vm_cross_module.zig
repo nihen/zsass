@@ -313,6 +313,11 @@ fn cloneValueForLoadCssChild(self: anytype, child: anytype, v: Value) !Value {
         try child.list_pool.append(child.allocator, owned);
         return Value.listWithMetaEx(dst_handle, v.listSeparator(self.list_meta_pool.items), v.listBracketed(self.list_meta_pool.items), v.listIsMap(self.list_meta_pool.items), v.listCoerceSlash(self.list_meta_pool.items));
     }
+    // A number with a unit lives in the VM's number pool; the child has its
+    // own, so the number is made again there.
+    if (v.kind() == .number and v.unitId(&self.number_pool) != .none) {
+        return Value.number(v.asF64(&self.number_pool), v.unitId(&self.number_pool), &child.number_pool, child.allocator);
+    }
     return v;
 }
 
