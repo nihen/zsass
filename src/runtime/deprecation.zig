@@ -188,6 +188,10 @@ pub const TraceProvider = struct {
 
 pub threadlocal var trace_provider: ?TraceProvider = null;
 
+/// Whether a warning may read its file for the source line it shows. The
+/// embedding API turns it off: its sources need not be the files on disk.
+pub threadlocal var read_sources_for_warnings: bool = true;
+
 fn callSiteLineCol(site: CallSite) struct { line: u32, col: u32 } {
     if (site.read_source) {
         const source = std.Io.Dir.cwd().readFileAlloc(zsass_io.io, site.path, std.heap.c_allocator, .unlimited) catch
@@ -222,6 +226,28 @@ pub const SlashDivDeprecationSite = struct {
 };
 
 pub const DeprecationOpts = struct {
+    /// Takes the warnings written and counted by `other`, a copy these
+    /// options were given to run part of the same compilation.
+    pub fn takeWarningState(self: *DeprecationOpts, other: *const DeprecationOpts) void {
+        self.emitted = other.emitted;
+        self.shown_counts = other.shown_counts;
+        self.omitted = other.omitted;
+        self.seen = other.seen;
+        self.seen_len = other.seen_len;
+    }
+
+    /// Records `key`; true when it was recorded before.
+    fn alreadyWarned(self: *DeprecationOpts, key: u64) bool {
+        for (self.seen[0..self.seen_len]) |k| {
+            if (k == key) return true;
+        }
+        if (self.seen_len < self.seen.len) {
+            self.seen[self.seen_len] = key;
+            self.seen_len += 1;
+        }
+        return false;
+    }
+
     silenced: std.enums.EnumSet(DeprecationKind) = .empty,
     fatal: std.enums.EnumSet(DeprecationKind) = .empty,
     future: std.enums.EnumSet(DeprecationKind) = .empty,
@@ -230,6 +256,10 @@ pub const DeprecationOpts = struct {
     /// are only counted in `omitted` unless `verbose`.
     shown_counts: std.enums.EnumArray(DeprecationKind, u32) = .initFill(0),
     omitted: u32 = 0,
+    /// Warnings already written, by `warningKey`: the same message at the
+    /// same place is written once, as in the official CLI.
+    seen: [max_seen_warnings]u64 = @splat(0),
+    seen_len: u32 = 0,
     /// Ids made fatal and ids excluded with `--fatal-deprecation=-<id>`, as
     /// bits indexed like `known_deprecations`. `finalizeDeprecationOpts`
     /// applies the exclusions once every flag has been read.
@@ -363,7 +393,10 @@ fn writeWarningLocation(path: []const u8, line: u32, col: u32, end_col: u32) voi
         }
     }
     if (path.len == 0) return;
-    const source = std.Io.Dir.cwd().readFileAlloc(zsass_io.io, path, std.heap.c_allocator, .limited(64 << 20)) catch null;
+    const source = if (read_sources_for_warnings)
+        std.Io.Dir.cwd().readFileAlloc(zsass_io.io, path, std.heap.c_allocator, .limited(64 << 20)) catch null
+    else
+        null;
     defer if (source) |src| std.heap.c_allocator.free(src);
     var line_text: []const u8 = "";
     if (source) |src| {
@@ -426,6 +459,7 @@ fn emitDeprecationAt(
     }
     if (opts.quiet) return;
     if (opts.silenced.contains(kind)) return;
+    if (opts.alreadyWarned(warningKey(kind, msg, path, line, col))) return;
     if (!opts.verbose) {
         const shown = opts.shown_counts.get(kind);
         if (shown >= max_repeated_warnings) {
@@ -438,7 +472,7 @@ fn emitDeprecationAt(
 
     var err_file = std.Io.File.stderr();
     var err_buf: [1024]u8 = undefined;
-    var err_w = err_file.writer(zsass_io.io, err_buf[0..]);
+    var err_w = err_file.writerStreaming(zsass_io.io, err_buf[0..]);
     err_w.interface.print("DEPRECATION WARNING [{s}]: {s}\n\n", .{ kind.kindName(), msg }) catch {};
     err_w.interface.flush() catch |flush_err| {
         switch (flush_err) {
@@ -459,13 +493,27 @@ fn emitDeprecationAt(
 /// As the official CLI: five warnings of each kind, then a count.
 const max_repeated_warnings: u32 = 5;
 
+/// Distinct warnings remembered for de-duplication; past it, a repeat may
+/// be written again.
+const max_seen_warnings = 1024;
+
+fn warningKey(kind: DeprecationKind, msg: []const u8, path: []const u8, line: u32, col: u32) u64 {
+    var h = std.hash.Wyhash.init(@backingInt(kind));
+    h.update(msg);
+    h.update(&.{0});
+    h.update(path);
+    h.update(std.mem.asBytes(&line));
+    h.update(std.mem.asBytes(&col));
+    return h.final() | 1;
+}
+
 /// "WARNING: N repetitive deprecation warnings omitted." once a
 /// compilation is done, when any were.
 pub fn writeOmittedSummary(opts: *const DeprecationOpts) void {
     if (opts.omitted == 0 or opts.quiet) return;
     var err_file = std.Io.File.stderr();
     var err_buf: [256]u8 = undefined;
-    var err_w = err_file.writer(zsass_io.io, err_buf[0..]);
+    var err_w = err_file.writerStreaming(zsass_io.io, err_buf[0..]);
     err_w.interface.print("WARNING: {d} repetitive deprecation warnings omitted.\nRun in verbose mode to see all warnings.\n\n", .{opts.omitted}) catch {};
     err_w.interface.flush() catch {};
 }
@@ -481,7 +529,7 @@ pub const ParseDeprecationError = error{
 fn printDeprecationOptionMessage(comptime fmt: []const u8, args: anytype) void {
     var err_file = std.Io.File.stderr();
     var err_buf: [512]u8 = undefined;
-    var err_w = err_file.writer(zsass_io.io, err_buf[0..]);
+    var err_w = err_file.writerStreaming(zsass_io.io, err_buf[0..]);
     err_w.interface.print(fmt, args) catch {};
     err_w.interface.flush() catch |flush_err| switch (flush_err) {
         else => {},

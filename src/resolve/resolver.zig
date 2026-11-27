@@ -1081,6 +1081,11 @@ const ResolverEvalEnv = struct {
     /// each call. Otherwise the VM evaluates the expression again and
     /// reports them.
     deprecation_opts: ?*deprecation_mod.DeprecationOpts = null,
+    /// Set when the value would replace the expression (constant folding):
+    /// a call that warns is then not folded, so the VM runs it and warns.
+    /// Other static evaluations keep their value; the VM still runs the
+    /// expression.
+    probe_deprecations: bool = false,
     /// Evaluate string literals to their canonical text. Set when the result
     /// is a final value (a module configuration), not compiled again.
     canonical_literals: bool = false,
@@ -1091,6 +1096,10 @@ const ResolverEvalEnv = struct {
 
     pub fn builtinDeprecations(self: *const ResolverEvalEnv) ?*deprecation_mod.DeprecationOpts {
         return self.deprecation_opts;
+    }
+
+    pub fn probeDeprecations(self: *const ResolverEvalEnv) bool {
+        return self.probe_deprecations;
     }
 
     pub fn builtinCallSite(self: *const ResolverEvalEnv, offset: u32, end_offset: u32) ?deprecation_mod.CallSite {
@@ -1182,6 +1191,7 @@ fn tryStaticEvalValueWithConfigDefaults(ctx: *Ctx, expr: ExprIndex, allow_config
     var env: ResolverEvalEnv = .{
         .ctx = ctx,
         .allow_configurable_defaults = allow_configurable_defaults,
+        .probe_deprecations = true,
     };
     return resolver_eval.eval(&env, ctx.prog, expr) catch null;
 }

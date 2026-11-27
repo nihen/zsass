@@ -951,6 +951,11 @@ pub fn runLoadCssModule(self: anytype, resolved_path: []const u8, config: LoadCs
 
     var child_vm = try self.initLoadCssChildVM(&child_program, is_plain_css_source, parent_selector != null);
     defer child_vm.deinit();
+    defer self.deprecation_opts.takeWarningState(&child_vm.deprecation_opts);
+    // A warning in the module shows its source and, below it, the trace
+    // that reached `meta.load-css()`.
+    child_vm.diag_entry_source = source;
+    child_vm.diag_parent = self;
     if (opts.quiet) child_vm.deprecation_opts.quiet = true;
     try child_vm.ensureStaticEvalListsLoaded();
     const seed_bindings = try buildLoadCssSeedBindings(self, &child_vm, config);

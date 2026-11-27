@@ -1771,16 +1771,17 @@ fn minmaxVariadic(ctx: *BuiltinContext, args: []const Value, is_min: bool, css_n
     return minmaxVariadicMode(ctx, args, is_min, css_name, .css);
 }
 
-/// A CSS math function checks each argument against every earlier one, in
-/// order, for units known to be incompatible (`min(1em, 1px, 1s)` fails on
-/// `1em and 1s`). A unitless argument mixed with one that has a unit is
-/// incompatible too when `unitless_incompatible` (clamp), and otherwise
-/// left to the function (min, max).
+/// A CSS math function checks each later argument against the first for
+/// units known to be incompatible (`min(1em, 1px, 1s)` fails on `1em and
+/// 1s`; `min(1, 2s, 3px)` is 1). A unitless argument mixed with one that
+/// has a unit is incompatible too when `unitless_incompatible` (clamp), and
+/// otherwise left to the function (min, max).
 fn checkCalcArgsKnownCompatible(ctx: *BuiltinContext, values: []const Value, unitless_incompatible: bool) BuiltinError!void {
-    for (values, 0..) |later, j| {
+    if (values.len == 0) return;
+    for (values[1..]) |later| {
         const later_unit = unitSlice(ctx, later.unitId(ctx.number_pool));
         if (later_unit != null and isGeneratedUnitDescription(later_unit.?)) continue;
-        for (values[0..j]) |earlier| {
+        for (values[0..1]) |earlier| {
             const earlier_unit = unitSlice(ctx, earlier.unitId(ctx.number_pool));
             if (earlier_unit != null and isGeneratedUnitDescription(earlier_unit.?)) continue;
             if (earlier_unit == null and later_unit == null) continue;

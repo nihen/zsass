@@ -110,7 +110,7 @@ pub fn builtinContext(self: anytype) builtin_mod.BuiltinContext {
 }
 
 fn builtinCallSite(self: anytype) ?deprecation_mod.CallSite {
-    const fid: usize = @intCast(self.current_source_span.file_id);
+    const fid: usize = self.diagnosticModuleIndex();
     if (fid >= self.program.modules.len) return null;
     const mod = self.program.modules[fid];
     if (mod.module_path.len == 0) return null;

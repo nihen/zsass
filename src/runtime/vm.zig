@@ -490,6 +490,12 @@ pub const VM = struct {
     diag_entry_source: []const u8 = "",
     /// Other sources read for warnings, by path.
     diag_sources: std.StringHashMapUnmanaged([]const u8) = .empty,
+    /// Whether a warning may read a module's file for its source line. Off
+    /// for the embedding API, whose sources need not be the files on disk.
+    diag_read_files: bool = true,
+    /// The VM whose `meta.load-css()` runs this one, whose trace continues
+    /// this one's.
+    diag_parent: ?*VM = null,
     /// Legacy global builtin lookup cache for Indirect CSS/string callable fallback.
     /// value=maxInt(u32) is miss sentinel.
     legacy_global_builtin_cache: std.AutoHashMapUnmanaged(InternId, u32) = .empty,
@@ -8645,6 +8651,10 @@ pub const VM = struct {
         var child_vm = try VM.init(self.allocator, self.intern_pool, self.color_pool, self.rule_ir, child_program);
         child_vm.error_sink_fd = self.error_sink_fd;
         child_vm.budget = self.budget;
+        // The module's deprecations are the compilation's: the same
+        // options, counts, and warnings already written.
+        child_vm.deprecation_opts = self.deprecation_opts;
+        child_vm.diag_read_files = self.diag_read_files;
         child_vm.load_css_stack_ptr = self.load_css_stack_ptr;
         child_vm.load_css_loaded_paths_ptr = self.load_css_loaded_paths_ptr;
         child_vm.load_css_state_ptr = self.load_css_state_ptr;
@@ -8760,7 +8770,7 @@ pub const VM = struct {
         if (module_id) |id| {
             if (id == self.program.root_index and self.diag_entry_source.len != 0) return self.diag_entry_source;
         }
-        if (path.len == 0) return null;
+        if (path.len == 0 or !self.diag_read_files) return null;
         if (self.diag_sources.get(path)) |src| return src;
         const src = std.Io.Dir.cwd().readFileAlloc(zsass_io.io, path, self.allocator, .limited(64 << 20)) catch return null;
         const key = self.allocator.dupe(u8, path) catch {
@@ -8778,25 +8788,38 @@ pub const VM = struct {
     /// The trace of the code running now, outermost first: each active
     /// call, then the current position with its source line. Returns how
     /// many frames it filled; 0 when the position is unknown.
+    /// The module the current position is in. Under `meta.load-css()` the
+    /// span's file id is the source-map tag of the module, not its index.
+    pub fn diagnosticModuleIndex(self: *const VM) usize {
+        if (self.load_css_module_tag_override != null) return self.current_module;
+        return @intCast(self.current_source_span.file_id);
+    }
+
     pub fn buildDiagnosticTrace(self: *VM, out: []error_format.ErrorTraceFrame) usize {
         if (out.len == 0) return 0;
-        const fid: usize = @intCast(self.current_source_span.file_id);
+        const fid: usize = self.diagnosticModuleIndex();
         if (fid >= self.program.modules.len) return 0;
         const inner_mod = &self.program.modules[fid];
-        if (inner_mod.module_path.len == 0 or inner_mod.line_starts.len == 0) return 0;
+        if (inner_mod.module_path.len == 0) return 0;
+
+        var n: usize = 0;
+        // Under `meta.load-css()`, the trace that reached it comes first.
+        if (self.diag_parent) |parent| {
+            n = parent.buildDiagnosticTrace(out[0 .. out.len - 1]);
+        }
+        // The top of a module `meta.load-css()` runs is labelled after it.
+        const top_label = if (self.diag_parent != null) "load-css()" else "root stylesheet";
 
         var sites: [error_format.max_error_stack]CallSite = undefined;
-        const max_sites = @min(sites.len, out.len - 1);
+        const max_sites = @min(sites.len, out.len - 1 - n);
         const site_count = self.callSites(sites[0..max_sites]);
-        var n: usize = 0;
         var label_buf: [64]u8 = undefined;
         for (sites[0..site_count], 0..) |site, i| {
             if (site.module_id >= self.program.modules.len) return 0;
             const m = &self.program.modules[site.module_id];
-            if (m.line_starts.len == 0) return 0;
-            const label = if (i == 0 and site.chunk == .top) "root stylesheet" else diagnosticCallLabel(site.chunk, site.chunk_name, &label_buf);
-            const start = sourceOffsetToLineColVm(m.line_starts, m.source_len, site.span_start);
-            error_format.fillTraceFrame(&out[n], m.module_path, label, start.line + 1, start.col + 1, start.line + 1, start.col + 1, "");
+            const label = if (i == 0 and site.chunk == .top) top_label else diagnosticCallLabel(site.chunk, site.chunk_name, &label_buf);
+            const start = self.diagnosticLineCol(site.module_id, m, site.span_start) orelse return 0;
+            error_format.fillTraceFrame(&out[n], m.module_path, label, start.line, start.col, start.line, start.col, "");
             n += 1;
         }
 
@@ -8811,7 +8834,17 @@ pub const VM = struct {
                 module_id = null;
             }
         }
-        const source = self.diagnosticSource(module_id, path) orelse return 0;
+        const inner_ref = self.innerMostChunkRef();
+        const inner_label = if (inner_ref == .top) top_label else diagnosticCallLabel(inner_ref, self.innerMostChunkName(), &label_buf);
+        const source = self.diagnosticSource(module_id, path) orelse {
+            // No source to show: the position alone, from the module's line
+            // table when the code is the module's own.
+            if (module_id == null or inner_mod.line_starts.len == 0) return n;
+            const pos = sourceOffsetToLineColVm(inner_mod.line_starts, inner_mod.source_len, self.current_source_span.start);
+            error_format.fillTraceFrame(&out[n], path, inner_label, pos.line + 1, pos.col + 1, pos.line + 1, pos.col + 1, "");
+            out[n].line_text_len = 0;
+            return n + 1;
+        };
         const span_start: usize = @min(@as(usize, self.current_source_span.start), source.len);
         const span_end: usize = @min(@max(@as(usize, self.current_source_span.end), span_start), source.len);
         const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..span_start], '\n')) |nl| nl + 1 else 0;
@@ -8821,10 +8854,22 @@ pub const VM = struct {
         const end_on_line = @min(span_end, line_end);
         const end_col: u32 = @intCast(end_on_line - line_start + 1);
         const line_text = std.mem.trimEnd(u8, source[line_start..line_end], "\r");
-        const inner_label = diagnosticCallLabel(self.innerMostChunkRef(), self.innerMostChunkName(), &label_buf);
         error_format.fillTraceFrame(&out[n], path, inner_label, line_no, col_no, line_no, end_col, line_text);
         n += 1;
         return n;
+    }
+
+    /// 1-based line and column of `offset` in module `module_id`, from its
+    /// line table or, without one, its source.
+    fn diagnosticLineCol(self: *VM, module_id: u32, m: anytype, offset: u32) ?struct { line: u32, col: u32 } {
+        if (m.line_starts.len != 0) {
+            const pos = sourceOffsetToLineColVm(m.line_starts, m.source_len, offset);
+            return .{ .line = pos.line + 1, .col = pos.col + 1 };
+        }
+        const source = self.diagnosticSource(module_id, m.module_path) orelse return null;
+        const end = @min(@as(usize, offset), source.len);
+        const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..end], '\n')) |nl| nl + 1 else 0;
+        return .{ .line = @intCast(std.mem.count(u8, source[0..line_start], "\n") + 1), .col = @intCast(end - line_start + 1) };
     }
 
     fn diagnosticCallLabel(ref: ChunkRef, name: []const u8, buf: []u8) []const u8 {
