@@ -2753,6 +2753,8 @@ fn runEnd2EndWithBudget(
     vm.budget = budget;
     defer vm.deinit();
     vm.deprecation_opts = deprecation_opts;
+    defer deprecation_mod.writeOmittedSummary(&vm.deprecation_opts);
+    vm.diag_entry_source = source;
     if (std.c.getenv("ZSASS_TRACE_SLOT")) |slot_z| {
         const slot_str = std.mem.sliceTo(slot_z, 0);
         if (std.fmt.parseInt(u32, slot_str, 10)) |v| {

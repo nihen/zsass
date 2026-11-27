@@ -486,6 +486,10 @@ pub const VM = struct {
     list_append_tails: std.AutoHashMapUnmanaged(u32, builtin_mod.ListTail) = .empty,
     /// The callee's module and frame while its arguments are bound.
     param_default_ctx: ?ParamDefaultCtx = null,
+    /// The entry stylesheet's source, for the source line a warning shows.
+    diag_entry_source: []const u8 = "",
+    /// Other sources read for warnings, by path.
+    diag_sources: std.StringHashMapUnmanaged([]const u8) = .empty,
     /// Legacy global builtin lookup cache for Indirect CSS/string callable fallback.
     /// value=maxInt(u32) is miss sentinel.
     legacy_global_builtin_cache: std.AutoHashMapUnmanaged(InternId, u32) = .empty,
@@ -815,6 +819,14 @@ pub const VM = struct {
     }
 
     pub fn deinit(self: *VM) void {
+        {
+            var it = self.diag_sources.iterator();
+            while (it.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+                self.allocator.free(entry.value_ptr.*);
+            }
+            self.diag_sources.deinit(self.allocator);
+        }
         self.freeModGlobalsIfAny();
         self.stack.deinit(self.allocator);
         self.stack_source_spans.deinit(self.allocator);
@@ -2263,6 +2275,9 @@ pub const VM = struct {
     }
 
     pub fn runTopWithSelectorPrefix(self: *VM, selector_prefix: []const InternId) VMError!void {
+        const saved_provider = deprecation_mod.trace_provider;
+        deprecation_mod.trace_provider = .{ .ctx = self, .build = buildDiagnosticTraceOpaque };
+        defer deprecation_mod.trace_provider = saved_provider;
         if (self.load_css_stack_ptr == null) self.load_css_stack_ptr = &self.load_css_stack_owner;
         if (self.load_css_stack_ptr == &self.load_css_stack_owner) self.load_css_stack_owner.clearRetainingCapacity();
         self.resetOwnedLoadCssLoadedPaths();
@@ -4891,14 +4906,14 @@ pub const VM = struct {
                 if (self.suppress_diagnostics) return .continue_exec;
                 const val = try self.pop();
                 const msg = try self.valueToDiagnosticMessage(val, false);
-                const file_id: usize = @intCast(self.current_source_span.file_id);
-                if (file_id < self.program.modules.len) {
-                    const module = self.program.modules[file_id];
-                    const pos = sourceOffsetToLineColVm(module.line_starts, module.source_len, self.current_source_span.start);
-                    vmStderrPrint("WARNING: {s}\n    {s} {d}:{d}  root stylesheet\n", .{ msg, module.module_path, pos.line + 1, pos.col + 1 });
-                } else {
-                    vmStderrPrint("WARNING: {s}\n", .{msg});
+                // The message, then the trace of calls that led here.
+                vmStderrPrint("WARNING: {s}\n", .{msg});
+                var frames: [error_format.max_error_stack]error_format.ErrorTraceFrame = undefined;
+                const frame_count = self.buildDiagnosticTrace(&frames);
+                if (frame_count > 0) {
+                    error_format.writeTraceFrames(self.allocator, frames[0..frame_count], false, "    ") catch {};
                 }
+                vmStderrPrint("\n", .{});
             },
             .emit_stmt_gap => {
                 // Load marker only in top-level context. loop in rule body (`.boxed { @include box }`
@@ -8706,6 +8721,93 @@ pub const VM = struct {
             n += 1;
         }
         return n;
+    }
+
+    fn buildDiagnosticTraceOpaque(ctx: *anyopaque, out: []error_format.ErrorTraceFrame) usize {
+        const self: *VM = @ptrCast(@alignCast(ctx));
+        return self.buildDiagnosticTrace(out);
+    }
+
+    /// The source of `path` for a warning's source line: the entry's own
+    /// source, or the file read once.
+    fn diagnosticSource(self: *VM, module_id: ?u32, path: []const u8) ?[]const u8 {
+        if (module_id) |id| {
+            if (id == self.program.root_index and self.diag_entry_source.len != 0) return self.diag_entry_source;
+        }
+        if (path.len == 0) return null;
+        if (self.diag_sources.get(path)) |src| return src;
+        const src = std.Io.Dir.cwd().readFileAlloc(zsass_io.io, path, self.allocator, .limited(64 << 20)) catch return null;
+        const key = self.allocator.dupe(u8, path) catch {
+            self.allocator.free(src);
+            return null;
+        };
+        self.diag_sources.put(self.allocator, key, src) catch {
+            self.allocator.free(key);
+            self.allocator.free(src);
+            return null;
+        };
+        return src;
+    }
+
+    /// The trace of the code running now, outermost first: each active
+    /// call, then the current position with its source line. Returns how
+    /// many frames it filled; 0 when the position is unknown.
+    pub fn buildDiagnosticTrace(self: *VM, out: []error_format.ErrorTraceFrame) usize {
+        if (out.len == 0) return 0;
+        const fid: usize = @intCast(self.current_source_span.file_id);
+        if (fid >= self.program.modules.len) return 0;
+        const inner_mod = &self.program.modules[fid];
+        if (inner_mod.module_path.len == 0 or inner_mod.line_starts.len == 0) return 0;
+
+        var sites: [error_format.max_error_stack]CallSite = undefined;
+        const max_sites = @min(sites.len, out.len - 1);
+        const site_count = self.callSites(sites[0..max_sites]);
+        var n: usize = 0;
+        var label_buf: [64]u8 = undefined;
+        for (sites[0..site_count], 0..) |site, i| {
+            if (site.module_id >= self.program.modules.len) return 0;
+            const m = &self.program.modules[site.module_id];
+            if (m.line_starts.len == 0) return 0;
+            const label = if (i == 0 and site.chunk == .top) "root stylesheet" else diagnosticCallLabel(site.chunk, site.chunk_name, &label_buf);
+            const start = sourceOffsetToLineColVm(m.line_starts, m.source_len, site.span_start);
+            error_format.fillTraceFrame(&out[n], m.module_path, label, start.line + 1, start.col + 1, start.line + 1, start.col + 1, "");
+            n += 1;
+        }
+
+        // Code an `@import` brought in is spanned in the imported file.
+        var path: []const u8 = inner_mod.module_path;
+        var module_id: ?u32 = @intCast(fid);
+        const origin_index: usize = @backingInt(self.current_origin);
+        if (self.current_origin != .invalid and origin_index < self.program.origins.len) {
+            const origin_path = self.program.origins[origin_index].source_path;
+            if (origin_path.len != 0 and !std.mem.eql(u8, origin_path, inner_mod.module_path)) {
+                path = origin_path;
+                module_id = null;
+            }
+        }
+        const source = self.diagnosticSource(module_id, path) orelse return 0;
+        const span_start: usize = @min(@as(usize, self.current_source_span.start), source.len);
+        const span_end: usize = @min(@max(@as(usize, self.current_source_span.end), span_start), source.len);
+        const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..span_start], '\n')) |nl| nl + 1 else 0;
+        const line_end = std.mem.indexOfScalarPos(u8, source, span_start, '\n') orelse source.len;
+        const line_no: u32 = @intCast(std.mem.count(u8, source[0..line_start], "\n") + 1);
+        const col_no: u32 = @intCast(span_start - line_start + 1);
+        const end_on_line = @min(span_end, line_end);
+        const end_col: u32 = @intCast(end_on_line - line_start + 1);
+        const line_text = std.mem.trimEnd(u8, source[line_start..line_end], "\r");
+        const inner_label = diagnosticCallLabel(self.innerMostChunkRef(), self.innerMostChunkName(), &label_buf);
+        error_format.fillTraceFrame(&out[n], path, inner_label, line_no, col_no, line_no, end_col, line_text);
+        n += 1;
+        return n;
+    }
+
+    fn diagnosticCallLabel(ref: ChunkRef, name: []const u8, buf: []u8) []const u8 {
+        return switch (ref) {
+            .function, .mixin => std.fmt.bufPrint(buf, "{s}()", .{name}) catch buf[0..0],
+            .content => "@content",
+            .placeholder => "@extend",
+            .top => "root stylesheet",
+        };
     }
 
     pub const CallSite = struct {

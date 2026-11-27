@@ -1093,9 +1093,9 @@ const ResolverEvalEnv = struct {
         return self.deprecation_opts;
     }
 
-    pub fn builtinCallSite(self: *const ResolverEvalEnv, offset: u32) ?deprecation_mod.CallSite {
+    pub fn builtinCallSite(self: *const ResolverEvalEnv, offset: u32, end_offset: u32) ?deprecation_mod.CallSite {
         if (offset == std.math.maxInt(u32) or self.ctx.module_path.len == 0) return null;
-        return .{ .path = self.ctx.module_path, .line_starts = self.ctx.prog.line_starts, .offset = offset };
+        return .{ .path = self.ctx.module_path, .line_starts = self.ctx.prog.line_starts, .offset = offset, .end_offset = end_offset };
     }
 
     /// Long-lived alloc used when appending to Sidecar Value pool (number / callable / ...).

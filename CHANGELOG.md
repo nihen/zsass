@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call is left to run, and warns.
 - Errors and warnings in the arguments of `@include` are located there;
   they pointed at the first line of the file.
+- Deprecation warnings and `@warn` are written as the official CLI writes
+  them: a deprecation shows the source line with a caret under the call,
+  both show the trace of calls that led there (`f()`, `m()`, `@use`, ...,
+  `root stylesheet`), and each is followed by a blank line.
+- Up to five deprecation warnings of each kind are shown, then "WARNING:
+  N repetitive deprecation warnings omitted." at the end, as the official
+  CLI does; `--verbose` shows them all. Only one of each kind was shown.
 - `%` between numbers with compatible units converts the right operand:
   `7cm % 1in` is `1.92cm` instead of an error.
 

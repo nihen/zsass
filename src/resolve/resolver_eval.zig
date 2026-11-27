@@ -392,7 +392,7 @@ fn evalBuiltinCall(env: anytype, prog: anytype, payload: u32) Error!Value {
     if (@hasDecl(Env, "builtinDeprecations")) {
         if (env.builtinDeprecations()) |opts| {
             bctx.deprecation_opts = opts;
-            deprecation_mod.builtin_call_site = env.builtinCallSite(call.span_start);
+            deprecation_mod.builtin_call_site = env.builtinCallSite(call.span_start, call.span_end);
         }
     }
 

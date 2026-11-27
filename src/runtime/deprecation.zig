@@ -171,11 +171,22 @@ pub const CallSite = struct {
     path: []const u8,
     line_starts: []const u32,
     offset: u32,
+    /// Where the call ends, when known, for the caret under it.
+    end_offset: ?u32 = null,
     /// `line_starts` is not at hand: read `path` to place `offset`.
     read_source: bool = false,
 };
 
 pub threadlocal var builtin_call_site: ?CallSite = null;
+
+/// Builds the trace of the code running now (outermost frame first) for a
+/// warning, set by the VM while it runs. Returns how many frames it filled.
+pub const TraceProvider = struct {
+    ctx: *anyopaque,
+    build: *const fn (ctx: *anyopaque, out: []error_format.ErrorTraceFrame) usize,
+};
+
+pub threadlocal var trace_provider: ?TraceProvider = null;
 
 fn callSiteLineCol(site: CallSite) struct { line: u32, col: u32 } {
     if (site.read_source) {
@@ -215,6 +226,10 @@ pub const DeprecationOpts = struct {
     fatal: std.enums.EnumSet(DeprecationKind) = .empty,
     future: std.enums.EnumSet(DeprecationKind) = .empty,
     emitted: std.enums.EnumSet(DeprecationKind) = .empty,
+    /// Warnings shown for each kind; past `max_repeated_warnings`, the rest
+    /// are only counted in `omitted` unless `verbose`.
+    shown_counts: std.enums.EnumArray(DeprecationKind, u32) = .initFill(0),
+    omitted: u32 = 0,
     /// Ids made fatal and ids excluded with `--fatal-deprecation=-<id>`, as
     /// bits indexed like `known_deprecations`. `finalizeDeprecationOpts`
     /// applies the exclusions once every flag has been read.
@@ -303,15 +318,89 @@ pub fn emitDeprecation(
     var at_path = path;
     var at_line = line;
     var at_col = col;
+    var at_end_col: u32 = 0;
     if (path.len == 0) {
         if (builtin_call_site) |site| {
             const pos = callSiteLineCol(site);
             at_path = site.path;
             at_line = pos.line;
             at_col = pos.col;
+            if (site.end_offset) |end| {
+                var end_site = site;
+                end_site.offset = end;
+                const end_pos = callSiteLineCol(end_site);
+                if (end_pos.line == pos.line) at_end_col = end_pos.col;
+            }
         }
     }
-    return emitDeprecationAt(opts, kind, msg, at_path, at_line, at_col);
+    return emitDeprecationAt(opts, kind, msg, at_path, at_line, at_col, at_end_col);
+}
+
+/// `emitDeprecation` with the column the warning's span ends at on its
+/// line, for the source line it shows.
+pub fn emitDeprecationSpan(
+    opts: *DeprecationOpts,
+    kind: DeprecationKind,
+    msg: []const u8,
+    path: []const u8,
+    line: u32,
+    col: u32,
+    end_col: u32,
+) !void {
+    return emitDeprecationAt(opts, kind, msg, path, line, col, end_col);
+}
+
+/// Where a warning happened, as Sass shows it: the source line with a
+/// caret, then the trace. The running VM supplies the trace; otherwise it
+/// is the one position given, in the root stylesheet.
+fn writeWarningLocation(path: []const u8, line: u32, col: u32, end_col: u32) void {
+    var frames: [error_format.max_error_stack]error_format.ErrorTraceFrame = undefined;
+    if (trace_provider) |provider| {
+        const n = provider.build(provider.ctx, &frames);
+        if (n > 0) {
+            error_format.writeTraceFrames(std.heap.c_allocator, frames[0..n], true, "    ") catch {};
+            return;
+        }
+    }
+    if (path.len == 0) return;
+    const source = std.Io.Dir.cwd().readFileAlloc(zsass_io.io, path, std.heap.c_allocator, .limited(64 << 20)) catch null;
+    defer if (source) |src| std.heap.c_allocator.free(src);
+    var line_text: []const u8 = "";
+    if (source) |src| {
+        var it = std.mem.splitScalar(u8, src, '\n');
+        var current: u32 = 1;
+        while (it.next()) |text| : (current += 1) {
+            if (current == line) {
+                line_text = std.mem.trimEnd(u8, text, "\r");
+                break;
+            }
+        }
+    }
+    const end = if (end_col > col) end_col else col + 1;
+    // While the resolver loads modules, its frames are the trace: each
+    // module loaded at its `@use`/`@forward`/`@import`, the innermost at
+    // the warning.
+    var n: usize = 0;
+    const stack = error_format.error_state.error_stack[0..error_format.error_state.error_stack_len];
+    if (stack.len > 0 and std.mem.eql(u8, stack[stack.len - 1].path, path)) {
+        for (stack[0 .. stack.len - 1]) |frame| {
+            if (n + 1 >= frames.len) break;
+            const pos = offsetLineCol(frame.source, if (frame.has_span) frame.span_start else 0);
+            error_format.fillTraceFrame(&frames[n], frame.path, frame.label, pos.line, pos.col, pos.line, pos.col, "");
+            n += 1;
+        }
+        error_format.fillTraceFrame(&frames[n], path, stack[stack.len - 1].label, line, col, line, end, line_text);
+    } else {
+        error_format.fillTraceFrame(&frames[n], path, "root stylesheet", line, col, line, end, line_text);
+    }
+    n += 1;
+    error_format.writeTraceFrames(std.heap.c_allocator, frames[0..n], line_text.len != 0, "    ") catch {};
+}
+
+fn offsetLineCol(source: []const u8, offset: u32) struct { line: u32, col: u32 } {
+    const end = @min(@as(usize, offset), source.len);
+    const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..end], '\n')) |nl| nl + 1 else 0;
+    return .{ .line = @intCast(std.mem.count(u8, source[0..line_start], "\n") + 1), .col = @intCast(end - line_start + 1) };
 }
 
 fn emitDeprecationAt(
@@ -321,6 +410,7 @@ fn emitDeprecationAt(
     path: []const u8,
     line: u32,
     col: u32,
+    end_col: u32,
 ) !void {
     if (opts.probe) return error.SassError;
     if (active_recorder) |recorder| recorder.record(kind, msg, path, line, col);
@@ -336,27 +426,48 @@ fn emitDeprecationAt(
     }
     if (opts.quiet) return;
     if (opts.silenced.contains(kind)) return;
-    if (!opts.verbose and opts.emitted.contains(kind)) return;
+    if (!opts.verbose) {
+        const shown = opts.shown_counts.get(kind);
+        if (shown >= max_repeated_warnings) {
+            opts.omitted += 1;
+            return;
+        }
+        opts.shown_counts.set(kind, shown + 1);
+    }
     opts.emitted.insert(kind);
 
     var err_file = std.Io.File.stderr();
     var err_buf: [1024]u8 = undefined;
     var err_w = err_file.writer(zsass_io.io, err_buf[0..]);
-    err_w.interface.print(
-        "DEPRECATION WARNING [{s}]: {s}\n  {s} {d}:{d}\n",
-        .{ kind.kindName(), msg, path, line, col },
-    ) catch {};
+    err_w.interface.print("DEPRECATION WARNING [{s}]: {s}\n\n", .{ kind.kindName(), msg }) catch {};
     err_w.interface.flush() catch |flush_err| {
         switch (flush_err) {
             else => {},
         }
     }; // best-effort logging
+    writeWarningLocation(path, line, col, end_col);
+    err_w.interface.writeAll("\n") catch {};
+    err_w.interface.flush() catch {};
 
     if (opts.trace_deprecation) {
         error_format.writeStackTrace(std.heap.c_allocator) catch |trace_err| switch (trace_err) {
             else => {},
         };
     }
+}
+
+/// As the official CLI: five warnings of each kind, then a count.
+const max_repeated_warnings: u32 = 5;
+
+/// "WARNING: N repetitive deprecation warnings omitted." once a
+/// compilation is done, when any were.
+pub fn writeOmittedSummary(opts: *const DeprecationOpts) void {
+    if (opts.omitted == 0 or opts.quiet) return;
+    var err_file = std.Io.File.stderr();
+    var err_buf: [256]u8 = undefined;
+    var err_w = err_file.writer(zsass_io.io, err_buf[0..]);
+    err_w.interface.print("WARNING: {d} repetitive deprecation warnings omitted.\nRun in verbose mode to see all warnings.\n\n", .{opts.omitted}) catch {};
+    err_w.interface.flush() catch {};
 }
 
 pub const DeprecationSetType = enum { silence, fatal, future };
