@@ -223,10 +223,6 @@ fn piecesOf(a: Allocator, complex: *const ComplexSelector, mark: Specificity) Er
 }
 
 /// A deep copy of `items` in `a`, sharing nothing with where they were made.
-/// Below this, the extension steps of one selector keep everything they
-/// made; compacting would cost more than it saves.
-const compact_min_bytes: usize = 1 << 20;
-
 fn cloneItems(a: Allocator, items: []const Item) Error![]Item {
     const out = try a.alloc(Item, items.len);
     for (items, out) |item, *copy| {
@@ -703,35 +699,26 @@ pub const Engine = struct {
 
         var next_step: u32 = 0;
         while (next_step < self.steps.items.len and self.steps.items[next_step].order < snapshot) next_step += 1;
-        // Each step's result goes into an arena that keeps it with what the
-        // steps before left. When that arena holds several times what the
-        // current items need, they are copied to a fresh one and the old
-        // one is freed: a selector extended by many `@extend`s in turn holds
-        // a bounded multiple of its live size, and each item is copied a
-        // constant number of times on average, not once per step.
+        // Each step works in an arena of its own and keeps only a copy of its
+        // result, so a selector extended by many `@extend`s in turn holds one
+        // step's worth of memory, not the work of every step before.
         const parent = scratch.child_allocator;
-        var kept = std.heap.ArenaAllocator.init(parent);
-        defer kept.deinit();
-        var live_bytes: usize = 0;
+        var kept: ?std.heap.ArenaAllocator = null;
+        defer if (kept) |*k| k.deinit();
         while (true) {
             // Steps can be many; a caller's deadline applies between them.
             if (self.budget) |b| try b.checkCancelled();
-            const step_index = blk: {
-                var probe = std.heap.ArenaAllocator.init(parent);
-                defer probe.deinit();
-                break :blk try self.firstStepHeld(probe.allocator(), current, next_step) orelse break;
-            };
-            current = try self.extendItems(kept.allocator(), current, .{ .step = step_index });
+            var work = std.heap.ArenaAllocator.init(parent);
+            defer work.deinit();
+            const step_index = try self.firstStepHeld(work.allocator(), current, next_step) orelse break;
+            const extended = try self.extendItems(work.allocator(), current, .{ .step = step_index });
+            var next = std.heap.ArenaAllocator.init(parent);
+            errdefer next.deinit();
+            const copied = try cloneItems(next.allocator(), extended);
+            if (kept) |*k| k.deinit();
+            kept = next;
+            current = copied;
             next_step = step_index + 1;
-            const held = kept.queryCapacity();
-            if (held > compact_min_bytes and held > live_bytes *| 4) {
-                var next = std.heap.ArenaAllocator.init(parent);
-                errdefer next.deinit();
-                current = try cloneItems(next.allocator(), current);
-                kept.deinit();
-                kept = next;
-                live_bytes = kept.queryCapacity();
-            }
         }
 
         var result = SelectorList.init(out);

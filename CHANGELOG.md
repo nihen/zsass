@@ -82,10 +82,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `@extend` with many extenders of one selector is about 20% faster: each
-  extension step's copy of the selector is amortized instead of repeated,
-  and the duplicate-extender check looks only at entries with an equal
-  extender. Memory stays within a fixed multiple of the live selector.
+- `@extend` with many extenders of one selector is about 8% faster: the
+  duplicate-extender check looks only at entries with an equal extender.
 
 
 ## 0.5.1 (2026-11-27)
