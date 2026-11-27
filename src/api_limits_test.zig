@@ -1144,7 +1144,7 @@ test "errors: a map or an empty list is not a CSS value, in a declaration or an 
     try std.testing.expectEqualStrings("a {\n  --c: (x: 1);\n}\n", try compile(a, "a { --c: (x: 1); }", "", &.{}, quiet));
 }
 
-test "variables: a configuration from a variable that a deprecated call sets" {
+test "math: CSS min() and max() compare each argument with the first" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
