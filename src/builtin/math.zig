@@ -286,10 +286,31 @@ fn knownCalculationUnitsIncompatible(unit_a: ?[]const u8, unit_b: ?[]const u8) b
     const a = unit_a.?;
     const b = unit_b.?;
     if (std.mem.eql(u8, a, b)) return false;
-    const cat_a = unitCategory(a);
-    const cat_b = unitCategory(b);
+    const cat_a = unitFamilyIgnoringCase(a);
+    const cat_b = unitFamilyIgnoringCase(b);
     if (cat_a == .unknown or cat_b == .unknown) return false;
     return cat_a != cat_b;
+}
+
+/// The family of a unit for telling whether two are known to be
+/// incompatible, which ignores case (`min(1PX, 1s)` is an error), unlike
+/// conversion (`1PX + 1px` is too).
+fn unitFamilyIgnoringCase(unit: []const u8) UnitCategory {
+    const families = [_]struct { name: []const u8, cat: UnitCategory }{
+        .{ .name = "px", .cat = .length },       .{ .name = "cm", .cat = .length },
+        .{ .name = "mm", .cat = .length },       .{ .name = "in", .cat = .length },
+        .{ .name = "pt", .cat = .length },       .{ .name = "pc", .cat = .length },
+        .{ .name = "q", .cat = .length },        .{ .name = "deg", .cat = .angle },
+        .{ .name = "rad", .cat = .angle },       .{ .name = "grad", .cat = .angle },
+        .{ .name = "turn", .cat = .angle },      .{ .name = "s", .cat = .time },
+        .{ .name = "ms", .cat = .time },         .{ .name = "hz", .cat = .frequency },
+        .{ .name = "khz", .cat = .frequency },   .{ .name = "dpi", .cat = .resolution },
+        .{ .name = "dpcm", .cat = .resolution }, .{ .name = "dppx", .cat = .resolution },
+    };
+    for (families) |f| {
+        if (std.ascii.eqlIgnoreCase(unit, f.name)) return f.cat;
+    }
+    return .unknown;
 }
 
 fn toCanonical(value: f64, unit: []const u8) ?f64 {

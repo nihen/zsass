@@ -1078,3 +1078,13 @@ test "units: CSS math keeps units differing in case" {
     const a = arena.allocator();
     try std.testing.expectEqualStrings("a {\n  b: min(2px, 3PX);\n  c: calc(2px + 3PX);\n  d: calc(1em + 2EM);\n  e: calc(2q + 3Q);\n}\n", try compile(a, "a { b: min(2px, 3PX); c: calc(2px + 3PX); d: calc(1em + 2EM); e: calc(2q + 3Q); }", "", &.{}, quiet));
 }
+
+test "units: CSS math rejects units known incompatible whatever their case" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "a { b: calc(1PX + 1s); }", "a { b: calc(1Q + 1deg); }", "a { b: min(1PX, 1s); }" }) |src| {
+        if (compile(a, src, "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    }
+    try std.testing.expectEqualStrings("a {\n  b: calc(1X + 1s);\n}\n", try compile(a, "a { b: calc(1X + 1s); }", "", &.{}, quiet));
+}
