@@ -1666,6 +1666,10 @@ fn nodeContainsCalcArgOpaqueCssFunction(ast: *const ast_flat.Ast, ctx: *Ctx, nod
 }
 
 fn resolveCalcArgInterpPart(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex, span: Span) ResolveError!ExprIndex {
+    // Interpolated Sass is not part of a surrounding calculation.
+    const saved_in_calculation = ctx.in_calculation_args;
+    ctx.in_calculation_args = false;
+    defer ctx.in_calculation_args = saved_in_calculation;
     const n = ast.getNode(node);
     if (extractCalcArgStaticNumberInfo(ast, ctx, node)) |num| {
         return try appendNumberLiteral(ctx.prog, ctx.a, num.value, num.unit_id, span);
@@ -3507,6 +3511,10 @@ fn resolveExprUnquotedIdent(ctx: *Ctx, n: AstNode, span: Span) ResolveError!Expr
 }
 
 fn resolveExprTextTemplate(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex, span: Span) ResolveError!ExprIndex {
+    // Interpolated Sass is not part of a surrounding calculation.
+    const saved_in_calculation = ctx.in_calculation_args;
+    ctx.in_calculation_args = false;
+    defer ctx.in_calculation_args = saved_in_calculation;
     const text_storage = try astTextNodeRawAlloc(ctx.a, ast, ctx.pool, node);
     defer ctx.a.free(text_storage);
     const text = text_storage;
@@ -3702,7 +3710,7 @@ fn resolveExprParen(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Span)
         const li = try resolveExpr(ast, ctx, lhs);
         const ri = try resolveExpr(ast, ctx, rhs);
         const bidx: u32 = @intCast(ctx.prog.binary_exprs.items.len);
-        try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = .div, .in_calculation = ctx.calc_arg_mode or ctx.in_calculation_args });
+        try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = .div, .in_calculation = ctx.in_calculation_args });
         // Spanned as written inside the parentheses, as diagnostics show it.
         const inner_span = Span{ .start = inner_node.span_start, .end = inner_node.span_end };
         return try appendExpr(ctx.prog, ctx.a, .{ .kind = .binary, .payload = bidx, .span = inner_span });
@@ -3711,6 +3719,10 @@ fn resolveExprParen(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Span)
 }
 
 fn resolveExprStringInterp(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Span) ResolveError!ExprIndex {
+    // Interpolated Sass is not part of a surrounding calculation.
+    const saved_in_calculation = ctx.in_calculation_args;
+    ctx.in_calculation_args = false;
+    defer ctx.in_calculation_args = saved_in_calculation;
     const off: ExtraIndex = n.payload;
     const quoted = (n.flags & 1) != 0;
     const part_count = ast.getExtraU32(off);
@@ -3867,8 +3879,8 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
     // The arguments of a CSS calculation function are a calculation's,
     // where `/` divides without a deprecation; those of any other call are
     // not, even inside one.
-    const args_in_calculation = calc_arg_mode or
-        (ns_id == .none and !has_custom_function_binding and isCssCalculationFunctionName(name_slice));
+    const args_in_calculation = ns_id == .none and !has_custom_function_binding and
+        (calc_arg_mode or isCssCalculationFunctionName(name_slice));
     const calc_arg_allow_numberish_ident_literals = is_css_math_legacy_call;
     const preserve_unquote_calc_first_arg =
         ns_id == .none and (identifierEq(name_slice, "invert") or identifierEq(name_slice, "saturate"));
@@ -4328,7 +4340,7 @@ fn resolveExprRecorded(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex, n: 
                 break :ri try resolveExpr(ast, ctx, rhs);
             };
             const bidx: u32 = @intCast(ctx.prog.binary_exprs.items.len);
-            try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = mapBinOp(op), .in_calculation = ctx.calc_arg_mode or ctx.in_calculation_args });
+            try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = mapBinOp(op), .in_calculation = ctx.in_calculation_args });
             return try appendExpr(ctx.prog, ctx.a, .{ .kind = .binary, .payload = bidx, .span = span });
         },
         .expr_unary_op => {
@@ -4422,6 +4434,10 @@ fn resolveExprRecorded(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex, n: 
         },
         .expr_interp => {
             const inner: NodeIndex = @fromBackingInt(@intCast(n.payload));
+            // Interpolated Sass is not part of a surrounding calculation.
+            const saved_in_calculation = ctx.in_calculation_args;
+            ctx.in_calculation_args = false;
+            defer ctx.in_calculation_args = saved_in_calculation;
             const inner_e = try resolveExpr(ast, ctx, inner);
             const part = [_]ExprIndex{inner_e};
             return try appendInterpExprResolved(ctx, &part, span, false);
