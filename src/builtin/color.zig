@@ -1317,6 +1317,14 @@ pub fn color_hwb(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
     return color_hwbImpl(ctx, args, arg_names) catch |err| explainedColorError(ctx, .hwb, args, arg_names, err);
 }
 
+/// The global hwb() has only the one-argument form; its arguments are
+/// otherwise bound as color.hwb() binds them.
+pub fn global_hwb(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    if (args.len != 1) return error.BuiltinArity;
+    if (arg_names.len > 0 and arg_names[0] != .none and !shared.argNameMatches(ctx, arg_names[0], "channels")) return error.BuiltinArity;
+    return color_hwb(ctx, args, arg_names);
+}
+
 const MixHueMethod = enum {
     shorter,
     longer,

@@ -159,6 +159,9 @@ pub fn sassFunctionForCssMathGlobal(id: Id) Id {
     };
 }
 
+/// The global hwb(), which unlike color.hwb() takes only `$channels`.
+pub const global_hwb_id: Id = 191;
+
 pub fn resolveLegacyGlobal(name: []const u8) ?Id {
     // `scale()` is frequently used as a CSS transform function and is a Sass legacy global
     // Not builtin. Only `scale-color()` is builtin resolved.
@@ -180,6 +183,7 @@ pub fn resolveLegacyGlobal(name: []const u8) ?Id {
     if (shared.identifierEq(name, "alpha")) return 185;
     if (shared.identifierEq(name, "opacity")) return 186;
     if (shared.identifierEq(name, "grayscale")) return 187;
+    if (shared.identifierEq(name, "hwb")) return global_hwb_id;
     if (shared.identifierEq(name, "scale-color")) return 49;
     if (shared.identifierEq(name, "adjust-color")) return 50;
     if (shared.identifierEq(name, "change-color")) return 51;
@@ -690,6 +694,7 @@ pub fn dispatch(ctx: *BuiltinContext, id: Id, args: []const Value, arg_names: []
         89 => color.color_transparentize(ctx, args),
         90 => color.color_ie_hex_str(ctx, args),
         91 => color.color_hwb(ctx, args, arg_names),
+        global_hwb_id => color.global_hwb(ctx, args, arg_names),
         60 => list.list_append(ctx, args, arg_names),
         61 => list.list_index(ctx, args, arg_names),
         62 => list.list_join(ctx, args, arg_names),

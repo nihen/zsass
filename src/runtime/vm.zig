@@ -9525,6 +9525,7 @@ inline fn builtinSkipsSlashFreeCoercion(builtin_id: u32) bool {
         42,
         52,
         91,
+        builtin_mod.global_hwb_id,
         92,
         93,
         94,
