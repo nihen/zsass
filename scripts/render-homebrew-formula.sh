@@ -7,7 +7,11 @@
 # given by --output.
 #
 # Usage:
-#   scripts/render-homebrew-formula.sh <version> [--output <path>]
+#   scripts/render-homebrew-formula.sh <version> [--verified <file>] [--output <path>]
+#
+#   --verified takes the output of scripts/verify-release-assets.sh
+#   (`<asset> <sha256>` lines); the digests then come from there instead
+#   of the published .sha256 files.
 #
 #   <version> may be `0.1.0` or `v0.1.0`; the leading `v` is stripped.
 #
@@ -25,8 +29,17 @@ raw_version="$1"
 shift
 
 output_path=""
+verified_path=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --verified)
+            verified_path="${2:-}"
+            if [[ -z "${verified_path}" ]]; then
+                echo "$0: --verified requires a path" >&2
+                exit 64
+            fi
+            shift 2
+            ;;
         -o|--output)
             output_path="${2:-}"
             if [[ -z "${output_path}" ]]; then
@@ -61,6 +74,16 @@ fetch_sha() {
     local url="${release_url_base}/${archive}.sha256"
     local out="${tmpdir}/${archive}.sha256"
 
+    if [[ -n "${verified_path}" ]]; then
+        local digest
+        digest="$(awk -v a="${archive}" '$1 == a {print $2; exit}' "${verified_path}")"
+        if [[ ! "${digest}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "$0: ${archive} is not in ${verified_path}" >&2
+            exit 65
+        fi
+        sha["${os}-${arch}"]="${digest}"
+        return
+    fi
     if ! curl -fsSL "${url}" -o "${out}"; then
         echo "$0: failed to fetch ${url}" >&2
         exit 65

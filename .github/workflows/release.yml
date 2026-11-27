@@ -22,9 +22,40 @@ env:
   TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
+  # Release only a tag that names a version on main, from a run started at
+  # that tag: the signing certificate names the run's ref, and users verify
+  # against the tag. Later jobs check out the commit verified here.
+  verify:
+    name: Verify the release tag
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.check.outputs.sha }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the tag
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          num='(0|[1-9][0-9]*)'
+          ident='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          [[ "${TAG}" =~ ^v${num}\.${num}\.${num}(-${ident}(\.${ident})*)?$ ]] || fail "not a vX.Y.Z tag: ${TAG}"
+          [[ "${GITHUB_REF}" == "refs/tags/${TAG}" ]] || fail "run from ${GITHUB_REF}, not refs/tags/${TAG}; dispatch with: gh workflow run release.yml --ref ${TAG} -f tag=${TAG}"
+          sha="$(git rev-parse --verify "refs/tags/${TAG}^{commit}")" || fail "no tag ${TAG}"
+          git merge-base --is-ancestor "${sha}" origin/main || fail "${TAG} is not on main"
+          version="$(git show "${sha}:build.zig.zon" | awk -F '"' '/^[[:space:]]*\.version[[:space:]]*=/{print $2; exit}')"
+          [[ "v${version}" == "${TAG}" ]] || fail "build.zig.zon version ${version} does not match ${TAG}"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runs_on }}
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
@@ -59,7 +90,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ needs.verify.outputs.sha }}
           submodules: recursive
           persist-credentials: false
 
@@ -121,17 +152,28 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  # The only job in the `release` environment, so its protection rules
+  # (reviewers, allowed tags) apply once, before anything is published.
+  approve:
+    name: Approve the release
+    runs-on: ubuntu-latest
+    needs: [verify, build]
+    environment: release
+    steps:
+      - name: Approved
+        run: echo "Publishing ${TAG}"
+
   publish:
     name: Sign and publish release
     runs-on: ubuntu-latest
-    needs: build
+    needs: [verify, build, approve]
     permissions:
       contents: write
       id-token: write    # required for sigstore keyless signing (cosign sign-blob)
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ needs.verify.outputs.sha }}
           persist-credentials: false
 
       - name: Download all build artifacts
@@ -186,10 +228,33 @@ jobs:
             sha256sum -c "${sha}"
           done
 
+      # The tag could have moved since verify ran.
+      - name: Check that the tag still names the verified commit
+        shell: bash
+        env:
+          VERIFIED_SHA: ${{ needs.verify.outputs.sha }}
+        run: |
+          set -euo pipefail
+          remote="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${TAG}^{}" "refs/tags/${TAG}" \
+            | awk '{print $1}' | tail -n1)"
+          if [[ "${remote}" != "${VERIFIED_SHA}" ]]; then
+            echo "::error::refs/tags/${TAG} now names ${remote:-nothing}, not the verified ${VERIFIED_SHA}"
+            exit 1
+          fi
+
       - name: Install cosign
         uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9  # v3
         with:
           cosign-release: 'v2.4.1'
+
+      # The installers are published from the tag and signed like the
+      # archives, so users can verify the script before running it instead
+      # of piping the default branch into a shell.
+      - name: Add the installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/install.sh scripts/install.ps1 dist/
 
       - name: Sign each artifact (sigstore keyless)
         shell: bash
@@ -202,7 +267,7 @@ jobs:
             echo "::error::No archives found to sign"
             exit 1
           fi
-          for asset in "${archives[@]}"; do
+          for asset in "${archives[@]}" install.sh install.ps1; do
             cosign sign-blob --yes \
               --output-signature "${asset}.sig" \
               --output-certificate "${asset}.pem" \
@@ -219,20 +284,26 @@ jobs:
             dist/zsass-v*.sha256
             dist/zsass-v*.sig
             dist/zsass-v*.pem
+            dist/install.sh
+            dist/install.sh.sig
+            dist/install.sh.pem
+            dist/install.ps1
+            dist/install.ps1.sig
+            dist/install.ps1.pem
           fail_on_unmatched_files: true
           generate_release_notes: true
 
   container:
     name: Publish GHCR image
     runs-on: ubuntu-latest
-    needs: publish
+    needs: [verify, publish]
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ needs.verify.outputs.sha }}
           persist-credentials: false
 
       - name: Derive image version
@@ -288,7 +359,7 @@ jobs:
   homebrew:
     name: Update homebrew-tap formula
     runs-on: ubuntu-latest
-    needs: publish
+    needs: [verify, publish]
     # Co-locating the tap update in the same workflow as `publish` is
     # what makes the chain self-driving: the previous standalone
     # workflow listened for `release: published`, but releases minted
@@ -312,7 +383,7 @@ jobs:
         if: steps.token.outputs.skip != 'true'
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ needs.verify.outputs.sha }}
           path: zsass
           persist-credentials: false
 
@@ -325,6 +396,29 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
 
+      # The formula pins the archives' sha256. Take them only from archives
+      # that carry the release workflow's signature for this tag.
+      - name: Install cosign
+        if: steps.token.outputs.skip != 'true'
+        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9  # v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Verify the release archives
+        if: steps.token.outputs.skip != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ env.TAG }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          assets=()
+          for target in macos-aarch64 macos-x86_64 linux-aarch64 linux-x86_64; do
+            assets+=("zsass-v${version}-${target}.tar.gz")
+          done
+          zsass/scripts/verify-release-assets.sh "v${version}" "${assets[@]}" \
+            > "${RUNNER_TEMP}/verified-sha256.txt"
+
       - name: Render formula
         if: steps.token.outputs.skip != 'true'
         shell: bash
@@ -335,6 +429,7 @@ jobs:
           version="${VERSION#v}"
           mkdir -p homebrew-tap/Formula
           zsass/scripts/render-homebrew-formula.sh "${version}" \
+            --verified "${RUNNER_TEMP}/verified-sha256.txt" \
             --output homebrew-tap/Formula/zsass.rb
 
       - name: Commit and push

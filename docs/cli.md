@@ -9,23 +9,18 @@ machine-friendly outputs.
 
 ### Pre-built binary (no Zig required)
 
-For day-to-day use you don't need a Zig toolchain - just download the
-release tarball and run the installer:
-
-```bash
-# Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/nihen/zsass/main/scripts/install.sh | sh
-
-# Windows (PowerShell)
-iwr -useb https://raw.githubusercontent.com/nihen/zsass/main/scripts/install.ps1 | iex
-```
+For day-to-day use you don't need a Zig toolchain. Download the installer
+from a release, verify its signature, and run it, as the
+[README](../README.md#install) shows.
 
 The installer auto-detects OS / arch, downloads the matching artifact from
 [GitHub Releases](https://github.com/nihen/zsass/releases), verifies its
-SHA256, and installs the binary under `<prefix>/bin` (default
-`~/.local/bin` on Unix, `%LOCALAPPDATA%\zsass\bin` on Windows). Pin a
-version with `--version v0.1.0` or change the destination with
-`--prefix ~/opt/zsass`.
+SHA256 and its Sigstore signature with cosign, and installs the binary
+under `<prefix>/bin` (default `~/.local/bin` on Unix,
+`%LOCALAPPDATA%\zsass\bin` on Windows). Pin a version with
+`--version v0.1.0` or change the destination with `--prefix ~/opt/zsass`.
+Without cosign it stops; `--skip-signature` installs without the
+signature check.
 
 ### From source
 

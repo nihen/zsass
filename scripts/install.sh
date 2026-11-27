@@ -2,18 +2,18 @@
 # zsass binary installer.
 #
 # Detects OS / arch, downloads the matching tarball from GitHub Releases,
-# verifies its SHA256, and installs the binary into <prefix>/bin.
+# verifies its SHA256 and its Sigstore signature with cosign, and installs
+# the binary into <prefix>/bin. Without cosign it stops, unless
+# --skip-signature is given.
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/nihen/zsass/main/scripts/install.sh | sh
-#   curl -fsSL .../install.sh | sh -s -- --version v0.1.0 --prefix ~/opt/zsass
-#
-# Or invoke directly from a checkout:
-#   scripts/install.sh --prefix ~/.local
+# Usage (README.md shows how to verify this script before running it):
+#   sh install.sh
+#   sh install.sh --version v0.1.0 --prefix ~/opt/zsass
 #
 # Environment overrides:
-#   ZSASS_INSTALL_PREFIX   default install prefix (default: $HOME/.local)
-#   ZSASS_VERSION          default version to install (default: latest release)
+#   ZSASS_INSTALL_PREFIX          default install prefix (default: $HOME/.local)
+#   ZSASS_VERSION                 default version to install (default: latest release)
+#   ZSASS_INSTALL_SKIP_SIGSTORE=1 same as --skip-signature
 
 set -eu
 
@@ -22,6 +22,7 @@ BIN_NAME="zsass"
 
 PREFIX="${ZSASS_INSTALL_PREFIX:-$HOME/.local}"
 VERSION="${ZSASS_VERSION:-}"
+SKIP_SIGNATURE="${ZSASS_INSTALL_SKIP_SIGSTORE:-0}"
 
 usage() {
   cat <<'EOF'
@@ -30,6 +31,8 @@ Usage: install.sh [options]
 Options:
   --prefix <dir>     Install prefix; binary goes to <dir>/bin (default: $HOME/.local)
   --version <ver>    Version tag to install, e.g. v0.1.0 (default: latest)
+  --skip-signature   Install without checking the Sigstore signature
+                     (only the SHA256 from the same release is checked)
   -h, --help         Show this help text
 EOF
 }
@@ -42,6 +45,8 @@ while [ $# -gt 0 ]; do
     --version)
       [ $# -ge 2 ] || { echo "--version requires a value" >&2; exit 64; }
       VERSION="$2"; shift 2 ;;
+    --skip-signature)
+      SKIP_SIGNATURE=1; shift ;;
     -h|--help)
       usage; exit 0 ;;
     *)
@@ -62,6 +67,19 @@ require curl
 require tar
 require uname
 require mktemp
+
+if [ "$SKIP_SIGNATURE" != "1" ] && ! command -v cosign >/dev/null 2>&1; then
+  {
+    echo "[zsass-install] cosign is required to verify the release signature, and it was not found."
+    echo "[zsass-install] Install cosign (https://docs.sigstore.dev/cosign/system_config/installation/),"
+    echo "[zsass-install] for example:"
+    echo "[zsass-install]   macOS:  brew install cosign"
+    echo "[zsass-install]   Linux:  a binary or package from https://github.com/sigstore/cosign/releases"
+    echo "[zsass-install] then run this installer again. To install without the signature check,"
+    echo "[zsass-install] pass --skip-signature (or set ZSASS_INSTALL_SKIP_SIGSTORE=1)."
+  } >&2
+  exit 1
+fi
 
 uname_s="$(uname -s)"
 case "$uname_s" in
@@ -121,25 +139,22 @@ else
   exit 1
 fi
 
-# Opportunistic sigstore verification: when `cosign` is on PATH, we
-# additionally download the .sig / .pem sidecars and require a clean
-# verify-blob against the tag-specific OIDC identity. If cosign is missing
-# we skip silently (SHA256 + GitHub TLS still apply); if cosign is
-# present but verification fails, we abort.
-if [ "${ZSASS_INSTALL_SKIP_SIGSTORE:-0}" = "1" ]; then
-  echo "[zsass-install] note: ZSASS_INSTALL_SKIP_SIGSTORE=1 set; skipping signature verification"
-elif command -v cosign >/dev/null 2>&1; then
-  echo "[zsass-install] cosign found; verifying sigstore signature (fail-closed)"
-  if ! curl -fSL --retry 3 "${url}.sig" -o "$tmp/$asset.sig"; then
-    echo "[zsass-install] FAILED to download ${asset}.sig from a release that should publish it." >&2
-    echo "[zsass-install] Aborting install. Set ZSASS_INSTALL_SKIP_SIGSTORE=1 to bypass." >&2
-    exit 1
-  fi
-  if ! curl -fSL --retry 3 "${url}.pem" -o "$tmp/$asset.pem"; then
-    echo "[zsass-install] FAILED to download ${asset}.pem from a release that should publish it." >&2
-    echo "[zsass-install] Aborting install. Set ZSASS_INSTALL_SKIP_SIGSTORE=1 to bypass." >&2
-    exit 1
-  fi
+# The SHA256 sidecar comes from the same place as the archive, so it only
+# catches a damaged download. The Sigstore signature ties the archive to
+# this repository's release workflow at this tag; it is checked before
+# anything is extracted or run.
+if [ "$SKIP_SIGNATURE" = "1" ]; then
+  echo "[zsass-install] WARNING: skipping the Sigstore signature check as requested." >&2
+  echo "[zsass-install] WARNING: the archive is trusted only as far as the download location is." >&2
+else
+  echo "[zsass-install] verifying sigstore signature"
+  for ext in sig pem; do
+    if ! curl -fSL --retry 3 "${url}.${ext}" -o "$tmp/$asset.${ext}"; then
+      echo "[zsass-install] FAILED to download ${asset}.${ext} from the release." >&2
+      echo "[zsass-install] Aborting install. Pass --skip-signature to install without the signature check." >&2
+      exit 1
+    fi
+  done
   if ! cosign verify-blob \
        --certificate "$tmp/$asset.pem" \
        --signature   "$tmp/$asset.sig" \
@@ -150,8 +165,6 @@ elif command -v cosign >/dev/null 2>&1; then
     exit 1
   fi
   echo "[zsass-install] sigstore signature OK"
-else
-  echo "[zsass-install] note: cosign not in PATH; skipping signature verification (run cosign verify-blob manually for hardened install)"
 fi
 
 echo "[zsass-install] extracting"

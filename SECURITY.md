@@ -83,6 +83,13 @@ Every release archive is published with two integrity layers:
      <asset>
    ```
 
+The installers (`install.sh`, `install.ps1`) are release assets signed the
+same way; verify them before running them, as the README shows. They
+check each archive's signature with cosign before extracting it, and stop
+when cosign is missing unless `--skip-signature` (`-SkipSignature`) is
+given. The container image and the Homebrew formula are built only from
+archives whose signature verifies.
+
 If signature verification fails for an artifact downloaded from
 <https://github.com/nihen/zsass/releases>, please report it through the
 private channels above before installing.
