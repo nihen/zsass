@@ -8763,8 +8763,14 @@ fn resolveVariableDeclStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtI
                     break :blk try encodeCrossAssignSlot(target.module_id, target.slot);
                 }
             }
-            if (lookupGlobalSlot(ctx.prog, name)) |s| break :blk s;
-            break :blk try ctx.declareGlobal(name_id);
+            const global_slot = lookupGlobalSlot(ctx.prog, name) orelse try ctx.declareGlobal(name_id);
+            // Set by an assignment that may never run: reading it unset is
+            // an error, as for a slot a callable's reference made. One that
+            // does run marks it declared.
+            if (ctx.in_callable or ctx.flow_control_depth > 0) {
+                try ctx.prog.unknown_global_slots.append(ctx.a, global_slot);
+            }
+            break :blk global_slot;
         } else blk: {
             if ((flags_u & 2) != 0) {
                 if (lookupGlobalSlot(ctx.prog, ctx.pool.get(name_id))) |s| break :blk s;

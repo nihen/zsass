@@ -1036,3 +1036,11 @@ test "variables: a new variable in a top-level block is not the global a mixin r
     if (compile(a, "@mixin m { b: $u; } @if true { $u: 2px; } .a { @include m; }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
     try std.testing.expectEqualStrings(".a {\n  b: 2px;\n}\n", try compile(a, "@mixin m { b: $u; } $u: 1px; @if true { $u: 2px; } .a { @include m; }", "", &.{}, quiet));
 }
+
+test "variables: a global only an unrun !global sets is undefined in a mixin" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    if (compile(a, "@mixin m { @if false { $u: 1 !global; } b: $u; } .a { @include m; }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expectEqualStrings(".a {\n  b: 3px;\n}\n", try compile(a, "@mixin s { $u: 3px !global; } @mixin m { b: $u; } .a { @include s; @include m; }", "", &.{}, quiet));
+}

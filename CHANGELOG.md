@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- A function or mixin that reads a global only a `!global` assignment
+  inside a callable or flow block sets, which has not run, fails with
+  "Undefined variable." instead of reading null.
 - Deprecation warnings from built-in functions are located where the
   function was called, instead of at `0:0`.
 - `math.random()`, `list.nth()`, and `list.set-nth()` warn
