@@ -1,5 +1,6 @@
 const std = @import("std");
 const stack_guard = @import("stack_guard.zig");
+const deprecation_mod = @import("deprecation.zig");
 const css_utils = @import("css_utils.zig");
 const builtin_mod = @import("../builtin/mod.zig");
 const color_mod = @import("../color/color.zig");
@@ -84,6 +85,14 @@ fn builtinPreservesSlashLists(builtin_id: u32) bool {
     };
 }
 
+fn builtinCallSite(self: anytype) ?deprecation_mod.CallSite {
+    const fid: usize = @intCast(self.current_source_span.file_id);
+    if (fid >= self.program.modules.len) return null;
+    const mod = self.program.modules[fid];
+    if (mod.module_path.len == 0) return null;
+    return .{ .path = mod.module_path, .line_starts = mod.line_starts, .offset = self.current_source_span.start };
+}
+
 pub fn dispatchBuiltinArgs(self: anytype, builtin_id: u32, args: []const Value, arg_names: []const InternId) !Value {
     perf.note(.vm_call_builtin);
     perf.note(.builtin_call);
@@ -111,6 +120,9 @@ pub fn dispatchBuiltinArgs(self: anytype, builtin_id: u32, args: []const Value, 
         .deprecation_opts = &self.deprecation_opts,
         .budget = self.budget,
     };
+    const saved_site = deprecation_mod.builtin_call_site;
+    deprecation_mod.builtin_call_site = builtinCallSite(self);
+    defer deprecation_mod.builtin_call_site = saved_site;
     const out = builtin_mod.dispatch(&bctx, builtin_id, args, arg_names) catch |e| {
         return reportBuiltinDispatchFailure(self, builtin_id, e);
     };

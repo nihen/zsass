@@ -1902,7 +1902,18 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
     return best;
 }
 
+/// The global abs(): warns about a percentage, which a later Sass leaves to
+/// the CSS abs().
 pub fn math_abs(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    return mathAbs(ctx, args, arg_names, true);
+}
+
+/// `math.abs()`: takes a percentage without a warning.
+pub fn math_abs_module(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    return mathAbs(ctx, args, arg_names, false);
+}
+
+fn mathAbs(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId, global: bool) BuiltinError!Value {
     const bound = try bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{"number"}, 1);
     const arg = bound[0].?;
     const named = arg_names.len > 0 and arg_names[0] != .none;
@@ -1916,9 +1927,13 @@ pub fn math_abs(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     };
     if (number.kind() == .number) {
         const unit = if (number.unitId(ctx.number_pool) == .none) null else ctx.intern_pool.get(number.unitId(ctx.number_pool));
-        if (unit != null and std.ascii.eqlIgnoreCase(unit.?, "%")) {
+        if (global and unit != null and std.ascii.eqlIgnoreCase(unit.?, "%")) {
             if (ctx.deprecation_opts) |opts| {
-                try deprecation_mod.emitDeprecation(opts, .abs_percent, "abs() with percentage is deprecated", "", 0, 0);
+                const shown = try valueToCssString(ctx, number);
+                defer ctx.allocator.free(shown);
+                var buf: [512]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "Passing percentage units to the global abs() function is deprecated.\nIn the future, this will emit a CSS abs() function to be resolved by the browser.\nTo preserve current behavior: math.abs({s})\nTo emit a CSS abs() now: abs(#{{{s}}})\nMore info: https://sass-lang.com/d/abs-percent", .{ shown, shown }) catch return error.SassError;
+                try deprecation_mod.emitDeprecation(opts, .abs_percent, msg, "", 0, 0);
             }
         }
     }
@@ -2517,6 +2532,18 @@ pub fn math_rem(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     return numberLike(ctx, result, y.unitId(ctx.number_pool));
 }
 
+fn warnRandomLimitUnit(ctx: *BuiltinContext, limit: Value) BuiltinError!void {
+    const unit_id = limit.unitId(ctx.number_pool);
+    if (unit_id == .none) return;
+    const opts = ctx.deprecation_opts orelse return;
+    const unit = ctx.intern_pool.get(unit_id);
+    const shown = try numberTextForMessage(ctx, limit);
+    defer ctx.allocator.free(shown);
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "math.random() will no longer ignore $limit units ({s}) in a future release.\n\nRecommendation: math.random(math.div($limit, 1{s})) * 1{s}\n\nTo preserve current behavior: math.random(math.div($limit, 1{s}))\n\nMore info: https://sass-lang.com/d/function-units", .{ shown, unit, unit, unit }) catch return;
+    try deprecation_mod.emitDeprecation(opts, .function_units, msg, "", 0, 0);
+}
+
 pub fn math_random(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
     if (args.len > 1) return badArity(1, args.len);
     const bound = try bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{"limit"}, 0);
@@ -2527,6 +2554,7 @@ pub fn math_random(ctx: *BuiltinContext, args: []const Value, arg_names: []const
         }
 
         if (limit_value.kind() != .number) return reportArgumentTypeMismatch(ctx, "limit", limit_value, "number");
+        try warnRandomLimitUnit(ctx, limit_value);
         const raw = limit_value.asF64(ctx.number_pool);
         const rounded = shared.fuzzyInt(raw) orelse return shared.reportNotInt(ctx, "limit", limit_value);
         // Past the 64-bit range a number is not an int either.

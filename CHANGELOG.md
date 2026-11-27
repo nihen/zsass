@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- Deprecation warnings from built-in functions are located where the
+  function was called, instead of at `0:0`.
+- `math.random()`, `list.nth()`, and `list.set-nth()` warn
+  (`function-units`) about a number with a unit they ignore, and only the
+  global `abs()` warns (`abs-percent`) about a percentage, not
+  `math.abs()`, as the official CLI does.
 - A parameter default that reads a variable nothing has set, such as
   `@mixin m($x: $u)`, fails with "Undefined variable." instead of an
   internal compiler error.

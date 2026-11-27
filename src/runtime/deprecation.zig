@@ -165,6 +165,27 @@ fn mergeFatalDeprecationsForVersion(opts: *DeprecationOpts, version: SassVersion
     }
 }
 
+/// Where the built-in function being called was called, for the
+/// deprecations it raises: they have no location of their own.
+pub const CallSite = struct {
+    path: []const u8,
+    line_starts: []const u32,
+    offset: u32,
+};
+
+pub threadlocal var builtin_call_site: ?CallSite = null;
+
+fn callSiteLineCol(site: CallSite) struct { line: u32, col: u32 } {
+    var lo: usize = 0;
+    var hi: usize = site.line_starts.len;
+    if (hi == 0) return .{ .line = 1, .col = site.offset + 1 };
+    while (hi - lo > 1) {
+        const mid = (lo + hi) / 2;
+        if (site.line_starts[mid] <= site.offset) lo = mid else hi = mid;
+    }
+    return .{ .line = @intCast(lo + 1), .col = (site.offset -| site.line_starts[lo]) + 1 };
+}
+
 pub const SlashDivDeprecationSite = struct {
     opts: *DeprecationOpts,
     path: []const u8,
@@ -251,6 +272,29 @@ pub fn swapActiveRecorder(recorder: ?*DeprecationRecorder) ?*DeprecationRecorder
 }
 
 pub fn emitDeprecation(
+    opts: *DeprecationOpts,
+    kind: DeprecationKind,
+    msg: []const u8,
+    path: []const u8,
+    line: u32,
+    col: u32,
+) !void {
+    // A built-in function's warning is located where it was called.
+    var at_path = path;
+    var at_line = line;
+    var at_col = col;
+    if (path.len == 0) {
+        if (builtin_call_site) |site| {
+            const pos = callSiteLineCol(site);
+            at_path = site.path;
+            at_line = pos.line;
+            at_col = pos.col;
+        }
+    }
+    return emitDeprecationAt(opts, kind, msg, at_path, at_line, at_col);
+}
+
+fn emitDeprecationAt(
     opts: *DeprecationOpts,
     kind: DeprecationKind,
     msg: []const u8,
