@@ -4953,6 +4953,11 @@ pub const VM = struct {
             },
             .emit_error => {
                 const val = try self.pop();
+                // An error the compiler knew of, reported as any other is.
+                if (inst.arg_a == 1 and val.isString()) {
+                    error_format.setContextMessage(self.intern_pool.get(val.stringIntern()));
+                    return error.SassError;
+                }
                 const rendered_msg = try self.valueToDiagnosticMessage(val, true);
                 const msg = try css_utils.escapePrivateUseCodePoints(self.allocator, rendered_msg);
                 defer if (msg.ptr != rendered_msg.ptr) self.allocator.free(msg);

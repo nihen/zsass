@@ -2435,6 +2435,7 @@ pub fn math_sign(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
 }
 
 pub fn math_mod(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    if (try shortCalculationCall(ctx, "mod", args, arg_names, 2)) |css| return css;
     if (args.len != 2) return error.SassError;
     const bound = bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{ "y", "x" }, 2) catch return error.SassError;
     const y_arg = bound[0] orelse return error.SassError;
@@ -2505,6 +2506,7 @@ pub fn math_mod(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
 }
 
 pub fn math_rem(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    if (try shortCalculationCall(ctx, "rem", args, arg_names, 2)) |css| return css;
     if (args.len != 2) return error.SassError;
     const bound = bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{ "y", "x" }, 2) catch return error.SassError;
     const y_arg = bound[0] orelse return error.SassError;
@@ -2628,6 +2630,7 @@ pub fn math_random(ctx: *BuiltinContext, args: []const Value, arg_names: []const
 }
 
 pub fn math_clamp(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    if (try shortCalculationCall(ctx, "clamp", args, arg_names, 3)) |css| return css;
     var has_named = false;
     const named_len = @min(args.len, arg_names.len);
     for (arg_names[0..named_len]) |name_id| {
@@ -2785,6 +2788,7 @@ pub fn math_sqrt(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
 }
 
 pub fn math_pow(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    if (try shortCalculationCall(ctx, "pow", args, arg_names, 2)) |css| return css;
     const bound = try bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{ "base", "exponent" }, 2);
     const base_arg = bound[0].?;
     const exponent_arg = bound[1].?;
@@ -2863,6 +2867,24 @@ pub fn math_log(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     }
 
     return Value.numberUnitless(@log(number));
+}
+
+/// For a calculation called by its global name with fewer than `min`
+/// arguments: the CSS call when one is text the browser may read as more,
+/// else the official CLI's error. Null when there are enough, or for a
+/// sass:math call.
+fn shortCalculationCall(ctx: *BuiltinContext, comptime name: []const u8, args: []const Value, arg_names: []const InternId, min: usize) BuiltinError!?Value {
+    if (args.len >= min or args.len == 0 or !ctx.global_call) return null;
+    for (arg_names) |arg_name| {
+        if (arg_name != .none) return null;
+    }
+    for (args) |arg| {
+        if (arg.isString() and !arg.stringQuoted(ctx.string_flags_pool.items)) return try buildCssMathCall(ctx, name, args);
+    }
+    var buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{d} arguments required, but only {d} {s} passed.", .{ min, args.len, if (args.len == 1) "was" else "were" }) catch return error.SassError;
+    error_format.setContextMessage(msg);
+    return error.SassError;
 }
 
 /// "Expected 1px to have no units.", naming the parameter unless the
@@ -2982,6 +3004,7 @@ pub fn math_atan(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
 }
 
 pub fn math_atan2(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    if (try shortCalculationCall(ctx, "atan2", args, arg_names, 2)) |css| return css;
     if (args.len != 2) return error.SassError;
     const bound = bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{ "y", "x" }, 2) catch return error.SassError;
     const y_arg = bound[0] orelse return error.SassError;

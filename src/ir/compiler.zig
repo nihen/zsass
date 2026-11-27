@@ -2495,7 +2495,14 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
             try ctx.cb.emit(.load_const, 0, idx);
         },
         .sass_error => {
-            try emitForcedSassError(ctx);
+            if (ex.payload != 0) {
+                // The error a calculation's arguments make when it runs.
+                const msg_idx = try ctx.cb.addConst(Value.string(@fromBackingInt(ex.payload), false));
+                try ctx.cb.emit(.load_const, 0, msg_idx);
+                try ctx.cb.emit(.emit_error, 1, 0);
+            } else {
+                try emitForcedSassError(ctx);
+            }
         },
         .var_ref => {
             try ctx.cb.emit(.load_local, 0, remapLocalSlot(ctx, ex.payload));
