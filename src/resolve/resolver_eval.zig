@@ -13,6 +13,8 @@ const value_mod = @import("../runtime/value.zig");
 const value_format = @import("../runtime/value_format.zig");
 const css_utils = @import("../runtime/css_utils.zig");
 const intern_pool_mod = @import("../runtime/intern_pool.zig");
+const deprecation_mod = @import("../runtime/deprecation.zig");
+const error_format = @import("../runtime/error_format.zig");
 const value_eq = @import("../runtime/value_eq.zig");
 const InternId = intern_pool_mod.InternId;
 const InternPool = intern_pool_mod.InternPool;
@@ -380,8 +382,22 @@ fn evalBuiltinCall(env: anytype, prog: anytype, payload: u32) Error!Value {
         .list_index_cache = null,
         .deprecation_opts = null,
     };
+    const Env = @TypeOf(env.*);
+    const saved_site = deprecation_mod.builtin_call_site;
+    defer deprecation_mod.builtin_call_site = saved_site;
+    if (@hasDecl(Env, "builtinDeprecations")) {
+        if (env.builtinDeprecations()) |opts| {
+            bctx.deprecation_opts = opts;
+            deprecation_mod.builtin_call_site = env.builtinCallSite(call.span_start);
+        }
+    }
 
-    const result = builtin_mod.dispatch(&bctx, call.builtin_id, args, arg_names) catch {
+    const result = builtin_mod.dispatch(&bctx, call.builtin_id, args, arg_names) catch |err| {
+        // A deprecation made fatal is the compilation's error, at the call.
+        if (err == error.FatalDeprecation and bctx.deprecation_opts != null) {
+            if (call.span_start != std.math.maxInt(u32)) error_format.recordErrorSpan(call.span_start, call.span_end, 0);
+            return error.SassError;
+        }
         return error.NonStaticExpr;
     };
 

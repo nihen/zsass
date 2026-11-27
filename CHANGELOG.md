@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A calc() with variables, such as `calc($x + 1s)` with `$x: 1px`, fails
   with "1px and 1s are incompatible." instead of being kept; interpolated
   text is still not checked.
+- A deprecation raised by a built-in call in a `@use ... with` or
+  `@forward ... with` value is reported, located at the call.
+- A fatal deprecation is reported as the official CLI does: one error
+  with the deprecation's message, "This is only an error because you've
+  set the <id> deprecation to be fatal.", and the source frame of the
+  call, instead of a separate "Deprecation [<id>]" line and "Fatal
+  deprecation.".
+- The `@import` deprecation includes "More info and automated migrator:
+  https://sass-lang.com/d/import" and is located at the URL.
 - `%` between numbers with compatible units converts the right operand:
   `7cm % 1in` is `1.92cm` instead of an error.
 

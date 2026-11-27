@@ -322,19 +322,12 @@ fn emitDeprecationAt(
     if (active_recorder) |recorder| recorder.record(kind, msg, path, line, col);
     // A fatal deprecation fails the compilation even when warnings are
     // quiet or this one is silenced, as in the official CLI.
+    // The error is reported with the deprecation's message where it
+    // happened, as in the official CLI.
     if (opts.fatal.contains(kind)) {
-        var err_file = std.Io.File.stderr();
-        var err_buf: [512]u8 = undefined;
-        var err_w = err_file.writer(zsass_io.io, err_buf[0..]);
-        err_w.interface.print(
-            "Error: Deprecation [{s}]: {s}\n     on line {d}, column {d} of {s}\n",
-            .{ kind.kindName(), msg, line, col, path },
-        ) catch {};
-        err_w.interface.flush() catch |flush_err| {
-            switch (flush_err) {
-                else => {},
-            }
-        }; // best-effort logging
+        var buf: [2048]u8 = undefined;
+        const text = std.fmt.bufPrint(&buf, "{s}\n\nThis is only an error because you've set the {s} deprecation to be fatal.\nRemove this setting if you need to keep using this feature.", .{ msg, kind.kindName() }) catch msg;
+        error_format.setContextMessage(text);
         return error.FatalDeprecation;
     }
     if (opts.quiet) return;

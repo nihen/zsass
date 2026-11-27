@@ -90,15 +90,19 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: 
     }
 
     if (loader.deprecation_opts) |dep_opts| {
-        const pos = spanStartLineColOneBased(ctx.ast.source.len, ctx.prog.line_starts, span.start);
-        try deprecation_mod.emitDeprecation(
+        // Located at the URL, as the official CLI reports it.
+        const pos = spanStartLineColOneBased(ctx.ast.source.len, ctx.prog.line_starts, url_span.start);
+        deprecation_mod.emitDeprecation(
             dep_opts,
             .import,
-            "Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.",
+            "Sass @import rules are deprecated and will be removed in Dart Sass 3.0.0.\n\nMore info and automated migrator: https://sass-lang.com/d/import",
             ctx.module_path,
             pos.line,
             pos.col,
-        );
+        ) catch |err| {
+            if (err == error.FatalDeprecation) error_format.recordErrorSpan(url_span.start, url_span.end, 0);
+            return err;
+        };
     }
 
     var child_loaded = loadImportChildAst(

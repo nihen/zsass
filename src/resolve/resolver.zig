@@ -1076,12 +1076,26 @@ fn lookupModuleStaticOrConfigSeedValue(loader: *const ModuleResolver, module_id:
 const ResolverEvalEnv = struct {
     ctx: *Ctx,
     allow_configurable_defaults: bool = false,
+    /// Set when the value is evaluated only here (a module configuration):
+    /// the deprecations its built-in calls raise are reported, located at
+    /// each call. Otherwise the VM evaluates the expression again and
+    /// reports them.
+    deprecation_opts: ?*deprecation_mod.DeprecationOpts = null,
     /// Evaluate string literals to their canonical text. Set when the result
     /// is a final value (a module configuration), not compiled again.
     canonical_literals: bool = false,
 
     pub fn allocator(self: *const ResolverEvalEnv) std.mem.Allocator {
         return self.ctx.a;
+    }
+
+    pub fn builtinDeprecations(self: *const ResolverEvalEnv) ?*deprecation_mod.DeprecationOpts {
+        return self.deprecation_opts;
+    }
+
+    pub fn builtinCallSite(self: *const ResolverEvalEnv, offset: u32) ?deprecation_mod.CallSite {
+        if (offset == std.math.maxInt(u32) or self.ctx.module_path.len == 0) return null;
+        return .{ .path = self.ctx.module_path, .line_starts = self.ctx.prog.line_starts, .offset = offset };
     }
 
     /// Long-lived alloc used when appending to Sidecar Value pool (number / callable / ...).
@@ -1895,7 +1909,12 @@ fn parseWithConfigEntries(ctx: *Ctx, config_extra: ExtraIndex) ResolveError![]Wi
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.SassError,
         };
-        var env: ResolverEvalEnv = .{ .ctx = ctx, .allow_configurable_defaults = true, .canonical_literals = true };
+        var env: ResolverEvalEnv = .{
+            .ctx = ctx,
+            .allow_configurable_defaults = true,
+            .canonical_literals = true,
+            .deprecation_opts = if (ctx.loader) |loader| loader.deprecation_opts else null,
+        };
         const value = resolver_eval.eval(&env, ctx.prog, expr_idx) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.SassError,
@@ -3964,6 +3983,8 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
                     .builtin_id = bid,
                     .arg_start = astart,
                     .arg_count = @intCast(arg_buf.items.len),
+                    .span_start = span.start,
+                    .span_end = span.end,
                     .local_slot_hint = resolveBuiltinLocalSlotHint(ctx, bid, astart, @intCast(arg_buf.items.len)),
                     .prebound_kind = prebound.kind,
                     .prebound_module = prebound.module_id,
@@ -4003,6 +4024,8 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
                         .builtin_id = bid,
                         .arg_start = astart,
                         .arg_count = @intCast(arg_buf.items.len),
+                        .span_start = span.start,
+                        .span_end = span.end,
                         .local_slot_hint = resolveBuiltinLocalSlotHint(ctx, bid, astart, @intCast(arg_buf.items.len)),
                         .prebound_kind = prebound.kind,
                         .prebound_module = prebound.module_id,
@@ -4064,6 +4087,8 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
             .builtin_id = bid,
             .arg_start = astart,
             .arg_count = @intCast(arg_buf.items.len),
+            .span_start = span.start,
+            .span_end = span.end,
             .local_slot_hint = resolveBuiltinLocalSlotHint(ctx, bid, astart, @intCast(arg_buf.items.len)),
             .prebound_kind = prebound.kind,
             .prebound_module = prebound.module_id,
@@ -4089,6 +4114,8 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
                 .builtin_id = bid,
                 .arg_start = astart,
                 .arg_count = @intCast(arg_buf.items.len),
+                .span_start = span.start,
+                .span_end = span.end,
                 .local_slot_hint = resolveBuiltinLocalSlotHint(ctx, bid, astart, @intCast(arg_buf.items.len)),
                 .prebound_kind = prebound.kind,
                 .prebound_module = prebound.module_id,
