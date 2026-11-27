@@ -580,7 +580,7 @@ fn cssMathUnitsNeedPassthrough(unit_a: ?[]const u8, unit_b: ?[]const u8, preserv
     if (unit_a == null and unit_b == null) return false;
     const a = unit_a.?;
     const b = unit_b.?;
-    if (std.ascii.eqlIgnoreCase(a, b)) return false;
+    if (std.mem.eql(u8, a, b)) return false;
     if (convertUnit(1.0, a, b) != null) return false;
     return !knownCalculationUnitsIncompatible(unit_a, unit_b);
 }

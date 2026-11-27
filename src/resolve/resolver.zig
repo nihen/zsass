@@ -4384,14 +4384,14 @@ fn extractStaticNumberInfo(ast: *const ast_flat.Ast, node: NodeIndex) ?StaticNum
     };
 }
 
-fn staticUnitsEqualIgnoreCase(ctx: *Ctx, lhs: InternId, rhs: InternId) bool {
+fn staticUnitsEqual(ctx: *Ctx, lhs: InternId, rhs: InternId) bool {
     if (lhs == .none or rhs == .none) return lhs == rhs;
-    return std.ascii.eqlIgnoreCase(ctx.pool.get(lhs), ctx.pool.get(rhs));
+    return std.mem.eql(u8, ctx.pool.get(lhs), ctx.pool.get(rhs));
 }
 
 fn convertComparableUnitValueStatic(ctx: *Ctx, value: f64, from: InternId, to: InternId) ?f64 {
     if (from == .none or to == .none) return null;
-    if (staticUnitsEqualIgnoreCase(ctx, from, to)) return value;
+    if (staticUnitsEqual(ctx, from, to)) return value;
     const from_info = comparableUnitInfo(ctx.pool.get(from)) orelse return null;
     const to_info = comparableUnitInfo(ctx.pool.get(to)) orelse return null;
     if (from_info.family != to_info.family) return null;
@@ -4409,7 +4409,7 @@ fn combineStaticAddSub(ctx: *Ctx, lhs: StaticNumberInfo, rhs: StaticNumberInfo, 
     if (rhs.unit_id == .none) {
         return .{ .value = lhs.value + rhs_value, .unit_id = lhs.unit_id };
     }
-    if (staticUnitsEqualIgnoreCase(ctx, lhs.unit_id, rhs.unit_id)) {
+    if (staticUnitsEqual(ctx, lhs.unit_id, rhs.unit_id)) {
         return .{ .value = lhs.value + rhs_value, .unit_id = lhs.unit_id };
     }
     const rhs_converted = convertComparableUnitValueStatic(ctx, rhs_value, rhs.unit_id, lhs.unit_id) orelse return null;
@@ -4435,7 +4435,7 @@ fn combineStaticDiv(ctx: *Ctx, lhs: StaticNumberInfo, rhs: StaticNumberInfo) ?St
         return .{ .value = lhs.value / rhs.value, .unit_id = lhs.unit_id };
     }
     if (lhs.unit_id == .none) return null;
-    if (staticUnitsEqualIgnoreCase(ctx, lhs.unit_id, rhs.unit_id)) {
+    if (staticUnitsEqual(ctx, lhs.unit_id, rhs.unit_id)) {
         return .{ .value = lhs.value / rhs.value, .unit_id = .none };
     }
     const rhs_converted = convertComparableUnitValueStatic(ctx, rhs.value, rhs.unit_id, lhs.unit_id) orelse return null;
@@ -4538,7 +4538,7 @@ fn calcArgBinaryNeedsLiteralPreserve(
 
     const lu = ctx.pool.get(l.unit_id);
     const ru = ctx.pool.get(r.unit_id);
-    if (std.ascii.eqlIgnoreCase(lu, ru)) return false;
+    if (std.mem.eql(u8, lu, ru)) return false;
 
     const l_is_percent = std.mem.eql(u8, lu, "%");
     const r_is_percent = std.mem.eql(u8, ru, "%");

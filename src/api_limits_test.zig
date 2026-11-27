@@ -1071,3 +1071,10 @@ test "units: units are case-sensitive" {
     }
     try std.testing.expectEqualStrings("a {\n  b: 5q;\n  c: 1001Hz;\n  d: false;\n}\n", try compile(a, "@use \"sass:math\"; a { b: 1q + 1mm; c: 1Hz + 1kHz; d: math.compatible(1PX, 1in); }", "", &.{}, quiet));
 }
+
+test "units: CSS math keeps units differing in case" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("a {\n  b: min(2px, 3PX);\n  c: calc(2px + 3PX);\n  d: calc(1em + 2EM);\n}\n", try compile(a, "a { b: min(2px, 3PX); c: calc(2px + 3PX); d: calc(1em + 2EM); }", "", &.{}, quiet));
+}
