@@ -31,7 +31,7 @@ jobs:
     outputs:
       sha: ${{ steps.check.outputs.sha }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -88,7 +88,7 @@ jobs:
             exe_suffix: .exe
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
         with:
           ref: ${{ needs.verify.outputs.sha }}
           submodules: recursive
@@ -171,7 +171,7 @@ jobs:
       contents: write
       id-token: write    # required for sigstore keyless signing (cosign sign-blob)
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
         with:
           ref: ${{ needs.verify.outputs.sha }}
           persist-credentials: false
@@ -301,7 +301,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
         with:
           ref: ${{ needs.verify.outputs.sha }}
           persist-credentials: false
@@ -381,7 +381,7 @@ jobs:
 
       - name: Checkout zsass (renderer source)
         if: steps.token.outputs.skip != 'true'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
         with:
           ref: ${{ needs.verify.outputs.sha }}
           path: zsass
@@ -389,7 +389,7 @@ jobs:
 
       - name: Checkout nihen/homebrew-tap
         if: steps.token.outputs.skip != 'true'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
         # The credentials stay: the last step pushes the formula with them.
         with:
           repository: nihen/homebrew-tap
