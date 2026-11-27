@@ -391,6 +391,9 @@ pub const ResolvedProgram = struct {
     /// "Fallback when undeclared" (slot -> outer visible slot) when creating a new local with Flow-control.
     /// VM `.load_local` uses fallback only on the first read with `declared=false`.
     flow_local_fallbacks: std.ArrayListUnmanaged(FlowLocalFallback) = .empty,
+    /// Global slots made for a variable a function or mixin uses that
+    /// nothing declared when the callable was resolved.
+    unknown_global_slots: std.ArrayListUnmanaged(u32) = .empty,
 
     stmts: std.ArrayListUnmanaged(ResolvedStmt) = .empty,
 
@@ -554,6 +557,7 @@ pub const ResolvedProgram = struct {
         self.color_literals.deinit(alloc);
         self.static_slot_values.deinit(alloc);
         self.flow_local_fallbacks.deinit(alloc);
+        self.unknown_global_slots.deinit(alloc);
         self.stmts.deinit(alloc);
         self.rule_stmts.deinit(alloc);
         self.selector_part_exprs.deinit(alloc);

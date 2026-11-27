@@ -7,6 +7,10 @@
 //! 8 byte fixed prioritizes decoding cost reduction over density.
 //! If it is necessary to make the length variable in the subsequent stage, judge by measurement (equivalent to decision #2).
 
+/// `load_local` arg_a: reading a variable no assignment has reached is
+/// fine (the check `!default` makes).
+pub const load_local_flag_unset_ok: u16 = 1;
+
 pub const Opcode = enum(u8) {
     //-- stack / local ------------------------------
     nop = 0,

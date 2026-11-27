@@ -301,6 +301,9 @@ pub const ModuleChunks = struct {
     source_len: u32 = 0,
     /// local slot undeclared Fallback slot when reading (no fallback if index=slot, value=maxInt(u32)).
     local_fallback_slots: []u32 = &.{},
+    /// Slots the resolver made for a variable a callable used that nothing
+    /// declared; reading one that is still undeclared is an error.
+    unknown_global_slots: []bool = &.{},
 
     /// True when this module's top chunk performs no CSS-affecting work of
     /// its own: no rule/at-rule/declaration/comment emission, no @extend
@@ -1068,7 +1071,9 @@ fn peepholeFuseSuperinstructions(
                 old_to_new[i + 1] = new_pc;
                 old_to_new[i + 2] = new_pc;
                 try out.append(temp_alloc, Instruction.make(.load_local_add_const, slot, ci));
-                try new_to_old.append(temp_alloc, @intCast(i));
+                // An error comes from the operation, so the fused
+                // instruction reports the operation's span.
+                try new_to_old.append(temp_alloc, @intCast(i + 2));
                 i += 3;
                 continue;
             }
@@ -1086,7 +1091,9 @@ fn peepholeFuseSuperinstructions(
                 old_to_new[i + 1] = new_pc;
                 old_to_new[i + 2] = new_pc;
                 try out.append(temp_alloc, Instruction.make(.load_local_mul_const, slot, ci));
-                try new_to_old.append(temp_alloc, @intCast(i));
+                // An error comes from the operation, so the fused
+                // instruction reports the operation's span.
+                try new_to_old.append(temp_alloc, @intCast(i + 2));
                 i += 3;
                 continue;
             }
@@ -1104,7 +1111,9 @@ fn peepholeFuseSuperinstructions(
                 old_to_new[i + 1] = new_pc;
                 old_to_new[i + 2] = new_pc;
                 try out.append(temp_alloc, Instruction.make(.load_local_ge_const, slot, ci));
-                try new_to_old.append(temp_alloc, @intCast(i));
+                // An error comes from the operation, so the fused
+                // instruction reports the operation's span.
+                try new_to_old.append(temp_alloc, @intCast(i + 2));
                 i += 3;
                 continue;
             }
@@ -1122,7 +1131,9 @@ fn peepholeFuseSuperinstructions(
                 old_to_new[i + 1] = new_pc;
                 old_to_new[i + 2] = new_pc;
                 try out.append(temp_alloc, Instruction.make(.load_const_add_local, slot, ci));
-                try new_to_old.append(temp_alloc, @intCast(i));
+                // An error comes from the operation, so the fused
+                // instruction reports the operation's span.
+                try new_to_old.append(temp_alloc, @intCast(i + 2));
                 i += 3;
                 continue;
             }
@@ -3929,7 +3940,9 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
             const a = resolved.assign_stmts.items[st.payload];
             const store_op: Opcode = if (a.global) .store_local_writeback else .store_local;
             if (a.default) {
-                try ctx.cb.emit(.load_local, 0, remapLocalSlot(ctx, a.slot));
+                // `!default` reads the variable to see whether it is set:
+                // reading an unset one here is not an error.
+                try ctx.cb.emit(.load_local, opcode_mod.load_local_flag_unset_ok, remapLocalSlot(ctx, a.slot));
                 const nil_idx = try ctx.cb.addConst(Value.nil_v);
                 try ctx.cb.emit(.load_const, 0, nil_idx);
                 try ctx.cb.emit(.eq, 0, 0);
@@ -3943,7 +3956,7 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                 const else_pc = ctx.cb.code.items.len;
                 // Must be "declared" even if !default is skipped, so
                 // Self-assign the existing value and pass it through store_local.
-                try ctx.cb.emit(.load_local, 0, remapLocalSlot(ctx, a.slot));
+                try ctx.cb.emit(.load_local, opcode_mod.load_local_flag_unset_ok, remapLocalSlot(ctx, a.slot));
                 try ctx.cb.emit(store_op, 0, remapLocalSlot(ctx, a.slot));
 
                 const after_pc = ctx.cb.code.items.len;
@@ -5542,6 +5555,16 @@ fn compileOneModule(
         break :blk slots;
     };
 
+    const unknown_global_slots: []bool = blk: {
+        if (resolved.unknown_global_slots.items.len == 0) break :blk &.{};
+        var max_used: u32 = 0;
+        for (resolved.unknown_global_slots.items) |slot| max_used = @max(max_used, slot);
+        const flags = try arena.alloc(bool, @as(usize, max_used) + 1);
+        @memset(flags, false);
+        for (resolved.unknown_global_slots.items) |slot| flags[slot] = true;
+        break :blk flags;
+    };
+
     var res = ModuleChunks{
         .module_path = try arena.dupe(u8, resolved.module_path),
         .top = top,
@@ -5555,6 +5578,7 @@ fn compileOneModule(
         .line_starts = try arena.dupe(u32, resolved.line_starts),
         .source_len = resolved.source_len,
         .local_fallback_slots = local_fallback_slots,
+        .unknown_global_slots = unknown_global_slots,
         .cross_entry_pure_top = topChunkIsCrossEntryPure(&top),
         .meta_load_deps = try arena.dupe(u32, resolved.meta_load_deps.items),
     };
