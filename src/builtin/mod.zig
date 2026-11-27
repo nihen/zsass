@@ -146,6 +146,16 @@ fn resolveCssMathLegacyGlobal(name: []const u8) ?Id {
 }
 
 /// Fallback for non-namespaced calls for compatibility purposes.
+/// The `sass:math` function behind a CSS math global that has a separate
+/// id for the CSS form: `min()`/`max()`.
+pub fn sassFunctionForCssMathGlobal(id: Id) Id {
+    return switch (id) {
+        4 => 116,
+        5 => 117,
+        else => id,
+    };
+}
+
 pub fn resolveLegacyGlobal(name: []const u8) ?Id {
     // `scale()` is frequently used as a CSS transform function and is a Sass legacy global
     // Not builtin. Only `scale-color()` is builtin resolved.

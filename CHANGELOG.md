@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- `meta.get-function("min")` and `"max"` return the Sass functions, which
+  refuse incompatible units and `var()`, as the official CLI does; a plain
+  `min()` call still stays as CSS.
 - `string.unquote("&")` gives the text `&`, not the parent selector,
   as the official CLI does.
 - A list built up with `list.append()` in a loop takes memory and time in

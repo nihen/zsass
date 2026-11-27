@@ -989,3 +989,11 @@ test "string.unquote: an `&` it returns is text, not the parent selector" {
     try std.testing.expectEqualStrings(".p {\n  z: &;\n  y: 1 2 &;\n}\n", try compile(a, "@use 'sass:list'; @use 'sass:string'; .p { z: string.unquote('&'); y: list.append((1 2), string.unquote('&')); }", "", &.{}, quiet));
     try std.testing.expectEqualStrings(".p-x {\n  a: b;\n}\n", try compile(a, "@use 'sass:string'; .p { #{string.unquote('&')}-x { a: b; } }", "", &.{}, quiet));
 }
+
+test "meta.get-function: the global min() is the Sass function" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    if (compile(a, "@use \"sass:meta\"; a { b: meta.call(meta.get-function(\"min\"), 1px, 2em); }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expectEqualStrings("a {\n  b: 2px;\n}\n", try compile(a, "@use \"sass:meta\"; a { b: meta.call(meta.get-function(\"max\"), 1px, 2px); }", "", &.{}, quiet));
+}
