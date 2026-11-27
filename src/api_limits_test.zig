@@ -935,3 +935,14 @@ test "arguments: non-int indexes and incompatible min/max units are errors" {
     try std.testing.expectEqualStrings("a {\n  b: max(1px, 2em);\n}\n", try compile(a, "a { b: max(1px, 2em); }", "", &.{}, quiet));
     try std.testing.expectEqualStrings("a {\n  b: [\"a\", \"b c\"];\n}\n", try compile(a, "@use \"sass:string\"; a { b: string.split(\"a b c\", \" \", 1px); }", "", &.{}, quiet));
 }
+
+test "selector functions: comments in a selector argument read as spaces" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("a {\n  b: .a .b;\n  c: .a.b;\n  d: [a=\"/* kept */\"];\n}\n", try compile(a,
+        \\@use "sass:selector";
+        \\a { b: selector.parse(".a/**/.b"); c: selector.unify(".a /* x */", ".b"); d: selector.parse("[a=\"/* kept */\"]"); }
+    , "", &.{}, quiet));
+    if (compile(a, "@use \"sass:selector\"; a { b: selector.parse(\".a /* open\"); }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+}

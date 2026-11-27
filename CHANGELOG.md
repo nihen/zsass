@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   match the official CLI, such as `$n: 1.5 is not an int.`; an unquoted
   string in such a message is written without quotes; and "1 was passed"
   replaces "1 were passed".
+- The `sass:selector` functions accept comments in a selector argument,
+  such as `selector.parse(".a /* note */ .b")`, as the official CLI does.
 
 ## 0.5.1 (2026-11-27)
 
