@@ -55,14 +55,14 @@ jobs:
 
       - name: Checkout zsass (renderer source)
         if: steps.token.outputs.skip != 'true'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           path: zsass
           persist-credentials: false
 
       - name: Checkout nihen/homebrew-tap
         if: steps.token.outputs.skip != 'true'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         # The credentials stay: the last step pushes the formula with them.
         with:
           repository: nihen/homebrew-tap
