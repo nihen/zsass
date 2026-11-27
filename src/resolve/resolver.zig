@@ -3820,6 +3820,10 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
         (lookupIdentifierIdInsensitive(&ctx.prog.function_names, name_slice) != null or
             ctx.lookupStarFunction(name_slice) != null);
 
+    if (ns_id == .none and !has_custom_function_binding and !raw_name_is_interpolated and isStrictCalculationFunctionName(name_slice)) {
+        try checkCalculationArgs(ast, ctx, off, arg_count);
+    }
+
     if (ns_id == .none and !has_custom_function_binding and span.start <= span.end and span.end <= ast.source.len and identifierEq(name_slice, "calc")) {
         const raw_calc_call = ast.source[span.start..span.end];
         if (std.mem.indexOfScalar(u8, raw_calc_call, '$') == null) {
@@ -4604,6 +4608,157 @@ fn isCssCalculationFunctionName(name: []const u8) bool {
         if (identifierEq(name, candidate)) return true;
     }
     return false;
+}
+
+/// The calculation functions whose arguments must be a calculation; min(),
+/// max(), round(), and abs() fall back to the Sass functions instead.
+fn isStrictCalculationFunctionName(name: []const u8) bool {
+    const strict_names = [_][]const u8{
+        "calc", "clamp", "hypot", "sign", "sqrt", "pow", "sin", "cos",       "tan", "asin",
+        "acos", "atan",  "atan2", "mod",  "rem",  "exp", "log", "calc-size",
+    };
+    for (strict_names) |candidate| {
+        if (identifierEq(name, candidate)) return true;
+    }
+    return false;
+}
+
+const CalcIssue = enum { operation, expression, missing_operator, whitespace };
+
+/// The official CLI rejects, as it parses them, a calculation's arguments
+/// that are no calculation: an operator other than + - * /, a value of
+/// another type, a unary operation, two values without an operator, and a
+/// + or - without whitespace around it.
+fn checkCalculationArgs(ast: *const ast_flat.Ast, ctx: *Ctx, call_extra: ExtraIndex, arg_count: u32) ResolveError!void {
+    const arg_nodes_start: ExtraIndex = call_extra + 3;
+    const arg_names_start: ExtraIndex = arg_nodes_start + arg_count;
+    for (0..arg_count) |i| {
+        const name: InternId = @fromBackingInt(@intCast(ast.getExtraU32(arg_names_start + @as(u32, @intCast(i)))));
+        if (name != .none) return;
+    }
+    for (0..arg_count) |i| {
+        const node: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start + @as(u32, @intCast(i)))));
+        if (calculationIssue(ast, ctx, node)) |found| {
+            const msg = switch (found.issue) {
+                .operation => "This operation can't be used in a calculation.",
+                .expression => "This expression can't be used in a calculation.",
+                .missing_operator => "Missing math operator.",
+                .whitespace => "\"+\" and \"-\" must be surrounded by whitespace in calculations.",
+            };
+            error_format.setContextMessage(msg);
+            const bad = ast.getNode(found.node);
+            error_format.recordErrorSpan(bad.span_start, bad.span_end, 0);
+            return error.SassError;
+        }
+    }
+}
+
+const CalcIssueAt = struct { issue: CalcIssue, node: NodeIndex };
+
+fn calculationIssue(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ?CalcIssueAt {
+    if (node == .none) return null;
+    const n = ast.getNode(node);
+    const source = ast.source;
+    switch (n.tag) {
+        .expr_binary_op => {
+            const off: ExtraIndex = n.payload;
+            const lhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const rhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
+            const op: ast_flat.BinOp = @fromBackingInt(@intCast(@as(u8, @truncate(ast.getExtraU32(off + 2)))));
+            switch (op) {
+                .add, .sub, .mul, .div => {},
+                else => return .{ .issue = .operation, .node = node },
+            }
+            if (calculationIssue(ast, ctx, lhs)) |found| return found;
+            if (op == .add or op == .sub) {
+                // The operator is the first + or - after the left operand
+                // (the right one's span may start at it).
+                const op_char: u8 = if (op == .add) '+' else '-';
+                var pos: usize = ast.getNode(lhs).span_end;
+                while (pos < source.len and std.ascii.isWhitespace(source[pos])) pos += 1;
+                if (pos + 1 < source.len and source[pos] == op_char) {
+                    const before = pos > 0 and std.ascii.isWhitespace(source[pos - 1]);
+                    const after = std.ascii.isWhitespace(source[pos + 1]);
+                    if (!before or !after) return .{ .issue = .whitespace, .node = node };
+                }
+            }
+            return calculationIssue(ast, ctx, rhs);
+        },
+        .expr_slash_expr => {
+            const off: ExtraIndex = n.payload;
+            const lhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const rhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
+            if (calculationIssue(ast, ctx, lhs)) |found| return found;
+            return calculationIssue(ast, ctx, rhs);
+        },
+        .expr_unary_op => {
+            const off: ExtraIndex = n.payload;
+            const operand: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const op: ast_flat.UnaryOp = @fromBackingInt(@intCast(@as(u8, @truncate(ast.getExtraU32(off + 1)))));
+            const o = ast.getNode(operand);
+            // `+1px` and `-1px` are signed numbers, and `-#{$x}` is an
+            // identifier.
+            const signed = (op == .negate or op == .positive) and o.span_start == n.span_start + 1 and
+                (o.tag == .expr_number_literal or o.tag == .expr_number_immediate or o.tag == .expr_interp);
+            if (signed) return null;
+            return .{ .issue = .expression, .node = node };
+        },
+        .expr_paren => {
+            const inner: NodeIndex = @fromBackingInt(@intCast(n.payload));
+            return calculationIssue(ast, ctx, inner);
+        },
+        .expr_space_list => {
+            const off: ExtraIndex = n.payload;
+            const count = ast.getExtraU32(off);
+            var opaque_part = false;
+            for (0..count) |i| {
+                const child: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1 + @as(u32, @intCast(i)))));
+                const c = ast.getNode(child);
+                switch (c.tag) {
+                    .expr_unquoted_ident => {
+                        if (color_mod.lookupNamedColor(ctx.pool.get(@fromBackingInt(@intCast(c.payload)))) == null) opaque_part = true;
+                    },
+                    // A variable's value is only known when it runs.
+                    .expr_interp, .expr_string_interp, .expr_func_call, .expr_variable, .expr_namespaced_var => opaque_part = true,
+                    else => {},
+                }
+            }
+            // A signed number after a number or a variable is a + or -
+            // written without whitespace after it.
+            for (1..count) |i| {
+                const prev = ast.getNode(@fromBackingInt(@intCast(ast.getExtraU32(off + @as(u32, @intCast(i))))));
+                const child: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1 + @as(u32, @intCast(i)))));
+                const c = ast.getNode(child);
+                const signed = (c.tag == .expr_number_literal or c.tag == .expr_number_immediate) and
+                    c.span_start < source.len and (source[c.span_start] == '-' or source[c.span_start] == '+');
+                const math_prev = switch (prev.tag) {
+                    .expr_number_literal, .expr_number_immediate, .expr_variable, .expr_namespaced_var, .expr_paren => true,
+                    else => false,
+                };
+                if (signed and math_prev) return .{ .issue = .whitespace, .node = child };
+            }
+            if (opaque_part) return null;
+            for (0..count) |i| {
+                const child: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1 + @as(u32, @intCast(i)))));
+                if (calculationIssue(ast, ctx, child)) |found| return found;
+            }
+            return .{ .issue = .missing_operator, .node = node };
+        },
+        .expr_comma_list, .expr_bracketed_list, .expr_map_literal, .expr_bool_true, .expr_bool_false, .expr_null, .expr_color_hex => {
+            return .{ .issue = .expression, .node = node };
+        },
+        .expr_string_literal => {
+            if ((n.flags & 1) != 0) return .{ .issue = .expression, .node = node };
+            return null;
+        },
+        .expr_unquoted_ident => {
+            if (color_mod.lookupNamedColor(ctx.pool.get(@fromBackingInt(@intCast(n.payload)))) != null) {
+                return .{ .issue = .expression, .node = node };
+            }
+            return null;
+        },
+        else => return null,
+    }
 }
 
 fn isCssMathLegacyCalcFunctionName(name: []const u8) bool {
@@ -6905,6 +7060,18 @@ fn calcHasModuloOperatorResolver(expr: []const u8) bool {
     var i: usize = 0;
     while (i < expr.len) : (i += 1) {
         const c = expr[i];
+        // Interpolated Sass is not part of the calculation.
+        if (in_string == 0 and c == '#' and i + 1 < expr.len and expr[i + 1] == '{') {
+            var braces: usize = 0;
+            while (i < expr.len) : (i += 1) {
+                if (expr[i] == '{') braces += 1;
+                if (expr[i] == '}') {
+                    braces -= 1;
+                    if (braces == 0) break;
+                }
+            }
+            continue;
+        }
         if (in_string != 0) {
             if (c == '\\' and i + 1 < expr.len) {
                 i += 1;
@@ -6953,8 +7120,10 @@ fn validateRawCalcCallSyntax(ctx: *Ctx, raw_text: []const u8) ResolveError!void 
     const inner = trimmed[lparen + 1 .. rparen];
     if (std.mem.trim(u8, inner, " \t\r\n").len == 0) return error.SassError;
     if (calcTextHasTopLevelComma(inner)) return error.SassError;
-    if (calc_utils.calcHasBadWhitespace(inner)) return error.SassError;
-    if (calcHasModuloOperatorResolver(inner)) return error.SassError;
+    if (calcHasModuloOperatorResolver(inner)) {
+        error_format.setContextMessage("This operation can't be used in a calculation.");
+        return error.SassError;
+    }
 
     // Expressions containing variables/interpolation are evaluated on the runtime side.
     // Their terms are not numbers yet: `calc(#{2} * 1px + 1s)` is valid CSS.
