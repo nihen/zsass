@@ -171,11 +171,28 @@ pub const CallSite = struct {
     path: []const u8,
     line_starts: []const u32,
     offset: u32,
+    /// `line_starts` is not at hand: read `path` to place `offset`.
+    read_source: bool = false,
 };
 
 pub threadlocal var builtin_call_site: ?CallSite = null;
 
 fn callSiteLineCol(site: CallSite) struct { line: u32, col: u32 } {
+    if (site.read_source) {
+        const source = std.Io.Dir.cwd().readFileAlloc(zsass_io.io, site.path, std.heap.c_allocator, .unlimited) catch
+            return .{ .line = 1, .col = site.offset + 1 };
+        defer std.heap.c_allocator.free(source);
+        var line: u32 = 1;
+        var line_start: usize = 0;
+        const end = @min(@as(usize, site.offset), source.len);
+        for (source[0..end], 0..) |c, i| {
+            if (c == '\n') {
+                line += 1;
+                line_start = i + 1;
+            }
+        }
+        return .{ .line = line, .col = @intCast(end - line_start + 1) };
+    }
     var lo: usize = 0;
     var hi: usize = site.line_starts.len;
     if (hi == 0) return .{ .line = 1, .col = site.offset + 1 };

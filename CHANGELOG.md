@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- A top-level read of a global that only an unrun `!global` in a flow
+  block sets fails with "Undefined variable.", as one in a callable does.
 - A function or mixin that reads a global only a `!global` assignment
   inside a callable or flow block sets, which has not run, fails with
   "Undefined variable." instead of reading null.

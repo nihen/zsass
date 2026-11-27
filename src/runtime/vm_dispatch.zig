@@ -90,6 +90,15 @@ fn builtinCallSite(self: anytype) ?deprecation_mod.CallSite {
     if (fid >= self.program.modules.len) return null;
     const mod = self.program.modules[fid];
     if (mod.module_path.len == 0) return null;
+    // Code an `@import` brought in runs in the importing module but was
+    // written, and is spanned, in the imported file.
+    const origin_index: usize = @backingInt(self.current_origin);
+    if (self.current_origin != .invalid and origin_index < self.program.origins.len) {
+        const origin_path = self.program.origins[origin_index].source_path;
+        if (origin_path.len != 0 and !std.mem.eql(u8, origin_path, mod.module_path)) {
+            return .{ .path = origin_path, .line_starts = &.{}, .offset = self.current_source_span.start, .read_source = true };
+        }
+    }
     return .{ .path = mod.module_path, .line_starts = mod.line_starts, .offset = self.current_source_span.start };
 }
 

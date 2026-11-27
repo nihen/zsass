@@ -257,6 +257,11 @@ pub const FrameSlotPool = struct {
     }
 };
 
+const ParamDefaultCtx = struct {
+    module_id: u32,
+    declared: []const bool,
+};
+
 pub const Frame = struct {
     locals: []Value,
     declared: []bool = &.{},
@@ -479,6 +484,8 @@ pub const VM = struct {
     /// Repeated `list.index()` over immutable list handles.
     list_index_cache: std.AutoHashMapUnmanaged(builtin_mod.ListIndexCacheKey, Value) = .empty,
     list_append_tails: std.AutoHashMapUnmanaged(u32, builtin_mod.ListTail) = .empty,
+    /// The callee's module and frame while its arguments are bound.
+    param_default_ctx: ?ParamDefaultCtx = null,
     /// Legacy global builtin lookup cache for Indirect CSS/string callable fallback.
     /// value=maxInt(u32) is miss sentinel.
     legacy_global_builtin_cache: std.AutoHashMapUnmanaged(InternId, u32) = .empty,
@@ -3017,7 +3024,10 @@ pub const VM = struct {
     /// The slot is one the resolver gave a name a callable used but nothing
     /// declared, and no assignment to the module global has run.
     fn slotIsUnknownGlobal(self: *const VM, slot: usize) bool {
-        const module_id = self.current_module;
+        return self.slotIsUnknownGlobalIn(self.current_module, slot);
+    }
+
+    fn slotIsUnknownGlobalIn(self: *const VM, module_id: u32, slot: usize) bool {
         if (module_id >= self.program.modules.len) return false;
         const mod = &self.program.modules[module_id];
         if (slot >= mod.unknown_global_slots.len or !mod.unknown_global_slots[slot]) return false;
@@ -7264,7 +7274,11 @@ pub const VM = struct {
     /// callable's reference made and nothing has set.
     fn paramDefaultLocal(self: *VM, locals: []const Value, slot: anytype) VMError!Value {
         const index: usize = slot;
-        if (self.slotIsUnknownGlobal(index)) {
+        // Defaults are read in the callee's module and frame, which are not
+        // current yet while its arguments are bound.
+        const ctx = self.param_default_ctx orelse ParamDefaultCtx{ .module_id = self.current_module, .declared = &.{} };
+        const set_in_frame = index < ctx.declared.len and ctx.declared[index];
+        if (!set_in_frame and self.slotIsUnknownGlobalIn(ctx.module_id, index)) {
             error_format.setContextMessage("Undefined variable.");
             return error.SassError;
         }
@@ -7510,6 +7524,9 @@ pub const VM = struct {
             &.{}
         else
             try self.allocateGlobalWriteback(target_module, callee.local_count);
+        const saved_default_ctx = self.param_default_ctx;
+        self.param_default_ctx = .{ .module_id = target_module, .declared = declared };
+        defer self.param_default_ctx = saved_default_ctx;
         try self.bindCallableArgs(callee, locals, declared, args, arg_names, rest_separator_override);
         const has_pending_content = self.pending_content_chunk != content_none_sentinel;
         if (has_pending_content and switch (target) {
@@ -7857,6 +7874,9 @@ pub const VM = struct {
         }
         self.overlayCurrentFrameGlobalWritebacksForContent(target_module, locals, declared, global_writeback);
 
+        const saved_default_ctx = self.param_default_ctx;
+        self.param_default_ctx = .{ .module_id = target_module, .declared = declared };
+        defer self.param_default_ctx = saved_default_ctx;
         try self.bindCallableArgs(callee, locals, declared, args, arg_names, rest_separator_override);
         const next_binding = if (caller_frame) |fr|
             contentParentBindingFromFrame(fr)

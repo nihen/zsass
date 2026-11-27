@@ -391,7 +391,8 @@ fn numberToDeg(ctx: *BuiltinContext, value: f64) BuiltinError!Value {
 /// either is a compound unit such as `px*px` or `px/s`: each factor has to
 /// convert to a factor of the other. Null when they are incompatible.
 fn compoundUnitFactor(ctx: *BuiltinContext, from: ?[]const u8, to: ?[]const u8) BuiltinError!?f64 {
-    if (from == null or to == null) return null;
+    // A unitless number compares with any other.
+    if (from == null or to == null) return 1;
     var from_num: std.ArrayListUnmanaged([]const u8) = .empty;
     defer from_num.deinit(ctx.allocator);
     var from_den: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -425,6 +426,8 @@ fn matchUnitFactors(ctx: *BuiltinContext, from: []const []const u8, to: []const 
     outer: for (from) |f| {
         for (to, 0..) |t, i| {
             if (used[i]) continue;
+            // Units differing only in case are different units.
+            if (!std.mem.eql(u8, f, t) and std.ascii.eqlIgnoreCase(f, t)) continue;
             const c = convertUnit(1.0, f, t) orelse continue;
             used[i] = true;
             factor *= c;

@@ -1044,3 +1044,20 @@ test "variables: a global only an unrun !global sets is undefined in a mixin" {
     if (compile(a, "@mixin m { @if false { $u: 1 !global; } b: $u; } .a { @include m; }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
     try std.testing.expectEqualStrings(".a {\n  b: 3px;\n}\n", try compile(a, "@mixin s { $u: 3px !global; } @mixin m { b: $u; } .a { @include s; @include m; }", "", &.{}, quiet));
 }
+
+test "variables: hyphen and underscore name one global; an unrun top-level !global is undefined" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings(".a {\n  b: 2;\n}\n", try compile(a, "@mixin m { a: $foo-bar; } $foo_bar: 1; @if true { $foo-bar: 2; } .a { b: $foo_bar; }", "", &.{}, quiet));
+    if (compile(a, "@if false { $u: 1 !global; } .a { b: $u; }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expectEqualStrings(".a {\n  b: 1;\n}\n", try compile(a, "@if true { $u: 1 !global; } .a { b: $u; }", "", &.{}, quiet));
+}
+
+test "math: compound units differing in case are incompatible; unitless compares" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    if (compile(a, "@use \"sass:math\"; a { b: math.min(2px * 1s, 1PX * 1s); }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expectEqualStrings("a {\n  b: 0;\n}\n", try compile(a, "@use \"sass:math\"; a { b: math.min(1px * 1px, 0); }", "", &.{}, quiet));
+}

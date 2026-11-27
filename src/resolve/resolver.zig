@@ -825,7 +825,8 @@ const Ctx = struct {
     }
 
     fn isUndeclaredCallableGlobal(self: *const Ctx, slot: SlotId, name: []const u8) bool {
-        if (self.prog.declared_global_names.contains(name)) return false;
+        // `$foo-bar` and `$foo_bar` are one variable.
+        if (lookupVoidFlagInsensitive(&self.prog.declared_global_names, name)) return false;
         for (self.prog.unknown_global_slots.items) |s| {
             if (s == slot) return true;
         }
@@ -9402,7 +9403,9 @@ fn predeclareGlobalSlotsInStmt(ctx: *Ctx, node: NodeIndex) ResolveError!void {
             const name = ctx.pool.get(name_id);
             try ctx.markDeclaredGlobal(name_id);
             if (lookupGlobalSlot(ctx.prog, name) != null) return;
-            _ = try ctx.declareGlobal(name_id);
+            // Only a `!global` in a flow block declares it, which may not run.
+            const slot = try ctx.declareGlobal(name_id);
+            try ctx.prog.unknown_global_slots.append(ctx.a, slot);
         },
         .stmt_if => {
             const off: ExtraIndex = n.payload;
