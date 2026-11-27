@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Up to five deprecation warnings of each kind are shown, then "WARNING:
   N repetitive deprecation warnings omitted." at the end, as the official
   CLI does; `--verbose` shows them all. Only one of each kind was shown.
+- A map or an empty list used as a CSS value fails with "(x: 1) isn't a
+  valid CSS value." instead of "Compilation failed.", and so does one
+  interpolated into a value, a selector, a property name, or an at-rule
+  prelude, which zsass wrote out as text.
+- `@debug` writes a value other than a string as `meta.inspect()` does:
+  `()` and the quotes of strings inside a map were lost.
 - `%` between numbers with compatible units converts the right operand:
   `7cm % 1in` is `1.92cm` instead of an error.
 

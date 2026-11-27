@@ -3648,6 +3648,9 @@ pub const VM = struct {
                 const source_name_interp = (inst.arg_b & opcode_mod.make_selector_flag_source_name_interp) != 0;
                 const source_args_interp = (inst.arg_b & opcode_mod.make_selector_flag_source_args_interp) != 0;
                 const source_has_interp = source_name_interp or source_args_interp;
+                // An interpolated map or empty list is not CSS, in a value,
+                // a selector, a property name, or a prelude alike.
+                for (self.stack.items[base .. base + n]) |part| try self.ensureCssDeclarationValue(part, false);
                 const call_info = interpolatedCallInfo(
                     self.allocator,
                     self.intern_pool,
@@ -4891,7 +4894,9 @@ pub const VM = struct {
                 if (self.deprecation_opts.quiet) return .continue_exec;
                 if (self.suppress_diagnostics) return .continue_exec;
                 const val = try self.pop();
-                const msg = try self.valueToDiagnosticMessage(val, false);
+                // A string is shown as its text; any other value as
+                // meta.inspect() writes it.
+                const msg = if (val.isString()) try self.valueToDiagnosticMessage(val, false) else try self.inspectForMessage(val);
                 const file_id: usize = @intCast(self.current_source_span.file_id);
                 if (file_id < self.program.modules.len) {
                     const module = self.program.modules[file_id];
@@ -6537,6 +6542,27 @@ pub const VM = struct {
         }
         if (bracketed) try acc.append(self.allocator, ']');
         return try acc.toOwnedSlice(self.allocator);
+    }
+
+    /// A value as `meta.inspect()` writes it; the text is interned.
+    fn inspectForMessage(self: *VM, v: Value) VMError![]const u8 {
+        const inspect_id = builtin_mod.resolve("meta", "inspect") orelse return error.InternalError;
+        const out = try vm_dispatch.dispatchBuiltinArgs(self, inspect_id, &.{v}, &.{});
+        if (!out.isString()) return error.InternalError;
+        return self.intern_pool.get(out.stringIntern());
+    }
+
+    /// A declaration's value must be CSS: not a map, a module, or an empty
+    /// list. The error names the part that is not, as Sass does.
+    fn ensureCssDeclarationValue(self: *VM, value: Value, custom_property: bool) VMError!void {
+        if (custom_property) return;
+        if (!declarationValueNeedsCssError(&self.list_pool, value)) return;
+        const offending = firstMapInValue(&self.list_pool, value) orelse value;
+        const text = self.inspectForMessage(offending) catch return error.SassError;
+        var buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{s} isn't a valid CSS value.", .{text}) catch return error.SassError;
+        error_format.setContextMessage(msg);
+        return error.SassError;
     }
 
     fn valueToDiagnosticMessage(self: *VM, v: Value, comptime prefer_css_decl_render: bool) VMError![]const u8 {
@@ -8431,7 +8457,7 @@ pub const VM = struct {
 
     fn buildCalcSizeCallableResult(self: *VM, args: []const Value) VMError!Value {
         if (args.len == 0 or args.len > 2) return error.SassError;
-        try ensureDeclarationValueIsCssValue(&self.list_pool, args[0], false);
+        try self.ensureCssDeclarationValue(args[0], false);
 
         const arg0_id = try valueToInternIdDecl(
             self.intern_pool,
@@ -8512,7 +8538,7 @@ pub const VM = struct {
                 try acc.appendSlice(self.allocator, raw);
                 try acc.appendSlice(self.allocator, ": ");
             }
-            try ensureDeclarationValueIsCssValue(&self.list_pool, arg, false);
+            try self.ensureCssDeclarationValue(arg, false);
             const arg_id = try valueToInternIdDecl(
                 self.intern_pool,
                 &self.number_pool,
@@ -8584,7 +8610,7 @@ pub const VM = struct {
     /// surface only once the CSS is emitted.
     fn skipInvalidDeferredDeclValue(self: *VM, val: Value, is_custom_property: bool) VMError!bool {
         if (!self.css_output_deferred) {
-            try ensureDeclarationValueIsCssValue(&self.list_pool, val, is_custom_property);
+            try self.ensureCssDeclarationValue(val, is_custom_property);
             return false;
         }
         if (is_custom_property) return false;
@@ -11667,13 +11693,15 @@ fn declarationValueNeedsCssError(list_pool: *const std.ArrayListUnmanaged([]Valu
     return list_pool.items[handle].len == 0;
 }
 
-fn ensureDeclarationValueIsCssValue(
-    list_pool: *const std.ArrayListUnmanaged([]Value),
-    value: Value,
-    custom_property: bool,
-) VMError!void {
-    if (custom_property) return;
-    if (declarationValueNeedsCssError(list_pool, value)) return error.SassError;
+fn firstMapInValue(list_pool: *const std.ArrayListUnmanaged([]Value), value: Value) ?Value {
+    if (value.kind() != .list) return null;
+    if (value.listIsMap(value_mod.empty_list_meta_pool)) return value;
+    const handle: usize = @intCast(value.listHandle());
+    if (handle >= list_pool.items.len) return null;
+    for (list_pool.items[handle]) |item| {
+        if (firstMapInValue(list_pool, item)) |found| return found;
+    }
+    return null;
 }
 
 fn shouldRenderImplicitMapList(v: Value, items: []const Value, mode: ListSerializeMode) bool {

@@ -85,6 +85,30 @@ fn builtinPreservesSlashLists(builtin_id: u32) bool {
     };
 }
 
+pub fn builtinContext(self: anytype) builtin_mod.BuiltinContext {
+    return .{
+        .allocator = self.allocator,
+        .intern_pool = self.intern_pool,
+        .list_pool = &self.list_pool,
+        .color_pool = self.color_pool,
+        .number_pool = &self.number_pool,
+        .callable_payload_pool = &self.callable_payload_pool,
+        .list_meta_pool = &self.list_meta_pool,
+        .string_flags_pool = &self.string_flags_pool,
+        .random_state = &self.random_state,
+        .vm = self,
+        .map_lookup_index_cache = &self.map_lookup_index_cache,
+        .list_index_cache = &self.list_index_cache,
+        .list_append_tails = &self.list_append_tails,
+        .slash_list_preserve = &self.slash_list_preserve,
+        .list_parent_sel_none_hook = @TypeOf(self.*).builtinListSidecarHook,
+        .list_parent_sel_none_query = @TypeOf(self.*).builtinListSidecarQuery,
+        .calc_text_args_hook = @TypeOf(self.*).builtinCalcTextArgsHook,
+        .deprecation_opts = &self.deprecation_opts,
+        .budget = self.budget,
+    };
+}
+
 fn builtinCallSite(self: anytype) ?deprecation_mod.CallSite {
     const fid: usize = @intCast(self.current_source_span.file_id);
     if (fid >= self.program.modules.len) return null;
@@ -108,27 +132,7 @@ pub fn dispatchBuiltinArgs(self: anytype, builtin_id: u32, args: []const Value, 
     if (builtin_id == meta_keywords_builtin_id and args.len == 1) {
         if (try dispatchMetaKeywordsSingleArg(self, args, arg_names)) |out| return out;
     }
-    var bctx = builtin_mod.BuiltinContext{
-        .allocator = self.allocator,
-        .intern_pool = self.intern_pool,
-        .list_pool = &self.list_pool,
-        .color_pool = self.color_pool,
-        .number_pool = &self.number_pool,
-        .callable_payload_pool = &self.callable_payload_pool,
-        .list_meta_pool = &self.list_meta_pool,
-        .string_flags_pool = &self.string_flags_pool,
-        .random_state = &self.random_state,
-        .vm = self,
-        .map_lookup_index_cache = &self.map_lookup_index_cache,
-        .list_index_cache = &self.list_index_cache,
-        .list_append_tails = &self.list_append_tails,
-        .slash_list_preserve = &self.slash_list_preserve,
-        .list_parent_sel_none_hook = @TypeOf(self.*).builtinListSidecarHook,
-        .list_parent_sel_none_query = @TypeOf(self.*).builtinListSidecarQuery,
-        .calc_text_args_hook = @TypeOf(self.*).builtinCalcTextArgsHook,
-        .deprecation_opts = &self.deprecation_opts,
-        .budget = self.budget,
-    };
+    var bctx = builtinContext(self);
     const saved_site = deprecation_mod.builtin_call_site;
     deprecation_mod.builtin_call_site = builtinCallSite(self);
     defer deprecation_mod.builtin_call_site = saved_site;

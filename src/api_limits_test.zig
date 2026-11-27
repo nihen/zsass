@@ -1131,3 +1131,15 @@ test "errors: a calc() with variables checks their units" {
     try expectCompileMessage(a, "$x: 1px; a { b: calc($x + 1s); }", "1px and 1s are incompatible.");
     try std.testing.expectEqualStrings("a {\n  b: calc(1px + 1s);\n}\n", try compile(a, "$x: 1px; a { b: calc(#{$x} + 1s); }", "", &.{}, quiet));
 }
+
+test "errors: a map or an empty list is not a CSS value, in a declaration or an interpolation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try expectCompileMessage(a, "a { b: (x: 1, y: 2); }", "(x: 1, y: 2) isn't a valid CSS value.");
+    try expectCompileMessage(a, "a { b: 1px (x: \"s\"); }", "(x: \"s\") isn't a valid CSS value.");
+    try expectCompileMessage(a, "a { b: (); }", "() isn't a valid CSS value.");
+    try expectCompileMessage(a, "a { b: c#{()}d; }", "() isn't a valid CSS value.");
+    try expectCompileMessage(a, ".#{(x: 1)} { b: 1; }", "(x: 1) isn't a valid CSS value.");
+    try std.testing.expectEqualStrings("a {\n  --c: (x: 1);\n}\n", try compile(a, "a { --c: (x: 1); }", "", &.{}, quiet));
+}
