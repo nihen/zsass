@@ -259,6 +259,7 @@ pub fn clearErrorContext() void {
     error_state.error_stack_overflow = 0;
     error_state.error_stack_snapshot_len = 0;
     error_state.context_message_len = 0;
+    error_state.reported = false;
 }
 
 /// CLI-FIX-E Step 2c+: dart compatible multi-level stack trace (`{inner} {l}:{c} @use\n {entry} {l}:{c} root stylesheet`)
@@ -321,6 +322,9 @@ pub const ErrorState = struct {
     error_stack_overflow: usize = 0,
     error_stack_snapshot: [max_error_stack]ErrorTraceFrame = @splat(.{}),
     error_stack_snapshot_len: usize = 0,
+    /// Set once the current error has been written to stderr, so the
+    /// caller that receives it does not write it again.
+    reported: bool = false,
 };
 
 pub threadlocal var error_state: ErrorState = std.mem.zeroes(ErrorState);
@@ -462,6 +466,11 @@ fn writeSourceFrameWithLabel(
         eprint("  \u{2577}\n", .{});
     } else {
         eprint("  >\n", .{});
+    }
+    if (unicodeDiagnosticsEnabled()) {
+        eprint("{s} \u{2502} {s}\n", .{ lineno_text, line_text });
+    } else {
+        eprint("{s} | {s}\n", .{ lineno_text, line_text });
     }
     // caret indicator
     const lineno_pad = "        ";

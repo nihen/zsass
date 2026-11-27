@@ -3307,7 +3307,11 @@ fn resolveExprVariable(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
         return try appendExpr(ctx.prog, ctx.a, .{ .kind = .var_ref, .payload = slot, .span = span });
     }
     if (ctx.in_callable) {
-        const slot = lookupGlobalSlot(ctx.prog, raw_name) orelse try ctx.declareGlobal(name_id);
+        const slot = lookupGlobalSlot(ctx.prog, raw_name) orelse blk: {
+            const new_slot = try ctx.declareGlobal(name_id);
+            try ctx.prog.unknown_global_slots.append(ctx.a, new_slot);
+            break :blk new_slot;
+        };
         return try appendExpr(ctx.prog, ctx.a, .{
             .kind = .var_ref,
             .payload = slot,
@@ -10443,6 +10447,7 @@ const preamble_prog_pod_lists = [_][]const u8{
     "color_literals",
     "static_slot_values",
     "flow_local_fallbacks",
+    "unknown_global_slots",
     "stmts",
     "selector_part_exprs",
     "decl_stmts",

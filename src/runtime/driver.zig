@@ -245,6 +245,8 @@ fn printUserFacingError(err: anyerror, input_path: []const u8) void {
     if (error_format.verboseErrorsEnabled()) {
         cliErrPrint("zsass: driver error: {}\n", .{err});
     }
+    // The VM error path writes its report where it has the call stack.
+    if (error_format.error_state.reported) return;
     const msg = error_format.errorToUserMessageWithContext(err);
     if (error_format.ansiDiagnosticsEnabled()) {
         cliErrPrint("\x1b[31mError:\x1b[0m {s}\n", .{msg});
@@ -349,6 +351,95 @@ fn resolveFrameInfoEx(
 /// Achieved dart compatibility. In nested call (entry  ->  A  ->  B  ->  error), `outermostCallerInfo` is
 /// Since the caller info (= entry) of the outermost frame is returned, the middle A frame is not drawn.
 /// (= fixed at 2 stages). Dart releases all intermediate frames, but stops at 2 stages in Phase 3.
+/// The trace of a VM error: where it happened, named by the function or
+/// mixin it is in, then each call that led there, out to the root
+/// stylesheet. False when a frame cannot be placed; the caller then draws
+/// the single frame.
+fn buildVmErrorTrace(
+    vm: *vm_mod.VM,
+    program_ptr: *compiler_mod.Program,
+    inner_source: []const u8,
+    inner_path: []const u8,
+    span_start: u32,
+    span_end: u32,
+    entry_path: []const u8,
+    call_sites: []const vm_mod.VM.CallSite,
+) bool {
+    const snapshot = &error_format.error_state.error_stack_snapshot;
+    if (call_sites.len + 1 > snapshot.len) return false;
+    const root_idx = program_ptr.root_index;
+    var n: usize = 0;
+    // Outermost first, as the snapshot keeps them.
+    for (call_sites, 0..) |site, i| {
+        if (site.module_id >= program_ptr.modules.len) return false;
+        const m = &program_ptr.modules[site.module_id];
+        if (m.line_starts.len == 0) return false;
+        var frame: error_format.ErrorTraceFrame = .{};
+        const path = if (site.module_id == root_idx) entry_path else m.module_path;
+        const p_len = @min(path.len, frame.path_buf.len);
+        @memcpy(frame.path_buf[0..p_len], path[0..p_len]);
+        frame.path_len = p_len;
+        // The outermost call is made by the root stylesheet; each later one
+        // by the chunk the previous call entered.
+        const label = if (i == 0 and site.chunk == .top)
+            "root stylesheet"
+        else
+            formatCallLabel(site.chunk, site.chunk_name, &frame.label_buf);
+        if (label.ptr != &frame.label_buf) @memcpy(frame.label_buf[0..label.len], label);
+        frame.label_len = label.len;
+        const start = lineColFromStarts(m.line_starts, site.span_start);
+        const end = lineColFromStarts(m.line_starts, site.span_end);
+        frame.line_no = start.line + 1;
+        frame.col_no = start.col + 1;
+        frame.end_line_no = end.line + 1;
+        frame.end_col_no = end.col + 1;
+        frame.has_span = true;
+        snapshot[n] = frame;
+        n += 1;
+    }
+
+    var inner: error_format.ErrorTraceFrame = .{};
+    const ip_len = @min(inner_path.len, inner.path_buf.len);
+    @memcpy(inner.path_buf[0..ip_len], inner_path[0..ip_len]);
+    inner.path_len = ip_len;
+    const inner_label = formatCallLabel(vm.innerMostChunkRef(), vm.innerMostChunkName(), &inner.label_buf);
+    inner.label_len = inner_label.len;
+    const ip = computeLineColInline(inner_source, span_start);
+    const iep = computeLineColInline(inner_source, span_end);
+    inner.line_no = ip.line + 1;
+    inner.col_no = ip.col + 1;
+    inner.end_line_no = iep.line + 1;
+    inner.end_col_no = iep.col + 1;
+    inner.has_span = true;
+    const line_text = extractLineInline(inner_source, ip.line);
+    const tlen = @min(line_text.len, inner.line_text_buf.len);
+    @memcpy(inner.line_text_buf[0..tlen], line_text[0..tlen]);
+    inner.line_text_len = tlen;
+    snapshot[n] = inner;
+    n += 1;
+    error_format.error_state.error_stack_snapshot_len = n;
+    return true;
+}
+
+/// A trace line's name: `f()` for a function and `m()` for a mixin, as Sass
+/// writes them.
+fn formatCallLabel(ref: vm_mod.ChunkRef, name: []const u8, buf: []u8) []const u8 {
+    return switch (ref) {
+        .function, .mixin => std.fmt.bufPrint(buf, "{s}()", .{name}) catch buf[0..0],
+        else => formatInnerLabel(ref, name, buf),
+    };
+}
+
+fn lineColFromStarts(line_starts: []const u32, offset: u32) InlineLineCol {
+    var lo: usize = 0;
+    var hi: usize = line_starts.len;
+    while (hi - lo > 1) {
+        const mid = (lo + hi) / 2;
+        if (line_starts[mid] <= offset) lo = mid else hi = mid;
+    }
+    return .{ .line = @intCast(lo), .col = offset -| line_starts[lo] };
+}
+
 fn buildVmErrorSnapshotV3(
     vm: *vm_mod.VM,
     program_ptr: *compiler_mod.Program,
@@ -2726,8 +2817,11 @@ fn runEnd2EndWithBudget(
         // Rendered with (`{imported} l:c {fn-name}()\n {entry} l:c root stylesheet`).
         // Take exact callsite span of entry in outermostCallerInfo() of VM and innerMostChunkName()
         // Reflect the function/mixin name in the inner frame label.
-        if (frame_info.has_frame and !file_id_is_entry) {
-            buildVmErrorSnapshotV3(&vm, program_ptr, diag_alloc, frame_info.source.?, frame_info.path, ctx.span_start, ctx.span_end, source, module_path);
+        var call_sites: [32]vm_mod.VM.CallSite = undefined;
+        const call_count = vm.callSites(&call_sites);
+        if (frame_info.has_frame and (call_count > 0 or !file_id_is_entry) and
+            buildVmErrorTrace(&vm, program_ptr, frame_info.source.?, frame_info.path, ctx.span_start, ctx.span_end, module_path, call_sites[0..call_count]))
+        {
             error_format.writeStackTrace(diag_alloc) catch {
                 error_format.writeSourceFrame(frame_info.source.?, frame_info.line_starts.?, ctx.span_start, ctx.span_end, frame_info.path);
             };
@@ -2736,6 +2830,7 @@ fn runEnd2EndWithBudget(
         } else {
             cliErrPrint("  {s}\n", .{frame_info.path});
         }
+        error_format.error_state.reported = true;
         // CLI-FIX-E Step 3 (C-6): Write error CSS template to out.css in file output mode.
         writeErrorCssIfNeeded(
             diag_alloc,
