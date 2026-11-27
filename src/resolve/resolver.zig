@@ -4709,6 +4709,16 @@ fn calculationArgsProblem(ast: *const ast_flat.Ast, ctx: *Ctx, name: []const u8,
 
 const CalcIssueAt = struct { issue: CalcIssue, node: NodeIndex };
 
+/// A number, parenthesized calculation, or calculation call: what two of
+/// side by side lack an operator between.
+fn isCalcMathOperand(ast: *const ast_flat.Ast, n: ast_flat.AstNode) bool {
+    return switch (n.tag) {
+        .expr_number_literal, .expr_number_immediate, .expr_paren => true,
+        .expr_func_call => isCalculationCallNode(ast, n),
+        else => false,
+    };
+}
+
 /// The built-in a global call resolves to. round() with a rest argument is
 /// no calculation, so it is the Sass function, which takes one argument.
 fn globalBuiltinForCall(ast: *const ast_flat.Ast, name: []const u8, call_extra: ExtraIndex, arg_count: u32) ?builtin_mod.Id {
@@ -4810,6 +4820,11 @@ fn calcArgMayExpand(ast: *const ast_flat.Ast, node: NodeIndex) bool {
             return std.ascii.startsWithIgnoreCase(text, "var(") or std.ascii.startsWithIgnoreCase(text, "env(") or
                 std.ascii.startsWithIgnoreCase(text, "attr(");
         },
+        .expr_unary_op => {
+            // `-#{...}` is an identifier.
+            const operand = ast.getNode(@fromBackingInt(@intCast(ast.getExtraU32(n.payload))));
+            return operand.tag == .expr_interp and operand.span_start == n.span_start + 1;
+        },
         .expr_paren => return calcArgMayExpand(ast, @fromBackingInt(@intCast(n.payload))),
         .expr_space_list => {
             const off: ExtraIndex = n.payload;
@@ -4841,8 +4856,8 @@ fn calculationIssue(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ?CalcI
             if (op == .add or op == .sub) {
                 // The operator is the first + or - after the left operand
                 // (the right one's span may start at it).
-                // Comments are skipped to find it; one after it counts as
-                // whitespace, one before it does not.
+                // Comments are skipped to find it, and count as whitespace
+                // around it.
                 const op_char: u8 = if (op == .add) '+' else '-';
                 var pos: usize = ast.getNode(lhs).span_end;
                 while (pos < source.len) {
@@ -4851,11 +4866,15 @@ fn calculationIssue(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ?CalcI
                     } else if (std.mem.startsWith(u8, source[pos..], "/*")) {
                         const close = std.mem.indexOfPos(u8, source, pos + 2, "*/") orelse break;
                         pos = close + 2;
+                    } else if (std.mem.startsWith(u8, source[pos..], "//")) {
+                        pos = std.mem.indexOfScalarPos(u8, source, pos, '\n') orelse source.len;
                     } else break;
                 }
                 if (pos + 1 < source.len and source[pos] == op_char) {
-                    const before = pos > 0 and std.ascii.isWhitespace(source[pos - 1]);
-                    const after = std.ascii.isWhitespace(source[pos + 1]) or std.mem.startsWith(u8, source[pos + 1 ..], "/*");
+                    const before = pos > 0 and (std.ascii.isWhitespace(source[pos - 1]) or
+                        (pos >= 2 and source[pos - 2] == '*' and source[pos - 1] == '/'));
+                    const rest = source[pos + 1 ..];
+                    const after = std.ascii.isWhitespace(rest[0]) or std.mem.startsWith(u8, rest, "/*") or std.mem.startsWith(u8, rest, "//");
                     if (!before or !after) return .{ .issue = .whitespace, .node = node };
                 }
             }
@@ -4885,41 +4904,31 @@ fn calculationIssue(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ?CalcI
             return calculationIssue(ast, ctx, inner);
         },
         .expr_space_list => {
+            // Each value is checked; two numbers side by side lack an
+            // operator. Text the browser reads (an identifier, var(),
+            // interpolation) may stand between them, and a variable's
+            // value is checked when it is known.
             const off: ExtraIndex = n.payload;
             const count = ast.getExtraU32(off);
-            var opaque_part = false;
             for (0..count) |i| {
                 const child: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1 + @as(u32, @intCast(i)))));
                 const c = ast.getNode(child);
-                switch (c.tag) {
-                    .expr_unquoted_ident => {
-                        if (color_mod.lookupNamedColor(ctx.pool.get(@fromBackingInt(@intCast(c.payload)))) == null) opaque_part = true;
-                    },
-                    // A variable's value is only known when it runs.
-                    .expr_interp, .expr_string_interp, .expr_func_call, .expr_variable, .expr_namespaced_var => opaque_part = true,
-                    else => {},
+                if (i > 0) {
+                    const prev = ast.getNode(@fromBackingInt(@intCast(ast.getExtraU32(off + @as(u32, @intCast(i))))));
+                    // A signed number after a number or a variable is a +
+                    // or - written without whitespace after it.
+                    const signed = (c.tag == .expr_number_literal or c.tag == .expr_number_immediate) and
+                        c.span_start < source.len and (source[c.span_start] == '-' or source[c.span_start] == '+');
+                    const math_prev = switch (prev.tag) {
+                        .expr_number_literal, .expr_number_immediate, .expr_variable, .expr_namespaced_var, .expr_paren => true,
+                        else => false,
+                    };
+                    if (signed and math_prev) return .{ .issue = .whitespace, .node = child };
+                    if (isCalcMathOperand(ast, prev) and isCalcMathOperand(ast, c)) return .{ .issue = .missing_operator, .node = node };
                 }
-            }
-            // A signed number after a number or a variable is a + or -
-            // written without whitespace after it.
-            for (1..count) |i| {
-                const prev = ast.getNode(@fromBackingInt(@intCast(ast.getExtraU32(off + @as(u32, @intCast(i))))));
-                const child: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1 + @as(u32, @intCast(i)))));
-                const c = ast.getNode(child);
-                const signed = (c.tag == .expr_number_literal or c.tag == .expr_number_immediate) and
-                    c.span_start < source.len and (source[c.span_start] == '-' or source[c.span_start] == '+');
-                const math_prev = switch (prev.tag) {
-                    .expr_number_literal, .expr_number_immediate, .expr_variable, .expr_namespaced_var, .expr_paren => true,
-                    else => false,
-                };
-                if (signed and math_prev) return .{ .issue = .whitespace, .node = child };
-            }
-            if (opaque_part) return null;
-            for (0..count) |i| {
-                const child: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1 + @as(u32, @intCast(i)))));
                 if (calculationIssue(ast, ctx, child)) |found| return found;
             }
-            return .{ .issue = .missing_operator, .node = node };
+            return null;
         },
         .expr_comma_list, .expr_bracketed_list, .expr_map_literal, .expr_bool_true, .expr_bool_false, .expr_null, .expr_color_hex => {
             return .{ .issue = .expression, .node = node };
