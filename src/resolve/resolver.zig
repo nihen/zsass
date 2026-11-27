@@ -5199,7 +5199,7 @@ fn subParseError(err: anyerror) ResolveError {
     return error.SassError;
 }
 
-fn parseSubExpr(ctx: *Ctx, inner: []const u8, _: Span) ResolveError!ExprIndex {
+fn parseSubExpr(ctx: *Ctx, inner: []const u8, outer_span: Span) ResolveError!ExprIndex {
     var sub_ast = ast_flat.Ast.init(ctx.a, inner, .none);
     defer sub_ast.deinit();
     var lexer = lexer_mod.Lexer.init(ctx.a, inner);
@@ -5250,7 +5250,42 @@ fn parseSubExpr(ctx: *Ctx, inner: []const u8, _: Span) ResolveError!ExprIndex {
         .deferred_callable_default_use_bindings = ctx.deferred_callable_default_use_bindings,
         .mixin_accepts_content = ctx.mixin_accepts_content,
     };
-    return resolveExpr(&sub_ast, &sub_ctx, expr_root);
+    const expr_base = ctx.prog.exprs.items.len;
+    const call_base = ctx.prog.builtin_calls.items.len;
+    const result = try resolveExpr(&sub_ast, &sub_ctx, expr_root);
+    rebaseSubExprSpans(ctx, inner, 0, outer_span, expr_base, call_base);
+    return result;
+}
+
+/// The expressions a sub-parse made are spanned within the text it parsed,
+/// which is `inner` after `prefix_len` bytes of its own; place them in the
+/// module's source, or at `outer_span` when `inner` is not a slice of it, so
+/// diagnostics point at the right place.
+fn rebaseSubExprSpans(ctx: *Ctx, inner: []const u8, prefix_len: u32, outer_span: ?Span, expr_base: usize, call_base: usize) void {
+    const source = ctx.ast.source;
+    const src_start = @intFromPtr(source.ptr);
+    const inner_start = @intFromPtr(inner.ptr);
+    const within = inner_start >= src_start and inner_start + inner.len <= src_start + source.len;
+    if (!within and outer_span == null) return;
+    const offset: u32 = if (within) @intCast(inner_start - src_start) else 0;
+    for (ctx.prog.exprs.items[expr_base..]) |*e| {
+        if (within) {
+            e.span.start = (e.span.start -| prefix_len) + offset;
+            e.span.end = (e.span.end -| prefix_len) + offset;
+        } else {
+            e.span = outer_span.?;
+        }
+    }
+    for (ctx.prog.builtin_calls.items[call_base..]) |*c| {
+        if (c.span_start == std.math.maxInt(u32)) continue;
+        if (within) {
+            c.span_start = (c.span_start -| prefix_len) + offset;
+            c.span_end = (c.span_end -| prefix_len) + offset;
+        } else {
+            c.span_start = outer_span.?.start;
+            c.span_end = outer_span.?.end;
+        }
+    }
 }
 
 fn isBareVarIdentChar(c: u8) bool {
@@ -9548,7 +9583,11 @@ fn resolveExprFromSourceText(ctx: *Ctx, raw_src: []const u8) ResolveError!ExprIn
 
     var sub_ctx = ctx.*;
     sub_ctx.ast = &sub_ast;
-    return try resolveExprMaybeStaticLiteral(&sub_ast, &sub_ctx, expr_root);
+    const expr_base = ctx.prog.exprs.items.len;
+    const call_base = ctx.prog.builtin_calls.items.len;
+    const result = try resolveExprMaybeStaticLiteral(&sub_ast, &sub_ctx, expr_root);
+    rebaseSubExprSpans(ctx, raw_src, 0, null, expr_base, call_base);
+    return result;
 }
 
 fn resolveLegacyPlusImportantValue(ctx: *Ctx, value_source: []const u8, span: Span) ResolveError!?ExprIndex {
@@ -9612,6 +9651,9 @@ fn resolveIncludeArgsFromSource(ctx: *Ctx, inner_src: []const u8) ResolveError!R
 
     var sub_ctx = ctx.*;
     sub_ctx.ast = &sub_ast;
+    const expr_base = ctx.prog.exprs.items.len;
+    const call_base = ctx.prog.builtin_calls.items.len;
+    defer rebaseSubExprSpans(ctx, inner_src, "__zsass_include(".len, null, expr_base, call_base);
 
     const off: ExtraIndex = root.payload;
     const argc = sub_ast.getExtraU32(off + 2);

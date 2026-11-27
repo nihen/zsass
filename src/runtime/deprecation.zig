@@ -222,6 +222,9 @@ pub const DeprecationOpts = struct {
     fatal_excluded: u64 = 0,
     verbose: bool = false,
     quiet: bool = false,
+    /// Set while an expression is folded ahead of time: a deprecation
+    /// fails the folding silently, so the expression runs where it can warn.
+    probe: bool = false,
     /// When true, deprecation warnings print a stack trace when available (dart `--trace`).
     trace_deprecation: bool = false,
 };
@@ -319,6 +322,7 @@ fn emitDeprecationAt(
     line: u32,
     col: u32,
 ) !void {
+    if (opts.probe) return error.SassError;
     if (active_recorder) |recorder| recorder.record(kind, msg, path, line, col);
     // A fatal deprecation fails the compilation even when warnings are
     // quiet or this one is silenced, as in the official CLI.

@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deprecation.".
 - The `@import` deprecation includes "More info and automated migrator:
   https://sass-lang.com/d/import" and is located at the URL.
+- A deprecation from a built-in call that zsass would fold ahead of time,
+  such as one in a `meta.load-css()` `$with` map, is no longer lost: the
+  call is left to run, and warns.
+- Errors and warnings in the arguments of `@include` are located there;
+  they pointed at the first line of the file.
 - `%` between numbers with compatible units converts the right operand:
   `7cm % 1in` is `1.92cm` instead of an error.
 

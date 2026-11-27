@@ -385,6 +385,10 @@ fn evalBuiltinCall(env: anytype, prog: anytype, payload: u32) Error!Value {
     const Env = @TypeOf(env.*);
     const saved_site = deprecation_mod.builtin_call_site;
     defer deprecation_mod.builtin_call_site = saved_site;
+    // Folding without a place to report a deprecation gives up instead, so
+    // the VM evaluates the call and reports it.
+    var probe_opts: deprecation_mod.DeprecationOpts = .{ .probe = true };
+    bctx.deprecation_opts = &probe_opts;
     if (@hasDecl(Env, "builtinDeprecations")) {
         if (env.builtinDeprecations()) |opts| {
             bctx.deprecation_opts = opts;
