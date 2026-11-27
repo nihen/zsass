@@ -10,14 +10,14 @@
 # digests rather than fetching the .sha256 files again, which could have
 # changed since.
 #
-# Needs curl, cosign, and sha256sum (or shasum). Set ZSASS_REPO to verify a
-# fork's releases.
+# Needs curl, cosign, and sha256sum (or shasum). Set ZSASS_RELEASE_REPO to
+# verify a fork's releases, as for render-homebrew-formula.sh.
 set -euo pipefail
 
 tag="${1:?usage: $0 <tag> <asset>...}"
 shift
 [[ $# -gt 0 ]] || { echo "usage: $0 <tag> <asset>..." >&2; exit 64; }
-repo="${ZSASS_REPO:-nihen/zsass}"
+repo="${ZSASS_RELEASE_REPO:-nihen/zsass}"
 base="https://github.com/${repo}/releases/download/${tag}"
 
 sha256_of() {

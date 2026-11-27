@@ -132,9 +132,9 @@ if (-not $Version.StartsWith('v')) {
     $Version = "v$Version"
 }
 
-$skipSignature = $SkipSignature -or $env:ZSASS_INSTALL_SKIP_SIGSTORE -eq '1'
+$skipSignatureCheck = $SkipSignature -or $env:ZSASS_INSTALL_SKIP_SIGSTORE -eq '1'
 $cosignCmd = Get-Command cosign -ErrorAction SilentlyContinue
-if (-not $skipSignature -and $null -eq $cosignCmd) {
+if (-not $skipSignatureCheck -and $null -eq $cosignCmd) {
     throw @'
 [zsass-install] cosign is required to verify the release signature, and it was not found.
 [zsass-install] Install cosign (https://docs.sigstore.dev/cosign/system_config/installation/),
@@ -169,7 +169,7 @@ try {
     # catches a damaged download. The Sigstore signature ties the archive to
     # this repository's release workflow at this tag; it is checked before
     # anything is extracted or run.
-    if ($skipSignature) {
+    if ($skipSignatureCheck) {
         Write-Warning '[zsass-install] skipping the Sigstore signature check as requested.'
         Write-Warning '[zsass-install] the archive is trusted only as far as the download location is.'
     } else {

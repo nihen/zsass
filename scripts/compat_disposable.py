@@ -8,8 +8,10 @@ zig build realworld.
 
 The repositories it downloads are untrusted. Package installs run with
 lifecycle scripts disabled, and bower (whose hooks run code) is skipped;
---allow-lifecycle-scripts turns both back on for inputs you trust. Even
-then, run this in a disposable container or VM without credentials.
+--allow-lifecycle-scripts turns both back on for inputs you trust. A
+project can still run code through its package manager setup, such as a
+`yarnPath` in .yarnrc.yml, so run this in a disposable container or VM
+without credentials.
 """
 from __future__ import annotations
 
@@ -2129,7 +2131,10 @@ def without_scripts(cmd: list[str], cwd: Path) -> tuple[list[str], dict[str, str
     if ALLOW_LIFECYCLE_SCRIPTS or cmd[0] not in ("npm", "pnpm", "yarn"):
         return cmd, None
     if cmd[0] == "yarn" and yarn_is_berry(cwd):
-        return [arg for arg in cmd if arg != "--ignore-scripts"], {**os.environ, "YARN_ENABLE_SCRIPTS": "false"}
+        # YARN_ENABLE_SCRIPTS stops dependencies' scripts only; skip-build
+        # also stops the project's own.
+        args = [arg for arg in cmd if arg != "--ignore-scripts"] + ["--mode=skip-build"]
+        return args, {**os.environ, "YARN_ENABLE_SCRIPTS": "false"}
     if "--ignore-scripts" in cmd:
         return cmd, None
     return cmd + ["--ignore-scripts"], None
