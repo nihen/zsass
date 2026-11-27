@@ -275,8 +275,8 @@ fn buildResolveTable() []const ResolveRow {
         .{ .m = "math", .n = "floor", .id = 1 },
         .{ .m = "math", .n = "ceil", .id = 2 },
         .{ .m = "math", .n = "round", .id = 113 },
-        .{ .m = "math", .n = "min", .id = 4 },
-        .{ .m = "math", .n = "max", .id = 5 },
+        .{ .m = "math", .n = "min", .id = 116 },
+        .{ .m = "math", .n = "max", .id = 117 },
         .{ .m = "math", .n = "div", .id = 6 },
         .{ .m = "math", .n = "percentage", .id = 7 },
         .{ .m = "math", .n = "unit", .id = 8 },
@@ -501,6 +501,8 @@ pub fn dispatch(ctx: *BuiltinContext, id: Id, args: []const Value, arg_names: []
         113 => math.math_round_namespaced(ctx, args, arg_names),
         114 => math.math_min(ctx, args, arg_names),
         115 => math.math_max(ctx, args, arg_names),
+        116 => math.math_min_module(ctx, args, arg_names),
+        117 => math.math_max_module(ctx, args, arg_names),
         22 => string.string_index(ctx, args, arg_names),
         23 => string.string_insert(ctx, args, arg_names),
         24 => string.string_length(ctx, args),
@@ -593,8 +595,12 @@ const testing = std.testing;
 
 test "resolveLegacyGlobal: css math names are case-insensitive" {
     try testing.expectEqual(resolve("math", "abs"), resolveLegacyGlobal("AbS"));
-    try testing.expectEqual(resolve("math", "min"), resolveLegacyGlobal("MiN"));
-    try testing.expectEqual(resolve("math", "max"), resolveLegacyGlobal("MaX"));
+    // The bare globals are CSS min()/max(), which keep incompatible units as
+    // CSS; the sass:math members refuse them.
+    try testing.expectEqual(@as(?Id, 4), resolveLegacyGlobal("MiN"));
+    try testing.expectEqual(@as(?Id, 5), resolveLegacyGlobal("MaX"));
+    try testing.expectEqual(@as(?Id, 116), resolve("math", "min"));
+    try testing.expectEqual(@as(?Id, 117), resolve("math", "max"));
     try testing.expectEqual(resolve("math", "clamp"), resolveLegacyGlobal("ClAmP"));
     try testing.expectEqual(resolve("math", "hypot"), resolveLegacyGlobal("hYpOt"));
     // mod/rem/exp/sign exist only as bare CSS L4 globals, not as sass:math members.

@@ -27,7 +27,7 @@ fn parseListSeparatorArg(ctx: *BuiltinContext, param_name: []const u8, value: Va
     if (identifierEq(raw, "space")) return .space;
     if (identifierEq(raw, "comma")) return .comma;
     if (identifierEq(raw, "slash")) return .slash;
-    return error.BuiltinType;
+    return shared.reportArgumentMessage(param_name, "Must be \"space\", \"comma\", \"slash\", or \"auto\".", .{});
 }
 
 const LogicalListView = struct {
@@ -103,7 +103,10 @@ fn listItemTruthy(value: Value) bool {
 fn parseListIndexArg(ctx: *BuiltinContext, param_name: []const u8, value: Value) BuiltinError!i64 {
     if (value.kind() != .number) return reportArgumentTypeMismatch(ctx, param_name, value, "number");
     const raw = value.asF64(ctx.number_pool);
-    return float_int.toI64(@trunc(raw)) orelse error.BuiltinType;
+    const whole = shared.fuzzyInt(raw) orelse return shared.reportNotInt(ctx, param_name, value);
+    const idx = float_int.toI64(whole) orelse return shared.reportNotInt(ctx, param_name, value);
+    if (idx == 0) return shared.reportArgumentMessage(param_name, "List index may not be 0.", .{});
+    return idx;
 }
 
 fn reportInvalidListIndex(param_name: []const u8, index: i64, list_len: usize) BuiltinError {

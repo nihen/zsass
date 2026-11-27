@@ -91,14 +91,19 @@ fn parseIntIndex(ctx: *BuiltinContext, v: Value) BuiltinError!i64 {
     return float_int.toI64(truncated) orelse error.BuiltinType;
 }
 
-fn parseIntIndexNamed(ctx: *BuiltinContext, param_name: []const u8, v: Value) BuiltinError!i64 {
-    return parseIntIndex(ctx, v) catch |err| switch (err) {
-        error.BuiltinType => {
-            if (!v.isNumber()) return reportArgumentTypeMismatch(ctx, param_name, v, "number");
-            return error.BuiltinType;
-        },
-        else => return err,
-    };
+/// An index argument: unitless and an int. Sass names the argument in
+/// every message except `string.slice()`'s "is not an int", so the caller
+/// says whether to.
+fn parseIntIndexNamed(ctx: *BuiltinContext, param_name: []const u8, v: Value, name_in_int_message: bool) BuiltinError!i64 {
+    if (!v.isNumber()) return reportArgumentTypeMismatch(ctx, param_name, v, "number");
+    if (v.unitId(ctx.number_pool) != .none) return reportExpectedNoUnits(ctx, param_name, v);
+    const whole = shared.fuzzyInt(v.asF64(ctx.number_pool)) orelse
+        return shared.reportNotInt(ctx, if (name_in_int_message) param_name else null, v);
+    return float_int.toI64(whole) orelse shared.reportNotInt(ctx, if (name_in_int_message) param_name else null, v);
+}
+
+fn reportExpectedNoUnits(ctx: *BuiltinContext, param_name: []const u8, v: Value) BuiltinError {
+    return shared.reportArgumentMismatchPhraseExpected(ctx, param_name, v, "to have no units");
 }
 
 fn resolveIndex(len: usize, index: i64) usize {
@@ -131,7 +136,7 @@ pub fn string_insert(ctx: *BuiltinContext, args: []const Value, arg_names: []con
     const base_v = bound[0].?;
     const ins_v = bound[1].?;
     const idx_v = bound[2].?;
-    const idx = try parseIntIndexNamed(ctx, "index", idx_v);
+    const idx = try parseIntIndexNamed(ctx, "index", idx_v, true);
     const base = try stringArgText(ctx, "string", base_v);
     const ins = try stringArgText(ctx, "insert", ins_v);
 
@@ -173,8 +178,8 @@ pub fn string_slice(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
     const end_v = bound[2];
     const s = try stringArgText(ctx, "string", str_v);
     const quoted = str_v.stringQuoted(ctx.string_flags_pool.items);
-    const start_raw = try parseIntIndexNamed(ctx, "start-at", start_v);
-    const end_raw: ?i64 = if (end_v) |v| try parseIntIndexNamed(ctx, "end-at", v) else null;
+    const start_raw = try parseIntIndexNamed(ctx, "start-at", start_v, false);
+    const end_raw: ?i64 = if (end_v) |v| try parseIntIndexNamed(ctx, "end-at", v, false) else null;
 
     const cp_len = utf8CodepointCount(s);
     if (cp_len == 0) {
@@ -231,14 +236,15 @@ fn parseSplitLimit(ctx: *BuiltinContext, v: Value) BuiltinError!usize {
     return std.math.cast(usize, limit) orelse error.BuiltinArity;
 }
 
+/// `$limit` of `string.split()`: an int of at least 1. Sass ignores its
+/// unit.
 fn parseSplitLimitNamed(ctx: *BuiltinContext, param_name: []const u8, v: Value) BuiltinError!usize {
-    return parseSplitLimit(ctx, v) catch |err| switch (err) {
-        error.BuiltinType => {
-            if (!v.isNumber()) return reportArgumentTypeMismatch(ctx, param_name, v, "number");
-            return error.BuiltinType;
-        },
-        else => return err,
-    };
+    if (!v.isNumber()) return reportArgumentTypeMismatch(ctx, param_name, v, "number");
+    const raw = v.asF64(ctx.number_pool);
+    const whole = shared.fuzzyInt(raw) orelse return shared.reportNotInt(ctx, param_name, v);
+    const limit = float_int.toI64(whole) orelse return shared.reportNotInt(ctx, param_name, v);
+    if (limit < 1) return shared.reportArgumentMessage(param_name, "Must be 1 or greater, was {d}.", .{limit});
+    return std.math.cast(usize, limit) orelse error.BuiltinType;
 }
 
 pub fn string_split(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {

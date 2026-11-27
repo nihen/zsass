@@ -923,3 +923,15 @@ test "list.append: appending twice to one list keeps both results apart" {
     ;
     try std.testing.expectEqualStrings("x {\n  a: a;\n  b: b;\n  a2: a a2;\n  n: 20 21 21;\n}\n", try compile(a, src, "", &.{}, quiet));
 }
+
+test "arguments: non-int indexes and incompatible min/max units are errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    if (compile(a, "@use \"sass:list\"; a { b: list.nth((1 2 3), 1.5); }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    if (compile(a, "@use \"sass:math\"; a { b: math.max(1px, 2em); }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    if (compile(a, "@use \"sass:math\" as *; a { b: max(1px, 2em); }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    // The CSS function keeps what it cannot compare.
+    try std.testing.expectEqualStrings("a {\n  b: max(1px, 2em);\n}\n", try compile(a, "a { b: max(1px, 2em); }", "", &.{}, quiet));
+    try std.testing.expectEqualStrings("a {\n  b: [\"a\", \"b c\"];\n}\n", try compile(a, "@use \"sass:string\"; a { b: string.split(\"a b c\", \" \", 1px); }", "", &.{}, quiet));
+}

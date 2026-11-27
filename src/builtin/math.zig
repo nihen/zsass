@@ -2,6 +2,8 @@
 const std = @import("std");
 const stack_guard = @import("../runtime/stack_guard.zig");
 const shared = @import("shared.zig");
+const error_format = @import("../runtime/error_format.zig");
+const float_int = @import("../runtime/float_int.zig");
 const deprecation_mod = @import("../runtime/deprecation.zig");
 const intern_pool_mod = @import("../runtime/intern_pool.zig");
 
@@ -1709,9 +1711,32 @@ fn unitDescriptionFromValue(ctx: *BuiltinContext, value: Value) BuiltinError![]u
     return error.BuiltinType;
 }
 
+/// How `min()`/`max()` treat arguments they cannot compare.
+const MinMaxMode = enum {
+    /// The CSS function: leave the call as CSS.
+    css,
+    /// `math.min()`/`math.max()`: an error.
+    module,
+};
+
 fn minmaxVariadic(ctx: *BuiltinContext, args: []const Value, is_min: bool, css_name: []const u8) BuiltinError!Value {
+    return minmaxVariadicMode(ctx, args, is_min, css_name, .css);
+}
+
+fn reportIncompatibleUnits(ctx: *BuiltinContext, a: Value, b: Value) BuiltinError {
+    const sa = try valueToCssString(ctx, a);
+    defer ctx.allocator.free(sa);
+    const sb = try valueToCssString(ctx, b);
+    defer ctx.allocator.free(sb);
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s} and {s} have incompatible units.", .{ sa, sb }) catch return error.SassError;
+    error_format.setContextMessage(msg);
+    return error.SassError;
+}
+
+fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, css_name: []const u8, mode: MinMaxMode) BuiltinError!Value {
     if (args.len == 0) return badArity(1, args.len);
-    const preserve_css = shouldPreserveCssMathCall(ctx, args);
+    const preserve_css = mode == .css and shouldPreserveCssMathCall(ctx, args);
 
     const values = try ctx.allocator.alloc(Value, args.len);
     defer ctx.allocator.free(values);
@@ -1726,6 +1751,7 @@ fn minmaxVariadic(ctx: *BuiltinContext, args: []const Value, is_min: bool, css_n
     for (values) |arg| {
         if (arg.kind() != .number) {
             if (preserve_css) return buildCssMathCall(ctx, css_name, args);
+            if (mode == .module) return shared.reportArgumentMismatchPhraseUnnamed(ctx, arg, "is not a number");
             return error.BuiltinType;
         }
         const arg_unit = unitSlice(ctx, arg.unitId(ctx.number_pool));
@@ -1757,11 +1783,13 @@ fn minmaxVariadic(ctx: *BuiltinContext, args: []const Value, is_min: bool, css_n
         const best_unit = unitSlice(ctx, best.unitId(ctx.number_pool));
         const arg_unit = unitSlice(ctx, arg.unitId(ctx.number_pool));
         if (cssMathUnitsNeedPassthrough(best_unit, arg_unit, false)) {
+            if (mode == .module) return reportIncompatibleUnits(ctx, best, arg);
             return buildCssMathCall(ctx, css_name, args);
         }
         const converted = minMaxComparableValue(ctx, arg, best.unitId(ctx.number_pool)) catch |e| switch (e) {
             error.BuiltinArity => {
                 if (preserve_css) return buildCssMathCall(ctx, css_name, args);
+                if (mode == .module) return reportIncompatibleUnits(ctx, best, arg);
                 return error.BuiltinArity;
             },
             else => return e,
@@ -2080,6 +2108,22 @@ pub fn math_max(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     };
 }
 
+pub fn math_min_module(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    ensureNoNamedArgs(args, arg_names) catch return error.SassError;
+    return minmaxVariadicMode(ctx, args, true, "min", .module) catch |err| switch (err) {
+        error.BuiltinArity => error.SassError,
+        else => err,
+    };
+}
+
+pub fn math_max_module(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    ensureNoNamedArgs(args, arg_names) catch return error.SassError;
+    return minmaxVariadicMode(ctx, args, false, "max", .module) catch |err| switch (err) {
+        error.BuiltinArity => error.SassError,
+        else => err,
+    };
+}
+
 pub fn math_div(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
     const bound = try bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{ "number1", "number2" }, 2);
     const lhs = bound[0].?;
@@ -2389,12 +2433,17 @@ pub fn math_random(ctx: *BuiltinContext, args: []const Value, arg_names: []const
 
         if (limit_value.kind() != .number) return reportArgumentTypeMismatch(ctx, "limit", limit_value, "number");
         const raw = limit_value.asF64(ctx.number_pool);
-        if (!std.math.isFinite(raw)) return error.BuiltinType;
-
-        const rounded = @round(raw);
-        if (@abs(raw - rounded) > 1e-10) return error.BuiltinType;
+        const rounded = shared.fuzzyInt(raw) orelse return shared.reportNotInt(ctx, "limit", limit_value);
+        // Past the 64-bit range a number is not an int either.
+        _ = float_int.toI64(rounded) orelse return shared.reportNotInt(ctx, "limit", limit_value);
+        if (rounded <= 0) return shared.reportArgumentMismatchPhraseCustom(ctx, "limit", limit_value, "Must be greater than 0, was ", ".");
         // The official CLI accepts limits from 1 through 2^32.
-        if (rounded <= 0 or rounded > 0x1p32) return error.BuiltinType;
+        if (rounded > 0x1p32) {
+            var buf: [160]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "RangeError (max): Must be positive and <= 2^32: Not in inclusive range 1..4294967296: {d}", .{@as(u64, @intFromFloat(@min(rounded, 0x1p63)))}) catch return error.BuiltinType;
+            error_format.setContextMessage(msg);
+            return error.BuiltinType;
+        }
 
         const limit: u64 = @intFromFloat(rounded);
         if (limit == 1) return Value.numberUnitless(1);

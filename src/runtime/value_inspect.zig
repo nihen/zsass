@@ -54,6 +54,7 @@ fn formatNumberValue(ctx: *const Context, value: Value) std.mem.Allocator.Error!
 fn formatStringValue(ctx: *const Context, value: Value) std.mem.Allocator.Error![]const u8 {
     std.debug.assert(value.kind() == .string);
     const raw = calc_utils.stripCalcArgMarker(ctx.intern_pool.get(value.stringIntern()));
+    if (!value.stringQuoted(value_mod.empty_string_flags_pool)) return ctx.allocator.dupe(u8, raw);
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(ctx.allocator);
 

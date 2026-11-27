@@ -73,7 +73,8 @@ pub fn missingArgumentMessage() []const u8 {
 
 pub fn formatTooManyArguments(buf: []u8, expected: usize, got: usize) ![]u8 {
     const arg_noun = if (expected == 1) "argument" else "arguments";
-    return std.fmt.bufPrint(buf, "Only {d} {s} allowed, but {d} were passed.", .{ expected, arg_noun, got });
+    const verb = if (got == 1) "was" else "were";
+    return std.fmt.bufPrint(buf, "Only {d} {s} allowed, but {d} {s} passed.", .{ expected, arg_noun, got, verb });
 }
 
 /// Zig error tag  ->  official Sass CLI compatible user-facing message.

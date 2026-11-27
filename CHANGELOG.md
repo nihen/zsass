@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proportion to its length. Each append copied the whole list, so 25000
   appends needed about 2.5 GB and hit the memory limit; they now take
   10 MB.
+- `list.nth()` and `list.set-nth()` refuse an index that is not an int,
+  such as `1.5`, instead of rounding it down, and `math.min()` and
+  `math.max()` refuse numbers with incompatible units, such as `1px` and
+  `2em`, as the official CLI does. The global CSS `min()` and `max()`
+  still keep such a call as CSS.
+- `string.split()` accepts a `$limit` with a unit, as the official CLI does.
+- Error messages for invalid arguments to `list.nth()`, `list.set-nth()`,
+  `list.join()`, `list.append()`, `math.random()`, `math.min()`,
+  `math.max()`, `string.slice()`, `string.insert()`, and `string.split()`
+  match the official CLI, such as `$n: 1.5 is not an int.`; an unquoted
+  string in such a message is written without quotes; and "1 was passed"
+  replaces "1 were passed".
 
 ## 0.5.1 (2026-11-27)
 
