@@ -1,5 +1,6 @@
 //! Runtime-backed sass:meta builtins.
 const std = @import("std");
+const stack_guard = @import("stack_guard.zig");
 const shared = @import("../builtin/shared.zig");
 const meta_helpers = @import("../builtin/meta_helpers.zig");
 const value_mod = @import("value.zig");
@@ -838,6 +839,7 @@ fn inspectColorValue(ctx: *BuiltinContext, value: Value) BuiltinError![]const u8
 }
 
 fn valueToInspectCssString(ctx: *BuiltinContext, value: Value) BuiltinError![]const u8 {
+    try stack_guard.check();
     if (value.isString()) {
         return inspectStringValue(ctx, value);
     }

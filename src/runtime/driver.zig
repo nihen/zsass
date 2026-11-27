@@ -21,6 +21,9 @@ const persistent_resolver_mod = @import("../resolve/persistent_resolver.zig");
 const cross_entry_state_mod = @import("cross_entry_state.zig");
 const source_map_mod = @import("../ir/source_map.zig");
 const syntax_override_mod = @import("syntax_override.zig");
+const resource_budget = @import("resource_budget.zig");
+const stack_guard = @import("stack_guard.zig");
+const batch_reuse = @import("batch_reuse.zig");
 
 const zsass_io_mod = @import("io.zig");
 const watch_backend_mod = @import("watch_backend.zig");
@@ -116,6 +119,7 @@ const USAGE =
     \\  --poll                                 Use polling watcher (requires --watch)
     \\  --update                               Recompile only when output is older than input
     \\  --check, --dry-run                     Compile without writing files
+    \\  --no-limits                            Lift the limits on work and output (trusted input only)
     \\  --dry-run=json                         Print resolved compile targets as JSON
     \\  --compile-only <input>                 Parse/resolve/compile only (no VM/emit phase)
     \\  --list-load-paths                      Print resolved load paths and exit
@@ -603,7 +607,7 @@ const bash_completion_script =
     \\    COMPREPLY=()
     \\    cur="${COMP_WORDS[COMP_CWORD]}"
     \\    prev="${COMP_WORDS[COMP_CWORD-1]}"
-    \\    opts="-h --help -v -V --version --info --completions -i --interactive --stdin --stdin-filepath -s --style -I --load-path -C --chdir -o --output -q --quiet --no-quiet --verbose --no-verbose --silence-deprecation --future-deprecation --fatal-deprecation -c --color --no-color --unicode --no-unicode --trace --no-trace --error-css --no-error-css --source-map --no-source-map --embed-source-map --embed-sources --no-embed-sources --source-map-file --source-map-url --source-map-urls --plain-css --scss --indented --no-indented --charset --no-charset -w --watch --poll --update --check --dry-run --compile-only --list-load-paths --env-report --phase-timer --dump-bc --opcode-histogram --trace-diff"
+    \\    opts="-h --help -v -V --version --info --completions -i --interactive --stdin --stdin-filepath -s --style -I --load-path -C --chdir -o --output -q --quiet --no-quiet --verbose --no-verbose --silence-deprecation --future-deprecation --fatal-deprecation -c --color --no-color --unicode --no-unicode --trace --no-trace --error-css --no-error-css --source-map --no-source-map --embed-source-map --embed-sources --no-embed-sources --source-map-file --source-map-url --source-map-urls --plain-css --scss --indented --no-indented --charset --no-charset --no-limits -w --watch --poll --update --check --dry-run --compile-only --list-load-paths --env-report --phase-timer --dump-bc --opcode-histogram --trace-diff"
     \\
     \\    case "$prev" in
     \\        --completions)
@@ -697,6 +701,7 @@ const zsh_completion_script =
     \\      '--no-indented[Force SCSS syntax]' \
     \\      '--charset[Emit @charset for non-ASCII output (default)]' \
     \\      '--no-charset[Disable @charset emission]' \
+    \\      '--no-limits[Lift the limits on work and output]' \
     \\      '(-w --watch)'{-w,--watch}'[Recompile on changes]' \
     \\      '--poll[Use polling watcher (requires --watch)]' \
     \\      '--update[Recompile only when output is older than input]' \
@@ -759,6 +764,7 @@ const fish_completion_script =
     \\complete -c zsass -l no-indented -d "Force SCSS syntax"
     \\complete -c zsass -l charset -d "Emit @charset for non-ASCII output (default)"
     \\complete -c zsass -l no-charset -d "Disable @charset emission"
+    \\complete -c zsass -l no-limits -d "Lift the limits on work and output"
     \\complete -c zsass -s w -l watch -d "Recompile on changes"
     \\complete -c zsass -l poll -d "Use polling watcher (requires --watch)"
     \\complete -c zsass -l update -d "Recompile only when output is older than input"
@@ -822,6 +828,8 @@ const RunOpts = struct {
     /// official Sass CLI `--scss` (default) / `--indented` / `--no-indented` /
     /// `--plain-css` semantics.
     syntax_override: ?syntax_override_mod.SyntaxOverride = null,
+    /// Resource limits for each entry (`--no-limits` lifts them).
+    limits: resource_budget.CompileLimits = .{},
 };
 
 /// Out-parameter carrier for `RunOpts.watch_out_deps`. The watcher owns
@@ -1253,6 +1261,8 @@ pub fn main(init: std.process.Init) !void {
             opts.charset = true;
         } else if (std.mem.eql(u8, a, "--no-charset")) {
             opts.charset = false;
+        } else if (std.mem.eql(u8, a, "--no-limits")) {
+            opts.limits = resource_budget.CompileLimits.unlimited();
         } else if (std.mem.eql(u8, a, "--indented")) {
             opts.syntax_override = .sass;
         } else if (std.mem.eql(u8, a, "--no-indented") or std.mem.eql(u8, a, "--scss")) {
@@ -2435,70 +2445,6 @@ fn envFlagDisabled(name: [:0]const u8) bool {
     return std.mem.eql(u8, s, "0");
 }
 
-fn sourceMayConfigureModule(source: []const u8) bool {
-    if (std.mem.indexOf(u8, source, "with") == null) return false;
-    return std.mem.indexOf(u8, source, "@use") != null or
-        std.mem.indexOf(u8, source, "@forward") != null;
-}
-
-fn sourceMayReachUnknownConfiguration(source: []const u8) bool {
-    if (sourceMayConfigureModule(source)) return true;
-    if (std.mem.indexOf(u8, source, "@import") == null) return false;
-    return !sourceImportsArePlainCssOnly(source);
-}
-
-fn importTailHasOnlyWhitespaceBeforeSemicolon(source: []const u8, start: usize) bool {
-    var k = start;
-    while (k < source.len) : (k += 1) {
-        if (source[k] == ';') return true;
-        if (!std.ascii.isWhitespace(source[k])) return false;
-    }
-    return true;
-}
-
-/// True when every `@import` occurrence in `source` is a plain-CSS import
-/// (url(...), an http(s)/protocol-relative URL, or a quoted path ending in
-/// .css). Plain-CSS imports pass through to the output without loading a
-/// Sass module, so they cannot inject configuration into module resolution.
-/// Anything ambiguous (quoted Sass partials, media-suffixed quoted imports,
-/// "@import" text inside strings or comments) answers false, keeping the
-/// caller on the conservative path.
-fn sourceImportsArePlainCssOnly(source: []const u8) bool {
-    var i: usize = 0;
-    while (std.mem.indexOfPos(u8, source, i, "@import")) |pos| {
-        i = pos + "@import".len;
-        var j = i;
-        while (j < source.len and std.ascii.isWhitespace(source[j])) j += 1;
-        if (j >= source.len) return false;
-        if (std.mem.startsWith(u8, source[j..], "url(")) continue;
-        if (source[j] == '"' or source[j] == '\'') {
-            const quote = source[j];
-            const rest = source[j + 1 ..];
-            const end = std.mem.indexOfScalar(u8, rest, quote) orelse return false;
-            const path = rest[0..end];
-            const after_quote = j + 1 + end + 1;
-            if (!importTailHasOnlyWhitespaceBeforeSemicolon(source, after_quote)) return false;
-            if (std.mem.startsWith(u8, path, "http://") or
-                std.mem.startsWith(u8, path, "https://") or
-                std.mem.startsWith(u8, path, "//"))
-            {
-                continue;
-            }
-            if (std.mem.endsWith(u8, path, ".css")) continue;
-            return false;
-        }
-        return false;
-    }
-    return true;
-}
-
-test "driver: plain-css import probe rejects quoted media suffixes" {
-    try std.testing.expect(sourceImportsArePlainCssOnly("@import \"theme.css\";"));
-    try std.testing.expect(sourceImportsArePlainCssOnly("@import \"https://example.com/theme.css\";"));
-    try std.testing.expect(!sourceImportsArePlainCssOnly("@import \"theme.css\" screen;"));
-    try std.testing.expect(!sourceImportsArePlainCssOnly("@import \"theme\";"));
-}
-
 fn runEnd2EndWithPool(
     allocator: std.mem.Allocator,
     input_path: []const u8,
@@ -2510,6 +2456,41 @@ fn runEnd2EndWithPool(
     phase_aggregator: ?*PhaseAggregator,
     persistent_state: ?*persistent_resolver_mod.PersistentResolverState,
     cross_entry_states: ?*cross_entry_state_mod.CrossEntryModuleStates,
+) !void {
+    // Each entry gets its own budget, so one entry cannot use up another's.
+    var budget = resource_budget.ResourceBudget.init(opts.limits, null, null);
+    const guard = stack_guard.begin(opts.limits.stack_bytes, opts.limits.max_syntax_depth, &budget);
+    defer guard.end();
+    // A batch worker passes an arena, which keeps what is freed.
+    var limited_alloc = if (shared_pool != null)
+        resource_budget.LimitedAllocator.initOverArena(&budget, allocator)
+    else
+        resource_budget.LimitedAllocator.init(&budget, allocator);
+    runEnd2EndWithBudget(limited_alloc.allocator(), input_path, output_path, opts, shared_pool, source_cache, ast_cache, phase_aggregator, persistent_state, cross_entry_states, &budget) catch |err| {
+        return budget.mapError(stack_guard.mapError(err));
+    };
+    if (stack_guard.tripped()) return error.NestingLimit;
+    if (budget.exceeded) |e| return e;
+}
+
+/// A limit that an inner layer recovered from still fails the entry.
+fn failOnRecoveredLimit(budget: *const resource_budget.ResourceBudget) !void {
+    if (stack_guard.tripped()) return error.NestingLimit;
+    if (budget.exceeded) |e| return e;
+}
+
+fn runEnd2EndWithBudget(
+    allocator: std.mem.Allocator,
+    input_path: []const u8,
+    output_path: []const u8,
+    opts: RunOpts,
+    shared_pool: ?*intern_pool_mod.InternPool,
+    source_cache: ?*source_cache_mod.SharedSourceCache,
+    ast_cache: ?*ast_cache_mod.ParsedAstCache,
+    phase_aggregator: ?*PhaseAggregator,
+    persistent_state: ?*persistent_resolver_mod.PersistentResolverState,
+    cross_entry_states: ?*cross_entry_state_mod.CrossEntryModuleStates,
+    budget: *resource_budget.ResourceBudget,
 ) !void {
     if (opts.update_mode) {
         if (opts.stdin_source == null and
@@ -2569,22 +2550,19 @@ fn runEnd2EndWithPool(
     // SAFETY: Assigned from shared or owned compile result before any use.
     var program_ptr: *compiler_mod.Program = undefined;
     if (shared_pool) |pool| {
-        const persistent_ctx: ?compiler_mod.PersistentCompileContext = if (persistent_state) |ps|
-            if (sourceMayReachUnknownConfiguration(source)) null else ps.compileContext()
-        else
-            null;
+        const persistent_ctx: ?compiler_mod.PersistentCompileContext = if (persistent_state) |ps| ps.contextFor(source) else null;
         // Import-preamble checkpoints serve exactly the entries the persistent
         // opt-out leaves cold (kill switch: ZSASS_PREAMBLE_CHECKPOINT=0).
         const preamble_store: ?*persistent_resolver_mod.PersistentResolverState.PreambleStore = if (persistent_state) |ps|
             if (persistent_ctx == null and !envFlagDisabled("ZSASS_PREAMBLE_CHECKPOINT")) &ps.preamble_checkpoints else null
         else
             null;
-        borrowed_result = try compiler_mod.parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(allocator, source, module_path, opts.load_paths, phase_timer_ptr, pool, source_cache, ast_cache, persistent_ctx, &deprecation_opts, preamble_store);
+        borrowed_result = try compiler_mod.parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(allocator, source, module_path, opts.load_paths, phase_timer_ptr, pool, source_cache, ast_cache, persistent_ctx, &deprecation_opts, preamble_store, budget);
         pool_ptr = pool;
         color_pool_ptr = &borrowed_result.?.color_pool;
         program_ptr = &borrowed_result.?.program;
     } else {
-        owned_result = try compiler_mod.parseResolveCompileWithPathAndPhaseTimer(allocator, source, module_path, opts.load_paths, phase_timer_ptr, &deprecation_opts);
+        owned_result = try compiler_mod.parseResolveCompileWithPathAndPhaseTimer(allocator, source, module_path, opts.load_paths, phase_timer_ptr, &deprecation_opts, budget);
         pool_ptr = &owned_result.?.pool;
         color_pool_ptr = &owned_result.?.color_pool;
         program_ptr = &owned_result.?.program;
@@ -2665,10 +2643,12 @@ fn runEnd2EndWithPool(
     }
 
     var rule_ir = rule_ir_mod.RuleIR.init();
+    rule_ir.budget = budget;
     defer rule_ir.deinit(allocator);
 
     var vm = try vm_mod.VM.init(allocator, pool_ptr, color_pool_ptr, &rule_ir, program_ptr);
     vm.error_sink_fd = api_mod.compileErrorSinkFd();
+    vm.budget = budget;
     defer vm.deinit();
     vm.deprecation_opts = deprecation_opts;
     if (std.c.getenv("ZSASS_TRACE_SLOT")) |slot_z| {
@@ -2688,7 +2668,7 @@ fn runEnd2EndWithPool(
     if (cross_entry_states != null and
         resolved_sm_mode == .off and
         opts.stdin_source == null and
-        !sourceMayReachUnknownConfiguration(source) and
+        !batch_reuse.sourceMayReachUnknownConfiguration(source) and
         !envFlagDisabled("ZSASS_CROSS_ENTRY"))
     {
         vm.cross_entry_states = cross_entry_states;
@@ -2724,7 +2704,11 @@ fn runEnd2EndWithPool(
             rule_ir.nodes.items.len,
         });
     };
-    vm_mod.VM.runTop(&vm) catch |err| {
+    vm_mod.VM.runTop(&vm) catch |vm_err| {
+        // Report the limit an allocation failure came from.
+        const err = budget.mapError(vm_err);
+        // The compile's allocator may be what ran out; the report must not be.
+        const diag_alloc = std.heap.c_allocator;
         if (error_format.verboseErrorsEnabled()) {
             cliErrPrint("zsass: VM error: {}\n", .{err});
         }
@@ -2735,16 +2719,16 @@ fn runEnd2EndWithPool(
         const ctx = error_format.error_state.last_error_ctx;
         const root_idx: u32 = program_ptr.root_index;
         const file_id_is_entry = (ctx.file_id == root_idx);
-        const frame_info = resolveFrameInfoEx(allocator, program_ptr, ctx, source, module_path, file_id_is_entry);
-        defer if (frame_info.source_owned) |s| allocator.free(s);
+        const frame_info = resolveFrameInfoEx(diag_alloc, program_ptr, ctx, source, module_path, file_id_is_entry);
+        defer if (frame_info.source_owned) |s| diag_alloc.free(s);
 
         // CLI-FIX-E Step 2c+ Phase 3: VM error in imported module is 2-step trace
         // Rendered with (`{imported} l:c {fn-name}()\n {entry} l:c root stylesheet`).
         // Take exact callsite span of entry in outermostCallerInfo() of VM and innerMostChunkName()
         // Reflect the function/mixin name in the inner frame label.
         if (frame_info.has_frame and !file_id_is_entry) {
-            buildVmErrorSnapshotV3(&vm, program_ptr, allocator, frame_info.source.?, frame_info.path, ctx.span_start, ctx.span_end, source, module_path);
-            error_format.writeStackTrace(allocator) catch {
+            buildVmErrorSnapshotV3(&vm, program_ptr, diag_alloc, frame_info.source.?, frame_info.path, ctx.span_start, ctx.span_end, source, module_path);
+            error_format.writeStackTrace(diag_alloc) catch {
                 error_format.writeSourceFrame(frame_info.source.?, frame_info.line_starts.?, ctx.span_start, ctx.span_end, frame_info.path);
             };
         } else if (frame_info.has_frame) {
@@ -2754,7 +2738,7 @@ fn runEnd2EndWithPool(
         }
         // CLI-FIX-E Step 3 (C-6): Write error CSS template to out.css in file output mode.
         writeErrorCssIfNeeded(
-            allocator,
+            diag_alloc,
             output_path,
             err,
             frame_info.path,
@@ -2768,6 +2752,7 @@ fn runEnd2EndWithPool(
         return err;
     };
     perf.timeEnd(.phase_execute_ns, perf_exec_start);
+    try failOnRecoveredLimit(budget);
     if (opts.phase_timer) phase_timer.record(.execute, exec_start);
 
     if (opts.opcode_histogram) {
@@ -2832,7 +2817,9 @@ fn runEnd2EndWithPool(
         // they presuppose a real output destination.
         var discard_buf: [4096]u8 = undefined;
         var discard = std.Io.Writer.Discarding.init(discard_buf[0..]);
-        var tw = TrackingWriter.init(&discard.writer);
+        var limit_buf: [4096]u8 = undefined;
+        var limited = resource_budget.LimitedWriter.init(budget, &discard.writer, limit_buf[0..]);
+        var tw = TrackingWriter.init(&limited.interface);
         if (source_map) |*sm| {
             rule_ir.writeToWithSourceMap(&tw.writer, pool_ptr, sm, source_locations, opts.output_style, write_sm_opts) catch |err| {
                 cliErrPrint("zsass-check phase=writeTo-sm err={}\n", .{err});
@@ -2863,7 +2850,9 @@ fn runEnd2EndWithPool(
         defer css_out.deinit(allocator);
         {
             var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &css_out);
-            var tw = TrackingWriter.init(&aw.writer);
+            var limit_buf: [4096]u8 = undefined;
+            var limited = resource_budget.LimitedWriter.init(budget, &aw.writer, limit_buf[0..]);
+            var tw = TrackingWriter.init(&limited.interface);
             if (source_map) |*sm| {
                 try rule_ir.writeToWithSourceMap(&tw.writer, pool_ptr, sm, source_locations, opts.output_style, write_sm_opts);
                 if (opts.embed_sources) try sm.populateEmbedContents(allocator, module_path, source);
@@ -2877,6 +2866,7 @@ fn runEnd2EndWithPool(
             try tw.flush();
             css_out = aw.toArrayList();
         }
+        try failOnRecoveredLimit(budget);
         try writeFileAtomic(output_path, css_out.items);
 
         var dbuf: std.ArrayList(u8) = .empty;
@@ -2913,7 +2903,9 @@ fn runEnd2EndWithPool(
             atomic_writer = created;
             break :blk &fw.interface;
         };
-        var tw = TrackingWriter.init(target_writer);
+        var limit_buf: [4096]u8 = undefined;
+        var limited = resource_budget.LimitedWriter.init(budget, target_writer, limit_buf[0..]);
+        var tw = TrackingWriter.init(&limited.interface);
         if (source_map) |*sm| {
             rule_ir.writeToWithSourceMap(&tw.writer, pool_ptr, sm, source_locations, opts.output_style, write_sm_opts) catch |err| {
                 cliErrPrint("zsass-emit phase=writeTo-sm err={}\n", .{err});
@@ -2931,6 +2923,9 @@ fn runEnd2EndWithPool(
             };
             if (tw.bytes_written == 0 and !output_to_stdout) try tw.writeAll("\n");
         }
+        // Writing can trip a limit that a fallback hid; then the file is not
+        // replaced and nothing is cached.
+        try failOnRecoveredLimit(budget);
         try tw.flush();
         if (atomic_writer) |*a| try a.replace(zsass_io_mod.io);
     }
@@ -2956,6 +2951,7 @@ fn runEnd2EndWithPool(
         }
     }
 
+    try failOnRecoveredLimit(budget);
     try storeCssCache(allocator, input_path, output_path, opts, program_ptr);
 }
 
@@ -2978,7 +2974,7 @@ fn cssCacheRoot(allocator: std.mem.Allocator) ![]const u8 {
         const raw = std.mem.sliceTo(raw_z, 0);
         if (raw.len != 0) return try allocator.dupe(u8, raw);
     }
-    return try allocator.dupe(u8, ".zig-cache/zsass-css-cache-v3");
+    return try allocator.dupe(u8, ".zig-cache/zsass-css-cache-v4");
 }
 
 fn appendU64KeyMaterial(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, value: u64) !void {
@@ -2993,6 +2989,17 @@ fn appendI128KeyMaterial(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Al
     try buf.appendSlice(allocator, &tmp);
 }
 
+fn appendPathKeyMaterial(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, label: []const u8, path: []const u8) !void {
+    try buf.appendSlice(allocator, label);
+    try buf.appendSlice(allocator, path);
+    try buf.append(allocator, '\t');
+    if (zsass_io_mod.realPathAlloc(std.Io.Dir.cwd(), path, allocator)) |real| {
+        defer allocator.free(real);
+        try buf.appendSlice(allocator, real);
+    } else |_| {}
+    try buf.append(allocator, '\n');
+}
+
 fn cssCacheKeyHex(
     allocator: std.mem.Allocator,
     input_path: []const u8,
@@ -3000,21 +3007,26 @@ fn cssCacheKeyHex(
 ) ![64]u8 {
     var material: std.ArrayListUnmanaged(u8) = .empty;
     defer material.deinit(allocator);
-    try material.appendSlice(allocator, "zsass-css-cache-v3\n");
+    try material.appendSlice(allocator, "zsass-css-cache-v4\n");
     try material.appendSlice(allocator, builtin.zig_version_string);
     try material.append(allocator, '\n');
     try material.appendSlice(allocator, @tagName(builtin.mode));
     try material.append(allocator, '\n');
-    try material.appendSlice(allocator, input_path);
+    // Relative paths name different files in different projects, so the
+    // key holds where they lead, not only how they are spelled.
+    try appendPathKeyMaterial(&material, allocator, "cwd:", ".");
+    try appendPathKeyMaterial(&material, allocator, "in:", input_path);
+    for (opts.load_paths) |lp| try appendPathKeyMaterial(&material, allocator, "I:", lp);
+    // Every option that changes the CSS, or whether the compile succeeds.
+    try material.print(allocator, "style:{s}\nsyntax:{s}\n", .{
+        @tagName(opts.output_style),
+        if (opts.syntax_override) |o| @tagName(o) else "auto",
+    });
+    try material.appendSlice(allocator, "fatal:");
+    try material.appendSlice(allocator, std.mem.asBytes(&opts.deprecation.fatal));
+    try material.appendSlice(allocator, "\nlimits:");
+    try material.appendSlice(allocator, std.mem.asBytes(&opts.limits));
     try material.append(allocator, '\n');
-    var lp_total: usize = 0;
-    for (opts.load_paths) |lp| lp_total += lp.len;
-    try material.ensureUnusedCapacity(allocator, lp_total + opts.load_paths.len * 3);
-    for (opts.load_paths) |lp| {
-        material.appendSliceAssumeCapacity("I:");
-        material.appendSliceAssumeCapacity(lp);
-        material.appendAssumeCapacity('\n');
-    }
     try material.appendSlice(allocator, "charset:");
     try material.append(allocator, if (opts.charset) '1' else '0');
     try material.append(allocator, '\n');
@@ -3113,7 +3125,7 @@ fn manifestDepsStillFresh(allocator: std.mem.Allocator, manifest_bytes: []const 
     const header = lines.next() orelse return false;
     // v1, v2, and unknown headers are treated as stale; this is graceful
     // invalidation when the manifest format bumps.
-    if (!std.mem.eql(u8, header, "zsass-css-cache-v3")) return false;
+    if (!std.mem.eql(u8, header, "zsass-css-cache-v4")) return false;
     const strict = cssCacheStrict();
     while (lines.next()) |line| {
         if (line.len == 0) continue;
@@ -3182,7 +3194,7 @@ fn storeCssCache(
 
     var manifest: std.ArrayListUnmanaged(u8) = .empty;
     defer manifest.deinit(allocator);
-    try manifest.appendSlice(allocator, "zsass-css-cache-v3\n");
+    try manifest.appendSlice(allocator, "zsass-css-cache-v4\n");
     for (program.modules) |mod| {
         if (mod.module_path.len == 0) continue;
         const st = std.Io.Dir.cwd().statFile(zsass_io_mod.io, mod.module_path, .{}) catch return;
@@ -3825,4 +3837,26 @@ test "currentLocalTimestamp reads the C library's clock and calendar" {
     try std.testing.expect(hour <= 23);
     try std.testing.expect(minute <= 59);
     try std.testing.expect(second <= 60);
+}
+
+test "css cache key depends on the output style and on where paths lead" {
+    const alloc = std.testing.allocator;
+    const expanded = try cssCacheKeyHex(alloc, "in.scss", .{});
+    const compressed = try cssCacheKeyHex(alloc, "in.scss", .{ .output_style = .compressed });
+    try std.testing.expect(!std.mem.eql(u8, &expanded, &compressed));
+    var fatal_opts: RunOpts = .{};
+    fatal_opts.deprecation.fatal.insert(.import);
+    const fatal = try cssCacheKeyHex(alloc, "in.scss", fatal_opts);
+    try std.testing.expect(!std.mem.eql(u8, &expanded, &fatal));
+
+    // The same spelling names another file in another directory.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(zsass_io_mod.io, .{ .sub_path = "in.scss", .data = "a{b:c}" });
+    const dir = try zsass_io_mod.realPathAlloc(tmp.dir, ".", alloc);
+    defer alloc.free(dir);
+    const absolute = try std.fs.path.join(alloc, &.{ dir, "in.scss" });
+    defer alloc.free(absolute);
+    const there = try cssCacheKeyHex(alloc, absolute, .{});
+    try std.testing.expect(!std.mem.eql(u8, &expanded, &there));
 }

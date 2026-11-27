@@ -1,4 +1,6 @@
 const std = @import("std");
+const stack_guard = @import("../runtime/stack_guard.zig");
+const file_access_mod = @import("file_access.zig");
 const zsass_io = @import("../runtime/io.zig");
 const pkg_importer = @import("pkg_importer.zig");
 const test_utils = struct {
@@ -126,6 +128,8 @@ pub const ResolveOptions = struct {
     /// `pkg:` resolution is rejected so untrusted SCSS input cannot use it
     /// to read packages off the host filesystem.
     pkg_importer_enabled: bool = false,
+    /// Confines the files resolution may look at; null leaves them open.
+    file_access: ?*const file_access_mod.FileAccess = null,
 };
 
 pub fn resolveUrl(
@@ -150,6 +154,7 @@ pub fn resolveImportUrl(
 
 fn tryOverlayExplicitRelative(
     allocator: std.mem.Allocator,
+    probe: *file_access_mod.Probe,
     url: []const u8,
     from_path: []const u8,
     load_paths: []const []const u8,
@@ -172,11 +177,11 @@ fn tryOverlayExplicitRelative(
             const abs_file = std.fs.path.basename(overlay_abs);
             if (is_import) {
                 inline for ([_]CandidateKind{ .import_non_index, .normal_non_index, .import_index, .normal_index }) |kind| {
-                    if (try tryCandidatePhase(allocator, abs_base, abs_file, kind)) |path| {
+                    if (try tryCandidatePhase(allocator, probe, abs_base, abs_file, kind)) |path| {
                         return path;
                     }
                 }
-            } else if (try tryCandidates(allocator, abs_base, abs_file)) |path| {
+            } else if (try tryCandidates(allocator, probe, abs_base, abs_file)) |path| {
                 return path;
             }
         }
@@ -186,6 +191,7 @@ fn tryOverlayExplicitRelative(
 
 fn trySyntheticExplicitRelative(
     allocator: std.mem.Allocator,
+    probe: *file_access_mod.Probe,
     url: []const u8,
     load_paths: []const []const u8,
     is_import: bool,
@@ -198,11 +204,11 @@ fn trySyntheticExplicitRelative(
         const abs_file = std.fs.path.basename(synthetic_abs);
         if (is_import) {
             inline for ([_]CandidateKind{ .import_non_index, .normal_non_index, .import_index, .normal_index }) |kind| {
-                if (try tryCandidatePhase(allocator, abs_base, abs_file, kind)) |path| {
+                if (try tryCandidatePhase(allocator, probe, abs_base, abs_file, kind)) |path| {
                     return path;
                 }
             }
-        } else if (try tryCandidates(allocator, abs_base, abs_file)) |path| {
+        } else if (try tryCandidates(allocator, probe, abs_base, abs_file)) |path| {
             return path;
         }
 
@@ -213,11 +219,11 @@ fn trySyntheticExplicitRelative(
 
             if (is_import) {
                 inline for ([_]CandidateKind{ .import_non_index, .normal_non_index, .import_index, .normal_index }) |kind| {
-                    if (try tryCandidatePhase(allocator, lp, trimmed, kind)) |path| {
+                    if (try tryCandidatePhase(allocator, probe, lp, trimmed, kind)) |path| {
                         return path;
                     }
                 }
-            } else if (try tryCandidates(allocator, lp, trimmed)) |path| {
+            } else if (try tryCandidates(allocator, probe, lp, trimmed)) |path| {
                 return path;
             }
         }
@@ -228,11 +234,11 @@ fn trySyntheticExplicitRelative(
         for (load_paths) |lp| {
             if (is_import) {
                 inline for ([_]CandidateKind{ .import_non_index, .normal_non_index, .import_index, .normal_index }) |kind| {
-                    if (try tryCandidatePhase(allocator, lp, synthetic_name, kind)) |path| {
+                    if (try tryCandidatePhase(allocator, probe, lp, synthetic_name, kind)) |path| {
                         return path;
                     }
                 }
-            } else if (try tryCandidates(allocator, lp, synthetic_name)) |path| {
+            } else if (try tryCandidates(allocator, probe, lp, synthetic_name)) |path| {
                 return path;
             }
         }
@@ -242,6 +248,33 @@ fn trySyntheticExplicitRelative(
 
 fn resolveUrlImpl(
     allocator: std.mem.Allocator,
+    url: []const u8,
+    from_path: []const u8,
+    load_paths: []const []const u8,
+    is_import: bool,
+    opts: ResolveOptions,
+) (std.mem.Allocator.Error || error{ AmbiguousImport, FileImportDenied })!?ResolveResult {
+    var probe: file_access_mod.Probe = .{ .access = opts.file_access };
+    if (opts.file_access) |access| {
+        // Package resolution reads `package.json` files outside any root.
+        if (access.restricts() and std.mem.startsWith(u8, url, "pkg:")) return error.FileImportDenied;
+    }
+    const found = try resolveUrlProbed(allocator, &probe, url, from_path, load_paths, is_import, opts);
+    if (found) |result| {
+        if (!probe.allowsFile(result.path)) {
+            var drop = result;
+            drop.deinit();
+            return error.FileImportDenied;
+        }
+        return result;
+    }
+    if (probe.denied) return error.FileImportDenied;
+    return null;
+}
+
+fn resolveUrlProbed(
+    allocator: std.mem.Allocator,
+    probe: *file_access_mod.Probe,
     url: []const u8,
     from_path: []const u8,
     load_paths: []const []const u8,
@@ -257,6 +290,24 @@ fn resolveUrlImpl(
         if (!opts.pkg_importer_enabled) return null;
         const dir = std.fs.path.dirname(from_path) orelse ".";
         if (pkg_importer.resolve(allocator, url, dir)) |path| {
+            return .{ .path = path, .allocator = allocator };
+        }
+        return null;
+    }
+
+    // An absolute path names a file directly; load paths are not consulted.
+    if (std.fs.path.isAbsolute(url)) {
+        const abs = try std.fs.path.resolve(allocator, &.{url});
+        defer allocator.free(abs);
+        const abs_base = std.fs.path.dirname(abs) orelse "/";
+        const abs_file = std.fs.path.basename(abs);
+        if (is_import) {
+            inline for ([_]CandidateKind{ .import_non_index, .normal_non_index, .import_index, .normal_index }) |kind| {
+                if (try tryCandidatePhase(allocator, probe, abs_base, abs_file, kind)) |path| {
+                    return .{ .path = path, .allocator = allocator };
+                }
+            }
+        } else if (try tryCandidates(allocator, probe, abs_base, abs_file)) |path| {
             return .{ .path = path, .allocator = allocator };
         }
         return null;
@@ -299,11 +350,11 @@ fn resolveUrlImpl(
         const abs_file = std.fs.path.basename(nurl);
         if (is_import) {
             inline for ([_]CandidateKind{ .import_non_index, .normal_non_index, .import_index, .normal_index }) |kind| {
-                if (try tryCandidatePhase(allocator, abs_base, abs_file, kind)) |path| {
+                if (try tryCandidatePhase(allocator, probe, abs_base, abs_file, kind)) |path| {
                     return .{ .path = path, .allocator = allocator };
                 }
             }
-        } else if (try tryCandidates(allocator, abs_base, abs_file)) |path| {
+        } else if (try tryCandidates(allocator, probe, abs_base, abs_file)) |path| {
             return .{ .path = path, .allocator = allocator };
         }
         // official Sass CLI still consults load paths for explicit-relative URLs when
@@ -311,10 +362,10 @@ fn resolveUrlImpl(
         // real-world projects that write `@import "./variables/colors"` from a
         // file under `src/` while `variables/` lives at the configured source
         // root.
-        if (try trySyntheticExplicitRelative(allocator, url, load_paths, is_import)) |path| {
+        if (try trySyntheticExplicitRelative(allocator, probe, url, load_paths, is_import)) |path| {
             return .{ .path = path, .allocator = allocator };
         }
-        if (try tryOverlayExplicitRelative(allocator, url, from_path, load_paths, is_import)) |path| {
+        if (try tryOverlayExplicitRelative(allocator, probe, url, from_path, load_paths, is_import)) |path| {
             return .{ .path = path, .allocator = allocator };
         }
         // Explicit relative paths don't fall through to load paths
@@ -323,11 +374,11 @@ fn resolveUrlImpl(
 
     if (is_import) {
         inline for ([_]CandidateKind{ .import_non_index, .normal_non_index, .import_index, .normal_index }) |kind| {
-            if (try tryCandidatePhase(allocator, dir, nurl, kind)) |path| {
+            if (try tryCandidatePhase(allocator, probe, dir, nurl, kind)) |path| {
                 return .{ .path = path, .allocator = allocator };
             }
         }
-    } else if (try tryCandidates(allocator, dir, nurl)) |path| {
+    } else if (try tryCandidates(allocator, probe, dir, nurl)) |path| {
         return .{ .path = path, .allocator = allocator };
     }
 
@@ -340,11 +391,11 @@ fn resolveUrlImpl(
     for (load_paths) |lp| {
         if (is_import) {
             inline for ([_]CandidateKind{ .import_non_index, .normal_non_index, .import_index, .normal_index }) |kind| {
-                if (try tryCandidatePhase(allocator, lp, nurl, kind)) |path| {
+                if (try tryCandidatePhase(allocator, probe, lp, nurl, kind)) |path| {
                     return .{ .path = path, .allocator = allocator };
                 }
             }
-        } else if (try tryCandidates(allocator, lp, nurl)) |path| {
+        } else if (try tryCandidates(allocator, probe, lp, nurl)) |path| {
             return .{ .path = path, .allocator = allocator };
         }
     }
@@ -361,6 +412,7 @@ const CandidateKind = enum {
 
 fn tryCandidatePhase(
     allocator: std.mem.Allocator,
+    probe: *file_access_mod.Probe,
     base: []const u8,
     name: []const u8,
     kind: CandidateKind,
@@ -380,10 +432,10 @@ fn tryCandidatePhase(
     if (has_ext) {
         if (kind != .normal_non_index) return null;
         const cand = try std.mem.concat(allocator, u8, &.{ effective_base, "/", name_file });
-        if (fileExists(cand)) return cand;
+        if (probedFileExists(probe, cand)) return cand;
         allocator.free(cand);
         const part = try std.mem.concat(allocator, u8, &.{ effective_base, "/_", name_file });
-        if (fileExists(part)) return part;
+        if (probedFileExists(probe, part)) return part;
         allocator.free(part);
         return null;
     }
@@ -428,14 +480,14 @@ fn tryCandidatePhase(
     if (kind == .normal_non_index) {
         for (candidates[0..4], 0..) |candidate_opt, idx| {
             const candidate = candidate_opt.?;
-            if (!fileExists(candidate)) continue;
+            if (!probedFileExists(probe, candidate)) continue;
             if (found_idx != null) return error.AmbiguousImport;
             found_idx = idx;
         }
         if (found_idx == null) {
             for (candidates[4..candidate_count], 4..) |candidate_opt, idx| {
                 const candidate = candidate_opt.?;
-                if (!fileExists(candidate)) continue;
+                if (!probedFileExists(probe, candidate)) continue;
                 if (found_idx != null) return error.AmbiguousImport;
                 found_idx = idx;
             }
@@ -443,7 +495,7 @@ fn tryCandidatePhase(
     } else {
         for (candidates[0..candidate_count], 0..) |candidate_opt, idx| {
             const candidate = candidate_opt.?;
-            if (!fileExists(candidate)) continue;
+            if (!probedFileExists(probe, candidate)) continue;
             if (found_idx != null) return error.AmbiguousImport;
             found_idx = idx;
         }
@@ -453,13 +505,17 @@ fn tryCandidatePhase(
     return null;
 }
 
-fn tryCandidates(allocator: std.mem.Allocator, base: []const u8, name: []const u8) !?[]const u8 {
+fn tryCandidates(allocator: std.mem.Allocator, probe: *file_access_mod.Probe, base: []const u8, name: []const u8) !?[]const u8 {
     inline for ([_]CandidateKind{ .normal_non_index, .normal_index }) |kind| {
-        if (try tryCandidatePhase(allocator, base, name, kind)) |path| {
+        if (try tryCandidatePhase(allocator, probe, base, name, kind)) |path| {
             return path;
         }
     }
     return null;
+}
+
+fn probedFileExists(probe: *file_access_mod.Probe, path: []const u8) bool {
+    return probe.allows(path) and fileExists(path);
 }
 
 fn fileExists(path: []const u8) bool {
@@ -574,6 +630,7 @@ const DependencyGraph = struct {
         path: *std.ArrayList([]const u8),
         allocator: std.mem.Allocator,
     ) !bool {
+        try stack_guard.check();
         try colors.put(node, .gray);
         try path.append(allocator, node);
 

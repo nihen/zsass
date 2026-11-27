@@ -4,6 +4,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Security
+- Compilation stops with an error instead of crashing, hanging, or running
+  out of memory on small hostile inputs: deeply nested syntax, values or
+  selectors nested at run time, endless loops, and `@extend`s whose
+  combinations multiply. Limits on syntax depth, VM steps, generated rules,
+  `@extend` expansion, source size, output size, and memory apply by
+  default, so values that double each step stop as well. Each
+  has a stable diagnostic code, such as `ZSASS_LIMIT_VM_STEPS`, and fails
+  with exit code 65.
+- Numbers too large for a 64-bit integer, passed to `list.nth()`,
+  `math.random()`, the string functions, and similar, are refused instead
+  of being converted out of range, which crashed a safety build and was
+  undefined behavior in a release build. 2^63 reads as the largest 64-bit
+  integer, as in the official CLI. `math.random()` refuses a limit above
+  2^32, as the official CLI does.
+- Comparing values counts toward the step limit by the values and text it
+  visits, so equality on lists that share structure, map keys that are
+  maps or long strings, and large map literals stop at the limit.
+- The CLI's Docker image runs as an unprivileged user, is built from the
+  release tag it is published for, and pins its base image by digest.
+
+### Added
+- `CompileOptions.limits` and `CompileFilesOptions.limits`
+  (`CompileLimits`), with `CompileLimits.unlimited()`, and `--no-limits` for
+  the CLI.
+- `CompileOptions.cancellation_check` stops a compilation from the caller,
+  for example at a deadline.
+- `CompileOptions.file_import_policy` (`.disabled`, `.unrestricted`, or
+  `.roots`) decides which files `@use`, `@forward`, `@import`, and
+  `meta.load-css()` may read; `CompileOptions.forUntrustedInput(roots)` sets
+  it with the default limits. The default stays `.unrestricted`, as in Sass.
+
+### Fixed
+- The CLI's CSS cache is keyed by where the input and load paths lead and
+  by the output style, syntax, fatal deprecations, and limits. Compiling
+  again with another `--style` returned the cached CSS, and projects
+  sharing `ZSASS_CSS_CACHE_DIR` could get each other's CSS. The cache moves
+  to a new directory, so older entries are not used.
+- `compileFiles` and a CLI batch no longer let an entry that configures a
+  module, or uses Sass `@import`, change what another entry gets from that
+  module, including when the configuring `@use ... with` or `@import` is in
+  a module the entry loads.
+- A fatal deprecation (`--fatal-deprecation`) fails the compilation with
+  `--quiet` or `--silence-deprecation` too, as in the official CLI; before,
+  `--quiet` turned it into a success.
+- `compileFiles` compiles one entry at a time until a thread-capable
+  `io_facility.io` is installed, since the default one provides no
+  concurrency.
+- `@extend` applied by many rules to the same selector no longer holds the
+  work of every rule at once: 1000 rules extending one placeholder take
+  tens of megabytes instead of nearly a gigabyte.
+- A selector with `:is()`, `:not()`, or another pseudo-class nested more than
+  32 levels deep is no longer an "Invalid CSS syntax" error.
+- `@use`, `@forward`, `@import`, and `meta.load-css()` load a stylesheet
+  named by an absolute path, as the official CLI does.
+
 ## 0.4.4 (2026-11-26)
 
 ### Changed

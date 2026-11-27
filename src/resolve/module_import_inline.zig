@@ -1,4 +1,5 @@
 const std = @import("std");
+const resource_budget = @import("../runtime/resource_budget.zig");
 
 const ast_flat = @import("../frontend/ast_flat.zig");
 const deprecation_mod = @import("../runtime/deprecation.zig");
@@ -64,8 +65,10 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: 
         }
     }
     const pkg_enabled = if (ctx.loader) |l| l.pkg_importer_enabled else false;
-    const resolved_path = (resolveImportModulePathWithPolicy(ctx.a, module_path, url, effective_lp, true, .{ .pkg_importer_enabled = pkg_enabled }) catch |err| switch (err) {
+    const access = if (ctx.loader) |l| resource_budget.ResourceBudget.fileAccess(l.budget) else null;
+    const resolved_path = (resolveImportModulePathWithPolicy(ctx.a, module_path, url, effective_lp, true, .{ .pkg_importer_enabled = pkg_enabled, .file_access = access }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.FileImportDenied => return error.FileImportDenied,
     }) orelse {
         if (error_format.verboseErrorsEnabled()) {
             deps.resolverStderrPrint("zsass resolver: @import file not found url={s} from={s}\n", .{ url, ctx.module_path });
@@ -104,6 +107,7 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: 
         if (ctx.loader) |ld| ld.source_cache else null,
         if (ctx.loader) |ld| ld.ast_cache else null,
         resolved_path,
+        if (ctx.loader) |ld| ld.budget else null,
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.IoFailure => {
@@ -113,6 +117,7 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: 
             return error.SassError;
         },
         error.SyntaxError => return error.SassError,
+        else => |e| return e,
     };
     defer child_loaded.deinit(ctx.a);
 

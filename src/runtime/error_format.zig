@@ -6,6 +6,8 @@
 
 const std = @import("std");
 const zsass_io = @import("io.zig");
+const resource_budget = @import("resource_budget.zig");
+const stack_guard = @import("stack_guard.zig");
 
 pub fn stderrPrint(comptime fmt: []const u8, args: anytype) void {
     var buf: [8192]u8 = undefined;
@@ -80,6 +82,7 @@ pub fn formatTooManyArguments(buf: []u8, expected: usize, got: usize) ![]u8 {
 /// Callers who want to prioritize thread-local context messages (rich error messages)
 /// Use `errorToUserMessageWithContext`.
 fn errorToUserMessage(err: anyerror) []const u8 {
+    if (resource_budget.limitMessage(err)) |m| return m;
     return switch (err) {
         // resolver / scope
         error.UnknownVar => "Undefined variable.",
@@ -171,6 +174,11 @@ fn errorToUserMessage(err: anyerror) []const u8 {
 /// Return it, otherwise fallback to static table (errorToUserMessage).
 /// Callers such as test are not contaminated by context message by using errorToUserMessage.
 pub fn errorToUserMessageWithContext(err: anyerror) []const u8 {
+    // A limit error keeps its fixed message even when an inner layer left a
+    // context message behind while unwinding.
+    if (resource_budget.limitMessage(err)) |m| return m;
+    // Whatever error a tripped stack guard turned into, it is the cause.
+    if (stack_guard.tripped()) return resource_budget.nesting_message;
     if (currentContextMessage()) |m| return m;
     return errorToUserMessage(err);
 }

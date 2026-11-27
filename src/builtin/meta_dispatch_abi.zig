@@ -112,6 +112,16 @@ pub const Status = enum(u8) {
     builtin_type = 3,
     builtin_unsupported = 4,
     sass_error = 5,
+    source_size_limit = 6,
+    syntax_nesting_limit = 7,
+    nesting_limit = 8,
+    execution_limit = 9,
+    selector_expansion_limit = 10,
+    ir_node_limit = 11,
+    output_size_limit = 12,
+    compilation_cancelled = 13,
+    file_import_denied = 14,
+    memory_limit = 15,
 };
 
 pub fn statusFromBuiltinError(err: BuiltinError) Status {
@@ -122,6 +132,16 @@ pub fn statusFromBuiltinError(err: BuiltinError) Status {
         error.BuiltinUnsupported => .builtin_unsupported,
         error.SassError => .sass_error,
         error.FatalDeprecation => .sass_error,
+        error.SourceSizeLimit => .source_size_limit,
+        error.SyntaxNestingLimit => .syntax_nesting_limit,
+        error.NestingLimit => .nesting_limit,
+        error.ExecutionLimit => .execution_limit,
+        error.SelectorExpansionLimit => .selector_expansion_limit,
+        error.IrNodeLimit => .ir_node_limit,
+        error.OutputSizeLimit => .output_size_limit,
+        error.CompilationCancelled => .compilation_cancelled,
+        error.FileImportDenied => .file_import_denied,
+        error.MemoryLimit => .memory_limit,
     };
 }
 
@@ -133,5 +153,15 @@ pub fn builtinErrorFromStatus(status: Status) BuiltinError {
         .builtin_type => error.BuiltinType,
         .builtin_unsupported => error.BuiltinUnsupported,
         .sass_error => error.SassError,
+        .source_size_limit => error.SourceSizeLimit,
+        .syntax_nesting_limit => error.SyntaxNestingLimit,
+        .nesting_limit => error.NestingLimit,
+        .execution_limit => error.ExecutionLimit,
+        .selector_expansion_limit => error.SelectorExpansionLimit,
+        .ir_node_limit => error.IrNodeLimit,
+        .output_size_limit => error.OutputSizeLimit,
+        .compilation_cancelled => error.CompilationCancelled,
+        .file_import_denied => error.FileImportDenied,
+        .memory_limit => error.MemoryLimit,
     };
 }

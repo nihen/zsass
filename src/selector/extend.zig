@@ -1,4 +1,5 @@
 const std = @import("std");
+const stack_guard = @import("../runtime/stack_guard.zig");
 const selector_mod = @import("selector.zig");
 const SelectorList = selector_mod.SelectorList;
 const ComplexSelector = selector_mod.ComplexSelector;
@@ -8,6 +9,7 @@ const PseudoSelector = selector_mod.PseudoSelector;
 const SimpleSelector = selector_mod.SimpleSelector;
 const specificity = @import("extend_specificity.zig");
 const extend_engine = @import("extend_engine.zig");
+const resource_budget = @import("../runtime/resource_budget.zig");
 const cloneSimpleSelector = selector_mod.cloneSimpleSelector;
 const simpleSelectorEql = specificity.simpleSelectorEql;
 const compoundSelectorEql = specificity.compoundSelectorEql;
@@ -213,6 +215,8 @@ pub const ApplyState = struct {
     /// `@extend`s whose target no rule of the module holds. They extend
     /// nothing by themselves, but their extenders are still extended.
     unmatched_hints: std.ArrayList(Extension) = .empty,
+    /// Handed to every engine this store builds.
+    budget: ?*resource_budget.ResourceBudget = null,
 
     pub fn init(allocator: std.mem.Allocator) ApplyState {
         return .{
@@ -344,7 +348,7 @@ pub const ApplyState = struct {
                     if (hint.source_module != own) continue;
                     try sources.append(self.allocator, .{ .extender = &hint.extender, .target = &hint.target, .order = hint.eval_order });
                 }
-                own_engine = try extend_engine.Engine.init(self.allocator, sources.items, .written) orelse return;
+                own_engine = try extend_engine.Engine.init(self.allocator, sources.items, .written, self.budget) orelse return;
                 continue;
             }
             self.buildGroup(all.items, groups, index) catch |err| switch (err) {
@@ -389,7 +393,7 @@ pub const ApplyState = struct {
                 });
             }
         }
-        return extend_engine.Engine.init(self.allocator, sources.items, .resolved);
+        return extend_engine.Engine.init(self.allocator, sources.items, .resolved, self.budget);
     }
 
     /// Work out what one other module contributes.
@@ -398,7 +402,7 @@ pub const ApplyState = struct {
         all: []const *const Extension,
         groups: []GroupData,
         index: usize,
-    ) error{ OutOfMemory, Unsupported }!void {
+    ) (extend_engine.Error || error{Unsupported})!void {
         const group = &groups[index];
         if (group.done) return;
         // Modules do not use one another in a circle; a group met again
@@ -413,7 +417,7 @@ pub const ApplyState = struct {
             if (hint.source_module != group.module) continue;
             try sources.append(self.allocator, .{ .extender = &hint.extender, .target = &hint.target, .order = hint.eval_order });
         }
-        const engine = try extend_engine.Engine.init(self.allocator, sources.items, .written) orelse return error.Unsupported;
+        const engine = try extend_engine.Engine.init(self.allocator, sources.items, .written, self.budget) orelse return error.Unsupported;
         defer engine.deinit(self.allocator);
         // What the module's own extenders held is found already.
         defer self.noteFound(engine);
@@ -644,6 +648,7 @@ pub const ApplyState = struct {
         walk_complex: *const ComplexSelector,
         matched: []bool,
     ) !void {
+        try stack_guard.check();
         for (walk_complex.components.items) |component| {
             if (component != .compound) continue;
             for (component.compound.simple_selectors.items) |ss| {
@@ -780,11 +785,12 @@ pub const RuleModuleExtendState = struct {
     module_matched_backing: []bool,
     module_matched: [][]bool,
 
-    pub fn init(allocator: std.mem.Allocator, module_store_count: usize) !RuleModuleExtendState {
+    pub fn init(allocator: std.mem.Allocator, module_store_count: usize, budget: ?*resource_budget.ResourceBudget) !RuleModuleExtendState {
         const module_stores = try allocator.alloc(ApplyState, module_store_count);
         errdefer allocator.free(module_stores);
         for (module_stores) |*store| {
             store.* = ApplyState.init(allocator);
+            store.budget = budget;
         }
 
         const module_next_eval_order = try allocator.alloc(u32, module_store_count);
@@ -950,6 +956,8 @@ pub const RuleModuleExtendState = struct {
                 });
                 try self.module_edge_indices[idx].append(self.allocator, edge_idx);
             }
+            // Each branch went into an extension of its own.
+            filtered_extender.deinit();
 
             if (self.module_next_eval_order[idx] != std.math.maxInt(u32)) {
                 self.module_next_eval_order[idx] += 1;
@@ -1119,37 +1127,40 @@ pub fn applyExtendEdgesToSelectorWithContext(
 /// whose simple selectors are extended together by `extender`.
 pub fn applySelectorFunctionExtend(
     allocator: std.mem.Allocator,
+    budget: ?*resource_budget.ResourceBudget,
     selector_list: *const SelectorList,
     extendee: *const SelectorList,
     extender: *const SelectorList,
-) error{OutOfMemory}!SelectorList {
-    return applySelectorFunction(allocator, selector_list, extendee, extender, false);
+) extend_engine.Error!SelectorList {
+    return applySelectorFunction(allocator, budget, selector_list, extendee, extender, false);
 }
 
 /// `selector.replace()`: the same, and what held the targets does not stay.
 pub fn applySelectorFunctionReplace(
     allocator: std.mem.Allocator,
+    budget: ?*resource_budget.ResourceBudget,
     selector_list: *const SelectorList,
     original: *const SelectorList,
     replacement: *const SelectorList,
-) error{OutOfMemory}!SelectorList {
-    return applySelectorFunction(allocator, selector_list, original, replacement, true);
+) extend_engine.Error!SelectorList {
+    return applySelectorFunction(allocator, budget, selector_list, original, replacement, true);
 }
 
 fn applySelectorFunction(
     allocator: std.mem.Allocator,
+    budget: ?*resource_budget.ResourceBudget,
     selector_list: *const SelectorList,
     extendee: *const SelectorList,
     extender: *const SelectorList,
     replace: bool,
-) error{OutOfMemory}!SelectorList {
+) extend_engine.Error!SelectorList {
     var sources: std.ArrayList(extend_engine.Source) = .empty;
     defer sources.deinit(allocator);
     for (extendee.selectors.items, 0..) |*complex, index| {
         if (complex.components.items.len != 1 or complex.components.items[0] != .compound) continue;
         try sources.append(allocator, .{ .extender = extender, .target = &complex.components.items[0].compound, .order = @intCast(index) });
     }
-    const engine = try extend_engine.Engine.init(allocator, sources.items, if (replace) .replace else .function) orelse return selector_list.clone(allocator);
+    const engine = try extend_engine.Engine.init(allocator, sources.items, if (replace) .replace else .function, budget) orelse return selector_list.clone(allocator);
     defer engine.deinit(allocator);
     // The extendees are taken one after the other, each on what the ones
     // before it left: the selector comes before all of them.

@@ -1,4 +1,5 @@
 const std = @import("std");
+const stack_guard = @import("stack_guard.zig");
 const color_mod = @import("../color/color.zig");
 const value_mod = @import("value.zig");
 const intern_pool_mod = @import("intern_pool.zig");
@@ -138,6 +139,8 @@ fn mapListsEqual(env: anytype, a_items: []const Value, b_items: []const Value) b
     if (a_items.len != b_items.len or (a_items.len % 2) != 0) return false;
     var i: usize = 0;
     while (i + 1 < a_items.len) : (i += 2) {
+        // Each pair is looked up among all pairs of the other map.
+        if (!stack_guard.chargeWork(b_items.len / 2)) return false;
         var found = false;
         var j: usize = 0;
         while (j + 1 < b_items.len) : (j += 2) {
@@ -152,6 +155,7 @@ fn mapListsEqual(env: anytype, a_items: []const Value, b_items: []const Value) b
 }
 
 fn valueEqInner(env: anytype, a: Value, b: Value) bool {
+    if (stack_guard.overflowed()) return false;
     if (a.kind() != b.kind()) {
         if (a.kind() == .string and b.kind() == .color) {
             const color_pool = env.colorPool() orelse return false;
@@ -168,10 +172,16 @@ fn valueEqInner(env: anytype, a: Value, b: Value) bool {
     if (a.isString()) {
         if (a.stringNamedColorLiteral(env.stringFlagsPool().items) != b.stringNamedColorLiteral(env.stringFlagsPool().items)) return false;
         if (a.stringIntern() == b.stringIntern()) return true;
+        // Comparing long text costs about one step per 8 bytes.
+        if (!stack_guard.chargeWork(@min(env.pool().get(a.stringIntern()).len, env.pool().get(b.stringIntern()).len) / 8)) return false;
         if (comparableStringsEqualFast(env.pool(), a, b)) |fast| return fast;
         const ca = comparableStringBytes(env.pool(), a);
         const cb = comparableStringBytes(env.pool(), b);
         if (!a.stringQuoted(env.stringFlagsPool().items) and !b.stringQuoted(env.stringFlagsPool().items)) {
+            // Normalizing calc() text allocates and rewrites both strings.
+            if (std.mem.indexOf(u8, ca, "calc(") != null or std.mem.indexOf(u8, cb, "calc(") != null) {
+                if (!stack_guard.chargeWork(4 * (ca.len + cb.len))) return false;
+            }
             if (normalizedCalcStringEqual(env.allocator(), ca, cb)) |eq| return eq;
         }
         return std.mem.eql(u8, ca, cb);
@@ -200,6 +210,10 @@ fn valueEqInner(env: anytype, a: Value, b: Value) bool {
 
         if (a_items.len != b_items.len) return false;
         if (a_items.len > 1 and a.listSeparator(lmp) != b.listSeparator(lmp)) return false;
+        // Descending into lists is what makes a comparison cost more than
+        // the instruction that asked for it, above all when they share
+        // structure. Comparing two scalars is not counted.
+        if (!stack_guard.chargeWork(a_items.len)) return false;
         for (a_items, b_items) |lhs, rhs| {
             if (!valueEqInner(env, lhs, rhs)) return false;
         }

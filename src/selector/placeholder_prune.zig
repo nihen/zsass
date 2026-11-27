@@ -1,6 +1,7 @@
 //! Selector placeholder pruning helpers for filtering and cleanup.
 
 const std = @import("std");
+const stack_guard = @import("../runtime/stack_guard.zig");
 const css_utils = @import("../runtime/css_utils.zig");
 
 const isIdentStart = css_utils.isIdentStart;
@@ -112,6 +113,7 @@ pub fn removePlaceholderParts(allocator: std.mem.Allocator, selector: []const u8
 /// Clean placeholder selectors from inside pseudo-class functions.
 /// Handles :is(), :where(), :matches(), :not(), :has().
 fn cleanPlaceholdersInPseudos(allocator: std.mem.Allocator, selector: []const u8) std.mem.Allocator.Error![]const u8 {
+    try stack_guard.check();
     const nth_pseudos = [_][]const u8{
         ":nth-child(",
         ":nth-last-child(",

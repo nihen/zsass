@@ -1,6 +1,7 @@
 /// CSS validation functions for plain-CSS passthrough, media queries,
 /// @supports, and unicode ranges.
 const std = @import("std");
+const stack_guard = @import("../runtime/stack_guard.zig");
 const css_utils = @import("../runtime/css_utils.zig");
 
 const EvalError = anyerror;
@@ -937,6 +938,7 @@ fn validateSupportsConditionList(t: []const u8) EvalError!void {
 }
 
 fn validateSupportsConditionListOp(t: []const u8, prev_op: u8) EvalError!void {
+    try stack_guard.check();
     const s = std.mem.trim(u8, t, " \t\n\r");
     if (s.len == 0) return EvalError.SassError;
 

@@ -4,6 +4,12 @@ const std = @import("std");
 /// For use by modules that don't have direct access to process.Init.
 pub var io: std.Io = std.Io.Threaded.global_single_threaded.io();
 
+/// False while `io` is still the default instance, which provides no
+/// concurrency, so callers keep work on one thread.
+pub fn supportsThreads() bool {
+    return io.userdata != @as(?*anyopaque, @ptrCast(std.Io.Threaded.global_single_threaded));
+}
+
 /// Wrapper around Dir.realPathFileAlloc that returns []u8 instead of [:0]u8,
 /// so that callers can free with the same allocator without sentinel mismatch.
 pub fn realPathAlloc(dir: std.Io.Dir, path: []const u8, allocator: std.mem.Allocator) ![]u8 {

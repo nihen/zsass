@@ -206,6 +206,18 @@ const css = try zsass.compileSourceToCss(alloc, source, "<stdin>", &.{}, .{
 For source-map output use `compileSourceToCssWithSourceMap`, which returns a
 `CompileCssWithSourceMapResult` owning both the CSS and the source-map JSON.
 
+Every compilation runs under finite resource limits (`CompileOptions.limits`).
+A stylesheet can still read any Sass or CSS file the process can, as in Sass;
+for input you do not trust, confine that with `CompileOptions.forUntrustedInput`:
+
+```zig
+const roots = [_][]const u8{"/srv/styles"};
+const css = try zsass.compileSourceToCss(alloc, source, "/srv/styles/in.scss", &.{}, zsass.CompileOptions.forUntrustedInput(&roots));
+```
+
+See [Compiling untrusted input](docs/api.md#compiling-untrusted-input) and
+[SECURITY.md](SECURITY.md).
+
 For multi-file batches the embedding surface also exposes a parallel
 `compileFiles`, which mirrors the CLI's worker pool / shared source &
 parsed-AST caches but writes results into in-memory `CompileFileResult`

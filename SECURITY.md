@@ -6,8 +6,8 @@ zsass is pre-1.0; only the latest minor release receives security fixes.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
-| < 0.1   | :x:                |
+| 0.4.x   | :white_check_mark: |
+| < 0.4   | :x:                |
 
 ## Reporting a Vulnerability
 
@@ -37,6 +37,29 @@ When reporting, please include:
 We do not currently run a paid bug bounty programme. We are happy to
 credit reporters in release notes and the published advisory unless you
 prefer to remain anonymous.
+
+## Compiling untrusted input
+
+zsass is a Sass compiler, not a sandbox. Sass lets a stylesheet read other
+stylesheets through `@use`, `@forward`, `@import`, and `meta.load-css()`, and
+lets it compute without bound. When you compile input you do not trust:
+
+- Use a release with resource limits and the file import policy (see
+  `CompileOptions.limits` and `CompileOptions.file_import_policy` in
+  [docs/api.md](docs/api.md#compiling-untrusted-input)).
+  `CompileOptions.forUntrustedInput(roots)` sets both. The CLI applies the
+  default limits too; `--no-limits` lifts them and is meant for trusted
+  input only.
+- Pass a wall-clock deadline through `cancellation_check`. The limits count
+  work, not time.
+- Still run the compiler in a separate process or container with CPU,
+  memory, and wall-clock limits. The limits stop known ways to exhaust a
+  process, but work that grows faster than its input can still take
+  seconds before a limit stops it.
+- Releases without resource limits can be made to crash, loop forever, or
+  use unbounded memory with small inputs. Run them only in an isolated
+  process or container with those limits, never in the same process as
+  other work.
 
 ## Verifying release artifacts
 
@@ -82,8 +105,10 @@ service that compiles untrusted user input on a hot path:
 - Memory safety bugs (out-of-bounds, use-after-free, double-free, leaks)
   reachable from any reasonable Sass input.
 - Resource exhaustion (RSS / CPU blowup, infinite loops, runaway
-  recursion) triggered by reasonably-sized inputs -- treat denial of
-  service against an embedder as in scope. The bar is "an attacker
+  recursion) triggered by reasonably-sized inputs under the default
+  limits -- treat denial of service against an embedder as in scope.
+- Reading a file outside the roots of `FileImportPolicy.roots`, or any file
+  with `FileImportPolicy.disabled`. The bar is "an attacker
   cannot make a 1-MiB stylesheet take exponential time or RAM"; pure
   pathological inputs at multi-MiB scale that grow linearly fall under
   the out-of-scope crash bullet below.

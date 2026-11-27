@@ -196,6 +196,12 @@ trace-diff, etc.), `--update` falls back to the entry-file mtime check and
 will not notice partials that were edited without touching the entry —
 re-run without `--update` (or rely on `--watch`) when that happens.
 
+Anyone who can write to the cache directory can change the CSS a later
+build copies out of it, and anyone who can read it can read the CSS of
+every project that uses it. Share a `ZSASS_CSS_CACHE_DIR` only between
+builds that trust each other; the default directory is per project
+(`.zig-cache/` under the working directory).
+
 Installer helpers respect a few additional knobs: `ZSASS_INSTALL_PREFIX` and
 `ZSASS_INSTALL_OPTIMIZE` override the default prefix/optimization in
 `scripts/install_cli.sh`, while `ZSASS_GLOBAL_CACHE_DIR` lets reproducible build

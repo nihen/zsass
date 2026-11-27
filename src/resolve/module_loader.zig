@@ -7,6 +7,8 @@ const ast_flat = @import("../frontend/ast_flat.zig");
 const data = @import("data.zig");
 const module_resolver_state = @import("module_resolver_state.zig");
 const path_resolution = @import("path_resolution.zig");
+const resource_budget = @import("../runtime/resource_budget.zig");
+const batch_reuse = @import("../runtime/batch_reuse.zig");
 
 const ModuleResolver = data.ModuleResolver;
 const ResolveError = data.ResolveError;
@@ -14,6 +16,21 @@ const ResolveError = data.ResolveError;
 const isVisiting = module_resolver_state.isVisiting;
 const loadModuleSource = path_resolution.loadModuleSource;
 const resolveUserModulePath = path_resolution.resolveUserModulePath;
+
+fn maxSyntaxDepth(self: *const ModuleResolver) u32 {
+    return if (self.budget) |b| b.limits.max_syntax_depth else resource_budget.default_max_syntax_depth;
+}
+
+fn checkSourceBytes(self: *const ModuleResolver, len: usize) ResolveError!void {
+    if (self.budget) |b| try b.checkSourceBytes(len);
+}
+
+/// Report a failed child parse as `fallback` unless a limit caused it.
+fn parseFailure(err: anyerror, fallback: ResolveError) ResolveError {
+    if (err == error.OutOfMemory) return error.OutOfMemory;
+    if (resource_budget.isLimitError(err)) return @errorCast(err);
+    return fallback;
+}
 
 pub const ResolveParsedModuleFn = *const fn (*ModuleResolver, *const ast_flat.Ast, []const u8) ResolveError!u32;
 
@@ -40,11 +57,25 @@ pub fn resolveEntryAst(self: *ModuleResolver, ast: *const ast_flat.Ast, entry_pa
     return resolve_parsed(self, ast, canonical);
 }
 
+/// A module that configures another, or uses Sass `@import`, changes what
+/// modules loaded after it see. Records shared across entries cannot replay
+/// that, so stop and let the caller compile the entry without them.
+fn refuseSharedRecordsIfConfiguring(self: *ModuleResolver, source: []const u8) ResolveError!void {
+    const flag = self.config_unsafe orelse return;
+    if (!batch_reuse.sourceMayReachUnknownConfiguration(source)) return;
+    flag.* = true;
+    return error.UsermoduleIoFailure;
+}
+
 pub fn resolveUserModule(self: *ModuleResolver, from_path: []const u8, url: []const u8, resolve_parsed: ResolveParsedModuleFn) ResolveError!u32 {
     if (url.len == 0) return error.UsermodulePathEmpty;
     const t_path = perf.timeBegin();
-    const resolved_raw = resolveUserModulePath(self.alloc, from_path, url, self.load_paths, .{ .pkg_importer_enabled = self.pkg_importer_enabled }) catch |err| switch (err) {
+    const resolved_raw = resolveUserModulePath(self.alloc, from_path, url, self.load_paths, .{
+        .pkg_importer_enabled = self.pkg_importer_enabled,
+        .file_access = resource_budget.ResourceBudget.fileAccess(self.budget),
+    }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.FileImportDenied => return error.FileImportDenied,
     } orelse return error.UsermoduleNotFound;
     defer self.alloc.free(resolved_raw);
     const resolved = std.fs.path.resolve(self.alloc, &.{resolved_raw}) catch |err| switch (err) {
@@ -68,10 +99,11 @@ pub fn resolveUserModule(self: *ModuleResolver, from_path: []const u8, url: []co
             else => return error.UsermoduleIoFailure,
         };
         defer source_for_cache.deinit(self.alloc);
-        const entry = ac.getOrParse(resolved, source_for_cache.source) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
+        try checkSourceBytes(self, source_for_cache.source.len);
+        try refuseSharedRecordsIfConfiguring(self, source_for_cache.source);
+        const entry = ac.getOrParse(resolved, source_for_cache.source, maxSyntaxDepth(self)) catch |err| switch (err) {
             error.SyntaxError => return error.UsermoduleLexFailure,
-            else => return error.UsermoduleParseFailure,
+            else => return parseFailure(err, error.UsermoduleParseFailure),
         };
         if (entry.ast.getNode(entry.ast.root).tag != .stylesheet_root) return error.UsermoduleRootMismatch;
         return resolveParsedWithPendingInitialConfig(self, &entry.ast, resolved, resolve_parsed);
@@ -83,6 +115,8 @@ pub fn resolveUserModule(self: *ModuleResolver, from_path: []const u8, url: []co
     };
     defer loaded.deinit(self.alloc);
     const source = loaded.source;
+    try checkSourceBytes(self, source.len);
+    try refuseSharedRecordsIfConfiguring(self, source);
 
     var scratch = std.heap.ArenaAllocator.init(self.alloc);
     defer scratch.deinit();
@@ -108,8 +142,9 @@ pub fn resolveUserModule(self: *ModuleResolver, from_path: []const u8, url: []co
     parser.is_indented_syntax = is_indented_syntax;
     parser.is_plain_css = is_plain_css_source;
     parser.no_interpolation = !lexer.saw_interpolation;
+    parser.max_syntax_depth = maxSyntaxDepth(self);
     defer parser.deinit();
-    var ast = parser.parse() catch return error.UsermoduleParseFailure;
+    var ast = parser.parse() catch |err| return parseFailure(err, error.UsermoduleParseFailure);
     ast.is_indented_syntax = is_indented_syntax;
     defer ast.deinit();
     if (ast.getNode(ast.root).tag != .stylesheet_root) return error.UsermoduleRootMismatch;

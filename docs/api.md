@@ -47,7 +47,8 @@ The compiler module exposes:
 
 - two in-memory single-source compile entry points (`compileSourceToCss`,
   `compileSourceToCssWithSourceMap`) that accept `CompileOptions` for
-  output-style / quiet selection,
+  output style, quiet mode, resource limits, cancellation, and which files a
+  stylesheet may load,
 - a parallel file-batch entry point (`compileFiles`) that mirrors the CLI's
   shared source / parsed-AST cache pipeline and returns each result in
   memory, and
@@ -63,7 +64,38 @@ pub const OutputStyle = enum { expanded, compressed };
 pub const CompileOptions = struct {
     output_style: OutputStyle = .expanded,
     quiet: bool = false, // suppress @warn / @debug
+    diagnostic_sink: ?DiagnosticSink = null,
+    diagnostic_ctx: ?*anyopaque = null,
+    limits: CompileLimits = .{},
+    cancellation_check: ?CancellationCheck = null,
+    cancellation_ctx: ?*anyopaque = null,
+    file_import_policy: FileImportPolicy = .unrestricted,
+
+    pub fn forUntrustedInput(import_roots: []const []const u8) CompileOptions;
 };
+
+pub const CompileLimits = struct {
+    max_source_bytes: usize = 128 * 1024 * 1024,
+    max_syntax_depth: u32 = 512,
+    max_vm_steps: u64 = 500_000_000,
+    max_selector_candidates: usize = 200_000,
+    max_ir_nodes: usize = 5_000_000,
+    max_output_bytes: usize = 128 * 1024 * 1024,
+    max_memory_bytes: usize = 2 * 1024 * 1024 * 1024,
+    stack_bytes: usize = 4 * 1024 * 1024,
+
+    pub fn unlimited() CompileLimits;
+};
+
+pub const CancellationCheck = *const fn (ctx: ?*anyopaque) bool;
+
+pub const FileImportPolicy = union(enum) {
+    disabled,
+    unrestricted,
+    roots: []const []const u8,
+};
+
+pub fn isLimitError(err: anyerror) bool;
 
 pub fn compileSourceToCss(
     alloc: std.mem.Allocator,
@@ -103,6 +135,10 @@ pub const CompileFilesOptions = struct {
     quiet: bool = false,
     load_paths: []const []const u8 = &.{},
     jobs: usize = 0, // 0 = auto (std.Thread.getCpuCount())
+    limits: CompileLimits = .{}, // applied to each entry separately
+    cancellation_check: ?CancellationCheck = null, // called from worker threads
+    cancellation_ctx: ?*anyopaque = null,
+    file_import_policy: FileImportPolicy = .unrestricted,
 };
 
 pub fn compileFiles(
@@ -122,7 +158,9 @@ each entry, then frees the outer slice with `alloc.free(results)`.
 
 `load_paths` is the user-module search list consulted by `@use` / `@forward` /
 bare relative `@import` when a path is not found relative to `dirname(file_path)`.
-Pass `&.{}` if you have no extra roots. `file_path` is also stored as the source
+Pass `&.{}` if you have no extra roots. `file_path` and `load_paths` decide
+where URLs are looked up; they do not confine what a stylesheet can load. See
+[Compiling untrusted input](#compiling-untrusted-input). `file_path` is also stored as the source
 identifier for source maps; use a meaningful virtual path (e.g. `"<stdin>"` or
 `"src/app.scss"`) even when compiling in-memory strings.
 
@@ -204,11 +242,103 @@ pub fn buildAll(alloc: std.mem.Allocator, paths: []const []const u8) !void {
 }
 ```
 
+Workers share `zsass.io_facility.io`. It starts as Zig's single-threaded
+`Io`, which provides no concurrency, so `compileFiles`
+compiles one entry at a time until the embedder installs a thread-capable
+one, for example `zsass.io_facility.io = init.io;` in `main`, as the
+examples do. With one worker, entries compile on the calling thread, which
+then needs the stack described under the limits below; parallel workers
+run on threads of their own.
+
 `results.len == paths.len` and the order is preserved. When `source_map` is
 `false`, `result.source_map_json` is `null`. Failed entries leave
 `result.err` non-null and `result.css` `null` - `compileFiles` itself returns
 the slice; per-entry failures are surfaced through the result records, not
 through the outer return.
+
+## Compiling untrusted input
+
+Every compilation runs under `CompileOptions.limits`. The defaults are
+finite, so a stylesheet that nests too deeply, loops forever, or expands
+`@extend` combinatorially fails with an error instead of exhausting the
+process:
+
+| Limit | Default | Error | Diagnostic code |
+| --- | --- | --- | --- |
+| `max_source_bytes` (each stylesheet) | 128 MiB | `error.SourceSizeLimit` | `ZSASS_LIMIT_SOURCE_BYTES` |
+| `max_syntax_depth` | 512 | `error.SyntaxNestingLimit` | `ZSASS_LIMIT_SYNTAX_DEPTH` |
+| `stack_bytes` (values and selectors built at run time) | 4 MiB | `error.NestingLimit` | `ZSASS_LIMIT_NESTING_DEPTH` |
+| `max_vm_steps` | 500,000,000 | `error.ExecutionLimit` | `ZSASS_LIMIT_VM_STEPS` |
+| `max_selector_candidates` | 200,000 | `error.SelectorExpansionLimit` | `ZSASS_LIMIT_SELECTOR_CANDIDATES` |
+| `max_ir_nodes` | 5,000,000 | `error.IrNodeLimit` | `ZSASS_LIMIT_IR_NODES` |
+| `max_output_bytes` | 128 MiB | `error.OutputSizeLimit` | `ZSASS_LIMIT_OUTPUT_BYTES` |
+| `max_memory_bytes` (held at once through the given allocator) | 2 GiB | `error.MemoryLimit` | `ZSASS_LIMIT_MEMORY_BYTES` |
+
+One budget covers the whole compilation: every module it loads and every
+`meta.load-css()` counts against it. Each `compileFiles` entry gets its own,
+and the caches its entries share have one more `max_memory_bytes` of their
+own.
+Syntax depth counts blocks, parentheses, brackets, interpolation, unary
+operators, each operator of a chain such as `a + b + c`, and the brackets of
+a selector, which is parsed again at run time. `max_selector_candidates`
+bounds the selectors `@extend` holds at once: the extenders registered for
+the rules being written, plus what extending one selector makes along the
+way. A selector counts once per compound and combinator, because the memory
+it takes grows with its length. The defaults leave wide
+room over the sass-spec suite and a corpus of real-world projects; raise a
+limit when a trusted stylesheet needs more, or use `CompileLimits.unlimited()`.
+`isLimitError(err)` tells these errors apart from Sass errors, and the final
+`Diagnostic` carries the code in `code`.
+
+The compiler recurses on the native stack of the calling thread. It uses up
+to `stack_bytes` below the call; give the thread at least twice that, or
+lower `stack_bytes` and `max_syntax_depth` together on a small stack.
+
+The limits count work, not time. For a wall-clock timeout, pass
+`cancellation_check`; it is called about every thousand VM instructions and
+between the phases of the compilation, and returning `true` stops it with
+`error.CompilationCancelled`:
+
+```zig
+const Deadline = struct {
+    io: std.Io,
+    end_ns: i96,
+    fn expired(ctx: ?*anyopaque) bool {
+        const self: *const Deadline = @ptrCast(@alignCast(ctx.?));
+        return std.Io.Clock.awake.now(self.io).nanoseconds >= self.end_ns;
+    }
+};
+
+const io = zsass.io_facility.io;
+var deadline: Deadline = .{ .io = io, .end_ns = std.Io.Clock.awake.now(io).nanoseconds + 2 * std.time.ns_per_s };
+var opts = zsass.CompileOptions.forUntrustedInput(&.{});
+opts.cancellation_check = Deadline.expired;
+opts.cancellation_ctx = &deadline;
+const css = try zsass.compileSourceToCss(alloc, source, "input.scss", &.{}, opts);
+```
+
+`@use`, `@forward`, `@import`, and `meta.load-css()` read files the way Sass
+does: relative to `file_path`, through `load_paths`, and through `../`. Set
+`file_import_policy` to keep a stylesheet from reading files you did not
+mean to expose:
+
+- `.unrestricted` (the default) loads any Sass or CSS file the process can
+  read.
+- `.disabled` loads none. Built-in modules such as `sass:math` still work,
+  and a plain CSS `@import` stays in the output.
+- `.{ .roots = &.{"/srv/styles"} }` loads only files inside the given
+  directories, both as the URL names them and after symbolic links are
+  resolved. A `pkg:` URL is refused.
+
+A refused URL fails with `error.FileImportDenied` (`ZSASS_IMPORT_DENIED`),
+with the same message whether or not the file exists.
+`CompileOptions.forUntrustedInput(roots)` returns options with the default
+limits and file imports confined to `roots`, or disabled when `roots` is
+empty. The roots slice must outlive the compile call.
+
+Limits and the import policy are not a sandbox. When the input is hostile,
+also run the compiler in a process or container with CPU, memory, and
+wall-clock limits.
 
 ## Profile dump (`-Dprofile=true` only)
 
@@ -231,10 +361,11 @@ pub fn maybeDumpProfile() void {
 
 ## Mirroring CLI behavior
 
-The API does **not** read files, env vars, or stdin on your behalf for the
-single-source entry points. `compileFiles` does open and read each input
-path, but otherwise leaves env-var defaults and output-path conventions to
-the caller. If you need the same behaviors as the CLI (env-var defaults,
+The single-source entry points do not read env vars or stdin, and they read
+no file but the stylesheets that the source loads (see
+`file_import_policy`). `compileFiles` also opens and reads each input path,
+but otherwise leaves env-var defaults and output-path conventions to the
+caller. If you need the same behaviors as the CLI (env-var defaults,
 output path inference), wrap these helpers in your own driver:
 
 | CLI behavior | How to mirror it from the API |
@@ -246,6 +377,7 @@ output path inference), wrap these helpers in your own driver:
 | `--stdin-filepath` | Pass that virtual path as `file_path` when compiling in-memory source. |
 | `--no-charset` / `--charset` | The API does not auto-insert `@charset`. Prepend it yourself if you need parity. |
 | `--plain-css` / `--scss` | The API always evaluates SCSS. Use the CLI for raw passthrough mode. |
+| `--no-limits` | Set `limits = CompileLimits.unlimited()`. |
 
 ## Runnable examples
 

@@ -1,6 +1,8 @@
 //!ResolvedProgram  ->  bytecode Program (Stage 1a Step 5).
 
 const std = @import("std");
+const stack_guard = @import("../runtime/stack_guard.zig");
+const resource_budget = @import("../runtime/resource_budget.zig");
 const zsass_io = @import("../runtime/io.zig");
 const opcode_mod = @import("opcode.zig");
 const rule_ir_mod = @import("rule_ir.zig");
@@ -2056,6 +2058,7 @@ fn compileParamDefaultInterp(ctx: CompileCtx, expr_idx: ExprIndex) CompileError!
 }
 
 fn compileParamDefaultExpr(ctx: CompileCtx, expr_idx: ExprIndex) CompileError!?Chunk.ParamDefaultExpr {
+    try stack_guard.check();
     if (try compileParamDefaultAtomExpr(ctx, expr_idx)) |expr| {
         return switch (expr) {
             .value => |v| .{ .value = v },
@@ -2177,6 +2180,7 @@ fn compileParamDefaultIfBuiltin(ctx: CompileCtx, payload: u32) CompileError!?Chu
 }
 
 fn compileParamDefault(ctx: CompileCtx, maybe_e: ?ExprIndex) CompileError!Chunk.ParamDefault {
+    try stack_guard.check();
     const e = maybe_e orelse return .none;
     const ex = exprAt(ctx.resolved, e);
     if (try compileParamDefaultAtomExpr(ctx, e)) |expr| {
@@ -2410,6 +2414,7 @@ fn appendForwardedMetaArgIndices(
 }
 
 fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
+    try stack_guard.check();
     const resolved = ctx.resolved;
     const ex = exprAt(resolved, e);
     const prev_span = ctx.cb.current_span;
@@ -3031,6 +3036,7 @@ fn compilePropertyNamespaceRule(ctx: CompileCtx, si: StmtIndex) CompileError!voi
 }
 
 fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
+    try stack_guard.check();
     const resolved = ctx.resolved;
     const st = resolved.stmts.items[si];
     if (st.origin_id.isValid()) {
@@ -5892,7 +5898,7 @@ pub const PersistentCompileContext = struct {
 const syntax_override_mod = @import("../runtime/syntax_override.zig");
 
 pub fn parseResolveCompile(allocator: std.mem.Allocator, source: []const u8) !ParseResolveCompileResult {
-    return parseResolveCompileWithPathAndPhaseTimer(allocator, source, null, &.{}, null, null);
+    return parseResolveCompileWithPathAndPhaseTimer(allocator, source, null, &.{}, null, null, null);
 }
 
 const error_format = @import("../runtime/error_format.zig");
@@ -5917,7 +5923,19 @@ pub fn parseResolveCompileWithPath(
     source_path: []const u8,
     load_paths: []const []const u8,
 ) !ParseResolveCompileResult {
-    return parseResolveCompileWithPathAndPhaseTimer(allocator, source, source_path, load_paths, null, null);
+    return parseResolveCompileWithPathAndPhaseTimer(allocator, source, source_path, load_paths, null, null, null);
+}
+
+/// `parseResolveCompileWithPath` that charges parsing and module loading to
+/// `budget`. The caller hands the same budget to the VM that runs the result.
+pub fn parseResolveCompileWithPathAndBudget(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    source_path: []const u8,
+    load_paths: []const []const u8,
+    budget: ?*resource_budget.ResourceBudget,
+) !ParseResolveCompileResult {
+    return parseResolveCompileWithPathAndPhaseTimer(allocator, source, source_path, load_paths, null, null, budget);
 }
 
 pub fn parseResolveCompileWithPathAndPhaseTimer(
@@ -5927,11 +5945,12 @@ pub fn parseResolveCompileWithPathAndPhaseTimer(
     load_paths: []const []const u8,
     phase_timer: ?*observe_mod.PhaseTimer,
     deprecation_opts: ?*deprecation_mod.DeprecationOpts,
+    budget: ?*resource_budget.ResourceBudget,
 ) !ParseResolveCompileResult {
     var pool = try InternPool.init(allocator);
     errdefer pool.deinit(allocator);
 
-    var borrowed = try parseResolveCompileWithPoolAndPhaseTimer(allocator, source, source_path, load_paths, phase_timer, &pool, deprecation_opts);
+    var borrowed = try parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(allocator, source, source_path, load_paths, phase_timer, &pool, null, null, null, deprecation_opts, null, budget);
     errdefer borrowed.color_pool.deinit(allocator);
     errdefer borrowed.resolved.deinit();
     errdefer borrowed.program.deinit();
@@ -5944,39 +5963,14 @@ pub fn parseResolveCompileWithPathAndPhaseTimer(
     };
 }
 
-fn parseResolveCompileWithPoolAndPhaseTimer(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    source_path: ?[]const u8,
-    load_paths: []const []const u8,
-    phase_timer: ?*observe_mod.PhaseTimer,
-    pool: *InternPool,
-    deprecation_opts: ?*deprecation_mod.DeprecationOpts,
-) !ParseResolveCompileBorrowedPoolResult {
-    return parseResolveCompileWithPoolPhaseTimerAndCaches(allocator, source, source_path, load_paths, phase_timer, pool, null, null, deprecation_opts);
-}
-
-/// `parseResolveCompileWithPoolAndPhaseTimer` equivalent + worker over source_cache / ast_cache.
-/// Passed from `compileFiles` in multi-entry CLI.
-fn parseResolveCompileWithPoolPhaseTimerAndCaches(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    source_path: ?[]const u8,
-    load_paths: []const []const u8,
-    phase_timer: ?*observe_mod.PhaseTimer,
-    pool: *InternPool,
-    source_cache: ?*source_cache_mod.SharedSourceCache,
-    ast_cache: ?*ast_cache_mod.ParsedAstCache,
-    deprecation_opts: ?*deprecation_mod.DeprecationOpts,
-) !ParseResolveCompileBorrowedPoolResult {
-    return parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(allocator, source, source_path, load_paths, phase_timer, pool, source_cache, ast_cache, null, deprecation_opts, null);
-}
-
 /// Plan C: Final entry point for cross-entry resolve/compile artifact reuse.
 /// If persistent_ctx is non-null, share records / id_by_path across workers,
 /// At the resolve stage, hit the module with the same canonical path and skip re-resolve.
 /// `preamble_store` (per-worker import-preamble checkpoints) applies only to
 /// the non-persistent route; the resolver ignores it when persistent_ctx is set.
+/// When a module the entry loads may configure another one, the shared
+/// records cannot represent that, and the entry is compiled again without
+/// them.
 pub fn parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
     allocator: std.mem.Allocator,
     source: []const u8,
@@ -5989,7 +5983,39 @@ pub fn parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
     persistent_ctx: ?PersistentCompileContext,
     deprecation_opts: ?*deprecation_mod.DeprecationOpts,
     preamble_store: ?*resolver.PreambleCheckpointStore,
+    budget: ?*resource_budget.ResourceBudget,
 ) !ParseResolveCompileBorrowedPoolResult {
+    const ctx = persistent_ctx orelse return parseResolveCompileOnce(allocator, source, source_path, load_paths, phase_timer, pool, source_cache, ast_cache, null, deprecation_opts, preamble_store, budget);
+    const unsafe = ctx.resolve_ctx.config_unsafe;
+    if (parseResolveCompileOnce(allocator, source, source_path, load_paths, phase_timer, pool, source_cache, ast_cache, ctx, deprecation_opts, null, budget)) |result| {
+        if (!unsafe.*) return result;
+        var r = result;
+        r.resolved.deinit();
+        r.program.deinit();
+    } else |err| {
+        if (!unsafe.*) return err;
+    }
+    error_format.clearErrorContext();
+    // What the abandoned attempt allocated in an arena still counts toward
+    // the memory limit; the limit itself stays as the caller set it.
+    return parseResolveCompileOnce(allocator, source, source_path, load_paths, phase_timer, pool, source_cache, ast_cache, null, deprecation_opts, null, budget);
+}
+
+fn parseResolveCompileOnce(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    source_path: ?[]const u8,
+    load_paths: []const []const u8,
+    phase_timer: ?*observe_mod.PhaseTimer,
+    pool: *InternPool,
+    source_cache: ?*source_cache_mod.SharedSourceCache,
+    ast_cache: ?*ast_cache_mod.ParsedAstCache,
+    persistent_ctx: ?PersistentCompileContext,
+    deprecation_opts: ?*deprecation_mod.DeprecationOpts,
+    preamble_store: ?*resolver.PreambleCheckpointStore,
+    budget: ?*resource_budget.ResourceBudget,
+) !ParseResolveCompileBorrowedPoolResult {
+    if (budget) |b| try b.checkSourceBytes(source.len);
     //Has persistent_ctx  ->  color_pool owns persistent state (retains color index across entries).
     //None  ->  alloc with per-call and free with errdefer.
     var owned_color_pool: ColorPool = .empty;
@@ -6030,6 +6056,7 @@ pub fn parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
     else
         false;
     parser.no_interpolation = !lexer.saw_interpolation;
+    if (budget) |b| parser.max_syntax_depth = b.limits.max_syntax_depth;
     defer parser.deinit();
     var ast = parser.parse() catch |err| {
         if (verboseCompileErrorsEnabled()) {
@@ -6044,7 +6071,7 @@ pub fn parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
 
     const resolve_start: i128 = if (phase_timer != null) observe_mod.PhaseTimer.begin() else 0;
     var resolved = (if (source_path) |p|
-        resolver.resolveWithEntryPathColorPoolCachesAndPersistent(allocator, &ast, pool, p, load_paths, color_pool_ptr, source_cache, ast_cache, if (persistent_ctx) |ctx| ctx.resolve_ctx else null, deprecation_opts, preamble_store)
+        resolver.resolveWithEntryPathColorPoolCachesAndPersistent(allocator, &ast, pool, p, load_paths, color_pool_ptr, source_cache, ast_cache, if (persistent_ctx) |ctx| ctx.resolve_ctx else null, deprecation_opts, preamble_store, budget)
     else
         resolver.resolveWithColorPool(allocator, &ast, pool, color_pool_ptr)) catch |err| {
         if (verboseCompileErrorsEnabled()) {

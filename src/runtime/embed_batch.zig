@@ -27,6 +27,10 @@ const perf = @import("perf.zig");
 const syntax_override_mod = @import("syntax_override.zig");
 const zsass_io = @import("io.zig");
 const error_format = @import("error_format.zig");
+const resource_budget = @import("resource_budget.zig");
+const stack_guard = @import("stack_guard.zig");
+const batch_reuse = @import("batch_reuse.zig");
+const file_access_mod = @import("../resolve/file_access.zig");
 
 /// Spin-lock-guarded wrapper around an arbitrary `std.mem.Allocator`. Used so
 /// the caller's allocator is safe to share across worker threads even when its
@@ -135,7 +139,18 @@ pub const CompileFilesOptions = struct {
     /// after the entry's own directory.
     load_paths: []const []const u8 = &.{},
     /// Worker thread count. `0` means "use `std.Thread.getCpuCount()`".
+    /// Workers share `io_facility.io`; while it is the default single-threaded
+    /// instance, entries are compiled one at a time whatever this says.
     jobs: usize = 0,
+    /// Limits applied to each entry separately.
+    limits: resource_budget.CompileLimits = .{},
+    /// Polled during each entry; returning true stops that entry with
+    /// `error.CompilationCancelled`. Called from worker threads.
+    cancellation_check: ?resource_budget.CancellationCheck = null,
+    cancellation_ctx: ?*anyopaque = null,
+    /// Which files the entries may load; see `CompileOptions.file_import_policy`.
+    /// The entry paths themselves are read whatever it says.
+    file_import_policy: file_access_mod.FileImportPolicy = .unrestricted,
 };
 
 /// Compile each path in `paths` and return one `CompileFileResult` per entry,
@@ -160,21 +175,35 @@ pub fn compileFiles(
 
     if (paths.len == 0) return results;
 
-    var source_cache = source_cache_mod.SharedSourceCache.init(std.heap.c_allocator);
+    // The caches the entries share hold sources and parsed modules that a
+    // per-entry budget cannot see, so they get an allowance of their own.
+    var shared_limiter = resource_budget.SharedLimitedAllocator.init(std.heap.c_allocator, opts.limits.max_memory_bytes);
+    const shared_alloc = shared_limiter.allocator();
+    var source_cache = source_cache_mod.SharedSourceCache.init(shared_alloc);
     defer source_cache.deinit();
+
+    // Roots are canonicalized once for the batch; workers only read it.
+    var file_access = try file_access_mod.FileAccess.init(std.heap.c_allocator, opts.file_import_policy);
+    defer file_access.deinit(std.heap.c_allocator);
 
     const order = try buildOrderByFileSize(alloc, paths);
     defer alloc.free(order);
 
-    if (paths.len == 1) {
-        var pool_arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    const cpu_count = std.Thread.getCpuCount() catch 4;
+    const requested = if (opts.jobs == 0) cpu_count else opts.jobs;
+    // The default Io provides no concurrency, so entries run one at a time on
+    // this thread until the embedder installs one that does, as the CLI does.
+    const worker_count = if (zsass_io.supportsThreads()) @min(paths.len, requested) else 1;
+
+    if (worker_count <= 1) {
+        var pool_arena = std.heap.ArenaAllocator.init(shared_alloc);
         defer pool_arena.deinit();
-        var shared_pool = try intern_pool_mod.InternPool.init(pool_arena.allocator());
+        var shared_pool = intern_pool_mod.InternPool.init(pool_arena.allocator()) catch |err| return shared_limiter.mapError(err);
         defer shared_pool.deinit(pool_arena.allocator());
-        var ast_cache = ast_cache_mod.ParsedAstCache.init(std.heap.c_allocator, &shared_pool);
+        var ast_cache = ast_cache_mod.ParsedAstCache.init(shared_alloc, &shared_pool);
         defer ast_cache.deinit();
         var persistent_state = persistent_resolver_mod.PersistentResolverState.init(
-            std.heap.c_allocator,
+            shared_alloc,
             &shared_pool,
             &source_cache,
             &ast_cache,
@@ -182,23 +211,25 @@ pub fn compileFiles(
         defer persistent_state.deinit();
         var work_arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         defer work_arena.deinit();
-        compileOnePath(
-            alloc,
-            work_arena.allocator(),
-            paths[0],
-            opts,
-            &shared_pool,
-            &source_cache,
-            &ast_cache,
-            &persistent_state,
-            &results[0],
-        );
+        // In `order`, as the workers take entries.
+        for (order) |slot| {
+            compileOnePath(
+                alloc,
+                work_arena.allocator(),
+                paths[slot],
+                opts,
+                &file_access,
+                &shared_limiter,
+                &shared_pool,
+                &source_cache,
+                &ast_cache,
+                &persistent_state,
+                &results[slot],
+            );
+            _ = work_arena.reset(.retain_capacity);
+        }
         return results;
     }
-
-    const cpu_count = std.Thread.getCpuCount() catch 4;
-    const requested = if (opts.jobs == 0) cpu_count else opts.jobs;
-    const worker_count = @min(paths.len, requested);
 
     var ts_alloc = ThreadSafeAlloc{ .child = alloc };
     const safe_alloc = ts_alloc.allocator();
@@ -208,6 +239,9 @@ pub fn compileFiles(
         paths: []const []const u8,
         order: []const usize,
         opts: CompileFilesOptions,
+        file_access: *const file_access_mod.FileAccess,
+        shared_limiter: *const resource_budget.SharedLimitedAllocator,
+        shared_alloc: std.mem.Allocator,
         source_cache: *source_cache_mod.SharedSourceCache,
         results: []CompileFileResult,
         // Snapshot of the caller thread's syntax override; each worker
@@ -224,6 +258,9 @@ pub fn compileFiles(
         .paths = paths,
         .order = order,
         .opts = opts,
+        .file_access = &file_access,
+        .shared_limiter = &shared_limiter,
+        .shared_alloc = shared_alloc,
         .source_cache = &source_cache,
         .results = results,
         .syntax_override = syntax_override_mod.get(),
@@ -251,18 +288,18 @@ pub fn compileFiles(
                 // parse / resolve work runs on this thread.
                 syntax_override_mod.set(state.syntax_override);
                 defer perf.flushThread();
-                var pool_arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+                var pool_arena = std.heap.ArenaAllocator.init(state.shared_alloc);
                 defer pool_arena.deinit();
                 const pool_alloc = pool_arena.allocator();
                 var shared_pool = intern_pool_mod.InternPool.init(pool_alloc) catch |err| {
-                    failAllRemaining(state, err);
+                    failAllRemaining(state, state.shared_limiter.mapError(err));
                     return;
                 };
                 defer shared_pool.deinit(pool_alloc);
-                var local_ast_cache = ast_cache_mod.ParsedAstCache.init(std.heap.c_allocator, &shared_pool);
+                var local_ast_cache = ast_cache_mod.ParsedAstCache.init(state.shared_alloc, &shared_pool);
                 defer local_ast_cache.deinit();
                 var persistent_state = persistent_resolver_mod.PersistentResolverState.init(
-                    std.heap.c_allocator,
+                    state.shared_alloc,
                     &shared_pool,
                     state.source_cache,
                     &local_ast_cache,
@@ -286,6 +323,8 @@ pub fn compileFiles(
                         work_arena.allocator(),
                         state.paths[slot],
                         state.opts,
+                        state.file_access,
+                        state.shared_limiter,
                         &shared_pool,
                         state.source_cache,
                         &local_ast_cache,
@@ -318,6 +357,8 @@ fn compileOnePath(
     work_alloc: std.mem.Allocator,
     input_path: []const u8,
     opts: CompileFilesOptions,
+    file_access: *const file_access_mod.FileAccess,
+    shared_limiter: *const resource_budget.SharedLimitedAllocator,
     shared_pool: *intern_pool_mod.InternPool,
     source_cache: *source_cache_mod.SharedSourceCache,
     ast_cache: *ast_cache_mod.ParsedAstCache,
@@ -328,7 +369,15 @@ fn compileOnePath(
     // Diagnostic state is threadlocal; reset so a previous entry compiled on
     // this worker thread cannot leak its span/stack into this entry's report.
     error_format.clearErrorContext();
-    compileOnePathFallible(out_alloc, work_alloc, input_path, opts, shared_pool, source_cache, ast_cache, persistent_state, out) catch |err| {
+    // A fresh budget per entry: one entry cannot use up another's allowance.
+    var budget = resource_budget.ResourceBudget.init(opts.limits, opts.cancellation_check, opts.cancellation_ctx);
+    budget.file_access = file_access;
+    const guard = stack_guard.begin(opts.limits.stack_bytes, opts.limits.max_syntax_depth, &budget);
+    defer guard.end();
+    // `work_alloc` is an arena that keeps what is freed until the entry ends.
+    var limited_alloc = resource_budget.LimitedAllocator.initOverArena(&budget, work_alloc);
+    compileOnePathFallible(out_alloc, limited_alloc.allocator(), input_path, opts, shared_pool, source_cache, ast_cache, persistent_state, out, &budget) catch |caught| {
+        const err = shared_limiter.mapError(budget.mapError(stack_guard.mapError(caught)));
         if (out.css) |b| {
             out_alloc.free(b);
             out.css = null;
@@ -399,13 +448,16 @@ fn compileOnePathFallible(
     ast_cache: *ast_cache_mod.ParsedAstCache,
     persistent_state: *persistent_resolver_mod.PersistentResolverState,
     out: *CompileFileResult,
+    budget: *resource_budget.ResourceBudget,
 ) !void {
     const source = try readFileAlloc(work_alloc, input_path);
 
     var deprecation_opts: @import("deprecation.zig").DeprecationOpts = .{};
     deprecation_opts.quiet = opts.quiet;
 
-    const persistent_ctx = persistent_state.compileContext();
+    // As in the CLI: an entry that may configure a shared module compiles
+    // without the results other entries left behind, and leaves none.
+    const persistent_ctx = persistent_state.contextFor(source);
     var borrowed = try compiler_mod.parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
         work_alloc,
         source,
@@ -418,6 +470,7 @@ fn compileOnePathFallible(
         persistent_ctx,
         &deprecation_opts,
         null,
+        budget,
     );
     defer {
         if (!borrowed.borrowed_color_pool) borrowed.color_pool.deinit(work_alloc);
@@ -425,10 +478,13 @@ fn compileOnePathFallible(
         borrowed.program.deinit();
     }
 
+    try budget.checkCancelled();
     var rule_ir = rule_ir_mod.RuleIR.init();
+    rule_ir.budget = budget;
     defer rule_ir.deinit(work_alloc);
 
     var vm = try vm_mod.VM.init(work_alloc, shared_pool, &borrowed.color_pool, &rule_ir, &borrowed.program);
+    vm.budget = budget;
     defer vm.deinit();
     vm.deprecation_opts = deprecation_opts;
     // Stream chunk flush keeps VM emit memory bounded when source maps are off
@@ -456,8 +512,15 @@ fn compileOnePathFallible(
 
     var aw = std.Io.Writer.Allocating.init(out_alloc);
     defer aw.deinit();
+    try budget.checkCancelled();
+    var limit_buf: [4096]u8 = undefined;
+    var limited = resource_budget.LimitedWriter.init(budget, &aw.writer, limit_buf[0..]);
     const sm_ptr: ?*source_map_mod.SourceMap = if (sm) |*m| m else null;
-    try rule_ir.writeToWithSourceMap(&aw.writer, shared_pool, sm_ptr, source_locations, opts.output_style, .{});
+    try rule_ir.writeToWithSourceMap(&limited.interface, shared_pool, sm_ptr, source_locations, opts.output_style, .{});
+    try limited.interface.flush();
+    if (stack_guard.tripped()) return error.NestingLimit;
+    // A limit an inner layer recovered from still fails the entry.
+    if (budget.exceeded) |e| return e;
     out.css = try aw.toOwnedSlice();
 
     if (sm) |*m| {

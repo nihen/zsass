@@ -41,6 +41,7 @@ fn resolveUserModulePathWithPolicy(
     const resolved_opt = module_mod.resolveUrl(alloc, url, from_path, load_paths, resolve_opts) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.AmbiguousImport => return null,
+        error.FileImportDenied => return error.FileImportDenied,
     };
     if (resolved_opt) |resolved| {
         if (isSassStylesheetPath(resolved.path) or (allow_plain_css and isPlainCssStylesheetPath(resolved.path))) {
@@ -63,6 +64,7 @@ pub fn resolveImportModulePathWithPolicy(
     const resolved_opt = module_mod.resolveImportUrl(alloc, url, from_path, load_paths, resolve_opts) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.AmbiguousImport => return null,
+        error.FileImportDenied => return error.FileImportDenied,
     };
     if (resolved_opt) |resolved| {
         if (isSassStylesheetPath(resolved.path) or (allow_plain_css and isPlainCssStylesheetPath(resolved.path))) {

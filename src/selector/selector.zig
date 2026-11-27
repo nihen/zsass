@@ -1,4 +1,5 @@
 const std = @import("std");
+const stack_guard = @import("../runtime/stack_guard.zig");
 const css_utils = @import("../runtime/css_utils.zig");
 
 // ============================================================================
@@ -141,6 +142,7 @@ pub const ComplexSelector = struct {
     }
 
     pub fn clone(self: *const ComplexSelector, allocator: std.mem.Allocator) !ComplexSelector {
+        try stack_guard.check();
         var result = ComplexSelector.init(allocator);
         // OOM mid-loop must release every component already cloned into
         // `result` (compounds carry their own owned memory).
@@ -181,6 +183,7 @@ pub const SelectorList = struct {
     }
 
     pub fn clone(self: *const SelectorList, allocator: std.mem.Allocator) !SelectorList {
+        try stack_guard.check();
         var result = SelectorList.init(allocator);
         // OOM mid-loop must release every complex selector that has
         // already been deep-cloned into `result`.
@@ -283,6 +286,47 @@ pub const ResolveParentError = std.mem.Allocator.Error || error{
     InvalidParentSelector,
 };
 
+/// The deepest nesting of parentheses in `text`, outside quoted strings.
+fn parenNesting(text: []const u8) usize {
+    var depth: usize = 0;
+    var deepest: usize = 0;
+    var quote: u8 = 0;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (c == '\\') {
+            i += 1;
+            continue;
+        }
+        if (quote != 0) {
+            if (c == quote) quote = 0;
+            continue;
+        }
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '*') {
+            const end = std.mem.indexOfPos(u8, text, i + 2, "*/") orelse return deepest;
+            i = end + 1;
+            continue;
+        }
+        switch (c) {
+            '"', '\'' => quote = c,
+            '(' => {
+                depth += 1;
+                deepest = @max(deepest, depth);
+            },
+            ')' => depth -|= 1,
+            else => {},
+        }
+    }
+    return deepest;
+}
+
+test "parenNesting counts nesting outside strings and comments" {
+    try std.testing.expectEqual(@as(usize, 2), parenNesting(":is(:not(a))"));
+    try std.testing.expectEqual(@as(usize, 1), parenNesting("[x=\"((\"] :is(a)"));
+    try std.testing.expectEqual(@as(usize, 0), parenNesting("a /* ((( */ b"));
+    try std.testing.expectEqual(@as(usize, 1), parenNesting("a\\( :is(b)"));
+}
+
 inline fn dupeForParse(allocator: std.mem.Allocator, value: []const u8) ParseError![]const u8 {
     return allocator.dupe(u8, value) catch return ParseError.OutOfMemory;
 }
@@ -293,10 +337,22 @@ inline fn allocSelectorListForParse(allocator: std.mem.Allocator, value: Selecto
     return ptr;
 }
 
+/// `parse` calls in progress on this thread; the outermost checks the depth.
+threadlocal var parse_depth: u32 = 0;
+
 /// Parse a selector-list source string into a `SelectorList` AST.
 /// Rejects syntactically invalid selectors with `ParseError.InvalidSelector`.
 /// Returned value is owned by the caller; free via `SelectorList.deinit`.
+///
+/// Pseudo-class arguments nested deeper than the compilation's syntax depth
+/// are refused before parsing: each level re-scans the text inside it, so the
+/// cost grows with the square of the depth.
 pub fn parse(allocator: std.mem.Allocator, input: []const u8) ParseError!SelectorList {
+    // Recursion through selector pseudo-class arguments.
+    try stack_guard.check();
+    if (parse_depth == 0 and parenNesting(input) > stack_guard.nestingLimit()) return stack_guard.refuse();
+    parse_depth += 1;
+    defer parse_depth -= 1;
     var list = SelectorList.init(allocator);
     errdefer list.deinit();
 
@@ -2225,6 +2281,7 @@ pub fn isSuperSelector(super_sel: *const SelectorList, sub: *const SelectorList)
 }
 
 pub fn complexIsSuperSelector(super_sel: *const ComplexSelector, sub: *const ComplexSelector) bool {
+    if (stack_guard.overflowed()) return false;
     if (transparentPseudoPairIsSuperSelector(super_sel, sub)) |result| {
         return result;
     }

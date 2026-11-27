@@ -1,4 +1,5 @@
 const std = @import("std");
+const resource_budget = @import("../runtime/resource_budget.zig");
 const origin_mod = @import("../runtime/origin.zig");
 const value_mod = @import("../runtime/value.zig");
 const intern_pool_mod = @import("../runtime/intern_pool.zig");
@@ -67,7 +68,7 @@ pub const ResolveError = error{
     /// User-module loader: child parse succeeded but AST root is not `stylesheet_root`.
     UsermoduleRootMismatch,
     Unsupported,
-};
+} || resource_budget.LimitError;
 
 pub fn spanStartLineColOneBased(source_len: usize, line_starts: []const u32, span_start: u32) struct { line: u32, col: u32 } {
     const offset: u32 = @min(span_start, @as(u32, @intCast(source_len)));
@@ -746,6 +747,8 @@ pub const ModuleResolver = struct {
     ast_cache: ?*ast_cache_mod.ParsedAstCache = null,
     /// When non-null, Sass `@import` and similar emit dart-compatible deprecation diagnostics.
     deprecation_opts: ?*deprecation_mod.DeprecationOpts = null,
+    /// Charged for every module this resolver loads; null means unlimited.
+    budget: ?*resource_budget.ResourceBudget = null,
 
     /// records / id_by_path / module path key dupe / allocator for alloc in ModuleExports.
     /// Same meta_arena as `self.meta` by default (single-entry).
@@ -772,6 +775,9 @@ pub const ModuleResolver = struct {
     /// If True, records / id_by_path is owned by self, so it is freed with deinitAll.
     /// If False, it is owned by PersistentResolverState, so keep it (used in Step 3 actual).
     records_owned: bool = true,
+    /// Points at `PersistentResolveContext.config_unsafe` while resolving
+    /// with shared records; null otherwise.
+    config_unsafe: ?*bool = null,
     /// records_ptr.items.len at the start of resolve for this entry. In cross-entry persistent mode
     /// Criteria for identifying "modules that were already loaded in the prior entry". module_id < entry_records_baseline
     /// is resolved in another entry, allowing `@use ... with (...)` (in the Sass specification
@@ -907,6 +913,10 @@ pub const PersistentResolveContext = struct {
     static_eval_lists: *std.ArrayListUnmanaged([]const value_mod.Value),
     import_origins: *std.ArrayListUnmanaged(CssOrigin),
     shared_value_pools: *SharedValuePoolStorage,
+    /// Set when a module this entry loads may configure another one. Shared
+    /// records cannot replay that configuration, so the caller compiles the
+    /// entry again without them.
+    config_unsafe: *bool,
 };
 
 pub const PreambleCheckpointStore = preamble_checkpoint_mod.PreambleCheckpointStore;

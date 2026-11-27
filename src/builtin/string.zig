@@ -1,5 +1,6 @@
 //! sass:string builtins.
 const std = @import("std");
+const float_int = @import("../runtime/float_int.zig");
 const shared = @import("shared.zig");
 const css_utils = @import("../runtime/css_utils.zig");
 const calc_utils = @import("../runtime/calc_utils.zig");
@@ -87,10 +88,7 @@ fn parseIntIndex(ctx: *BuiltinContext, v: Value) BuiltinError!i64 {
     if (!std.math.isFinite(raw)) return error.BuiltinType;
     const truncated = @trunc(raw);
     if (truncated != raw) return error.BuiltinType;
-    const max_i64_f: f64 = @floatFromInt(std.math.maxInt(i64));
-    const min_i64_f: f64 = @floatFromInt(std.math.minInt(i64));
-    if (truncated < min_i64_f or truncated > max_i64_f) return error.BuiltinType;
-    return @intFromFloat(truncated);
+    return float_int.toI64(truncated) orelse error.BuiltinType;
 }
 
 fn parseIntIndexNamed(ctx: *BuiltinContext, param_name: []const u8, v: Value) BuiltinError!i64 {
@@ -229,9 +227,8 @@ fn parseSplitLimit(ctx: *BuiltinContext, v: Value) BuiltinError!usize {
     const truncated = @trunc(raw);
     if (truncated != raw) return error.BuiltinArity;
     if (truncated < 1) return error.BuiltinArity;
-    const max_usize_f: f64 = @floatFromInt(std.math.maxInt(usize));
-    if (truncated > max_usize_f) return error.BuiltinArity;
-    return @intFromFloat(truncated);
+    const limit = float_int.toI64(truncated) orelse return error.BuiltinArity;
+    return std.math.cast(usize, limit) orelse error.BuiltinArity;
 }
 
 fn parseSplitLimitNamed(ctx: *BuiltinContext, param_name: []const u8, v: Value) BuiltinError!usize {

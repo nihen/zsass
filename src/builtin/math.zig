@@ -1,5 +1,6 @@
 //! sass:math builtins.
 const std = @import("std");
+const stack_guard = @import("../runtime/stack_guard.zig");
 const shared = @import("shared.zig");
 const deprecation_mod = @import("../runtime/deprecation.zig");
 const intern_pool_mod = @import("../runtime/intern_pool.zig");
@@ -435,6 +436,7 @@ fn ensureNoNamedArgs(args: []const Value, arg_names: []const InternId) BuiltinEr
 }
 
 fn valueLooksLikeCssMathArg(ctx: *BuiltinContext, value: Value) bool {
+    if (stack_guard.overflowed()) return false;
     if (value.isString()) {
         if (value.stringQuoted(ctx.string_flags_pool.items)) return false;
         const raw = ctx.intern_pool.get(value.stringIntern());
@@ -495,6 +497,7 @@ fn valueHasPercentUnit(ctx: *BuiltinContext, value: Value) bool {
 }
 
 fn valueContainsPercentToken(ctx: *BuiltinContext, value: Value) BuiltinError!bool {
+    try stack_guard.check();
     if (value.isNumber()) return valueHasPercentUnit(ctx, value);
     if (value.isString()) return std.mem.findScalar(u8, ctx.intern_pool.get(value.stringIntern()), '%') != null;
     if (value.kind() == .calc_fragment or value.kind() == .interp_fragment) {
@@ -1578,6 +1581,7 @@ fn normalizeGeneratedNumberUnit(ctx: *BuiltinContext, value: Value) BuiltinError
 }
 
 fn coerceMathNumberValue(ctx: *BuiltinContext, value: Value) BuiltinError!Value {
+    try stack_guard.check();
     if (value.kind() == .number) return normalizeGeneratedNumberUnit(ctx, value);
     if (try coerceMathNumberStringValue(ctx, value)) |parsed| return normalizeGeneratedNumberUnit(ctx, parsed);
     if (value.kind() == .calc_fragment or value.kind() == .interp_fragment) {
@@ -2389,10 +2393,8 @@ pub fn math_random(ctx: *BuiltinContext, args: []const Value, arg_names: []const
 
         const rounded = @round(raw);
         if (@abs(raw - rounded) > 1e-10) return error.BuiltinType;
-        if (rounded <= 0) return error.BuiltinType;
-
-        const max_u64_f: f64 = @floatFromInt(std.math.maxInt(u64));
-        if (rounded > max_u64_f) return error.BuiltinType;
+        // The official CLI accepts limits from 1 through 2^32.
+        if (rounded <= 0 or rounded > 0x1p32) return error.BuiltinType;
 
         const limit: u64 = @intFromFloat(rounded);
         if (limit == 1) return Value.numberUnitless(1);

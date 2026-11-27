@@ -1,4 +1,5 @@
 const std = @import("std");
+const stack_guard = @import("stack_guard.zig");
 const css_utils = @import("css_utils.zig");
 const builtin_mod = @import("../builtin/mod.zig");
 const color_mod = @import("../color/color.zig");
@@ -106,6 +107,7 @@ pub fn dispatchBuiltinArgs(self: anytype, builtin_id: u32, args: []const Value, 
         .list_parent_sel_none_hook = @TypeOf(self.*).builtinListSidecarHook,
         .calc_text_args_hook = @TypeOf(self.*).builtinCalcTextArgsHook,
         .deprecation_opts = &self.deprecation_opts,
+        .budget = self.budget,
     };
     const out = builtin_mod.dispatch(&bctx, builtin_id, args, arg_names) catch |e| {
         return reportBuiltinDispatchFailure(self, builtin_id, e);
@@ -285,6 +287,7 @@ pub fn invokeCallable(
     arg_names: []const InternId,
     rest_separator_override: ?ListSeparator,
 ) !?Value {
+    try stack_guard.check();
     if (target_v.kind() == .string) {
         if (expect_mixin) return error.BuiltinType;
         const name_id = target_v.stringIntern();
