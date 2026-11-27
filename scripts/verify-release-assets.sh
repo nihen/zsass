@@ -6,6 +6,10 @@
 # Usage: scripts/verify-release-assets.sh <tag> <asset>...
 #   e.g. scripts/verify-release-assets.sh v0.4.4 zsass-v0.4.4-linux-x86_64.tar.gz
 #
+# Prints `<asset> <sha256>` for each verified archive on stdout. Use these
+# digests rather than fetching the .sha256 files again, which could have
+# changed since.
+#
 # Needs curl, cosign, and sha256sum (or shasum). Set ZSASS_REPO to verify a
 # fork's releases.
 set -euo pipefail
@@ -36,12 +40,12 @@ for asset in "$@"; do
     --signature "${work}/${asset}.sig" \
     --certificate-identity "https://github.com/${repo}/.github/workflows/release.yml@refs/tags/${tag}" \
     --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-    "${work}/${asset}" >/dev/null
+    "${work}/${asset}" >&2
   actual="$(sha256_of "${work}/${asset}")"
   published="$(awk '{print $1; exit}' "${work}/${asset}.sha256")"
   if [[ "${actual}" != "${published}" ]]; then
     echo "::error::${asset}: published sha256 ${published} does not match the signed archive (${actual})" >&2
     exit 1
   fi
-  echo "verified ${asset} ${actual}"
+  echo "${asset} ${actual}"
 done

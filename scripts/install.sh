@@ -68,6 +68,19 @@ require tar
 require uname
 require mktemp
 
+if [ "$SKIP_SIGNATURE" != "1" ] && ! command -v cosign >/dev/null 2>&1; then
+  {
+    echo "[zsass-install] cosign is required to verify the release signature, and it was not found."
+    echo "[zsass-install] Install cosign (https://docs.sigstore.dev/cosign/system_config/installation/),"
+    echo "[zsass-install] for example:"
+    echo "[zsass-install]   macOS:  brew install cosign"
+    echo "[zsass-install]   Linux:  a binary or package from https://github.com/sigstore/cosign/releases"
+    echo "[zsass-install] then run this installer again. To install without the signature check,"
+    echo "[zsass-install] pass --skip-signature (or set ZSASS_INSTALL_SKIP_SIGSTORE=1)."
+  } >&2
+  exit 1
+fi
+
 uname_s="$(uname -s)"
 case "$uname_s" in
   Linux)  os="linux" ;;
@@ -133,17 +146,6 @@ fi
 if [ "$SKIP_SIGNATURE" = "1" ]; then
   echo "[zsass-install] WARNING: skipping the Sigstore signature check as requested." >&2
   echo "[zsass-install] WARNING: the archive is trusted only as far as the download location is." >&2
-elif ! command -v cosign >/dev/null 2>&1; then
-  {
-    echo "[zsass-install] cosign is required to verify the release signature, and it was not found."
-    echo "[zsass-install] Install cosign (https://docs.sigstore.dev/cosign/system_config/installation/),"
-    echo "[zsass-install] for example:"
-    echo "[zsass-install]   macOS:  brew install cosign"
-    echo "[zsass-install]   Linux:  a binary or package from https://github.com/sigstore/cosign/releases"
-    echo "[zsass-install] then run this installer again. To install without the signature check,"
-    echo "[zsass-install] pass --skip-signature (or set ZSASS_INSTALL_SKIP_SIGSTORE=1)."
-  } >&2
-  exit 1
 else
   echo "[zsass-install] verifying sigstore signature"
   for ext in sig pem; do

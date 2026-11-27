@@ -2113,13 +2113,26 @@ def package_roots_for_entries(entries: list[Path], source: Path) -> list[Path]:
 ALLOW_LIFECYCLE_SCRIPTS = False
 
 
-def without_scripts(cmd: list[str]) -> list[str]:
-    """`cmd` with lifecycle scripts disabled, unless they are allowed."""
+def yarn_is_berry(cwd: Path) -> bool:
+    """True for Yarn 2 and later, which take no --ignore-scripts flag."""
+    try:
+        cp = subprocess.run(["yarn", "--version"], cwd=cwd, text=True, capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    major = cp.stdout.strip().split(".", 1)[0]
+    return major.isdigit() and int(major) >= 2
+
+
+def without_scripts(cmd: list[str], cwd: Path) -> tuple[list[str], dict[str, str] | None]:
+    """`cmd` with lifecycle scripts disabled, unless they are allowed, and
+    the environment to run it with (None: inherit)."""
     if ALLOW_LIFECYCLE_SCRIPTS or cmd[0] not in ("npm", "pnpm", "yarn"):
-        return cmd
+        return cmd, None
+    if cmd[0] == "yarn" and yarn_is_berry(cwd):
+        return [arg for arg in cmd if arg != "--ignore-scripts"], {**os.environ, "YARN_ENABLE_SCRIPTS": "false"}
     if "--ignore-scripts" in cmd:
-        return cmd
-    return cmd + ["--ignore-scripts"]
+        return cmd, None
+    return cmd + ["--ignore-scripts"], None
 
 
 def install_command(pkg: Path) -> list[str]:
@@ -3002,7 +3015,7 @@ def setup_node(entries: list[Path], source: Path) -> tuple[list[Path], list[str]
             for sass_lp in common_sass_load_paths(pkg):
                 load_paths.append(sass_lp)
             continue
-        cmd = without_scripts(install_command(pkg))
+        cmd = install_command(pkg)
         if shutil.which(cmd[0]) is None:
             if not sass_needs_node_modules(entries, source):
                 setup.append(f"{cmd[0]} not available but Sass has no tilde imports; skipping install")
@@ -3011,44 +3024,45 @@ def setup_node(entries: list[Path], source: Path) -> tuple[list[Path], list[str]
                     load_paths.append(sass_lp)
                 continue
             raise RuntimeError(f"missing package manager: {cmd[0]}")
-        cp = run(cmd, cwd=pkg, timeout=INSTALL_TIMEOUT)
+        cmd, install_env = without_scripts(cmd, pkg)
+        cp = run(cmd, cwd=pkg, timeout=INSTALL_TIMEOUT, env=install_env)
         setup.append(f"{' '.join(cmd)} in {pkg.relative_to(source).as_posix() or '.'}")
         if cp.returncode != 0 and cmd[:2] == ["npm", "ci"]:
             fallback = ["npm", "install", "--no-audit", "--no-fund"]
             setup.append(f"npm ci failed; fallback {' '.join(fallback)} in {pkg.relative_to(source).as_posix() or '.'}")
-            fallback = without_scripts(fallback)
-            cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT)
+            fallback, install_env = without_scripts(fallback, pkg)
+            cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT, env=install_env)
         if cp.returncode != 0 and cmd[0] == "npm" and "ERESOLVE" in (cp.stderr + cp.stdout):
             fallback = ["npm", "install", "--legacy-peer-deps", "--no-audit", "--no-fund"]
             setup.append(f"npm peer resolution failed; fallback {' '.join(fallback)} in {pkg.relative_to(source).as_posix() or '.'}")
-            fallback = without_scripts(fallback)
-            cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT)
+            fallback, install_env = without_scripts(fallback, pkg)
+            cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT, env=install_env)
         if (cp.returncode != 0 and cmd[0] == "npm" and
                 ("husky" in (cp.stderr + cp.stdout) or " command sh -c " in (cp.stderr + cp.stdout) or "node-sass" in (cp.stderr + cp.stdout) or "PhantomJS" in (cp.stderr + cp.stdout))):
             fallback = ["npm", "install", "--ignore-scripts", "--legacy-peer-deps", "--no-audit", "--no-fund"]
             setup.append(f"npm lifecycle script failed; fallback {' '.join(fallback)} in {pkg.relative_to(source).as_posix() or '.'}")
-            fallback = without_scripts(fallback)
-            cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT)
+            fallback, install_env = without_scripts(fallback, pkg)
+            cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT, env=install_env)
         if cp.returncode != 0 and cmd[0] == "pnpm" and "LOCKFILE" in (cp.stderr + cp.stdout):
             fallback = ["pnpm", "install", "--no-frozen-lockfile"]
             setup.append(f"pnpm lockfile incompatible; fallback {' '.join(fallback)} in {pkg.relative_to(source).as_posix() or '.'}")
-            fallback = without_scripts(fallback)
-            cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT)
+            fallback, install_env = without_scripts(fallback, pkg)
+            cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT, env=install_env)
         if cp.returncode != 0 and cmd[0] == "pnpm" and "ERR_PNPM_LOCKFILE_BREAKING_CHANGE" in (cp.stderr + cp.stdout):
             fallback = ["pnpm", "install", "--force"]
             setup.append(f"pnpm breaking lockfile failed; fallback {' '.join(fallback)} in {pkg.relative_to(source).as_posix() or '.'}")
-            fallback = without_scripts(fallback)
-            cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT)
+            fallback, install_env = without_scripts(fallback, pkg)
+            cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT, env=install_env)
         if cp.returncode != 0 and cmd[0] == "yarn" and "frozen-lockfile" in (cp.stderr + cp.stdout):
             fallback = ["yarn", "install", "--no-frozen-lockfile"]
             setup.append(f"yarn frozen lockfile failed; fallback {' '.join(fallback)} in {pkg.relative_to(source).as_posix() or '.'}")
-            fallback = without_scripts(fallback)
-            cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT)
+            fallback, install_env = without_scripts(fallback, pkg)
+            cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT, env=install_env)
         if cp.returncode != 0 and cmd[0] == "yarn" and ("node-sass" in (cp.stderr + cp.stdout) or " command failed" in (cp.stderr + cp.stdout)):
             fallback = ["yarn", "install", "--ignore-scripts", "--no-frozen-lockfile"]
             setup.append(f"yarn lifecycle script failed; fallback {' '.join(fallback)} in {pkg.relative_to(source).as_posix() or '.'}")
-            fallback = without_scripts(fallback)
-            cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT)
+            fallback, install_env = without_scripts(fallback, pkg)
+            cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT, env=install_env)
         if cp.returncode != 0:
             if not sass_needs_node_modules(entries, source):
                 setup.append(f"install failed but Sass has no tilde imports; continuing without node_modules")
@@ -3067,8 +3081,10 @@ def setup_node(entries: list[Path], source: Path) -> tuple[list[Path], list[str]
             load_paths.extend(node_module_sass_load_paths(nm))
         if (pkg / "bower.json").exists() and not ALLOW_LIFECYCLE_SCRIPTS:
             setup.append(f"bower.json in {pkg.relative_to(source).as_posix() or '.'}: skipped; bower hooks run code (--allow-lifecycle-scripts)")
-        elif (pkg / "bower.json").exists() and shutil.which("bower") is not None:
-            bower_cmd = ["bower", "install", "--allow-root"]
+        elif (pkg / "bower.json").exists() and shutil.which("npx") is None:
+            setup.append(f"bower.json in {pkg.relative_to(source).as_posix() or '.'}: skipped; npx not available")
+        elif (pkg / "bower.json").exists():
+            bower_cmd = ["npx", "--yes", "bower", "install", "--allow-root"]
             bower_cp = run(bower_cmd, cwd=pkg, timeout=INSTALL_TIMEOUT)
             setup.append(f"{' '.join(bower_cmd)} in {pkg.relative_to(source).as_posix() or '.'}")
             if bower_cp.returncode != 0:

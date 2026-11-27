@@ -89,7 +89,8 @@ jobs:
           for target in macos-aarch64 macos-x86_64 linux-aarch64 linux-x86_64; do
             assets+=("zsass-v${version}-${target}.tar.gz")
           done
-          zsass/scripts/verify-release-assets.sh "v${version}" "${assets[@]}"
+          zsass/scripts/verify-release-assets.sh "v${version}" "${assets[@]}" \
+            > "${RUNNER_TEMP}/verified-sha256.txt"
 
       - name: Render formula
         if: steps.token.outputs.skip != 'true'
@@ -100,6 +101,7 @@ jobs:
           set -euo pipefail
           mkdir -p homebrew-tap/Formula
           zsass/scripts/render-homebrew-formula.sh "${VERSION}" \
+            --verified "${RUNNER_TEMP}/verified-sha256.txt" \
             --output homebrew-tap/Formula/zsass.rb
 
       - name: Commit and push

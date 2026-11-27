@@ -132,6 +132,19 @@ if (-not $Version.StartsWith('v')) {
     $Version = "v$Version"
 }
 
+$skipSignature = $SkipSignature -or $env:ZSASS_INSTALL_SKIP_SIGSTORE -eq '1'
+$cosignCmd = Get-Command cosign -ErrorAction SilentlyContinue
+if (-not $skipSignature -and $null -eq $cosignCmd) {
+    throw @'
+[zsass-install] cosign is required to verify the release signature, and it was not found.
+[zsass-install] Install cosign (https://docs.sigstore.dev/cosign/system_config/installation/),
+[zsass-install] for example cosign-windows-amd64.exe from https://github.com/sigstore/cosign/releases
+[zsass-install] saved as cosign.exe in a directory on PATH, then run this installer again.
+[zsass-install] To install without the signature check, pass -SkipSignature
+[zsass-install] (or set $env:ZSASS_INSTALL_SKIP_SIGSTORE='1').
+'@
+}
+
 $asset = "zsass-$Version-$os-$arch.zip"
 $url = "https://github.com/$repo/releases/download/$Version/$asset"
 $shaUrl = "$url.sha256"
@@ -156,18 +169,9 @@ try {
     # catches a damaged download. The Sigstore signature ties the archive to
     # this repository's release workflow at this tag; it is checked before
     # anything is extracted or run.
-    $cosignCmd = Get-Command cosign -ErrorAction SilentlyContinue
-    if ($SkipSignature -or $env:ZSASS_INSTALL_SKIP_SIGSTORE -eq '1') {
+    if ($skipSignature) {
         Write-Warning '[zsass-install] skipping the Sigstore signature check as requested.'
         Write-Warning '[zsass-install] the archive is trusted only as far as the download location is.'
-    } elseif ($null -eq $cosignCmd) {
-        throw @'
-[zsass-install] cosign is required to verify the release signature, and it was not found.
-[zsass-install] Install cosign (https://docs.sigstore.dev/cosign/system_config/installation/),
-[zsass-install] for example a binary from https://github.com/sigstore/cosign/releases,
-[zsass-install] then run this installer again. To install without the signature check,
-[zsass-install] pass -SkipSignature (or set $env:ZSASS_INSTALL_SKIP_SIGSTORE='1').
-'@
     } else {
         Write-Host '[zsass-install] verifying sigstore signature'
         $sigPath = Join-Path $tmp "$asset.sig"

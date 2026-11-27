@@ -49,35 +49,46 @@ the binary into `~/.local/bin` (Unix) or `%LOCALAPPDATA%\zsass\bin`
 [cosign releases](https://github.com/sigstore/cosign/releases)).
 
 Each release publishes the installer with its own signature. Download it
-from the release, verify it, then run it:
+from the release, verify it, then run it; the installer runs only if the
+signature verifies. Use an empty directory:
 
 Linux / macOS:
 
 ```bash
-TAG="$(curl -fsSL https://api.github.com/repos/nihen/zsass/releases/latest \
-  | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')"
-base="https://github.com/nihen/zsass/releases/download/${TAG}"
-curl -fsSLO "${base}/install.sh" -fsSLO "${base}/install.sh.sig" -fsSLO "${base}/install.sh.pem"
-cosign verify-blob --certificate install.sh.pem --signature install.sh.sig \
-  --certificate-identity "https://github.com/nihen/zsass/.github/workflows/release.yml@refs/tags/${TAG}" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  install.sh
-sh install.sh --version "${TAG}"
+(
+  set -eu
+  TAG="$(curl -fsSL https://api.github.com/repos/nihen/zsass/releases/latest \
+    | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')"
+  [ -n "${TAG}" ]
+  base="https://github.com/nihen/zsass/releases/download/${TAG}"
+  curl -fsSLO "${base}/install.sh" -fsSLO "${base}/install.sh.sig" -fsSLO "${base}/install.sh.pem"
+  cosign verify-blob --certificate install.sh.pem --signature install.sh.sig \
+    --certificate-identity "https://github.com/nihen/zsass/.github/workflows/release.yml@refs/tags/${TAG}" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    install.sh
+  sh install.sh --version "${TAG}"
+)
 ```
 
-Windows (PowerShell):
+Windows (PowerShell 5.1 or later):
 
 ```powershell
-$tag = (Invoke-RestMethod https://api.github.com/repos/nihen/zsass/releases/latest).tag_name
-$base = "https://github.com/nihen/zsass/releases/download/$tag"
-foreach ($f in 'install.ps1', 'install.ps1.sig', 'install.ps1.pem') {
-    Invoke-WebRequest "$base/$f" -OutFile $f
+& {
+  $ErrorActionPreference = 'Stop'
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  $tag = (Invoke-RestMethod -UseBasicParsing https://api.github.com/repos/nihen/zsass/releases/latest).tag_name
+  if (-not $tag) { throw 'could not find the latest release' }
+  $base = "https://github.com/nihen/zsass/releases/download/$tag"
+  foreach ($f in 'install.ps1', 'install.ps1.sig', 'install.ps1.pem') {
+    Invoke-WebRequest -UseBasicParsing "$base/$f" -OutFile $f
+  }
+  cosign verify-blob --certificate install.ps1.pem --signature install.ps1.sig `
+    --certificate-identity "https://github.com/nihen/zsass/.github/workflows/release.yml@refs/tags/$tag" `
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com `
+    install.ps1
+  if ($LASTEXITCODE -ne 0) { throw 'install.ps1 signature verification failed' }
+  powershell -ExecutionPolicy Bypass -File install.ps1 -Version $tag
 }
-cosign verify-blob --certificate install.ps1.pem --signature install.ps1.sig `
-  --certificate-identity "https://github.com/nihen/zsass/.github/workflows/release.yml@refs/tags/$tag" `
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com `
-  install.ps1
-powershell -ExecutionPolicy Bypass -File install.ps1 -Version $tag
 ```
 
 Change the destination with `--prefix ~/opt/zsass` (`-Prefix` on Windows).

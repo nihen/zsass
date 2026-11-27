@@ -186,6 +186,18 @@ jobs:
             sha256sum -c "${sha}"
           done
 
+      # The signing certificate names the ref the run started from, and
+      # users verify against the tag. A run dispatched from a branch would
+      # sign with the branch's name, so refuse it.
+      - name: Check that the run started at the tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" != "refs/tags/${TAG}" ]]; then
+            echo "::error::release.yml must run at refs/tags/${TAG}, not ${GITHUB_REF}; dispatch it with: gh workflow run release.yml --ref ${TAG} -f tag=${TAG}"
+            exit 1
+          fi
+
       - name: Install cosign
         uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9  # v3
         with:
@@ -360,7 +372,8 @@ jobs:
           for target in macos-aarch64 macos-x86_64 linux-aarch64 linux-x86_64; do
             assets+=("zsass-v${version}-${target}.tar.gz")
           done
-          zsass/scripts/verify-release-assets.sh "v${version}" "${assets[@]}"
+          zsass/scripts/verify-release-assets.sh "v${version}" "${assets[@]}" \
+            > "${RUNNER_TEMP}/verified-sha256.txt"
 
       - name: Render formula
         if: steps.token.outputs.skip != 'true'
@@ -372,6 +385,7 @@ jobs:
           version="${VERSION#v}"
           mkdir -p homebrew-tap/Formula
           zsass/scripts/render-homebrew-formula.sh "${version}" \
+            --verified "${RUNNER_TEMP}/verified-sha256.txt" \
             --output homebrew-tap/Formula/zsass.rb
 
       - name: Commit and push
