@@ -257,6 +257,12 @@ pub const FrameSlotPool = struct {
     }
 };
 
+pub const ModuleRunSite = struct {
+    module_id: u32,
+    offset: u32,
+    forward: bool,
+};
+
 const ParamDefaultCtx = struct {
     module_id: u32,
     declared: []const bool,
@@ -486,6 +492,21 @@ pub const VM = struct {
     list_append_tails: std.AutoHashMapUnmanaged(u32, builtin_mod.ListTail) = .empty,
     /// The callee's module and frame while its arguments are bound.
     param_default_ctx: ?ParamDefaultCtx = null,
+    /// The entry stylesheet's source, for the source line a warning shows.
+    diag_entry_source: []const u8 = "",
+    /// Other sources read for warnings, by path.
+    diag_sources: std.StringHashMapUnmanaged([]const u8) = .empty,
+    /// Whether a warning may read a module's file for its source line. Off
+    /// for the embedding API, whose sources need not be the files on disk.
+    diag_read_files: bool = true,
+    /// The VM whose `meta.load-css()` runs this one, whose trace continues
+    /// this one's.
+    diag_parent: ?*VM = null,
+    /// The module the code at `current_source_span` belongs to.
+    current_source_module: u32 = 0,
+    /// The `@use`/`@forward` that is running each module running now,
+    /// outermost first: in which module and where, for warnings' traces.
+    module_run_sites: std.ArrayListUnmanaged(ModuleRunSite) = .empty,
     /// Legacy global builtin lookup cache for Indirect CSS/string callable fallback.
     /// value=maxInt(u32) is miss sentinel.
     legacy_global_builtin_cache: std.AutoHashMapUnmanaged(InternId, u32) = .empty,
@@ -815,6 +836,15 @@ pub const VM = struct {
     }
 
     pub fn deinit(self: *VM) void {
+        self.module_run_sites.deinit(self.allocator);
+        {
+            var it = self.diag_sources.iterator();
+            while (it.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+                self.allocator.free(entry.value_ptr.*);
+            }
+            self.diag_sources.deinit(self.allocator);
+        }
         self.freeModGlobalsIfAny();
         self.stack.deinit(self.allocator);
         self.stack_source_spans.deinit(self.allocator);
@@ -2263,6 +2293,9 @@ pub const VM = struct {
     }
 
     pub fn runTopWithSelectorPrefix(self: *VM, selector_prefix: []const InternId) VMError!void {
+        const saved_provider = deprecation_mod.trace_provider;
+        deprecation_mod.trace_provider = .{ .ctx = self, .build = buildDiagnosticTraceOpaque };
+        defer deprecation_mod.trace_provider = saved_provider;
         if (self.load_css_stack_ptr == null) self.load_css_stack_ptr = &self.load_css_stack_owner;
         if (self.load_css_stack_ptr == &self.load_css_stack_owner) self.load_css_stack_owner.clearRetainingCapacity();
         self.resetOwnedLoadCssLoadedPaths();
@@ -2380,12 +2413,14 @@ pub const VM = struct {
                 .end = loc.end,
                 .file_id = self.load_css_module_tag_override orelse loc.module_id,
             };
+            self.current_source_module = loc.module_id;
         } else {
             self.current_source_span = .{
                 .start = 0,
                 .end = 0,
                 .file_id = self.load_css_module_tag_override orelse self.current_module,
             };
+            self.current_source_module = self.current_module;
         }
         if (self.histogram) |h| h.tick(inst.opcode());
         perf.note(.vm_step);
@@ -2606,12 +2641,14 @@ pub const VM = struct {
                 .end = loc.end,
                 .file_id = self.load_css_module_tag_override orelse loc.module_id,
             };
+            self.current_source_module = loc.module_id;
         } else {
             self.current_source_span = .{
                 .start = 0,
                 .end = 0,
                 .file_id = self.load_css_module_tag_override orelse self.current_module,
             };
+            self.current_source_module = self.current_module;
         }
         if (self.histogram) |h| h.tick(inst.opcode());
         perf.note(.vm_step);
@@ -2817,18 +2854,26 @@ pub const VM = struct {
                 const b = try self.maybeResolveParentSelectorValue(try self.pop());
                 const a = try self.maybeResolveParentSelectorValue(try self.pop());
                 const slash_dep: ?deprecation_mod.SlashDivDeprecationSite = blk: {
-                    const fid: usize = @intCast(self.current_source_span.file_id);
+                    // A calculation's `/` is not deprecated.
+                    if ((inst.arg_b & 2) != 0) break :blk null;
+                    const fid: usize = self.diagnosticModuleIndex();
                     if (fid >= self.program.modules.len) break :blk null;
-                    const mod = self.program.modules[fid];
+                    const mod = &self.program.modules[fid];
                     if (mod.module_path.len == 0) break :blk null;
-                    const pos = sourceOffsetToLineColVm(mod.line_starts, mod.source_len, self.current_source_span.start);
+                    const pos = self.diagnosticLineCol(@intCast(fid), mod, self.current_source_span.start) orelse break :blk null;
+                    const message = if (a.kind() == .number and b.kind() == .number and deprecation_mod.mayReport(&self.deprecation_opts, .slash_div))
+                        self.slashDivMessage(@intCast(fid), mod.module_path, (inst.arg_b & 1) != 0)
+                    else
+                        null;
                     break :blk .{
                         .opts = &self.deprecation_opts,
                         .path = mod.module_path,
-                        .line = pos.line + 1,
-                        .col = pos.col + 1,
+                        .line = pos.line,
+                        .col = pos.col,
+                        .message = message,
                     };
                 };
+                defer if (slash_dep) |site| if (site.message) |msg| self.allocator.free(msg);
                 try self.push(try divValues(
                     self.intern_pool,
                     &self.number_pool,
@@ -3633,6 +3678,9 @@ pub const VM = struct {
                 const source_name_interp = (inst.arg_b & opcode_mod.make_selector_flag_source_name_interp) != 0;
                 const source_args_interp = (inst.arg_b & opcode_mod.make_selector_flag_source_args_interp) != 0;
                 const source_has_interp = source_name_interp or source_args_interp;
+                // An interpolated map or empty list is not CSS, in a value,
+                // a selector, a property name, or a prelude alike.
+                for (self.stack.items[base .. base + n]) |part| try self.ensureCssDeclarationValue(part, false);
                 const call_info = interpolatedCallInfo(
                     self.allocator,
                     self.intern_pool,
@@ -4876,8 +4924,10 @@ pub const VM = struct {
                 if (self.deprecation_opts.quiet) return .continue_exec;
                 if (self.suppress_diagnostics) return .continue_exec;
                 const val = try self.pop();
-                const msg = try self.valueToDiagnosticMessage(val, false);
-                const file_id: usize = @intCast(self.current_source_span.file_id);
+                // A string is shown as its text; any other value as
+                // meta.inspect() writes it.
+                const msg = if (val.isString()) try self.valueToDiagnosticMessage(val, false) else try self.inspectForMessage(val);
+                const file_id: usize = self.diagnosticModuleIndex();
                 if (file_id < self.program.modules.len) {
                     const module = self.program.modules[file_id];
                     const pos = sourceOffsetToLineColVm(module.line_starts, module.source_len, self.current_source_span.start);
@@ -4891,14 +4941,14 @@ pub const VM = struct {
                 if (self.suppress_diagnostics) return .continue_exec;
                 const val = try self.pop();
                 const msg = try self.valueToDiagnosticMessage(val, false);
-                const file_id: usize = @intCast(self.current_source_span.file_id);
-                if (file_id < self.program.modules.len) {
-                    const module = self.program.modules[file_id];
-                    const pos = sourceOffsetToLineColVm(module.line_starts, module.source_len, self.current_source_span.start);
-                    vmStderrPrint("WARNING: {s}\n    {s} {d}:{d}  root stylesheet\n", .{ msg, module.module_path, pos.line + 1, pos.col + 1 });
-                } else {
-                    vmStderrPrint("WARNING: {s}\n", .{msg});
+                // The message, then the trace of calls that led here.
+                vmStderrPrint("WARNING: {s}\n", .{msg});
+                var frames: [error_format.max_error_stack]error_format.ErrorTraceFrame = undefined;
+                const frame_count = self.buildDiagnosticTrace(&frames);
+                if (frame_count > 0) {
+                    error_format.writeTraceFrames(self.allocator, frames[0..frame_count], false, "    ") catch {};
                 }
+                vmStderrPrint("\n", .{});
             },
             .emit_stmt_gap => {
                 // Load marker only in top-level context. loop in rule body (`.boxed { @include box }`
@@ -5649,7 +5699,7 @@ pub const VM = struct {
     }
 
     fn printCurrentVmErrorSource(self: *const VM) void {
-        const file_id: usize = @intCast(self.current_source_span.file_id);
+        const file_id: usize = self.diagnosticModuleIndex();
         if (file_id >= self.program.modules.len) return;
         const module = self.program.modules[file_id];
         const start = sourceOffsetToLineColVm(module.line_starts, module.source_len, self.current_source_span.start);
@@ -5700,7 +5750,7 @@ pub const VM = struct {
     }
 
     fn currentSourceUsesIndentedSyntax(self: *const VM) bool {
-        const file_id: usize = @intCast(self.current_source_span.file_id);
+        const file_id: usize = self.diagnosticModuleIndex();
         if (file_id >= self.program.modules.len) return false;
         const path = self.program.modules[file_id].module_path;
         return std.mem.endsWith(u8, path, ".sass");
@@ -5937,7 +5987,7 @@ pub const VM = struct {
     }
 
     fn currentSourceUsesPlainCss(self: *const VM) bool {
-        const file_id: usize = @intCast(self.current_source_span.file_id);
+        const file_id: usize = self.diagnosticModuleIndex();
         if (file_id < self.program.modules.len) {
             const path = self.program.modules[file_id].module_path;
             if (std.mem.endsWith(u8, path, ".css")) return true;
@@ -5949,7 +5999,7 @@ pub const VM = struct {
     }
 
     fn currentSourceSpanLooksNested(self: *const VM) bool {
-        const file_id: usize = @intCast(self.current_source_span.file_id);
+        const file_id: usize = self.diagnosticModuleIndex();
         if (file_id >= self.program.modules.len) return false;
         const module = &self.program.modules[file_id];
         if (self.current_source_span.start >= module.source_len) return true;
@@ -6522,6 +6572,27 @@ pub const VM = struct {
         }
         if (bracketed) try acc.append(self.allocator, ']');
         return try acc.toOwnedSlice(self.allocator);
+    }
+
+    /// A value as `meta.inspect()` writes it; the text is interned.
+    fn inspectForMessage(self: *VM, v: Value) VMError![]const u8 {
+        const inspect_id = builtin_mod.resolve("meta", "inspect") orelse return error.InternalError;
+        const out = try vm_dispatch.dispatchBuiltinArgs(self, inspect_id, &.{v}, &.{});
+        if (!out.isString()) return error.InternalError;
+        return self.intern_pool.get(out.stringIntern());
+    }
+
+    /// A declaration's value must be CSS: not a map, a module, or an empty
+    /// list. The error names the part that is not, as Sass does.
+    fn ensureCssDeclarationValue(self: *VM, value: Value, custom_property: bool) VMError!void {
+        if (custom_property) return;
+        if (!declarationValueNeedsCssError(&self.list_pool, value)) return;
+        const offending = firstMapInValue(&self.list_pool, value) orelse value;
+        const text = self.inspectForMessage(offending) catch return error.SassError;
+        var buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{s} isn't a valid CSS value.", .{text}) catch return error.SassError;
+        error_format.setContextMessage(msg);
+        return error.SassError;
     }
 
     fn valueToDiagnosticMessage(self: *VM, v: Value, comptime prefer_css_decl_render: bool) VMError![]const u8 {
@@ -8121,6 +8192,9 @@ pub const VM = struct {
         if (self.hasTopLevelCommaInCalcText(trimmed)) return error.SassError;
         if (calc_utils.calcHasBadWhitespace(trimmed)) return error.SassError;
         if (calcTextHasComplexNestedCalcAddend(trimmed)) return error.SassError;
+        // Values substituted for variables are numbers like any other; text
+        // that came from interpolation is not checked.
+        if (!source_interp_marked and calc_utils.recordCalcIncompatibleTermsMessage(self.allocator, trimmed)) return error.SassError;
 
         const has_special_var_call =
             std.mem.indexOf(u8, trimmed, "var(") != null or
@@ -8413,7 +8487,7 @@ pub const VM = struct {
 
     fn buildCalcSizeCallableResult(self: *VM, args: []const Value) VMError!Value {
         if (args.len == 0 or args.len > 2) return error.SassError;
-        try ensureDeclarationValueIsCssValue(&self.list_pool, args[0], false);
+        try self.ensureCssDeclarationValue(args[0], false);
 
         const arg0_id = try valueToInternIdDecl(
             self.intern_pool,
@@ -8494,7 +8568,7 @@ pub const VM = struct {
                 try acc.appendSlice(self.allocator, raw);
                 try acc.appendSlice(self.allocator, ": ");
             }
-            try ensureDeclarationValueIsCssValue(&self.list_pool, arg, false);
+            try self.ensureCssDeclarationValue(arg, false);
             const arg_id = try valueToInternIdDecl(
                 self.intern_pool,
                 &self.number_pool,
@@ -8566,7 +8640,7 @@ pub const VM = struct {
     /// surface only once the CSS is emitted.
     fn skipInvalidDeferredDeclValue(self: *VM, val: Value, is_custom_property: bool) VMError!bool {
         if (!self.css_output_deferred) {
-            try ensureDeclarationValueIsCssValue(&self.list_pool, val, is_custom_property);
+            try self.ensureCssDeclarationValue(val, is_custom_property);
             return false;
         }
         if (is_custom_property) return false;
@@ -8601,6 +8675,10 @@ pub const VM = struct {
         var child_vm = try VM.init(self.allocator, self.intern_pool, self.color_pool, self.rule_ir, child_program);
         child_vm.error_sink_fd = self.error_sink_fd;
         child_vm.budget = self.budget;
+        // The module's deprecations are the compilation's: the same
+        // options, counts, and warnings already written.
+        child_vm.deprecation_opts = self.deprecation_opts;
+        child_vm.diag_read_files = self.diag_read_files;
         child_vm.load_css_stack_ptr = self.load_css_stack_ptr;
         child_vm.load_css_loaded_paths_ptr = self.load_css_loaded_paths_ptr;
         child_vm.load_css_state_ptr = self.load_css_state_ptr;
@@ -8703,6 +8781,156 @@ pub const VM = struct {
             n += 1;
         }
         return n;
+    }
+
+    fn buildDiagnosticTraceOpaque(ctx: *anyopaque, out: []error_format.ErrorTraceFrame) usize {
+        const self: *VM = @ptrCast(@alignCast(ctx));
+        return self.buildDiagnosticTrace(out);
+    }
+
+    /// The source of `path` for a warning's source line: the entry's own
+    /// source, or the file read once.
+    fn diagnosticSource(self: *VM, module_id: ?u32, path: []const u8) ?[]const u8 {
+        if (module_id) |id| {
+            if (id == self.program.root_index and self.diag_entry_source.len != 0) return self.diag_entry_source;
+        }
+        if (path.len == 0 or !self.diag_read_files) return null;
+        if (self.diag_sources.get(path)) |src| return src;
+        const src = std.Io.Dir.cwd().readFileAlloc(zsass_io.io, path, self.allocator, .limited(64 << 20)) catch return null;
+        const key = self.allocator.dupe(u8, path) catch {
+            self.allocator.free(src);
+            return null;
+        };
+        self.diag_sources.put(self.allocator, key, src) catch {
+            self.allocator.free(key);
+            self.allocator.free(src);
+            return null;
+        };
+        return src;
+    }
+
+    /// The trace of the code running now, outermost first: each active
+    /// call, then the current position with its source line. Returns how
+    /// many frames it filled; 0 when the position is unknown.
+    /// The module the current position is in. Under `meta.load-css()` the
+    /// span's file id is the source-map tag of the module, not its index.
+    pub fn diagnosticModuleIndex(self: *const VM) usize {
+        if (self.load_css_module_tag_override != null) return self.current_source_module;
+        return @intCast(self.current_source_span.file_id);
+    }
+
+    pub fn buildDiagnosticTrace(self: *VM, out: []error_format.ErrorTraceFrame) usize {
+        if (out.len == 0) return 0;
+        const fid: usize = self.diagnosticModuleIndex();
+        if (fid >= self.program.modules.len) return 0;
+        const inner_mod = &self.program.modules[fid];
+        if (inner_mod.module_path.len == 0) return 0;
+
+        var n: usize = 0;
+        // Under `meta.load-css()`, the trace that reached it comes first.
+        if (self.diag_parent) |parent| {
+            n = parent.buildDiagnosticTrace(out[0 .. out.len - 1]);
+        }
+        // The top of a module `meta.load-css()` runs is labelled after it.
+        const root_label = if (self.diag_parent != null) "load-css()" else "root stylesheet";
+        // Each module a `@use`/`@forward` is running, at that rule; the
+        // first at the root's top, each later at the top of the one before.
+        for (self.module_run_sites.items, 0..) |run_site, i| {
+            if (n + 1 >= out.len) break;
+            if (run_site.module_id >= self.program.modules.len) return 0;
+            const m = &self.program.modules[run_site.module_id];
+            const label = if (i == 0) root_label else moduleRunLabel(self.module_run_sites.items[i - 1]);
+            const pos = self.diagnosticLineCol(run_site.module_id, m, run_site.offset) orelse return 0;
+            error_format.fillTraceFrame(&out[n], m.module_path, label, pos.line, pos.col, pos.line, pos.col, "");
+            n += 1;
+        }
+        const top_label = if (self.module_run_sites.items.len > 0)
+            moduleRunLabel(self.module_run_sites.items[self.module_run_sites.items.len - 1])
+        else
+            root_label;
+
+        var sites: [error_format.max_error_stack]CallSite = undefined;
+        const max_sites = @min(sites.len, out.len - 1 - n);
+        const site_count = self.callSites(sites[0..max_sites]);
+        var label_buf: [64]u8 = undefined;
+        for (sites[0..site_count], 0..) |site, i| {
+            if (site.module_id >= self.program.modules.len) return 0;
+            const m = &self.program.modules[site.module_id];
+            const label = if (i == 0 and site.chunk == .top) top_label else diagnosticCallLabel(site.chunk, site.chunk_name, &label_buf);
+            const start = self.diagnosticLineCol(site.module_id, m, site.span_start) orelse return 0;
+            error_format.fillTraceFrame(&out[n], m.module_path, label, start.line, start.col, start.line, start.col, "");
+            n += 1;
+        }
+
+        // Code an `@import` brought in is spanned in the imported file.
+        var path: []const u8 = inner_mod.module_path;
+        var module_id: ?u32 = @intCast(fid);
+        const origin_index: usize = @backingInt(self.current_origin);
+        if (self.current_origin != .invalid and origin_index < self.program.origins.len and
+            self.program.origins[origin_index].kind == .import_stylesheet)
+        {
+            const origin_path = self.program.origins[origin_index].source_path;
+            if (origin_path.len != 0 and !std.mem.eql(u8, origin_path, inner_mod.module_path)) {
+                path = origin_path;
+                module_id = null;
+            }
+        }
+        const inner_ref = self.innerMostChunkRef();
+        const inner_label = if (inner_ref == .top) top_label else diagnosticCallLabel(inner_ref, self.innerMostChunkName(), &label_buf);
+        const source = self.diagnosticSource(module_id, path) orelse {
+            // No source to show: the position alone, from the module's line
+            // table when the code is the module's own.
+            if (module_id == null or inner_mod.line_starts.len == 0) return n;
+            const pos = sourceOffsetToLineColVm(inner_mod.line_starts, inner_mod.source_len, self.current_source_span.start);
+            error_format.fillTraceFrame(&out[n], path, inner_label, pos.line + 1, pos.col + 1, pos.line + 1, pos.col + 1, "");
+            out[n].line_text_len = 0;
+            return n + 1;
+        };
+        const span_start: usize = @min(@as(usize, self.current_source_span.start), source.len);
+        const span_end: usize = @min(@max(@as(usize, self.current_source_span.end), span_start), source.len);
+        const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..span_start], '\n')) |nl| nl + 1 else 0;
+        const line_end = std.mem.indexOfScalarPos(u8, source, span_start, '\n') orelse source.len;
+        const line_no: u32 = @intCast(std.mem.count(u8, source[0..line_start], "\n") + 1);
+        const col_no: u32 = @intCast(span_start - line_start + 1);
+        const end_on_line = @min(span_end, line_end);
+        const end_col: u32 = @intCast(end_on_line - line_start + 1);
+        const line_text = std.mem.trimEnd(u8, source[line_start..line_end], "\r");
+        error_format.fillTraceFrame(&out[n], path, inner_label, line_no, col_no, line_no, end_col, line_text);
+        n += 1;
+        return n;
+    }
+
+    /// The slash-div warning for the division at the current position,
+    /// from its source. Null when the source is not at hand.
+    fn slashDivMessage(self: *VM, module_id: u32, path: []const u8, direct_value: bool) ?[]u8 {
+        const source = self.diagnosticSource(module_id, path) orelse return null;
+        return deprecation_mod.slashDivMessage(self.allocator, source, self.current_source_span.start, self.current_source_span.end, direct_value);
+    }
+
+    fn moduleRunLabel(site: ModuleRunSite) []const u8 {
+        return if (site.forward) "@forward" else "@use";
+    }
+
+    /// 1-based line and column of `offset` in module `module_id`, from its
+    /// line table or, without one, its source.
+    fn diagnosticLineCol(self: *VM, module_id: u32, m: anytype, offset: u32) ?struct { line: u32, col: u32 } {
+        if (m.line_starts.len != 0) {
+            const pos = sourceOffsetToLineColVm(m.line_starts, m.source_len, offset);
+            return .{ .line = pos.line + 1, .col = pos.col + 1 };
+        }
+        const source = self.diagnosticSource(module_id, m.module_path) orelse return null;
+        const end = @min(@as(usize, offset), source.len);
+        const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..end], '\n')) |nl| nl + 1 else 0;
+        return .{ .line = @intCast(std.mem.count(u8, source[0..line_start], "\n") + 1), .col = @intCast(end - line_start + 1) };
+    }
+
+    fn diagnosticCallLabel(ref: ChunkRef, name: []const u8, buf: []u8) []const u8 {
+        return switch (ref) {
+            .function, .mixin => std.fmt.bufPrint(buf, "{s}()", .{name}) catch buf[0..0],
+            .content => "@content",
+            .placeholder => "@extend",
+            .top => "root stylesheet",
+        };
     }
 
     pub const CallSite = struct {
@@ -8812,6 +9040,7 @@ pub const VM = struct {
         if (ca.desc != null and cb.desc != null and std.mem.eql(u8, ca.desc.?, cb.desc.?)) {
             return .{ .a = ca.value, .b = cb.value };
         }
+        recordIncompatibleUnitsMessage(pool, number_pool, alloc, a, b);
         return error.SassError;
     }
 
@@ -9847,6 +10076,7 @@ fn subValues(
                     defer alloc.free(merged_num);
                     return internCalcString(pool, alloc, merged_num, true);
                 }
+                recordIncompatibleUnitsMessage(pool, number_pool, alloc, lhs, rhs);
                 return error.SassError;
             },
             else => return err,
@@ -10275,7 +10505,7 @@ fn divValues(
             try deprecation_mod.emitDeprecation(
                 site.opts,
                 .slash_div,
-                "Using / for division is deprecated and will be removed in official Sass CLI 3.0.0.",
+                site.message orelse "Using / for division outside of calc() is deprecated and will be removed in Dart Sass 2.0.0.\n\nMore info and automated migrator: https://sass-lang.com/d/slash-div",
                 site.path,
                 site.line,
                 site.col,
@@ -10413,6 +10643,23 @@ fn modValues(
                 return try Value.number(std.math.nan(f64), unit, number_pool, alloc);
             }
             return try Value.number(builtin_shared.flooredModulo(av, bv), unit, number_pool, alloc);
+        }
+        // Compatible units: the result is in the left operand's unit.
+        if (combineAddUnits(pool, number_pool, lhs, rhs)) |resolved| {
+            const av = lhs.asF64(number_pool);
+            const bv = resolved.rhs;
+            if (std.math.isInf(bv)) {
+                if (std.math.isNan(av)) return try Value.number(std.math.nan(f64), ua, number_pool, alloc);
+                if (std.math.signbit(av) == std.math.signbit(bv)) return try Value.number(av, ua, number_pool, alloc);
+                return try Value.number(std.math.nan(f64), ua, number_pool, alloc);
+            }
+            return try Value.number(builtin_shared.flooredModulo(av, bv), ua, number_pool, alloc);
+        } else |err| switch (err) {
+            error.SassError => {
+                recordIncompatibleUnitsMessage(pool, number_pool, alloc, lhs, rhs);
+                return error.SassError;
+            },
+            else => return err,
         }
     }
     return error.SassError;
@@ -11543,13 +11790,15 @@ fn declarationValueNeedsCssError(list_pool: *const std.ArrayListUnmanaged([]Valu
     return list_pool.items[handle].len == 0;
 }
 
-fn ensureDeclarationValueIsCssValue(
-    list_pool: *const std.ArrayListUnmanaged([]Value),
-    value: Value,
-    custom_property: bool,
-) VMError!void {
-    if (custom_property) return;
-    if (declarationValueNeedsCssError(list_pool, value)) return error.SassError;
+fn firstMapInValue(list_pool: *const std.ArrayListUnmanaged([]Value), value: Value) ?Value {
+    if (value.kind() != .list) return null;
+    if (value.listIsMap(value_mod.empty_list_meta_pool)) return value;
+    const handle: usize = @intCast(value.listHandle());
+    if (handle >= list_pool.items.len) return null;
+    for (list_pool.items[handle]) |item| {
+        if (firstMapInValue(list_pool, item)) |found| return found;
+    }
+    return null;
 }
 
 fn shouldRenderImplicitMapList(v: Value, items: []const Value, mode: ListSerializeMode) bool {

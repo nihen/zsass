@@ -13,6 +13,8 @@ const value_mod = @import("../runtime/value.zig");
 const value_format = @import("../runtime/value_format.zig");
 const css_utils = @import("../runtime/css_utils.zig");
 const intern_pool_mod = @import("../runtime/intern_pool.zig");
+const deprecation_mod = @import("../runtime/deprecation.zig");
+const error_format = @import("../runtime/error_format.zig");
 const value_eq = @import("../runtime/value_eq.zig");
 const InternId = intern_pool_mod.InternId;
 const InternPool = intern_pool_mod.InternPool;
@@ -123,7 +125,7 @@ pub fn eval(env: anytype, prog: anytype, expr_idx: anytype) Error!Value {
             const cross = prog.cross_var_refs.items[ex.payload];
             break :blk env.lookupCrossVar(cross.module_id, cross.slot) orelse return error.NonStaticExpr;
         },
-        .binary => try evalBinary(env, prog, ex.payload),
+        .binary => try evalBinary(env, prog, ex.payload, expr_idx),
         .unary => try evalUnary(env, prog, ex.payload),
         .interp => try evalInterp(env, prog, ex.payload),
         .list => try evalList(env, prog, ex.payload),
@@ -179,7 +181,7 @@ fn evalLiteralColor(env: anytype, prog: anytype, payload: u32) Error!Value {
     return Value.colorWithHandle(handle);
 }
 
-fn evalBinary(env: anytype, prog: anytype, payload: u32) Error!Value {
+fn evalBinary(env: anytype, prog: anytype, payload: u32, expr_idx: anytype) Error!Value {
     const b = prog.binary_exprs.items[payload];
     const lhs = try eval(env, prog, b.lhs);
     const rhs = try eval(env, prog, b.rhs);
@@ -187,7 +189,20 @@ fn evalBinary(env: anytype, prog: anytype, payload: u32) Error!Value {
         .add => try addValues(env, lhs, rhs),
         .sub => try subValues(env, lhs, rhs),
         .mul => try mulValues(env, lhs, rhs),
-        .div => try divValues(env, lhs, rhs, b.lhs_written_slash),
+        .div => blk: {
+            // Dividing numbers with `/` is deprecated: folding it would lose
+            // the warning, so the VM divides them and warns.
+            // A calculation's `/` is not deprecated.
+            const deprecated = !b.in_calculation and lhs.kind() == .number and rhs.kind() == .number;
+            if (@hasDecl(@TypeOf(env.*), "probeDeprecations")) {
+                if (env.probeDeprecations() and deprecated) return error.NonStaticExpr;
+            }
+            // A value only the resolver evaluates warns here.
+            if (@hasDecl(@TypeOf(env.*), "slashDivDeprecation")) {
+                if (deprecated) try env.slashDivDeprecation(expr_idx);
+            }
+            break :blk try divValues(env, lhs, rhs, b.lhs_written_slash);
+        },
         .mod => try modValues(env, lhs, rhs),
         .eq => if (valueEq(env, lhs, rhs)) Value.true_v else Value.false_v,
         .neq => if (!valueEq(env, lhs, rhs)) Value.true_v else Value.false_v,
@@ -380,8 +395,28 @@ fn evalBuiltinCall(env: anytype, prog: anytype, payload: u32) Error!Value {
         .list_index_cache = null,
         .deprecation_opts = null,
     };
+    const Env = @TypeOf(env.*);
+    const saved_site = deprecation_mod.builtin_call_site;
+    defer deprecation_mod.builtin_call_site = saved_site;
+    // Folding without a place to report a deprecation gives up instead, so
+    // the VM evaluates the call and reports it.
+    var probe_opts: deprecation_mod.DeprecationOpts = .{ .probe = true };
+    if (@hasDecl(Env, "probeDeprecations")) {
+        if (env.probeDeprecations()) bctx.deprecation_opts = &probe_opts;
+    }
+    if (@hasDecl(Env, "builtinDeprecations")) {
+        if (env.builtinDeprecations()) |opts| {
+            bctx.deprecation_opts = opts;
+            deprecation_mod.builtin_call_site = env.builtinCallSite(call.span_start, call.span_end);
+        }
+    }
 
-    const result = builtin_mod.dispatch(&bctx, call.builtin_id, args, arg_names) catch {
+    const result = builtin_mod.dispatch(&bctx, call.builtin_id, args, arg_names) catch |err| {
+        // A deprecation made fatal is the compilation's error, at the call.
+        if (err == error.FatalDeprecation and bctx.deprecation_opts != null) {
+            if (call.span_start != std.math.maxInt(u32)) error_format.recordErrorSpan(call.span_start, call.span_end, 0);
+            return error.SassError;
+        }
         return error.NonStaticExpr;
     };
 

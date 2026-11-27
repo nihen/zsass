@@ -4,6 +4,7 @@ const stack_guard = @import("../runtime/stack_guard.zig");
 const shared = @import("shared.zig");
 const error_format = @import("../runtime/error_format.zig");
 const float_int = @import("../runtime/float_int.zig");
+const calc_utils = @import("../runtime/calc_utils.zig");
 const value_format = @import("../runtime/value_format.zig");
 const deprecation_mod = @import("../runtime/deprecation.zig");
 const intern_pool_mod = @import("../runtime/intern_pool.zig");
@@ -286,31 +287,7 @@ fn knownCalculationUnitsIncompatible(unit_a: ?[]const u8, unit_b: ?[]const u8) b
     const a = unit_a.?;
     const b = unit_b.?;
     if (std.mem.eql(u8, a, b)) return false;
-    const cat_a = unitFamilyIgnoringCase(a);
-    const cat_b = unitFamilyIgnoringCase(b);
-    if (cat_a == .unknown or cat_b == .unknown) return false;
-    return cat_a != cat_b;
-}
-
-/// The family of a unit for telling whether two are known to be
-/// incompatible, which ignores case (`min(1PX, 1s)` is an error), unlike
-/// conversion (`1PX + 1px` is too).
-fn unitFamilyIgnoringCase(unit: []const u8) UnitCategory {
-    const families = [_]struct { name: []const u8, cat: UnitCategory }{
-        .{ .name = "px", .cat = .length },       .{ .name = "cm", .cat = .length },
-        .{ .name = "mm", .cat = .length },       .{ .name = "in", .cat = .length },
-        .{ .name = "pt", .cat = .length },       .{ .name = "pc", .cat = .length },
-        .{ .name = "q", .cat = .length },        .{ .name = "deg", .cat = .angle },
-        .{ .name = "rad", .cat = .angle },       .{ .name = "grad", .cat = .angle },
-        .{ .name = "turn", .cat = .angle },      .{ .name = "s", .cat = .time },
-        .{ .name = "ms", .cat = .time },         .{ .name = "hz", .cat = .frequency },
-        .{ .name = "khz", .cat = .frequency },   .{ .name = "dpi", .cat = .resolution },
-        .{ .name = "dpcm", .cat = .resolution }, .{ .name = "dppx", .cat = .resolution },
-    };
-    for (families) |f| {
-        if (std.ascii.eqlIgnoreCase(unit, f.name)) return f.cat;
-    }
-    return .unknown;
+    return calc_utils.calcUnitsKnownIncompatible(a, b);
 }
 
 fn toCanonical(value: f64, unit: []const u8) ?f64 {
@@ -1794,6 +1771,54 @@ fn minmaxVariadic(ctx: *BuiltinContext, args: []const Value, is_min: bool, css_n
     return minmaxVariadicMode(ctx, args, is_min, css_name, .css);
 }
 
+/// The arguments of a CSS math function kept as CSS must not hold two
+/// numbers known to be incompatible, a unitless number with one that has
+/// a unit included; pairs are checked in order, each argument against
+/// every later one (`min(1em, 1px, 1s)` fails on `1em and 1s`).
+fn checkCalcArgsKnownCompatible(ctx: *BuiltinContext, values: []const Value) BuiltinError!void {
+    for (values, 0..) |earlier, i| {
+        if (earlier.kind() != .number) continue;
+        const earlier_unit = unitSlice(ctx, earlier.unitId(ctx.number_pool));
+        if (earlier_unit != null and isGeneratedUnitDescription(earlier_unit.?)) continue;
+        for (values[i + 1 ..]) |later| {
+            if (later.kind() != .number) continue;
+            const later_unit = unitSlice(ctx, later.unitId(ctx.number_pool));
+            if (later_unit != null and isGeneratedUnitDescription(later_unit.?)) continue;
+            if (earlier_unit == null and later_unit == null) continue;
+            if (earlier_unit == null or later_unit == null) return reportCalcIncompatible(ctx, earlier, later);
+            if (knownCalculationUnitsIncompatible(earlier_unit, later_unit)) return reportCalcIncompatible(ctx, earlier, later);
+        }
+    }
+}
+
+/// min()/max() left as CSS: the comparison of each argument with the best
+/// so far failed, so the arguments are checked as a calculation's.
+fn keepCssMinMax(ctx: *BuiltinContext, css_name: []const u8, args: []const Value, values: []const Value) BuiltinError!Value {
+    try checkCalcArgsKnownCompatible(ctx, values);
+    return buildCssMathCall(ctx, css_name, args);
+}
+
+fn reportNotCalcCompatible(ctx: *BuiltinContext, number: Value) BuiltinError {
+    const text = try numberTextForMessage(ctx, number);
+    defer ctx.allocator.free(text);
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "Number {s} isn't compatible with CSS calculations.", .{text}) catch return error.SassError;
+    error_format.setContextMessage(msg);
+    return error.SassError;
+}
+
+/// A CSS math function's error for two numbers it cannot combine.
+fn reportCalcIncompatible(ctx: *BuiltinContext, a: Value, b: Value) BuiltinError {
+    const sa = try numberTextForMessage(ctx, a);
+    defer ctx.allocator.free(sa);
+    const sb = try numberTextForMessage(ctx, b);
+    defer ctx.allocator.free(sb);
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s} and {s} are incompatible.", .{ sa, sb }) catch return error.SassError;
+    error_format.setContextMessage(msg);
+    return error.SassError;
+}
+
 fn reportIncompatibleUnits(ctx: *BuiltinContext, a: Value, b: Value) BuiltinError {
     const sa = try numberTextForMessage(ctx, a);
     defer ctx.allocator.free(sa);
@@ -1851,7 +1876,7 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
 
     for (values) |arg| {
         if (arg.kind() != .number) {
-            if (preserve_css) return buildCssMathCall(ctx, css_name, args);
+            if (preserve_css) return keepCssMinMax(ctx, css_name, args, values);
             if (mode == .module) return shared.reportArgumentMismatchPhraseUnnamed(ctx, arg, "is not a number");
             return error.BuiltinType;
         }
@@ -1889,7 +1914,7 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
         if (best_compound or arg_compound) {
             const factor = (try compoundUnitFactor(ctx, arg_unit, best_unit)) orelse {
                 if (mode == .module) return reportIncompatibleUnits(ctx, best, arg);
-                return error.SassError;
+                return reportNotCalcCompatible(ctx, if (best_compound) best else arg);
             };
             const converted = arg.asF64(ctx.number_pool) * factor;
             if (std.math.isNan(converted)) return numberLike(ctx, std.math.nan(f64), arg.unitId(ctx.number_pool));
@@ -1901,12 +1926,13 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
         }
         if (cssMathUnitsNeedPassthrough(best_unit, arg_unit, false)) {
             if (mode == .module) return reportIncompatibleUnits(ctx, best, arg);
-            return buildCssMathCall(ctx, css_name, args);
+            return keepCssMinMax(ctx, css_name, args, values);
         }
         const converted = minMaxComparableValue(ctx, arg, best.unitId(ctx.number_pool)) catch |e| switch (e) {
             error.BuiltinArity => {
-                if (preserve_css) return buildCssMathCall(ctx, css_name, args);
+                if (preserve_css) return keepCssMinMax(ctx, css_name, args, values);
                 if (mode == .module) return reportIncompatibleUnits(ctx, best, arg);
+                try checkCalcArgsKnownCompatible(ctx, values);
                 return error.BuiltinArity;
             },
             else => return e,
@@ -2156,12 +2182,12 @@ pub fn math_round(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
             return error.SassError;
         }
 
-        if ((num_unit != null) != (step_unit != null)) return error.SassError;
+        if ((num_unit != null) != (step_unit != null)) return reportCalcIncompatible(ctx, number, step_number);
 
         if (num_unit != null and step_unit != null and
             !unitsCompatibleForComparable(ctx, number, step_number))
         {
-            if (knownCalculationUnitsIncompatible(num_unit, step_unit)) return error.SassError;
+            if (knownCalculationUnitsIncompatible(num_unit, step_unit)) return reportCalcIncompatible(ctx, number, step_number);
             return buildCssMathCall(ctx, "round", args);
         }
 
@@ -2190,12 +2216,12 @@ pub fn math_round(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
             return error.SassError;
         }
 
-        if ((num_unit != null) != (offset_unit != null)) return error.SassError;
+        if ((num_unit != null) != (offset_unit != null)) return reportCalcIncompatible(ctx, number, offset_number);
 
         if (num_unit != null and offset_unit != null and
             !unitsCompatibleForComparable(ctx, number, offset_number))
         {
-            if (knownCalculationUnitsIncompatible(num_unit, offset_unit)) return error.SassError;
+            if (knownCalculationUnitsIncompatible(num_unit, offset_unit)) return reportCalcIncompatible(ctx, number, offset_number);
             return buildCssMathCall(ctx, "round", args);
         }
 
@@ -2447,10 +2473,10 @@ pub fn math_mod(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     {
         return error.SassError;
     }
-    if ((y_unit == null) != (x_unit == null)) return error.SassError;
+    if ((y_unit == null) != (x_unit == null)) return reportCalcIncompatible(ctx, y, x);
 
     if (y_unit != null and x_unit != null and !unitsCompatibleForComparable(ctx, y, x)) {
-        if (knownCalculationUnitsIncompatible(y_unit, x_unit)) return error.SassError;
+        if (knownCalculationUnitsIncompatible(y_unit, x_unit)) return reportCalcIncompatible(ctx, y, x);
         return buildCssMathCall(ctx, "mod", args);
     }
 
@@ -2459,7 +2485,7 @@ pub fn math_mod(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
         x.asF64(ctx.number_pool)
     else
         convertNumberToTargetUnit(ctx, x, y.unitId(ctx.number_pool)) catch {
-            if (knownCalculationUnitsIncompatible(y_unit, x_unit)) return error.SassError;
+            if (knownCalculationUnitsIncompatible(y_unit, x_unit)) return reportCalcIncompatible(ctx, y, x);
             return buildCssMathCall(ctx, "mod", args);
         };
     if (x_value == 0) return numberLike(ctx, std.math.nan(f64), y.unitId(ctx.number_pool));
@@ -2517,10 +2543,10 @@ pub fn math_rem(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     {
         return error.SassError;
     }
-    if ((y_unit == null) != (x_unit == null)) return error.SassError;
+    if ((y_unit == null) != (x_unit == null)) return reportCalcIncompatible(ctx, y, x);
 
     if (y_unit != null and x_unit != null and !unitsCompatibleForComparable(ctx, y, x)) {
-        if (knownCalculationUnitsIncompatible(y_unit, x_unit)) return error.SassError;
+        if (knownCalculationUnitsIncompatible(y_unit, x_unit)) return reportCalcIncompatible(ctx, y, x);
         return buildCssMathCall(ctx, "rem", args);
     }
 
@@ -2529,7 +2555,7 @@ pub fn math_rem(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
         x.asF64(ctx.number_pool)
     else
         convertNumberToTargetUnit(ctx, x, y.unitId(ctx.number_pool)) catch {
-            if (knownCalculationUnitsIncompatible(y_unit, x_unit)) return error.SassError;
+            if (knownCalculationUnitsIncompatible(y_unit, x_unit)) return reportCalcIncompatible(ctx, y, x);
             return buildCssMathCall(ctx, "rem", args);
         };
     if (x_value == 0) return numberLike(ctx, std.math.nan(f64), y.unitId(ctx.number_pool));
@@ -2675,20 +2701,12 @@ pub fn math_clamp(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
     const number_unit_slice = unitSlice(ctx, number_unit);
     const max_unit_slice = unitSlice(ctx, max_unit);
 
-    if ((min_unit_slice != null and isGeneratedUnitDescription(min_unit_slice.?)) or
-        (number_unit_slice != null and isGeneratedUnitDescription(number_unit_slice.?)) or
-        (max_unit_slice != null and isGeneratedUnitDescription(max_unit_slice.?)))
-    {
-        return error.SassError;
+    for ([_]Value{ min_value, number, max_value }, [_]?[]const u8{ min_unit_slice, number_unit_slice, max_unit_slice }) |v, unit| {
+        if (unit != null and isGeneratedUnitDescription(unit.?)) return reportNotCalcCompatible(ctx, v);
     }
 
-    if ((min_unit == .none) != (number_unit == .none) or
-        (min_unit == .none) != (max_unit == .none) or
-        (number_unit == .none) != (max_unit == .none))
-    {
-        return error.SassError;
-    }
-
+    // Also rejects a unitless argument mixed with ones that have units.
+    try checkCalcArgsKnownCompatible(ctx, &.{ min_value, number, max_value });
     if (cssMathUnitsNeedPassthrough(min_unit_slice, number_unit_slice, false) or
         cssMathUnitsNeedPassthrough(min_unit_slice, max_unit_slice, false) or
         cssMathUnitsNeedPassthrough(number_unit_slice, max_unit_slice, false))
@@ -2992,12 +3010,12 @@ pub fn math_atan2(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
         return buildCssMathCall(ctx, "atan2", args);
     }
 
-    if ((y_unit == .none) != (x_unit == .none)) return error.SassError;
+    if ((y_unit == .none) != (x_unit == .none)) return reportCalcIncompatible(ctx, y, x);
 
     var x_value = x.asF64(ctx.number_pool);
     if (y_unit != .none and x_unit != y_unit) {
         x_value = convertNumberToTargetUnit(ctx, x, y_unit) catch {
-            if (knownCalculationUnitsIncompatible(y_unit_slice, x_unit_slice)) return error.SassError;
+            if (knownCalculationUnitsIncompatible(y_unit_slice, x_unit_slice)) return reportCalcIncompatible(ctx, y, x);
             return buildCssMathCall(ctx, "atan2", args);
         };
     }
@@ -3014,6 +3032,7 @@ pub fn math_hypot(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
     var sum: f64 = 0;
     var result_unit: InternId = .none;
     var first = true;
+    var first_number: Value = undefined;
     for (args) |arg| {
         if (try valueHasComplexCalculationText(ctx, arg)) return error.SassError;
 
@@ -3042,6 +3061,7 @@ pub fn math_hypot(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
 
         if (first) {
             first = false;
+            first_number = number;
             result_unit = number.unitId(ctx.number_pool);
             const x = number.asF64(ctx.number_pool);
             sum += x * x;
@@ -3051,7 +3071,7 @@ pub fn math_hypot(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
         const arg_unit = number.unitId(ctx.number_pool);
         if ((arg_unit == .none) != (result_unit == .none)) {
             if (preserve_css) return buildCssMathCall(ctx, "hypot", args);
-            return error.SassError;
+            return reportCalcIncompatible(ctx, first_number, number);
         }
 
         const converted = if (result_unit == .none)
@@ -3059,7 +3079,7 @@ pub fn math_hypot(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
         else
             convertNumberToTargetUnit(ctx, number, result_unit) catch {
                 const result_unit_slice = unitSlice(ctx, result_unit);
-                if (knownCalculationUnitsIncompatible(result_unit_slice, number_unit_slice)) return error.SassError;
+                if (knownCalculationUnitsIncompatible(result_unit_slice, number_unit_slice)) return reportCalcIncompatible(ctx, first_number, number);
                 preserve_css = true;
                 continue;
             };

@@ -504,6 +504,8 @@ const Ctx = struct {
     /// Keep bare identifier as literal_string with marker,
     /// Enable arithmetic preserving on the runtime side.
     calc_arg_mode: bool = false,
+    /// Resolving the arguments of a CSS calculation function.
+    in_calculation_args: bool = false,
     /// `infinity` / `pi` etc. in CSS math call arguments such as clamp/hypot
     /// Use number-ish identifier for numerical resolution without turning it into a marker.
     calc_arg_allow_numberish_ident_literals: bool = false,
@@ -1076,12 +1078,66 @@ fn lookupModuleStaticOrConfigSeedValue(loader: *const ModuleResolver, module_id:
 const ResolverEvalEnv = struct {
     ctx: *Ctx,
     allow_configurable_defaults: bool = false,
+    /// Set when the value is evaluated only here (a module configuration):
+    /// the deprecations its built-in calls raise are reported, located at
+    /// each call. Otherwise the VM evaluates the expression again and
+    /// reports them.
+    deprecation_opts: ?*deprecation_mod.DeprecationOpts = null,
+    /// Set when the value would replace the expression (constant folding):
+    /// a call that warns is then not folded, so the VM runs it and warns.
+    /// Other static evaluations keep their value; the VM still runs the
+    /// expression.
+    probe_deprecations: bool = false,
+    /// The whole value being evaluated, for the slash-div warning's wording.
+    direct_value: ?ExprIndex = null,
     /// Evaluate string literals to their canonical text. Set when the result
     /// is a final value (a module configuration), not compiled again.
     canonical_literals: bool = false,
 
     pub fn allocator(self: *const ResolverEvalEnv) std.mem.Allocator {
         return self.ctx.a;
+    }
+
+    pub fn builtinDeprecations(self: *const ResolverEvalEnv) ?*deprecation_mod.DeprecationOpts {
+        return self.deprecation_opts;
+    }
+
+    pub fn probeDeprecations(self: *const ResolverEvalEnv) bool {
+        return self.probe_deprecations;
+    }
+
+    /// The slash-div deprecation for division `expr_idx`, when this value
+    /// warns at all (a module configuration).
+    pub fn slashDivDeprecation(self: *const ResolverEvalEnv, expr_idx: ExprIndex) resolver_eval.Error!void {
+        const opts = self.deprecation_opts orelse return;
+        const ctx = self.ctx;
+        const span = ctx.prog.exprs.items[expr_idx].span;
+        const source = ctx.ast.source;
+        const direct = self.direct_value != null and self.direct_value.? == expr_idx;
+        const message = deprecation_mod.slashDivMessage(ctx.a, source, span.start, span.end, direct);
+        defer if (message) |m| ctx.a.free(m);
+        const pos = data_mod.spanStartLineColOneBased(source.len, ctx.prog.line_starts, span.start);
+        const end_pos = data_mod.spanStartLineColOneBased(source.len, ctx.prog.line_starts, span.end);
+        deprecation_mod.emitDeprecationSpan(
+            opts,
+            .slash_div,
+            message orelse "Using / for division outside of calc() is deprecated and will be removed in Dart Sass 2.0.0.",
+            ctx.module_path,
+            pos.line,
+            pos.col,
+            if (end_pos.line == pos.line) end_pos.col else 0,
+        ) catch |err| switch (err) {
+            error.FatalDeprecation => {
+                error_format.recordErrorSpan(span.start, span.end, 0);
+                return error.SassError;
+            },
+            else => return error.SassError,
+        };
+    }
+
+    pub fn builtinCallSite(self: *const ResolverEvalEnv, offset: u32, end_offset: u32) ?deprecation_mod.CallSite {
+        if (offset == std.math.maxInt(u32) or self.ctx.module_path.len == 0) return null;
+        return .{ .path = self.ctx.module_path, .line_starts = self.ctx.prog.line_starts, .offset = offset, .end_offset = end_offset };
     }
 
     /// Long-lived alloc used when appending to Sidecar Value pool (number / callable / ...).
@@ -1168,6 +1224,7 @@ fn tryStaticEvalValueWithConfigDefaults(ctx: *Ctx, expr: ExprIndex, allow_config
     var env: ResolverEvalEnv = .{
         .ctx = ctx,
         .allow_configurable_defaults = allow_configurable_defaults,
+        .probe_deprecations = true,
     };
     return resolver_eval.eval(&env, ctx.prog, expr) catch null;
 }
@@ -1895,7 +1952,13 @@ fn parseWithConfigEntries(ctx: *Ctx, config_extra: ExtraIndex) ResolveError![]Wi
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.SassError,
         };
-        var env: ResolverEvalEnv = .{ .ctx = ctx, .allow_configurable_defaults = true, .canonical_literals = true };
+        var env: ResolverEvalEnv = .{
+            .ctx = ctx,
+            .allow_configurable_defaults = true,
+            .canonical_literals = true,
+            .deprecation_opts = if (ctx.loader) |loader| loader.deprecation_opts else null,
+            .direct_value = expr_idx,
+        };
         const value = resolver_eval.eval(&env, ctx.prog, expr_idx) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.SassError,
@@ -3444,6 +3507,10 @@ fn resolveExprUnquotedIdent(ctx: *Ctx, n: AstNode, span: Span) ResolveError!Expr
 }
 
 fn resolveExprTextTemplate(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex, span: Span) ResolveError!ExprIndex {
+    // Interpolated Sass is not part of a surrounding calculation.
+    const saved_in_calculation = ctx.in_calculation_args;
+    ctx.in_calculation_args = false;
+    defer ctx.in_calculation_args = saved_in_calculation;
     const text_storage = try astTextNodeRawAlloc(ctx.a, ast, ctx.pool, node);
     defer ctx.a.free(text_storage);
     const text = text_storage;
@@ -3639,13 +3706,19 @@ fn resolveExprParen(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Span)
         const li = try resolveExpr(ast, ctx, lhs);
         const ri = try resolveExpr(ast, ctx, rhs);
         const bidx: u32 = @intCast(ctx.prog.binary_exprs.items.len);
-        try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = .div });
-        return try appendExpr(ctx.prog, ctx.a, .{ .kind = .binary, .payload = bidx, .span = span });
+        try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = .div, .in_calculation = ctx.in_calculation_args });
+        // Spanned as written inside the parentheses, as diagnostics show it.
+        const inner_span = Span{ .start = inner_node.span_start, .end = inner_node.span_end };
+        return try appendExpr(ctx.prog, ctx.a, .{ .kind = .binary, .payload = bidx, .span = inner_span });
     }
     return resolveExpr(ast, ctx, inner);
 }
 
 fn resolveExprStringInterp(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Span) ResolveError!ExprIndex {
+    // Interpolated Sass is not part of a surrounding calculation.
+    const saved_in_calculation = ctx.in_calculation_args;
+    ctx.in_calculation_args = false;
+    defer ctx.in_calculation_args = saved_in_calculation;
     const off: ExtraIndex = n.payload;
     const quoted = (n.flags & 1) != 0;
     const part_count = ast.getExtraU32(off);
@@ -3799,6 +3872,11 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
         !has_custom_function_binding and
         isCssMathLegacyCalcFunctionName(name_slice);
     const calc_arg_mode = is_vendor_calc_special or is_calc_size_call or is_css_math_legacy_call;
+    // The arguments of a CSS calculation function are a calculation's,
+    // where `/` divides without a deprecation; those of any other call are
+    // not, even inside one.
+    const args_in_calculation = ns_id == .none and !has_custom_function_binding and
+        (calc_arg_mode or isCssCalculationFunctionName(name_slice));
     const calc_arg_allow_numberish_ident_literals = is_css_math_legacy_call;
     const preserve_unquote_calc_first_arg =
         ns_id == .none and (identifierEq(name_slice, "invert") or identifierEq(name_slice, "saturate"));
@@ -3823,6 +3901,9 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
             const inherit_calc_arg_mode = saved_calc_arg_mode and ns_id == .none and !has_custom_function_binding;
             ctx.calc_arg_mode = inherit_calc_arg_mode or calc_arg_mode;
             defer ctx.calc_arg_mode = saved_calc_arg_mode;
+            const saved_in_calculation = ctx.in_calculation_args;
+            ctx.in_calculation_args = args_in_calculation;
+            defer ctx.in_calculation_args = saved_in_calculation;
             const saved_calc_arg_allow_numberish = ctx.calc_arg_allow_numberish_ident_literals;
             ctx.calc_arg_allow_numberish_ident_literals =
                 saved_calc_arg_allow_numberish or calc_arg_allow_numberish_ident_literals;
@@ -3852,6 +3933,9 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
         const inherit_calc_arg_mode = saved_calc_arg_mode and ns_id == .none and !has_custom_function_binding;
         ctx.calc_arg_mode = inherit_calc_arg_mode or calc_arg_mode;
         defer ctx.calc_arg_mode = saved_calc_arg_mode;
+        const saved_in_calculation = ctx.in_calculation_args;
+        ctx.in_calculation_args = args_in_calculation;
+        defer ctx.in_calculation_args = saved_in_calculation;
         const saved_calc_arg_allow_numberish = ctx.calc_arg_allow_numberish_ident_literals;
         ctx.calc_arg_allow_numberish_ident_literals =
             saved_calc_arg_allow_numberish or calc_arg_allow_numberish_ident_literals;
@@ -3964,6 +4048,8 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
                     .builtin_id = bid,
                     .arg_start = astart,
                     .arg_count = @intCast(arg_buf.items.len),
+                    .span_start = span.start,
+                    .span_end = span.end,
                     .local_slot_hint = resolveBuiltinLocalSlotHint(ctx, bid, astart, @intCast(arg_buf.items.len)),
                     .prebound_kind = prebound.kind,
                     .prebound_module = prebound.module_id,
@@ -4003,6 +4089,8 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
                         .builtin_id = bid,
                         .arg_start = astart,
                         .arg_count = @intCast(arg_buf.items.len),
+                        .span_start = span.start,
+                        .span_end = span.end,
                         .local_slot_hint = resolveBuiltinLocalSlotHint(ctx, bid, astart, @intCast(arg_buf.items.len)),
                         .prebound_kind = prebound.kind,
                         .prebound_module = prebound.module_id,
@@ -4064,6 +4152,8 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
             .builtin_id = bid,
             .arg_start = astart,
             .arg_count = @intCast(arg_buf.items.len),
+            .span_start = span.start,
+            .span_end = span.end,
             .local_slot_hint = resolveBuiltinLocalSlotHint(ctx, bid, astart, @intCast(arg_buf.items.len)),
             .prebound_kind = prebound.kind,
             .prebound_module = prebound.module_id,
@@ -4089,6 +4179,8 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
                 .builtin_id = bid,
                 .arg_start = astart,
                 .arg_count = @intCast(arg_buf.items.len),
+                .span_start = span.start,
+                .span_end = span.end,
                 .local_slot_hint = resolveBuiltinLocalSlotHint(ctx, bid, astart, @intCast(arg_buf.items.len)),
                 .prebound_kind = prebound.kind,
                 .prebound_module = prebound.module_id,
@@ -4244,7 +4336,7 @@ fn resolveExprRecorded(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex, n: 
                 break :ri try resolveExpr(ast, ctx, rhs);
             };
             const bidx: u32 = @intCast(ctx.prog.binary_exprs.items.len);
-            try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = mapBinOp(op) });
+            try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = mapBinOp(op), .in_calculation = ctx.in_calculation_args });
             return try appendExpr(ctx.prog, ctx.a, .{ .kind = .binary, .payload = bidx, .span = span });
         },
         .expr_unary_op => {
@@ -4338,6 +4430,10 @@ fn resolveExprRecorded(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex, n: 
         },
         .expr_interp => {
             const inner: NodeIndex = @fromBackingInt(@intCast(n.payload));
+            // Interpolated Sass is not part of a surrounding calculation.
+            const saved_in_calculation = ctx.in_calculation_args;
+            ctx.in_calculation_args = false;
+            defer ctx.in_calculation_args = saved_in_calculation;
             const inner_e = try resolveExpr(ast, ctx, inner);
             const part = [_]ExprIndex{inner_e};
             return try appendInterpExprResolved(ctx, &part, span, false);
@@ -4486,6 +4582,18 @@ fn extractCalcArgStaticNumberInfo(ast: *const ast_flat.Ast, ctx: *Ctx, node: Nod
         },
         else => null,
     };
+}
+
+/// The CSS functions whose arguments are a calculation.
+fn isCssCalculationFunctionName(name: []const u8) bool {
+    const calculation_names = [_][]const u8{
+        "calc", "clamp", "hypot", "max",  "min",  "round", "abs", "sign", "sqrt", "pow", "sin",
+        "cos",  "tan",   "asin",  "acos", "atan", "atan2", "mod", "rem",  "exp",  "log",
+    };
+    for (calculation_names) |candidate| {
+        if (identifierEq(name, candidate)) return true;
+    }
+    return false;
 }
 
 fn isCssMathLegacyCalcFunctionName(name: []const u8) bool {
@@ -5172,7 +5280,7 @@ fn subParseError(err: anyerror) ResolveError {
     return error.SassError;
 }
 
-fn parseSubExpr(ctx: *Ctx, inner: []const u8, _: Span) ResolveError!ExprIndex {
+fn parseSubExpr(ctx: *Ctx, inner: []const u8, outer_span: Span) ResolveError!ExprIndex {
     var sub_ast = ast_flat.Ast.init(ctx.a, inner, .none);
     defer sub_ast.deinit();
     var lexer = lexer_mod.Lexer.init(ctx.a, inner);
@@ -5223,7 +5331,42 @@ fn parseSubExpr(ctx: *Ctx, inner: []const u8, _: Span) ResolveError!ExprIndex {
         .deferred_callable_default_use_bindings = ctx.deferred_callable_default_use_bindings,
         .mixin_accepts_content = ctx.mixin_accepts_content,
     };
-    return resolveExpr(&sub_ast, &sub_ctx, expr_root);
+    const expr_base = ctx.prog.exprs.items.len;
+    const call_base = ctx.prog.builtin_calls.items.len;
+    const result = try resolveExpr(&sub_ast, &sub_ctx, expr_root);
+    rebaseSubExprSpans(ctx, inner, 0, outer_span, expr_base, call_base);
+    return result;
+}
+
+/// The expressions a sub-parse made are spanned within the text it parsed,
+/// which is `inner` after `prefix_len` bytes of its own; place them in the
+/// module's source, or at `outer_span` when `inner` is not a slice of it, so
+/// diagnostics point at the right place.
+fn rebaseSubExprSpans(ctx: *Ctx, inner: []const u8, prefix_len: u32, outer_span: ?Span, expr_base: usize, call_base: usize) void {
+    const source = ctx.ast.source;
+    const src_start = @intFromPtr(source.ptr);
+    const inner_start = @intFromPtr(inner.ptr);
+    const within = inner_start >= src_start and inner_start + inner.len <= src_start + source.len;
+    if (!within and outer_span == null) return;
+    const offset: u32 = if (within) @intCast(inner_start - src_start) else 0;
+    for (ctx.prog.exprs.items[expr_base..]) |*e| {
+        if (within) {
+            e.span.start = (e.span.start -| prefix_len) + offset;
+            e.span.end = (e.span.end -| prefix_len) + offset;
+        } else {
+            e.span = outer_span.?;
+        }
+    }
+    for (ctx.prog.builtin_calls.items[call_base..]) |*c| {
+        if (c.span_start == std.math.maxInt(u32)) continue;
+        if (within) {
+            c.span_start = (c.span_start -| prefix_len) + offset;
+            c.span_end = (c.span_end -| prefix_len) + offset;
+        } else {
+            c.span_start = outer_span.?.start;
+            c.span_end = outer_span.?.end;
+        }
+    }
 }
 
 fn isBareVarIdentChar(c: u8) bool {
@@ -6750,7 +6893,7 @@ fn calcHasModuloOperatorResolver(expr: []const u8) bool {
     return false;
 }
 
-fn validateRawCalcCallSyntax(_: *Ctx, raw_text: []const u8) ResolveError!void {
+fn validateRawCalcCallSyntax(ctx: *Ctx, raw_text: []const u8) ResolveError!void {
     const trimmed = std.mem.trim(u8, raw_text, " \t\r\n");
     if (trimmed.len == 0 or trimmed[trimmed.len - 1] != ')') return;
     const lparen = std.mem.findScalar(u8, trimmed, '(') orelse return;
@@ -6769,7 +6912,7 @@ fn validateRawCalcCallSyntax(_: *Ctx, raw_text: []const u8) ResolveError!void {
     // Expressions containing variables/interpolation are evaluated on the runtime side.
     // Their terms are not numbers yet: `calc(#{2} * 1px + 1s)` is valid CSS.
     if (std.mem.findScalar(u8, inner, '$') != null or std.mem.indexOf(u8, inner, "#{") != null) return;
-    if (calc_utils.calcHasKnownIncompatibleUnits(inner)) return error.SassError;
+    if (calc_utils.recordCalcIncompatibleTermsMessage(ctx.a, inner)) return error.SassError;
 }
 
 fn resolveCssSpecialCallExprFromSourceText(ctx: *Ctx, raw_text: []const u8, span: Span) ResolveError!?ExprIndex {
@@ -9521,7 +9664,11 @@ fn resolveExprFromSourceText(ctx: *Ctx, raw_src: []const u8) ResolveError!ExprIn
 
     var sub_ctx = ctx.*;
     sub_ctx.ast = &sub_ast;
-    return try resolveExprMaybeStaticLiteral(&sub_ast, &sub_ctx, expr_root);
+    const expr_base = ctx.prog.exprs.items.len;
+    const call_base = ctx.prog.builtin_calls.items.len;
+    const result = try resolveExprMaybeStaticLiteral(&sub_ast, &sub_ctx, expr_root);
+    rebaseSubExprSpans(ctx, raw_src, 0, null, expr_base, call_base);
+    return result;
 }
 
 fn resolveLegacyPlusImportantValue(ctx: *Ctx, value_source: []const u8, span: Span) ResolveError!?ExprIndex {
@@ -9585,6 +9732,9 @@ fn resolveIncludeArgsFromSource(ctx: *Ctx, inner_src: []const u8) ResolveError!R
 
     var sub_ctx = ctx.*;
     sub_ctx.ast = &sub_ast;
+    const expr_base = ctx.prog.exprs.items.len;
+    const call_base = ctx.prog.builtin_calls.items.len;
+    defer rebaseSubExprSpans(ctx, inner_src, "__zsass_include(".len, null, expr_base, call_base);
 
     const off: ExtraIndex = root.payload;
     const argc = sub_ast.getExtraU32(off + 2);
@@ -10569,6 +10719,7 @@ const preamble_ctx_default_only = [_][]const u8{
     "property_namespace_depth",
     "allow_unknown_var_literal",
     "calc_arg_mode",
+    "in_calculation_args",
     "calc_arg_allow_numberish_ident_literals",
     "in_declaration_value",
     "slash_paren_depth",

@@ -525,55 +525,64 @@ fn writeSourceFrameWithLabel(
 /// The inner-most (path,source,span,label) traces the top of the stack, and the outer traces the stack toward the bottom.
 pub fn writeStackTrace(allocator: std.mem.Allocator) !void {
     if (error_state.error_stack_snapshot_len == 0) return;
-    const slen = error_state.error_stack_snapshot_len;
+    try writeTraceFrames(allocator, error_state.error_stack_snapshot[0..error_state.error_stack_snapshot_len], true, "  ");
+}
 
-    // Precompute the path+position string for all frames and calculate the max width.
-    var pieces: [max_error_stack][]u8 = undefined;
-    var owned: [max_error_stack]bool = @splat(false);
-    defer {
-        var k: usize = 0;
-        while (k < slen) : (k += 1) {
-            if (owned[k]) allocator.free(pieces[k]);
-        }
-    }
+/// Writes `frames` (outermost first) as Sass does: the innermost frame's
+/// source line with a caret when `with_snippet`, then one `path l:c  label`
+/// line per frame, innermost first, each after `indent`.
+pub fn writeTraceFrames(allocator: std.mem.Allocator, frames: []const ErrorTraceFrame, with_snippet: bool, indent: []const u8) !void {
+    const slen = frames.len;
+    if (slen == 0) return;
+    const pieces = try allocator.alloc([]u8, slen);
+    defer allocator.free(pieces);
+    var filled: usize = 0;
+    defer for (pieces[0..filled]) |piece| allocator.free(piece);
 
-    // snapshot[slen-1] is inner-most (= error occurrence position). Drawing is done in inner -> outer order.
     var max_width: usize = 0;
-    var i: usize = 0;
-    while (i < slen) : (i += 1) {
-        const idx = slen - 1 - i;
-        const f = error_state.error_stack_snapshot[idx];
-        const path = f.path_buf[0..f.path_len];
-        const text = try allocator.print("{s} {d}:{d}", .{
-            path,
-            f.line_no,
-            f.col_no,
-        });
-        pieces[idx] = text;
-        owned[idx] = true;
-        if (text.len > max_width) max_width = text.len;
+    for (frames, 0..) |f, idx| {
+        pieces[idx] = try allocator.print("{s} {d}:{d}", .{ f.path_buf[0..f.path_len], f.line_no, f.col_no });
+        filled += 1;
+        if (pieces[idx].len > max_width) max_width = pieces[idx].len;
     }
 
-    // Draw the source frame (frame ASCII) of the inner-most frame.
-    {
-        const inner = error_state.error_stack_snapshot[slen - 1];
-        if (inner.has_span) {
+    if (with_snippet) {
+        const inner = frames[slen - 1];
+        if (inner.has_span and inner.line_text_len > 0) {
             const line_text = inner.line_text_buf[0..inner.line_text_len];
             writeSourceFrameAsciiOnlyFromSnapshot(line_text, inner.line_no, inner.col_no, inner.end_line_no, inner.end_col_no);
         }
     }
 
-    // Print trace lines for each frame. inner -> outer order.
     var j: usize = 0;
     while (j < slen) : (j += 1) {
         const idx = slen - 1 - j;
-        const f = error_state.error_stack_snapshot[idx];
+        const f = frames[idx];
         const label = f.label_buf[0..f.label_len];
         const pad = max_width - pieces[idx].len + 2;
-        eprint("  {s}", .{pieces[idx]});
+        eprint("{s}{s}", .{ indent, pieces[idx] });
         eprintRepeat(' ', pad);
         eprint("{s}\n", .{label});
     }
+}
+
+/// Fills a trace frame.
+pub fn fillTraceFrame(frame: *ErrorTraceFrame, path: []const u8, label: []const u8, line_no: u32, col_no: u32, end_line_no: u32, end_col_no: u32, line_text: []const u8) void {
+    frame.* = .{};
+    const p_len = @min(path.len, frame.path_buf.len);
+    @memcpy(frame.path_buf[0..p_len], path[0..p_len]);
+    frame.path_len = p_len;
+    const l_len = @min(label.len, frame.label_buf.len);
+    @memcpy(frame.label_buf[0..l_len], label[0..l_len]);
+    frame.label_len = l_len;
+    frame.line_no = line_no;
+    frame.col_no = col_no;
+    frame.end_line_no = end_line_no;
+    frame.end_col_no = end_col_no;
+    const t_len = @min(line_text.len, frame.line_text_buf.len);
+    @memcpy(frame.line_text_buf[0..t_len], line_text[0..t_len]);
+    frame.line_text_len = t_len;
+    frame.has_span = true;
 }
 
 fn writeSourceFrameAsciiOnlyFromSnapshot(

@@ -4,6 +4,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+- Errors for incompatible units name the operands as the official CLI
+  does: `1px - 1s`, `1px < 1s`, and `1px % 1s` report "1px and 1s have
+  incompatible units.", and calc(), min(), max(), clamp(), round(),
+  mod(), rem(), atan2(), and hypot() report "1px and 1s are
+  incompatible." (or "Number calc(1px * 1px) isn't compatible with CSS
+  calculations.") instead of "Compilation failed.".
+- calc() checks a sum the way the official CLI does, folding it left to
+  right and comparing only operands that are numbers by then:
+  `calc(1px + 1em + 1s)` is kept, `calc(1px + 1in + 1s)` fails on `97px
+  and 1s`, and a parenthesized group is checked on its own. Relative
+  lengths such as `em` count as lengths, and `x` is an unknown unit.
+- clamp() rejects a unitless argument mixed with ones that have units,
+  and `clamp(1PX, 1s, 2px)` fails as `1PX and 1s` instead of being kept.
+- A calc() with variables, such as `calc($x + 1s)` with `$x: 1px`, fails
+  with "1px and 1s are incompatible." instead of being kept; interpolated
+  text is still not checked.
+- A deprecation raised by a built-in call in a `@use ... with` or
+  `@forward ... with` value is reported, located at the call.
+- A fatal deprecation is reported as the official CLI does: one error
+  with the deprecation's message, "This is only an error because you've
+  set the <id> deprecation to be fatal.", and the source frame of the
+  call, instead of a separate "Deprecation [<id>]" line and "Fatal
+  deprecation.".
+- The `@import` deprecation includes "More info and automated migrator:
+  https://sass-lang.com/d/import" and is located at the URL.
+- A deprecation from a built-in call that zsass would fold ahead of time,
+  such as one in a `meta.load-css()` `$with` map, is no longer lost: the
+  call is left to run, and warns.
+- Errors and warnings in the arguments of `@include` are located there;
+  they pointed at the first line of the file.
+- Deprecation warnings and `@warn` are written as the official CLI writes
+  them: a deprecation shows the source line with a caret under the call,
+  both show the trace of calls that led there (`f()`, `m()`, `@use`, ...,
+  `root stylesheet`), and each is followed by a blank line.
+- Up to five deprecation warnings of each kind are shown, then "WARNING:
+  N repetitive deprecation warnings omitted." at the end, as the official
+  CLI does; `--verbose` shows them all. Only one of each kind was shown.
+- A map or an empty list used as a CSS value fails with "(x: 1) isn't a
+  valid CSS value." instead of "Compilation failed.", and so does one
+  interpolated into a value, a selector, a property name, or an at-rule
+  prelude, which zsass wrote out as text.
+- `@debug` writes a value other than a string as `meta.inspect()` does:
+  `()` and the quotes of strings inside a map were lost.
+- The slash-div deprecation reads as the official CLI's: "Using / for
+  division outside of calc() is deprecated ...", with the recommendation
+  `math.div(a, b) or calc(a / b)` built from the source (only
+  `math.div()` for two numbers that are the whole value of a variable or
+  `@return`), instead of a placeholder sentence. A division that zsass
+  folded ahead of time no longer loses it.
+- A warning in a module that a `@use` or `@forward` loads lists that
+  rule, and the ones above it, in its trace.
+- `%` between numbers with compatible units converts the right operand:
+  `7cm % 1in` is `1.92cm` instead of an error.
+
 ## 0.5.2 (2026-11-28)
 
 ### Fixed

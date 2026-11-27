@@ -22,6 +22,7 @@ const embed_batch_mod = @import("runtime/embed_batch.zig");
 const resource_budget = @import("runtime/resource_budget.zig");
 const stack_guard = @import("runtime/stack_guard.zig");
 const file_access_mod = @import("resolve/file_access.zig");
+const deprecation_mod = @import("runtime/deprecation.zig");
 
 /// Which stylesheets `@use`, `@forward`, `@import`, and `meta.load-css()`
 /// may read. See `CompileOptions.file_import_policy`.
@@ -281,6 +282,9 @@ fn compileSourceToCssInArena(
     error_format_mod.clearContextMessage();
     const prev_diag = pushDiagnosticSink(opts);
     defer restoreDiagnosticSink(prev_diag);
+    const saved_read_sources = deprecation_mod.read_sources_for_warnings;
+    deprecation_mod.read_sources_for_warnings = false;
+    defer deprecation_mod.read_sources_for_warnings = saved_read_sources;
     var r = try compiler_mod.parseResolveCompileWithPathAndBudget(alloc, source, file_path, load_paths, budget);
     try budget.checkCancelled();
     defer r.pool.deinit(alloc);
@@ -296,6 +300,9 @@ fn compileSourceToCssInArena(
     vm.error_sink_fd = compile_error_sink_fd_tls;
     vm.budget = budget;
     vm.deprecation_opts.quiet = opts.quiet or builtin.is_test;
+    // Warnings show the source given here, never a file read again.
+    vm.diag_entry_source = source;
+    vm.diag_read_files = false;
     defer vm.deinit();
 
     try vm_mod.VM.runTop(&vm);
@@ -376,6 +383,9 @@ fn compileSourceToCssWithSourceMapInArena(
     error_format_mod.clearContextMessage();
     const prev_diag = pushDiagnosticSink(opts);
     defer restoreDiagnosticSink(prev_diag);
+    const saved_read_sources = deprecation_mod.read_sources_for_warnings;
+    deprecation_mod.read_sources_for_warnings = false;
+    defer deprecation_mod.read_sources_for_warnings = saved_read_sources;
     var r = try compiler_mod.parseResolveCompileWithPathAndBudget(alloc, source, file_path, load_paths, budget);
     try budget.checkCancelled();
     defer r.pool.deinit(alloc);
@@ -391,6 +401,9 @@ fn compileSourceToCssWithSourceMapInArena(
     vm.error_sink_fd = compile_error_sink_fd_tls;
     vm.budget = budget;
     vm.deprecation_opts.quiet = opts.quiet or builtin.is_test;
+    // Warnings show the source given here, never a file read again.
+    vm.diag_entry_source = source;
+    vm.diag_read_files = false;
     defer vm.deinit();
 
     try vm_mod.VM.runTop(&vm);
@@ -2814,7 +2827,6 @@ test "api: selector.unify() unifies and weaves as @extend does" {
 
 test "api: color functions report color-functions only where a replacement is asked for" {
     const alloc = std.testing.allocator;
-    const deprecation_mod = @import("runtime/deprecation.zig");
     const Case = struct { source: []const u8, reported: bool };
     const cases = [_]Case{
         .{ .source = "@use \"sass:color\";\na {b: color.mix(red, blue, 50%)}\n", .reported = false },

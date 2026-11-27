@@ -2753,6 +2753,7 @@ fn runEnd2EndWithBudget(
     vm.budget = budget;
     defer vm.deinit();
     vm.deprecation_opts = deprecation_opts;
+    vm.diag_entry_source = source;
     if (std.c.getenv("ZSASS_TRACE_SLOT")) |slot_z| {
         const slot_str = std.mem.sliceTo(slot_z, 0);
         if (std.fmt.parseInt(u32, slot_str, 10)) |v| {
@@ -2857,6 +2858,9 @@ fn runEnd2EndWithBudget(
         // after all sibling workers have flushed.
         return err;
     };
+    // As the official CLI, after the warnings and before the CSS; not when
+    // the compilation fails.
+    deprecation_mod.writeOmittedSummary(&vm.deprecation_opts);
     perf.timeEnd(.phase_execute_ns, perf_exec_start);
     try failOnRecoveredLimit(budget);
     if (opts.phase_timer) phase_timer.record(.execute, exec_start);

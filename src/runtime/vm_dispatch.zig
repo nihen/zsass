@@ -85,30 +85,8 @@ fn builtinPreservesSlashLists(builtin_id: u32) bool {
     };
 }
 
-fn builtinCallSite(self: anytype) ?deprecation_mod.CallSite {
-    const fid: usize = @intCast(self.current_source_span.file_id);
-    if (fid >= self.program.modules.len) return null;
-    const mod = self.program.modules[fid];
-    if (mod.module_path.len == 0) return null;
-    // Code an `@import` brought in runs in the importing module but was
-    // written, and is spanned, in the imported file.
-    const origin_index: usize = @backingInt(self.current_origin);
-    if (self.current_origin != .invalid and origin_index < self.program.origins.len) {
-        const origin_path = self.program.origins[origin_index].source_path;
-        if (origin_path.len != 0 and !std.mem.eql(u8, origin_path, mod.module_path)) {
-            return .{ .path = origin_path, .line_starts = &.{}, .offset = self.current_source_span.start, .read_source = true };
-        }
-    }
-    return .{ .path = mod.module_path, .line_starts = mod.line_starts, .offset = self.current_source_span.start };
-}
-
-pub fn dispatchBuiltinArgs(self: anytype, builtin_id: u32, args: []const Value, arg_names: []const InternId) !Value {
-    perf.note(.vm_call_builtin);
-    perf.note(.builtin_call);
-    if (builtin_id == meta_keywords_builtin_id and args.len == 1) {
-        if (try dispatchMetaKeywordsSingleArg(self, args, arg_names)) |out| return out;
-    }
-    var bctx = builtin_mod.BuiltinContext{
+pub fn builtinContext(self: anytype) builtin_mod.BuiltinContext {
+    return .{
         .allocator = self.allocator,
         .intern_pool = self.intern_pool,
         .list_pool = &self.list_pool,
@@ -129,6 +107,34 @@ pub fn dispatchBuiltinArgs(self: anytype, builtin_id: u32, args: []const Value, 
         .deprecation_opts = &self.deprecation_opts,
         .budget = self.budget,
     };
+}
+
+fn builtinCallSite(self: anytype) ?deprecation_mod.CallSite {
+    const fid: usize = self.diagnosticModuleIndex();
+    if (fid >= self.program.modules.len) return null;
+    const mod = self.program.modules[fid];
+    if (mod.module_path.len == 0) return null;
+    // Code an `@import` brought in runs in the importing module but was
+    // written, and is spanned, in the imported file.
+    const origin_index: usize = @backingInt(self.current_origin);
+    if (self.current_origin != .invalid and origin_index < self.program.origins.len and
+        self.program.origins[origin_index].kind == .import_stylesheet)
+    {
+        const origin_path = self.program.origins[origin_index].source_path;
+        if (origin_path.len != 0 and !std.mem.eql(u8, origin_path, mod.module_path)) {
+            return .{ .path = origin_path, .line_starts = &.{}, .offset = self.current_source_span.start, .read_source = true };
+        }
+    }
+    return .{ .path = mod.module_path, .line_starts = mod.line_starts, .offset = self.current_source_span.start };
+}
+
+pub fn dispatchBuiltinArgs(self: anytype, builtin_id: u32, args: []const Value, arg_names: []const InternId) !Value {
+    perf.note(.vm_call_builtin);
+    perf.note(.builtin_call);
+    if (builtin_id == meta_keywords_builtin_id and args.len == 1) {
+        if (try dispatchMetaKeywordsSingleArg(self, args, arg_names)) |out| return out;
+    }
+    var bctx = builtinContext(self);
     const saved_site = deprecation_mod.builtin_call_site;
     deprecation_mod.builtin_call_site = builtinCallSite(self);
     defer deprecation_mod.builtin_call_site = saved_site;

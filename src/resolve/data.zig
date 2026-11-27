@@ -312,6 +312,9 @@ pub const ResolvedProgram = struct {
         /// them (`1/2`), outside parentheses. They are still that text
         /// when the right side turns out not to be a number.
         lhs_written_slash: bool = false,
+        /// In the arguments of a CSS calculation function (`calc()`,
+        /// `min()`, ...), where `/` divides without a deprecation.
+        in_calculation: bool = false,
     }) = .empty,
     unary_exprs: std.ArrayListUnmanaged(struct { operand: ExprIndex, op: UnaryOp }) = .empty,
     call_exprs: std.ArrayListUnmanaged(struct {
@@ -337,6 +340,10 @@ pub const ResolvedProgram = struct {
         prebound_accepts_content: bool = false,
         prebound_capture_callers_locals: bool = false,
         prebound_name: InternId = .none,
+        /// Where the call starts in the module's source, for the
+        /// deprecations a statically evaluated call raises.
+        span_start: u32 = std.math.maxInt(u32),
+        span_end: u32 = std.math.maxInt(u32),
     }) = .empty,
     cross_var_refs: std.ArrayListUnmanaged(struct { module_id: u32, slot: SlotId }) = .empty,
     /// Modules named by a literal `meta.load()` URL in this module. They are

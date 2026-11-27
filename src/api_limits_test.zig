@@ -6,6 +6,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const api = @import("api.zig");
 const zsass_io = @import("runtime/io.zig");
+const error_format = @import("runtime/error_format.zig");
 
 const compile = api.compileSourceToCss;
 
@@ -1099,4 +1100,53 @@ test "calc: interpolated terms are not checked as numbers; runtime calc does not
     if (compile(a, "$x: 1px; a { b: calc($x + 2ms); }", "", &.{}, quiet)) |css| {
         try std.testing.expect(std.mem.indexOf(u8, css, "1.002px") == null);
     } else |_| {}
+}
+
+fn expectCompileMessage(a: std.mem.Allocator, src: []const u8, want: []const u8) !void {
+    error_format.clearContextMessage();
+    if (compile(a, src, "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expectEqualStrings(want, error_format.currentContextMessage() orelse "");
+}
+
+test "errors: incompatible units name the operands as the official CLI does" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try expectCompileMessage(a, "a { b: 1px - 1s; }", "1px and 1s have incompatible units.");
+    try expectCompileMessage(a, "a { b: 1px < 1s; }", "1px and 1s have incompatible units.");
+    try expectCompileMessage(a, "a { b: 1px % 1s; }", "1px and 1s have incompatible units.");
+    try expectCompileMessage(a, "a { b: calc(1px + 1in + 1s); }", "97px and 1s are incompatible.");
+    try expectCompileMessage(a, "a { b: calc((1px + 1s) * 2); }", "1px and 1s are incompatible.");
+    try expectCompileMessage(a, "a { b: min(1em, 1px, 1s); }", "1em and 1s are incompatible.");
+    try expectCompileMessage(a, "a { b: clamp(1px, 2, 3px); }", "1px and 2 are incompatible.");
+    try expectCompileMessage(a, "a { b: hypot(1px, 2px, 1s); }", "1px and 1s are incompatible.");
+    try expectCompileMessage(a, "a { b: min(1px * 1px, 1s); }", "Number calc(1px * 1px) isn't compatible with CSS calculations.");
+    try std.testing.expectEqualStrings("a {\n  b: calc(1px + 1em + 1s);\n  c: 1.92cm;\n}\n", try compile(a, "a { b: calc(1px + 1em + 1s); c: 7cm % 1in; }", "", &.{}, quiet));
+}
+
+test "errors: a calc() with variables checks their units" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try expectCompileMessage(a, "$x: 1px; a { b: calc($x + 1s); }", "1px and 1s are incompatible.");
+    try std.testing.expectEqualStrings("a {\n  b: calc(1px + 1s);\n}\n", try compile(a, "$x: 1px; a { b: calc(#{$x} + 1s); }", "", &.{}, quiet));
+}
+
+test "errors: a map or an empty list is not a CSS value, in a declaration or an interpolation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try expectCompileMessage(a, "a { b: (x: 1, y: 2); }", "(x: 1, y: 2) isn't a valid CSS value.");
+    try expectCompileMessage(a, "a { b: 1px (x: \"s\"); }", "(x: \"s\") isn't a valid CSS value.");
+    try expectCompileMessage(a, "a { b: (); }", "() isn't a valid CSS value.");
+    try expectCompileMessage(a, "a { b: c#{()}d; }", "() isn't a valid CSS value.");
+    try expectCompileMessage(a, ".#{(x: 1)} { b: 1; }", "(x: 1) isn't a valid CSS value.");
+    try std.testing.expectEqualStrings("a {\n  --c: (x: 1);\n}\n", try compile(a, "a { --c: (x: 1); }", "", &.{}, quiet));
+}
+
+test "math: CSS min() and max() compare each argument with the first" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("a {\n  a: 1;\n  b: 3;\n}\n", try compile(a, "a { a: min(1, 2s, 3px); b: max(3, 2s, 1px); }", "", &.{}, quiet));
 }
