@@ -140,7 +140,8 @@ pub fn complexSelectorEql(a: *const ComplexSelector, b: *const ComplexSelector) 
     return true;
 }
 
-fn compoundMultisetHash(c: *const CompoundSelector) u64 {
+/// Equal compounds (`compoundSelectorEql`) hash alike.
+pub fn compoundMultisetHash(c: *const CompoundSelector) u64 {
     const items = c.simple_selectors.items;
     const n = items.len;
     if (n == 0) return 0;

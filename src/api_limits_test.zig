@@ -955,3 +955,15 @@ test "@supports: parentheses around one group drop inside operations and in @imp
     try std.testing.expectEqualStrings("@supports ((a: b) or (c: d)) and (e: f) {\n  a {\n    b: c;\n  }\n}\n", try compile(a, "@supports (((a: b) or (c: d))) and (e: f) { a { b: c; } }", "", &.{}, quiet));
     try std.testing.expectEqualStrings("@import url(a.css) supports(display: grid);\n", try compile(a, "@import url(a.css) supports(((display: grid)));", "", &.{}, quiet));
 }
+
+test "@extend: many independent extends keep every pair" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var src: std.ArrayList(u8) = .empty;
+    for (0..3000) |i| try src.print(a, ".a{d} {{ c: d; }}\n", .{i});
+    for (0..3000) |i| try src.print(a, ".b{d} {{ @extend .a{d}; }}\n", .{ i, i });
+    const css = try compile(a, src.items, "", &.{}, quiet);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".a0, .b0 {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".a2999, .b2999 {") != null);
+}
