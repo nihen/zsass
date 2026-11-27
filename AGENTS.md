@@ -38,3 +38,4 @@ Initialize `tests/sass-spec` with `git submodule update --init` after cloning. R
 - Keep a focused change focused. Do not introduce speculative compatibility shims for unreleased internal APIs.
 - Do not bypass Git hooks. Do not push directly to `main` when collaborating.
 - Merge a pull request from a feature branch into `main` by squashing (`gh pr merge --squash`), and confirm afterwards that CI on `main` passed.
+- Merge a release pull request (`release/*`), or any pull request that bundles other pull requests, with a merge commit (`gh pr merge --merge`). Never squash it.
