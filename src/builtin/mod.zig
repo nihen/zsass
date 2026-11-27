@@ -8,6 +8,8 @@ const color = @import("color.zig");
 const list = @import("list.zig");
 const map = @import("map.zig");
 const meta_dispatch_abi = @import("meta_dispatch_abi.zig");
+const signatures = @import("signatures.zig");
+const error_format = @import("../runtime/error_format.zig");
 
 const Value = shared.Value;
 const InternId = shared.InternId;
@@ -270,6 +272,50 @@ fn resolveCaseSensitive(module: []const u8, name: []const u8) ?Id {
 
 /// Resolve plain (unnamespaced) legacy global mixin names (`apply`, `load-css`)
 /// to their meta-module dispatch ids. Used when a `@include` has no module prefix.
+/// A built-in call failed without a message: when its arguments do not fit
+/// the function, the official CLI's message for that ("Only 2 arguments
+/// allowed, but 3 were passed.", "Missing argument $color."), from the
+/// signatures the CLI reports.
+pub fn reportSignatureMismatch(pool: anytype, id: Id, args_len: usize, arg_names: []const InternId) void {
+    const row = signatureFor(id) orelse return;
+    var positional: usize = 0;
+    for (0..args_len) |i| {
+        if (i >= arg_names.len or arg_names[i] == .none) positional += 1;
+    }
+    var buf: [160]u8 = undefined;
+    if (row.max >= 0 and positional > @as(usize, @intCast(row.max))) {
+        const msg = error_format.formatTooManyArguments(&buf, @intCast(row.max), args_len) catch return;
+        error_format.setContextMessage(msg);
+        return;
+    }
+    for (row.required, 0..) |param, idx| {
+        if (idx < positional) continue;
+        var named = false;
+        for (arg_names) |name_id| {
+            if (name_id == .none) continue;
+            const raw = pool.get(name_id);
+            const bare = if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
+            if (shared.identifierEq(bare, param)) named = true;
+        }
+        if (named) continue;
+        const msg = std.fmt.bufPrint(&buf, "Missing argument ${s}.", .{param}) catch return;
+        error_format.setContextMessage(msg);
+        return;
+    }
+}
+
+fn signatureFor(id: Id) ?*const signatures.Row {
+    // A module function's row before a global's: they share an id when
+    // they are the same function.
+    for (&signatures.rows) |*row| {
+        if (row.module.len != 0 and resolve(row.module, row.name) == id) return row;
+    }
+    for (&signatures.rows) |*row| {
+        if (row.module.len == 0 and resolveLegacyGlobal(row.name) == id) return row;
+    }
+    return null;
+}
+
 pub fn resolveLegacyGlobalMixin(name: []const u8) ?Id {
     if (shared.identifierEq(name, "apply")) return meta_apply_mixin_id;
     if (shared.identifierEq(name, "load-css")) return meta_load_css_mixin_id;

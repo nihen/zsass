@@ -139,6 +139,12 @@ pub fn dispatchBuiltinArgs(self: anytype, builtin_id: u32, args: []const Value, 
     deprecation_mod.builtin_call_site = builtinCallSite(self);
     defer deprecation_mod.builtin_call_site = saved_site;
     const out = builtin_mod.dispatch(&bctx, builtin_id, args, arg_names) catch |e| {
+        // No message, or one that does not name the argument: the
+        // signature's, when the arguments do not fit it.
+        const unnamed = if (error_format.currentContextMessage()) |msg| std.mem.eql(u8, msg, error_format.missingArgumentMessage()) else true;
+        if (e != error.OutOfMemory and unnamed) {
+            builtin_mod.reportSignatureMismatch(self.intern_pool, builtin_id, args.len, arg_names);
+        }
         return reportBuiltinDispatchFailure(self, builtin_id, e);
     };
     if (builtinPreservesSlashLists(builtin_id)) {
