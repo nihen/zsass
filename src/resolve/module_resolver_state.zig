@@ -52,7 +52,11 @@ pub fn deinitAll(self: *ModuleResolver) void {
 }
 
 pub fn appendImportOrigin(self: *ModuleResolver, source_path: []const u8, parent_import_origin: OriginId, import_offset: u32) error{OutOfMemory}!OriginId {
-    const owned_path = try self.records_alloc.dupe(u8, source_path);
+    // Shown in traces, where Sass writes a path relative to the working
+    // directory without a leading "./".
+    var shown = source_path;
+    while (std.mem.startsWith(u8, shown, "./")) shown = shown[2..];
+    const owned_path = try self.records_alloc.dupe(u8, shown);
     const idx_u32: u32 = @intCast(self.import_origins_ptr.items.len);
     try self.import_origins_ptr.append(self.records_alloc, .{
         .kind = .import_stylesheet,

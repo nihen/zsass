@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- An error in code that `@import` brought in, and the Sass `if()`
+  warning in an imported file, point into that file, and their trace
+  lists each `@import` and call that led there, as the official CLI
+  does. Traces write such a file's path without a leading "./".
+- rgb(), hsl(), and hwb() accept positional and named arguments mixed
+  (`hsl(10, $saturation: 20%, $lightness: 30%)`), and report arguments no
+  overload takes as the official CLI does. The global hwb() takes only
+  `$channels`.
 - The color constructors rgb(), hsl(), hwb(), lab(), lch(), oklab(),
   oklch(), and color() say why they reject their arguments, as the
   official CLI does: the list's shape ("Expected a space- or

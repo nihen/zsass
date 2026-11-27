@@ -139,6 +139,8 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: 
 
     const saved_ast = ctx.ast;
     const saved_path = ctx.module_path;
+    const saved_file_source = ctx.file_source;
+    const saved_sub_source_delta = ctx.sub_source_delta;
     const saved_module_directive_locked = ctx.module_directive_locked;
     try ctx.visiting_imports.append(ctx.a, saved_path);
     defer _ = ctx.visiting_imports.pop();
@@ -148,6 +150,8 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: 
 
     ctx.ast = child_ast_ptr;
     ctx.module_path = resolved_path;
+    ctx.file_source = child_ast_ptr.source;
+    ctx.sub_source_delta = 0;
     ctx.module_directive_locked = false;
     // Error-trace frame for the inlined file: without this, spans recorded
     // while resolving the child would be projected onto the parent frame's
@@ -156,11 +160,13 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: 
     // to the import URL token span (dart points the parent trace line at
     // the quote start, not the statement head).
     error_format.setTopFrameSpan(url_span.start, url_span.end);
-    error_format.pushFrame(resolved_path, child_ast_ptr.source, "@import");
+    error_format.pushFrame(shownPath(resolved_path), child_ast_ptr.source, "@import");
     defer error_format.popFrame();
     defer {
         ctx.ast = saved_ast;
         ctx.module_path = saved_path;
+        ctx.file_source = saved_file_source;
+        ctx.sub_source_delta = saved_sub_source_delta;
         ctx.module_directive_locked = saved_module_directive_locked;
         // OOM during scope unwind cannot propagate from within a `defer`.
         // Log and continue: subsequent compiles will rebuild the map.
@@ -241,4 +247,12 @@ fn sourceLineCol(source: []const u8, offset: u32) struct { line: u32, col: u32 }
     const end = @min(@as(usize, offset), source.len);
     const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..end], '\n')) |nl| nl + 1 else 0;
     return .{ .line = @intCast(std.mem.count(u8, source[0..line_start], "\n") + 1), .col = @intCast(end - line_start + 1) };
+}
+
+/// A path as traces show it: relative to the working directory without a
+/// leading "./", as Sass writes it.
+fn shownPath(path: []const u8) []const u8 {
+    var shown = path;
+    while (std.mem.startsWith(u8, shown, "./")) shown = shown[2..];
+    return shown;
 }

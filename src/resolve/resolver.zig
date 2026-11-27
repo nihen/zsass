@@ -511,6 +511,9 @@ const Ctx = struct {
     /// How far `ast.source` is from the source spans refer to, inside a
     /// sub-parse: a position there plus this is one in the module's source.
     sub_source_delta: i64 = 0,
+    /// The source of the file being resolved: the module's, or that of a
+    /// file an @import brought in, which the module's line table is not for.
+    file_source: []const u8 = "",
     /// `infinity` / `pi` etc. in CSS math call arguments such as clamp/hypot
     /// Use number-ish identifier for numerical resolution without turning it into a marker.
     calc_arg_allow_numberish_ident_literals: bool = false,
@@ -5345,6 +5348,7 @@ fn parseSubExprAt(ctx: *Ctx, inner: []const u8, outer_span: Span, base: ?u32) Re
         .deferred_callable_default_use_bindings = ctx.deferred_callable_default_use_bindings,
         .mixin_accepts_content = ctx.mixin_accepts_content,
         .sub_source_delta = subSourceDelta(ctx, inner, 0, base),
+        .file_source = ctx.file_source,
     };
     const expr_base = ctx.prog.exprs.items.len;
     const call_base = ctx.prog.builtin_calls.items.len;
@@ -7598,9 +7602,9 @@ fn warnLegacyIfFunction(ast: *const ast_flat.Ast, ctx: *Ctx, call_extra: ExtraIn
     // Inside a sub-parse, positions are moved into the module's source.
     const start: u32 = @intCast(@as(i64, span.start) + ctx.sub_source_delta);
     const end: u32 = @intCast(@as(i64, span.end) + ctx.sub_source_delta);
-    const module_len: usize = if (ctx.prog.line_starts.len > 0) std.math.maxInt(u32) else source.len;
-    const pos = data_mod.spanStartLineColOneBased(module_len, ctx.prog.line_starts, start);
-    const end_pos = data_mod.spanStartLineColOneBased(module_len, ctx.prog.line_starts, end);
+    const file_source = if (ctx.file_source.len > 0) ctx.file_source else source;
+    const pos = sourceLineCol(file_source, start);
+    const end_pos = sourceLineCol(file_source, end);
     deprecation_mod.emitDeprecationSpan(opts, .if_function, msg, ctx.module_path, pos.line, pos.col, if (end_pos.line == pos.line) end_pos.col else 0) catch |err| switch (err) {
         error.FatalDeprecation => {
             error_format.recordErrorSpan(start, end, 0);
@@ -10827,6 +10831,7 @@ const preamble_ctx_default_only = [_][]const u8{
     "calc_arg_mode",
     "in_calculation_args",
     "sub_source_delta",
+    "file_source",
     "calc_arg_allow_numberish_ident_literals",
     "in_declaration_value",
     "slash_paren_depth",
@@ -11581,6 +11586,7 @@ fn resolveSingleAst(
         .static_eval_store = static_eval_store,
         .color_pool = color_pool,
         .initial_config_entries = mr.active_initial_config_entries,
+        .file_source = ast.source,
     };
     errdefer ctx.deinitScopes(a2);
 
@@ -13198,4 +13204,10 @@ test "resolver: nested !global member stays exported" {
         \\a {b: other.$member}
     , entry_path);
     defer bundle.deinit();
+}
+
+fn sourceLineCol(source: []const u8, offset: u32) struct { line: u32, col: u32 } {
+    const end = @min(@as(usize, offset), source.len);
+    const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..end], '\n')) |nl| nl + 1 else 0;
+    return .{ .line = @intCast(std.mem.count(u8, source[0..line_start], "\n") + 1), .col = @intCast(end - line_start + 1) };
 }

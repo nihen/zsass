@@ -8880,6 +8880,7 @@ pub const VM = struct {
                 .span_end = loc.end,
                 .chunk = r,
                 .chunk_name = chunk.name,
+                .origin = if (chunk.code_origin.len == chunk.code.len) chunk.code_origin[pc_idx] else .invalid,
             };
             n += 1;
         }
@@ -8922,6 +8923,22 @@ pub const VM = struct {
         return @intCast(self.current_source_span.file_id);
     }
 
+    /// The trace of an error at `span_start..span_end` of the module
+    /// `file_id`, when the code running there is one an @import brought in;
+    /// null otherwise, as the module's own frames place it.
+    pub fn importedErrorTrace(self: *VM, out: []error_format.ErrorTraceFrame, file_id: u32, span_start: u32, span_end: u32) ?usize {
+        if (self.diagnosticModuleIndex() != file_id or file_id >= self.program.modules.len) return null;
+        const m = &self.program.modules[file_id];
+        if (self.importedOrigin(self.current_origin, m.module_path) == null) return null;
+        const saved = self.current_source_span;
+        defer self.current_source_span = saved;
+        self.current_source_span.start = span_start;
+        self.current_source_span.end = span_end;
+        const n = self.buildDiagnosticTrace(out);
+        if (n == 0 or out[n - 1].line_text_len == 0) return null;
+        return n;
+    }
+
     pub fn buildDiagnosticTrace(self: *VM, out: []error_format.ErrorTraceFrame) usize {
         if (out.len == 0) return 0;
         const fid: usize = self.diagnosticModuleIndex();
@@ -8959,7 +8976,22 @@ pub const VM = struct {
         for (sites[0..site_count], 0..) |site, i| {
             if (site.module_id >= self.program.modules.len) return 0;
             const m = &self.program.modules[site.module_id];
-            const label = if (i == 0 and site.chunk == .top) top_label else diagnosticCallLabel(site.chunk, site.chunk_name, &label_buf);
+            var label = if (i == 0 and site.chunk == .top) top_label else diagnosticCallLabel(site.chunk, site.chunk_name, &label_buf);
+            // A call in code an @import brought in is in the imported file,
+            // reached through each @import when it is at the top.
+            if (self.importedOrigin(site.origin, m.module_path)) |origin_index| {
+                const origin_path = self.program.origins[origin_index].source_path;
+                if (i == 0 and site.chunk == .top) {
+                    n = self.appendImportFrames(out[0 .. out.len - 1], n, site.module_id, m.module_path, top_label, origin_index);
+                    label = "@import";
+                }
+                if (n + 1 >= out.len) break;
+                const file_source = self.diagnosticSource(null, origin_path) orelse return 0;
+                const pos = sourceLineCol(file_source, site.span_start);
+                error_format.fillTraceFrame(&out[n], origin_path, label, pos.line, pos.col, pos.line, pos.col, "");
+                n += 1;
+                continue;
+            }
             const start = self.diagnosticLineCol(site.module_id, m, site.span_start) orelse return 0;
             error_format.fillTraceFrame(&out[n], m.module_path, label, start.line, start.col, start.line, start.col, "");
             n += 1;
@@ -8970,17 +9002,11 @@ pub const VM = struct {
         var path: []const u8 = inner_mod.module_path;
         var module_id: ?u32 = @intCast(fid);
         var imported = false;
-        const origin_index: usize = @backingInt(self.current_origin);
-        if (self.current_origin != .invalid and origin_index < self.program.origins.len and
-            self.program.origins[origin_index].kind == .import_stylesheet)
-        {
-            const origin_path = self.program.origins[origin_index].source_path;
-            if (origin_path.len != 0 and !std.mem.eql(u8, origin_path, inner_mod.module_path)) {
-                path = origin_path;
-                module_id = null;
-                imported = true;
-                if (site_count == 0) n = self.appendImportFrames(out, n, @intCast(fid), inner_mod.module_path, top_label, origin_index);
-            }
+        if (self.importedOrigin(self.current_origin, inner_mod.module_path)) |origin_index| {
+            path = self.program.origins[origin_index].source_path;
+            module_id = null;
+            imported = true;
+            if (site_count == 0) n = self.appendImportFrames(out, n, @intCast(fid), inner_mod.module_path, top_label, origin_index);
         }
         const inner_ref = self.innerMostChunkRef();
         const inner_label = if (inner_ref == .top)
@@ -9015,6 +9041,23 @@ pub const VM = struct {
     fn slashDivMessage(self: *VM, module_id: u32, path: []const u8, direct_value: bool) ?[]u8 {
         const source = self.diagnosticSource(module_id, path) orelse return null;
         return deprecation_mod.slashDivMessage(self.allocator, source, self.current_source_span.start, self.current_source_span.end, direct_value);
+    }
+
+    /// The origin's index when it is an @import of a file other than the
+    /// module's own.
+    fn importedOrigin(self: *VM, origin: OriginId, module_path: []const u8) ?usize {
+        const index: usize = @backingInt(origin);
+        if (origin == .invalid or index >= self.program.origins.len) return null;
+        const o = self.program.origins[index];
+        if (o.kind != .import_stylesheet or o.source_path.len == 0) return null;
+        if (std.mem.eql(u8, o.source_path, module_path)) return null;
+        return index;
+    }
+
+    fn sourceLineCol(source: []const u8, offset: u32) struct { line: u32, col: u32 } {
+        const end = @min(@as(usize, offset), source.len);
+        const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..end], '\n')) |nl| nl + 1 else 0;
+        return .{ .line = @intCast(std.mem.count(u8, source[0..line_start], "\n") + 1), .col = @intCast(end - line_start + 1) };
     }
 
     /// The frames of the @import rules that brought in the code of
@@ -9085,6 +9128,8 @@ pub const VM = struct {
         /// The chunk the call is in, which names the trace line.
         chunk: ChunkRef,
         chunk_name: []const u8,
+        /// The `@import` the call's code came from, if any.
+        origin: OriginId = .invalid,
     };
 
     /// CLI-FIX-E Step 2c+ Phase 3: inner chunk name where error occurred (= function name / mixin name /
