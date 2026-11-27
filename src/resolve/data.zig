@@ -775,6 +775,9 @@ pub const ModuleResolver = struct {
     /// If True, records / id_by_path is owned by self, so it is freed with deinitAll.
     /// If False, it is owned by PersistentResolverState, so keep it (used in Step 3 actual).
     records_owned: bool = true,
+    /// Points at `PersistentResolveContext.config_unsafe` while resolving
+    /// with shared records; null otherwise.
+    config_unsafe: ?*bool = null,
     /// records_ptr.items.len at the start of resolve for this entry. In cross-entry persistent mode
     /// Criteria for identifying "modules that were already loaded in the prior entry". module_id < entry_records_baseline
     /// is resolved in another entry, allowing `@use ... with (...)` (in the Sass specification
@@ -910,6 +913,10 @@ pub const PersistentResolveContext = struct {
     static_eval_lists: *std.ArrayListUnmanaged([]const value_mod.Value),
     import_origins: *std.ArrayListUnmanaged(CssOrigin),
     shared_value_pools: *SharedValuePoolStorage,
+    /// Set when a module this entry loads may configure another one. Shared
+    /// records cannot replay that configuration, so the caller compiles the
+    /// entry again without them.
+    config_unsafe: *bool,
 };
 
 pub const PreambleCheckpointStore = preamble_checkpoint_mod.PreambleCheckpointStore;

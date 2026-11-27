@@ -243,7 +243,7 @@ pub fn buildAll(alloc: std.mem.Allocator, paths: []const []const u8) !void {
 ```
 
 Workers share `zsass.io_facility.io`. It starts as Zig's single-threaded
-`Io`, which does not support several threads at once, so `compileFiles`
+`Io`, which provides no concurrency, so `compileFiles`
 compiles one entry at a time until the embedder installs a thread-capable
 one, for example `zsass.io_facility.io = init.io;` in `main`, as the
 examples do.

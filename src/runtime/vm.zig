@@ -875,9 +875,30 @@ pub const VM = struct {
     }
 
     /// Comparing keys happens inside one instruction; each comparison counts
-    /// as a step, so a large map built again and again is bounded too.
+    /// as steps, so a large map built again and again is bounded too.
     fn chargeKeyComparisons(self: *VM, n: usize) VMError!void {
         if (self.budget) |b| try b.chargeVmSteps(n);
+    }
+
+    /// Values a comparison with `key` may visit: 1, plus the elements of a
+    /// list or map key, counted through nested lists. Shared sublists are
+    /// counted each time they appear, so the count stops at `cap`.
+    fn keyComparisonWeight(self: *VM, key: Value) VMError!u64 {
+        const cap: u64 = 1 << 20;
+        if (key.kind() != .list) return 1;
+        var weight: u64 = 1;
+        var stack: std.ArrayListUnmanaged(Value) = .empty;
+        defer stack.deinit(self.allocator);
+        try stack.append(self.allocator, key);
+        while (stack.pop()) |v| {
+            const items = try self.listItemsAt(v.listHandle());
+            weight += items.len;
+            if (weight >= cap) return cap;
+            for (items) |item| {
+                if (item.kind() == .list) try stack.append(self.allocator, item);
+            }
+        }
+        return weight;
     }
 
     fn checkMapDuplicateKeys(self: *VM, items: []const Value) VMError!void {
@@ -901,12 +922,16 @@ pub const VM = struct {
 
         var special_seen: std.ArrayListUnmanaged(Value) = .empty;
         defer special_seen.deinit(self.allocator);
+        // Sum of the comparison weights of the keys so far. Comparing a new
+        // key with each of them visits at most this many values.
+        var all_weight: u64 = 0;
 
         var key_i: usize = 0;
         while (key_i + 1 < items.len) : (key_i += 2) {
             const key = items[key_i];
             if (plainMapKeyBytes(self.intern_pool, key)) |raw| {
                 if (plain_seen.contains(raw)) return error.SassError;
+                all_weight += 1;
                 try self.chargeKeyComparisons(special_seen.items.len);
                 for (special_seen.items) |prev| {
                     if (valueEq(self.intern_pool, &self.number_pool, &self.list_meta_pool, &self.string_flags_pool, &self.callable_payload_pool, self.allocator, self.color_pool, &self.list_pool, prev, key)) {
@@ -915,7 +940,8 @@ pub const VM = struct {
                 }
                 try plain_seen.put(self.allocator, raw, {});
             } else {
-                try self.chargeKeyComparisons(key_i / 2);
+                try self.chargeKeyComparisons(@max(all_weight, key_i / 2));
+                all_weight += try self.keyComparisonWeight(key);
                 var prev_i: usize = 0;
                 while (prev_i < key_i) : (prev_i += 2) {
                     if (valueEq(self.intern_pool, &self.number_pool, &self.list_meta_pool, &self.string_flags_pool, &self.callable_payload_pool, self.allocator, self.color_pool, &self.list_pool, items[prev_i], key)) {

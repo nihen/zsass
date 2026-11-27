@@ -11559,6 +11559,7 @@ fn resolveWithEntryPathImpl(
     };
     if (persistent_ctx) |ps| {
         bindRecordsToPersistent(&mr, ps.records, ps.id_by_path, ps.import_origins);
+        mr.config_unsafe = ps.config_unsafe;
     } else {
         bindRecordsToSelf(&mr);
         // Import-preamble checkpointing applies only to the non-persistent

@@ -798,3 +798,81 @@ test "batch: a module configured through another one keeps each entry's value" {
         }
     }
 }
+
+test "batch: a module that configures another one is not replayed from shared records" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeFile(tmp.dir, "_lib.scss", "$c: blue !default; .lib { c: $c; }");
+    try writeFile(tmp.dir, "_configured.scss", "@use \"lib\" with ($c: red);");
+    try writeFile(tmp.dir, "_imports.scss", "$c: green; @import \"lib\";");
+    try writeFile(tmp.dir, "via.scss", "@use \"configured\";");
+    try writeFile(tmp.dir, "plain.scss", "@use \"lib\";");
+    try writeFile(tmp.dir, "nested.scss", "@use \"imports\";");
+    const root = try tmpPath(a, &tmp);
+    const names = [_][]const u8{ "via.scss", "plain.scss", "nested.scss" };
+    // The official CLI: red, blue, green.
+    const expected = [_][]const u8{ ".lib {\n  c: red;\n}\n", ".lib {\n  c: blue;\n}\n", ".lib {\n  c: green;\n}\n" };
+    const orders = [_][6]usize{ .{ 0, 0, 1, 2, 1, 0 }, .{ 1, 0, 1, 0, 2, 2 }, .{ 2, 1, 0, 0, 1, 2 } };
+    for (orders) |order| {
+        var paths: [6][]const u8 = undefined;
+        for (order, &paths) |i, *p| p.* = try std.fs.path.join(a, &.{ root, names[i] });
+        const results = try api.compileFiles(a, &paths, .{ .quiet = true, .jobs = 1 });
+        for (order, results) |i, r| try std.testing.expectEqualStrings(expected[i], r.css orelse return error.TestUnexpectedResult);
+    }
+}
+
+test "batch: parallel workers give the same results as one at a time" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeFile(tmp.dir, "_lib.scss", "$c: blue !default; .lib { c: $c; }");
+    try writeFile(tmp.dir, "_configured.scss", "@use \"lib\" with ($c: red);");
+    try writeFile(tmp.dir, "via.scss", "@use \"configured\";");
+    try writeFile(tmp.dir, "plain.scss", "@use \"lib\";");
+    try writeFile(tmp.dir, "bad.scss", "a { b: $missing; }");
+    const root = try tmpPath(a, &tmp);
+    const names = [_][]const u8{ "via.scss", "plain.scss", "bad.scss" };
+    var paths: [24][]const u8 = undefined;
+    for (&paths, 0..) |*p, i| p.* = try std.fs.path.join(a, &.{ root, names[i % names.len] });
+
+    try std.testing.expect(!zsass_io.supportsThreads());
+    const serial = try api.compileFiles(a, &paths, .{ .quiet = true, .jobs = 4 });
+
+    var threaded = std.Io.Threaded.init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const saved_io = zsass_io.io;
+    defer zsass_io.io = saved_io;
+    zsass_io.io = threaded.io();
+    try std.testing.expect(zsass_io.supportsThreads());
+    const parallel = try api.compileFiles(a, &paths, .{ .quiet = true, .jobs = 4 });
+
+    for (serial, parallel, 0..) |s, p, i| {
+        if (i % names.len == 2) {
+            try std.testing.expect(s.err != null and p.err != null);
+            continue;
+        }
+        try std.testing.expectEqualStrings(s.css orelse return error.TestUnexpectedResult, p.css orelse return error.TestUnexpectedResult);
+    }
+    try std.testing.expectEqualStrings(".lib {\n  c: red;\n}\n", parallel[0].css.?);
+    try std.testing.expectEqualStrings(".lib {\n  c: blue;\n}\n", parallel[1].css.?);
+}
+
+test "limits: comparing list keys counts their elements" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var src: std.ArrayList(u8) = .empty;
+    try src.appendSlice(a, "$m: (");
+    for (0..1000) |i| try src.print(a, "{s}({d}, 1, 1, 1, 1, 1, 1, 1, 1, 1): a", .{ if (i == 0) "" else ", ", i });
+    try src.appendSlice(a, "); a { x: length($m); }");
+    try std.testing.expectEqualStrings("a {\n  x: 1000;\n}\n", try compile(a, src.items, "", &.{}, quiet));
+    // About 1000 * 1000 / 2 comparisons of 11 values each.
+    try std.testing.expectError(error.ExecutionLimit, compile(a, src.items, "", &.{}, withLimits(.{ .max_vm_steps = 2_000_000 })));
+}

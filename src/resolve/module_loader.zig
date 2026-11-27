@@ -8,6 +8,7 @@ const data = @import("data.zig");
 const module_resolver_state = @import("module_resolver_state.zig");
 const path_resolution = @import("path_resolution.zig");
 const resource_budget = @import("../runtime/resource_budget.zig");
+const batch_reuse = @import("../runtime/batch_reuse.zig");
 
 const ModuleResolver = data.ModuleResolver;
 const ResolveError = data.ResolveError;
@@ -56,6 +57,16 @@ pub fn resolveEntryAst(self: *ModuleResolver, ast: *const ast_flat.Ast, entry_pa
     return resolve_parsed(self, ast, canonical);
 }
 
+/// A module that configures another, or uses Sass `@import`, changes what
+/// modules loaded after it see. Records shared across entries cannot replay
+/// that, so stop and let the caller compile the entry without them.
+fn refuseSharedRecordsIfConfiguring(self: *ModuleResolver, source: []const u8) ResolveError!void {
+    const flag = self.config_unsafe orelse return;
+    if (!batch_reuse.sourceMayReachUnknownConfiguration(source)) return;
+    flag.* = true;
+    return error.UsermoduleIoFailure;
+}
+
 pub fn resolveUserModule(self: *ModuleResolver, from_path: []const u8, url: []const u8, resolve_parsed: ResolveParsedModuleFn) ResolveError!u32 {
     if (url.len == 0) return error.UsermodulePathEmpty;
     const t_path = perf.timeBegin();
@@ -89,6 +100,7 @@ pub fn resolveUserModule(self: *ModuleResolver, from_path: []const u8, url: []co
         };
         defer source_for_cache.deinit(self.alloc);
         try checkSourceBytes(self, source_for_cache.source.len);
+        try refuseSharedRecordsIfConfiguring(self, source_for_cache.source);
         const entry = ac.getOrParse(resolved, source_for_cache.source, maxSyntaxDepth(self)) catch |err| switch (err) {
             error.SyntaxError => return error.UsermoduleLexFailure,
             else => return parseFailure(err, error.UsermoduleParseFailure),
@@ -104,6 +116,7 @@ pub fn resolveUserModule(self: *ModuleResolver, from_path: []const u8, url: []co
     defer loaded.deinit(self.alloc);
     const source = loaded.source;
     try checkSourceBytes(self, source.len);
+    try refuseSharedRecordsIfConfiguring(self, source);
 
     var scratch = std.heap.ArenaAllocator.init(self.alloc);
     defer scratch.deinit();

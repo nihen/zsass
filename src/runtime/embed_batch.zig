@@ -189,7 +189,13 @@ pub fn compileFiles(
     const order = try buildOrderByFileSize(alloc, paths);
     defer alloc.free(order);
 
-    if (paths.len == 1) {
+    const cpu_count = std.Thread.getCpuCount() catch 4;
+    const requested = if (opts.jobs == 0) cpu_count else opts.jobs;
+    // The default Io provides no concurrency, so entries run one at a time on
+    // this thread until the embedder installs one that does, as the CLI does.
+    const worker_count = if (zsass_io.supportsThreads()) @min(paths.len, requested) else 1;
+
+    if (worker_count <= 1) {
         var pool_arena = std.heap.ArenaAllocator.init(shared_alloc);
         defer pool_arena.deinit();
         var shared_pool = intern_pool_mod.InternPool.init(pool_arena.allocator()) catch |err| return shared_limiter.mapError(err);
@@ -205,27 +211,25 @@ pub fn compileFiles(
         defer persistent_state.deinit();
         var work_arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
         defer work_arena.deinit();
-        compileOnePath(
-            alloc,
-            work_arena.allocator(),
-            paths[0],
-            opts,
-            &file_access,
-            &shared_limiter,
-            &shared_pool,
-            &source_cache,
-            &ast_cache,
-            &persistent_state,
-            &results[0],
-        );
+        // In `order`, as the workers take entries.
+        for (order) |slot| {
+            compileOnePath(
+                alloc,
+                work_arena.allocator(),
+                paths[slot],
+                opts,
+                &file_access,
+                &shared_limiter,
+                &shared_pool,
+                &source_cache,
+                &ast_cache,
+                &persistent_state,
+                &results[slot],
+            );
+            _ = work_arena.reset(.retain_capacity);
+        }
         return results;
     }
-
-    const cpu_count = std.Thread.getCpuCount() catch 4;
-    const requested = if (opts.jobs == 0) cpu_count else opts.jobs;
-    // The default Io does not support threads; parallel workers need the
-    // embedder to install one that does, as the CLI does.
-    const worker_count = if (zsass_io.supportsThreads()) @min(paths.len, requested) else 1;
 
     var ts_alloc = ThreadSafeAlloc{ .child = alloc };
     const safe_alloc = ts_alloc.allocator();
@@ -453,7 +457,7 @@ fn compileOnePathFallible(
 
     // As in the CLI: an entry that may configure a shared module compiles
     // without the results other entries left behind, and leaves none.
-    const persistent_ctx: ?compiler_mod.PersistentCompileContext = if (batch_reuse.sourceMayReachUnknownConfiguration(source)) null else persistent_state.compileContext();
+    const persistent_ctx = persistent_state.contextFor(source);
     var borrowed = try compiler_mod.parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
         work_alloc,
         source,

@@ -18,6 +18,7 @@ const ast_cache_mod = @import("ast_cache.zig");
 const resolver_mod = @import("resolver.zig");
 const compiler_mod = @import("../ir/compiler.zig");
 const preamble_checkpoint_mod = @import("preamble_checkpoint.zig");
+const batch_reuse = @import("../runtime/batch_reuse.zig");
 
 pub const PersistentResolverState = struct {
     pub const PreambleStore = preamble_checkpoint_mod.PreambleCheckpointStore;
@@ -71,6 +72,10 @@ pub const PersistentResolverState = struct {
     /// so forks seed their own empty stores and all handles stay valid.
     preamble_checkpoints: preamble_checkpoint_mod.PreambleCheckpointStore,
 
+    /// Set once an entry reached a module that configures another; from
+    /// then on this worker compiles entries without shared records.
+    config_unsafe: bool = false,
+
     pub fn init(
         alloc: std.mem.Allocator,
         pool: *intern_pool_mod.InternPool,
@@ -97,7 +102,15 @@ pub const PersistentResolverState = struct {
             .static_eval_lists = &self.static_eval_lists,
             .import_origins = &self.import_origins,
             .shared_value_pools = &self.shared_value_pools,
+            .config_unsafe = &self.config_unsafe,
         };
+    }
+
+    /// The shared-records context for an entry with this source, or null when
+    /// the entry must compile without them.
+    pub fn contextFor(self: *PersistentResolverState, source: []const u8) ?compiler_mod.PersistentCompileContext {
+        if (self.config_unsafe or batch_reuse.sourceMayReachUnknownConfiguration(source)) return null;
+        return self.compileContext();
     }
 
     pub fn compileContext(self: *PersistentResolverState) compiler_mod.PersistentCompileContext {

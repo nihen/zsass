@@ -4,8 +4,8 @@ const std = @import("std");
 /// For use by modules that don't have direct access to process.Init.
 pub var io: std.Io = std.Io.Threaded.global_single_threaded.io();
 
-/// False while `io` is still the default instance, which does not support
-/// use from several threads at once.
+/// False while `io` is still the default instance, which provides no
+/// concurrency, so callers keep work on one thread.
 pub fn supportsThreads() bool {
     return io.userdata != @as(?*anyopaque, @ptrCast(std.Io.Threaded.global_single_threaded));
 }

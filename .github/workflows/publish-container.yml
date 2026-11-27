@@ -44,7 +44,7 @@ jobs:
       # not from the branch the workflow was started on.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
-          ref: ${{ env.TAG }}
+          ref: refs/tags/${{ env.TAG }}
           persist-credentials: false
 
       - name: Set up Docker Buildx

@@ -259,8 +259,8 @@ pub fn emitDeprecation(
     col: u32,
 ) !void {
     if (active_recorder) |recorder| recorder.record(kind, msg, path, line, col);
-    if (opts.quiet) return;
-    if (opts.silenced.contains(kind)) return;
+    // A fatal deprecation fails the compilation even when warnings are
+    // quiet or this one is silenced, as in the official CLI.
     if (opts.fatal.contains(kind)) {
         var err_file = std.Io.File.stderr();
         var err_buf: [512]u8 = undefined;
@@ -276,6 +276,8 @@ pub fn emitDeprecation(
         }; // best-effort logging
         return error.FatalDeprecation;
     }
+    if (opts.quiet) return;
+    if (opts.silenced.contains(kind)) return;
     if (!opts.verbose and opts.emitted.contains(kind)) return;
     opts.emitted.insert(kind);
 
@@ -462,4 +464,15 @@ test "deprecation lists accept ids zsass does not report" {
     try finalizeDeprecationOpts(&opts);
     try std.testing.expect(opts.silenced.contains(.import) == false);
     try std.testing.expect(opts.fatal.contains(.import));
+}
+
+test "a fatal deprecation fails even when quiet or silenced" {
+    var opts: DeprecationOpts = .{ .quiet = true };
+    opts.fatal.insert(.import);
+    try std.testing.expectError(error.FatalDeprecation, emitDeprecation(&opts, .import, "m", "a.scss", 1, 1));
+    opts.quiet = false;
+    opts.silenced.insert(.import);
+    try std.testing.expectError(error.FatalDeprecation, emitDeprecation(&opts, .import, "m", "a.scss", 1, 1));
+    var quiet_only: DeprecationOpts = .{ .quiet = true };
+    try emitDeprecation(&quiet_only, .import, "m", "a.scss", 1, 1);
 }

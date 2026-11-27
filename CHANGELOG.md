@@ -19,8 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `math.random()`, the string functions, and similar, are refused instead
   of being converted out of range, which crashed a safety build and was
   undefined behavior in a release build. 2^63 reads as the largest 64-bit
-  integer, as in the official CLI.
-- Comparing the keys of a map literal counts toward the step limit.
+  integer, as in the official CLI. `math.random()` refuses a limit above
+  2^32, as the official CLI does.
+- Comparing the keys of a map literal counts toward the step limit, by the
+  number of values each comparison visits.
 - The CLI's Docker image runs as an unprivileged user, is built from the
   release tag it is published for, and pins its base image by digest.
 
@@ -41,11 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again with another `--style` returned the cached CSS, and projects
   sharing `ZSASS_CSS_CACHE_DIR` could get each other's CSS. The cache moves
   to a new directory, so older entries are not used.
-- `compileFiles` no longer lets an entry that configures a module, or uses
-  Sass `@import`, change what another entry gets from that module.
+- `compileFiles` and a CLI batch no longer let an entry that configures a
+  module, or uses Sass `@import`, change what another entry gets from that
+  module, including when the configuring `@use ... with` or `@import` is in
+  a module the entry loads.
+- A fatal deprecation (`--fatal-deprecation`) fails the compilation with
+  `--quiet` or `--silence-deprecation` too, as in the official CLI; before,
+  `--quiet` turned it into a success.
 - `compileFiles` compiles one entry at a time until a thread-capable
-  `io_facility.io` is installed, since the default one does not support
-  several threads.
+  `io_facility.io` is installed, since the default one provides no
+  concurrency.
 - `@extend` applied by many rules to the same selector no longer holds the
   work of every rule at once: 1000 rules extending one placeholder take
   tens of megabytes instead of nearly a gigabyte.

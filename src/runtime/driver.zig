@@ -2550,10 +2550,7 @@ fn runEnd2EndWithBudget(
     // SAFETY: Assigned from shared or owned compile result before any use.
     var program_ptr: *compiler_mod.Program = undefined;
     if (shared_pool) |pool| {
-        const persistent_ctx: ?compiler_mod.PersistentCompileContext = if (persistent_state) |ps|
-            if (batch_reuse.sourceMayReachUnknownConfiguration(source)) null else ps.compileContext()
-        else
-            null;
+        const persistent_ctx: ?compiler_mod.PersistentCompileContext = if (persistent_state) |ps| ps.contextFor(source) else null;
         // Import-preamble checkpoints serve exactly the entries the persistent
         // opt-out leaves cold (kill switch: ZSASS_PREAMBLE_CHECKPOINT=0).
         const preamble_store: ?*persistent_resolver_mod.PersistentResolverState.PreambleStore = if (persistent_state) |ps|

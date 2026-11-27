@@ -5968,7 +5968,38 @@ pub fn parseResolveCompileWithPathAndPhaseTimer(
 /// At the resolve stage, hit the module with the same canonical path and skip re-resolve.
 /// `preamble_store` (per-worker import-preamble checkpoints) applies only to
 /// the non-persistent route; the resolver ignores it when persistent_ctx is set.
+/// When a module the entry loads may configure another one, the shared
+/// records cannot represent that, and the entry is compiled again without
+/// them.
 pub fn parseResolveCompileWithPoolPhaseTimerCachesAndPersistent(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    source_path: ?[]const u8,
+    load_paths: []const []const u8,
+    phase_timer: ?*observe_mod.PhaseTimer,
+    pool: *InternPool,
+    source_cache: ?*source_cache_mod.SharedSourceCache,
+    ast_cache: ?*ast_cache_mod.ParsedAstCache,
+    persistent_ctx: ?PersistentCompileContext,
+    deprecation_opts: ?*deprecation_mod.DeprecationOpts,
+    preamble_store: ?*resolver.PreambleCheckpointStore,
+    budget: ?*resource_budget.ResourceBudget,
+) !ParseResolveCompileBorrowedPoolResult {
+    const ctx = persistent_ctx orelse return parseResolveCompileOnce(allocator, source, source_path, load_paths, phase_timer, pool, source_cache, ast_cache, null, deprecation_opts, preamble_store, budget);
+    const unsafe = ctx.resolve_ctx.config_unsafe;
+    if (parseResolveCompileOnce(allocator, source, source_path, load_paths, phase_timer, pool, source_cache, ast_cache, ctx, deprecation_opts, null, budget)) |result| {
+        if (!unsafe.*) return result;
+        var r = result;
+        r.resolved.deinit();
+        r.program.deinit();
+    } else |err| {
+        if (!unsafe.*) return err;
+    }
+    error_format.clearErrorContext();
+    return parseResolveCompileOnce(allocator, source, source_path, load_paths, phase_timer, pool, source_cache, ast_cache, null, deprecation_opts, null, budget);
+}
+
+fn parseResolveCompileOnce(
     allocator: std.mem.Allocator,
     source: []const u8,
     source_path: ?[]const u8,
