@@ -2870,14 +2870,17 @@ pub fn math_log(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
 /// too), as the official CLI writes it. The number is written in full.
 fn reportUnitMismatch(ctx: *BuiltinContext, number: Value, param: []const u8, always_named: bool, expectation: []const u8) BuiltinError {
     const unit = unitSlice(ctx, number.unitId(ctx.number_pool)) orelse return error.SassError;
-    // A unit of several factors is written as a calculation; not here.
-    if (std.mem.indexOfAny(u8, unit, "*/") != null) return error.SassError;
+    // A unit of several factors is written as a calculation.
+    const compound = value_format.formatCompoundUnitNumber(ctx.allocator, number.asF64(ctx.number_pool), unit) catch return error.OutOfMemory;
+    defer if (compound) |text| ctx.allocator.free(text);
+    var num_buf: [128]u8 = undefined;
+    const shown = compound orelse (std.fmt.bufPrint(&num_buf, "{d}{s}", .{ number.asF64(ctx.number_pool), unit }) catch return error.SassError);
     var buf: [256]u8 = undefined;
     const prefix_name = !ctx.global_call or always_named;
     const msg = if (prefix_name)
-        std.fmt.bufPrint(&buf, "${s}: Expected {d}{s} {s}.", .{ param, number.asF64(ctx.number_pool), unit, expectation })
+        std.fmt.bufPrint(&buf, "${s}: Expected {s} {s}.", .{ param, shown, expectation })
     else
-        std.fmt.bufPrint(&buf, "Expected {d}{s} {s}.", .{ number.asF64(ctx.number_pool), unit, expectation });
+        std.fmt.bufPrint(&buf, "Expected {s} {s}.", .{ shown, expectation });
     error_format.setContextMessage(msg catch return error.SassError);
     return error.SassError;
 }

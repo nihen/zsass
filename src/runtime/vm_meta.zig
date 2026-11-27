@@ -1,5 +1,6 @@
 //! Runtime-backed sass:meta builtins.
 const std = @import("std");
+const value_format = @import("value_format.zig");
 const stack_guard = @import("stack_guard.zig");
 const shared = @import("../builtin/shared.zig");
 const meta_helpers = @import("../builtin/meta_helpers.zig");
@@ -952,6 +953,12 @@ fn valueToInspectCssString(ctx: *BuiltinContext, value: Value) BuiltinError![]co
     }
     if (value.kind() == .nil) {
         return ctx.allocator.dupe(u8, "null") catch error.OutOfMemory;
+    }
+    if (value.kind() == .number) {
+        const unit_id = value.unitId(ctx.number_pool);
+        if (unit_id != .none) {
+            if (value_format.formatCompoundUnitNumber(ctx.allocator, value.asF64(ctx.number_pool), ctx.intern_pool.get(unit_id)) catch return error.OutOfMemory) |text| return text;
+        }
     }
     return shared.valueToCssString(ctx, value);
 }
