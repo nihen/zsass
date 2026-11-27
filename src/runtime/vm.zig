@@ -874,6 +874,13 @@ pub const VM = struct {
         self.freeModuleVisibilityIfAny();
     }
 
+    /// A map literal checks each key that is not a plain string against
+    /// every key before it, inside one instruction; each comparison counts as
+    /// a step, and comparing lists or long text counts more in valueEq.
+    fn chargeKeyComparisons(self: *VM, n: usize) VMError!void {
+        if (self.budget) |b| try b.chargeVmSteps(n);
+    }
+
     fn checkMapDuplicateKeys(self: *VM, items: []const Value) VMError!void {
         const pair_count = items.len / 2;
         if (pair_count < 8) {
@@ -901,6 +908,7 @@ pub const VM = struct {
             const key = items[key_i];
             if (plainMapKeyBytes(self.intern_pool, key)) |raw| {
                 if (plain_seen.contains(raw)) return error.SassError;
+                try self.chargeKeyComparisons(special_seen.items.len);
                 for (special_seen.items) |prev| {
                     if (valueEq(self.intern_pool, &self.number_pool, &self.list_meta_pool, &self.string_flags_pool, &self.callable_payload_pool, self.allocator, self.color_pool, &self.list_pool, prev, key)) {
                         return error.SassError;
@@ -908,6 +916,7 @@ pub const VM = struct {
                 }
                 try plain_seen.put(self.allocator, raw, {});
             } else {
+                try self.chargeKeyComparisons(key_i / 2);
                 var prev_i: usize = 0;
                 while (prev_i < key_i) : (prev_i += 2) {
                     if (valueEq(self.intern_pool, &self.number_pool, &self.list_meta_pool, &self.string_flags_pool, &self.callable_payload_pool, self.allocator, self.color_pool, &self.list_pool, items[prev_i], key)) {
