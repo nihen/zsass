@@ -8812,6 +8812,7 @@ pub const VM = struct {
         if (ca.desc != null and cb.desc != null and std.mem.eql(u8, ca.desc.?, cb.desc.?)) {
             return .{ .a = ca.value, .b = cb.value };
         }
+        recordIncompatibleUnitsMessage(pool, number_pool, alloc, a, b);
         return error.SassError;
     }
 
@@ -9847,6 +9848,7 @@ fn subValues(
                     defer alloc.free(merged_num);
                     return internCalcString(pool, alloc, merged_num, true);
                 }
+                recordIncompatibleUnitsMessage(pool, number_pool, alloc, lhs, rhs);
                 return error.SassError;
             },
             else => return err,
@@ -10413,6 +10415,23 @@ fn modValues(
                 return try Value.number(std.math.nan(f64), unit, number_pool, alloc);
             }
             return try Value.number(builtin_shared.flooredModulo(av, bv), unit, number_pool, alloc);
+        }
+        // Compatible units: the result is in the left operand's unit.
+        if (combineAddUnits(pool, number_pool, lhs, rhs)) |resolved| {
+            const av = lhs.asF64(number_pool);
+            const bv = resolved.rhs;
+            if (std.math.isInf(bv)) {
+                if (std.math.isNan(av)) return try Value.number(std.math.nan(f64), ua, number_pool, alloc);
+                if (std.math.signbit(av) == std.math.signbit(bv)) return try Value.number(av, ua, number_pool, alloc);
+                return try Value.number(std.math.nan(f64), ua, number_pool, alloc);
+            }
+            return try Value.number(builtin_shared.flooredModulo(av, bv), ua, number_pool, alloc);
+        } else |err| switch (err) {
+            error.SassError => {
+                recordIncompatibleUnitsMessage(pool, number_pool, alloc, lhs, rhs);
+                return error.SassError;
+            },
+            else => return err,
         }
     }
     return error.SassError;

@@ -5,6 +5,7 @@ const stack_guard = @import("stack_guard.zig");
 const calculation = @import("../color/calculation.zig");
 const expr_scan = @import("expr_scan.zig");
 const css_utils = @import("css_utils.zig");
+const error_format = @import("error_format.zig");
 
 pub const calc_arg_marker = "\x01zsass-calc-arg:";
 pub const calc_interp_marker = "\x01zsass-calc-interp:";
@@ -64,9 +65,15 @@ fn classifyCalcUnit(unit: []const u8) CalcUnitCategory {
     if (std.ascii.eqlIgnoreCase(unit, "Hz") or std.ascii.eqlIgnoreCase(unit, "kHz"))
         return .frequency;
     if (std.ascii.eqlIgnoreCase(unit, "dpi") or std.ascii.eqlIgnoreCase(unit, "dpcm") or
-        std.ascii.eqlIgnoreCase(unit, "dppx") or std.mem.eql(u8, unit, "x"))
+        std.ascii.eqlIgnoreCase(unit, "dppx"))
         return .resolution;
     return .other_unit;
+}
+
+/// Whether two units (neither empty) are known to be incompatible in a
+/// calculation, as Sass checks it: by family, ignoring case.
+pub fn calcUnitsKnownIncompatible(unit_a: []const u8, unit_b: []const u8) bool {
+    return areCategoriesKnownIncompatible(classifyCalcUnit(unit_a), classifyCalcUnit(unit_b));
 }
 
 fn areCategoriesKnownIncompatible(cat_a: CalcUnitCategory, cat_b: CalcUnitCategory) bool {
@@ -1628,17 +1635,53 @@ fn calcExprHasMultiplicativeOp(expr: []const u8) bool {
 }
 
 pub fn calcHasKnownIncompatibleUnits(expr: []const u8) bool {
-    // Collect all terms and the operators between them at depth 0
-    // A term is a number+unit token, an operator is + or -
-    // We scan for ` + ` and ` - ` patterns at paren depth 0
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    return (calcKnownIncompatibleTerms(arena.allocator(), expr) catch return false) != null;
+}
+
+/// Two operands of a sum whose units are known to be incompatible, as Sass
+/// shows them (`2 * 1px` as `2px`).
+pub const IncompatibleTerms = struct { a: []const u8, b: []const u8 };
+
+/// Sets "`a` and `b` are incompatible." for the first such pair in `expr`.
+/// True when there is one.
+pub fn recordCalcIncompatibleTermsMessage(allocator: std.mem.Allocator, expr: []const u8) bool {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const terms = (calcKnownIncompatibleTerms(arena.allocator(), expr) catch return false) orelse return false;
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s} and {s} are incompatible.", .{ terms.a, terms.b }) catch return true;
+    error_format.setContextMessage(msg);
+    return true;
+}
+
+const CalcTermNumber = struct { text: []const u8, category: CalcUnitCategory };
+
+/// The term as a number, if it simplifies to one.
+fn calcTermNumber(a: std.mem.Allocator, term: []const u8) ?CalcTermNumber {
+    const parsed = calculation.parseCalc(a, term) catch return null;
+    const simplified = calculation.simplify(a, parsed) catch return null;
+    switch (simplified.*) {
+        .number => |n| {
+            const text = calculation.toCss(a, simplified) catch return null;
+            return .{ .text = text, .category = if (n.unit) |unit| classifyCalcUnit(unit) else .unitless };
+        },
+        else => return null,
+    }
+}
+
+/// Sass folds a sum left to right and checks two operands only once both
+/// are numbers: `calc(1px + 1in + 1s)` fails on `97px and 1s`, while
+/// `calc(1px + 1em + 1s)` stays as written. A parenthesized term is checked
+/// on its own.
+pub fn calcKnownIncompatibleTerms(a: std.mem.Allocator, expr: []const u8) error{OutOfMemory}!?IncompatibleTerms {
+    if (stack_guard.overflowed()) return null;
+    var terms: std.ArrayListUnmanaged([]const u8) = .empty;
+    var ops: std.ArrayListUnmanaged(u8) = .empty;
     var i: usize = 0;
     var depth: u32 = 0;
     var in_string: u8 = 0;
-    // Track all unit categories found in terms connected by +/- at depth 0
-    var categories: [16]CalcUnitCategory = undefined;
-    var cat_count: usize = 0;
-
-    // Parse terms separated by + and - at depth 0
     var term_start: usize = 0;
     while (i < expr.len) {
         const c = expr[i];
@@ -1651,60 +1694,66 @@ pub fn calcHasKnownIncompatibleUnits(expr: []const u8) bool {
             i += 1;
             continue;
         }
-        if (c == '"' or c == '\'') {
-            in_string = c;
-            i += 1;
-            continue;
-        }
-        if (c == '(') {
-            depth += 1;
-            i += 1;
-            continue;
-        }
-        if (c == ')') {
-            if (depth > 0) depth -= 1;
-            i += 1;
-            continue;
-        }
-        // Check for ` + ` or ` - ` at depth 0
-        if (depth == 0 and (c == '+' or c == '-') and i > 0 and i + 1 < expr.len and
-            expr[i - 1] == ' ' and expr[i + 1] == ' ')
-        {
-            // Found operator at depth 0, extract term before it
-            const term = std.mem.trim(u8, expr[term_start..i], " \t\n\r");
-            if (term.len > 0) {
-                const cat = extractTermUnitCategory(term);
-                if (cat_count < categories.len) {
-                    categories[cat_count] = cat;
-                    cat_count += 1;
-                }
-            }
-            term_start = i + 1;
-            i += 2;
-            continue;
+        switch (c) {
+            '"', '\'' => in_string = c,
+            '(' => depth += 1,
+            ')' => depth -|= 1,
+            '+', '-' => if (depth == 0 and i > 0 and i + 1 < expr.len and expr[i - 1] == ' ' and expr[i + 1] == ' ') {
+                try terms.append(a, std.mem.trim(u8, expr[term_start..i], " \t\n\r"));
+                try ops.append(a, c);
+                term_start = i + 1;
+            },
+            else => {},
         }
         i += 1;
     }
-    // Last term
-    const last_term = std.mem.trim(u8, expr[term_start..], " \t\n\r");
-    if (last_term.len > 0) {
-        const cat = extractTermUnitCategory(last_term);
-        if (cat_count < categories.len) {
-            categories[cat_count] = cat;
-            cat_count += 1;
-        }
-    }
+    try terms.append(a, std.mem.trim(u8, expr[term_start..], " \t\n\r"));
 
-    // Check all pairs of categories for known incompatibility
-    if (cat_count < 2) return false;
-    for (0..cat_count) |a| {
-        for (a + 1..cat_count) |b| {
-            if (areCategoriesKnownIncompatible(categories[a], categories[b])) {
-                return true;
+    // Each parenthesized group (not a function's arguments) is a sum of its own.
+    for (terms.items) |term| {
+        var j: usize = 0;
+        while (j < term.len) : (j += 1) {
+            if (term[j] != '(') continue;
+            const close = findMatchingParen(term, j) orelse break;
+            const is_call = j > 0 and (std.ascii.isAlphanumeric(term[j - 1]) or term[j - 1] == '-' or term[j - 1] == '_');
+            if (!is_call) {
+                if (try calcKnownIncompatibleTerms(a, term[j + 1 .. close])) |inner| return inner;
             }
+            j = close;
         }
     }
-    return false;
+    if (terms.items.len < 2) return null;
+
+    var left = calcTermNumber(a, terms.items[0]);
+    for (terms.items[1..], ops.items) |term, op| {
+        const right = calcTermNumber(a, term);
+        if (left != null and right != null) {
+            if (areCategoriesKnownIncompatible(left.?.category, right.?.category)) {
+                return .{ .a = left.?.text, .b = right.?.text };
+            }
+            const joined = try std.fmt.allocPrint(a, "{s} {c} {s}", .{ left.?.text, op, right.?.text });
+            left = calcTermNumber(a, joined);
+        } else {
+            left = null;
+        }
+    }
+    return null;
+}
+
+fn findMatchingParen(text: []const u8, open: usize) ?usize {
+    var depth: u32 = 0;
+    var j = open;
+    while (j < text.len) : (j += 1) {
+        switch (text[j]) {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if (depth == 0) return j;
+            },
+            else => {},
+        }
+    }
+    return null;
 }
 
 /// Extract the unit category from a calc term expression.

@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+- Errors for incompatible units name the operands as the official CLI
+  does: `1px - 1s`, `1px < 1s`, and `1px % 1s` report "1px and 1s have
+  incompatible units.", and calc(), min(), max(), clamp(), round(),
+  mod(), rem(), atan2(), and hypot() report "1px and 1s are
+  incompatible." (or "Number calc(1px * 1px) isn't compatible with CSS
+  calculations.") instead of "Compilation failed.".
+- calc() checks a sum the way the official CLI does, folding it left to
+  right and comparing only operands that are numbers by then:
+  `calc(1px + 1em + 1s)` is kept, `calc(1px + 1in + 1s)` fails on `97px
+  and 1s`, and a parenthesized group is checked on its own. Relative
+  lengths such as `em` count as lengths, and `x` is an unknown unit.
+- clamp() rejects a unitless argument mixed with ones that have units,
+  and `clamp(1PX, 1s, 2px)` fails as `1PX and 1s` instead of being kept.
+- `%` between numbers with compatible units converts the right operand:
+  `7cm % 1in` is `1.92cm` instead of an error.
+
 ## 0.5.2 (2026-11-28)
 
 ### Fixed

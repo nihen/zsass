@@ -6750,7 +6750,7 @@ fn calcHasModuloOperatorResolver(expr: []const u8) bool {
     return false;
 }
 
-fn validateRawCalcCallSyntax(_: *Ctx, raw_text: []const u8) ResolveError!void {
+fn validateRawCalcCallSyntax(ctx: *Ctx, raw_text: []const u8) ResolveError!void {
     const trimmed = std.mem.trim(u8, raw_text, " \t\r\n");
     if (trimmed.len == 0 or trimmed[trimmed.len - 1] != ')') return;
     const lparen = std.mem.findScalar(u8, trimmed, '(') orelse return;
@@ -6769,7 +6769,7 @@ fn validateRawCalcCallSyntax(_: *Ctx, raw_text: []const u8) ResolveError!void {
     // Expressions containing variables/interpolation are evaluated on the runtime side.
     // Their terms are not numbers yet: `calc(#{2} * 1px + 1s)` is valid CSS.
     if (std.mem.findScalar(u8, inner, '$') != null or std.mem.indexOf(u8, inner, "#{") != null) return;
-    if (calc_utils.calcHasKnownIncompatibleUnits(inner)) return error.SassError;
+    if (calc_utils.recordCalcIncompatibleTermsMessage(ctx.a, inner)) return error.SassError;
 }
 
 fn resolveCssSpecialCallExprFromSourceText(ctx: *Ctx, raw_text: []const u8, span: Span) ResolveError!?ExprIndex {
