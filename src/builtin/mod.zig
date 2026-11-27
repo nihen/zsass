@@ -396,11 +396,12 @@ pub fn colorConstructorArgumentsBind(pool: anytype, module: []const u8, name: []
     return overloadMismatch(pool, overloads, args_len, arg_names, &buf) == null;
 }
 
-/// For a color constructor called with positional and named arguments
-/// both, the arguments in the order of the overload that takes them: the
-/// index into the arguments of each parameter it is passed, written to
-/// `order`. Null when no overload takes them or none is named.
-pub fn colorConstructorArgumentOrder(pool: anytype, module: []const u8, name: []const u8, arg_names: []const InternId, order: []usize) ?usize {
+/// For a color constructor called with named arguments, the arguments in
+/// the order of the overload that takes them: the index into the arguments
+/// of each parameter it is passed, written to `order`. Null when no
+/// overload takes them, none is named, or `mixed_only` and none is
+/// positional.
+pub fn colorConstructorArgumentOrder(pool: anytype, module: []const u8, name: []const u8, arg_names: []const InternId, order: []usize, mixed_only: bool) ?usize {
     const row: signatures.Row = .{ .module = module, .name = name, .max = -1, .required = &.{} };
     const overloads = overloadsFor(&row) orelse return null;
     if (hasSpreadArgument(arg_names)) return null;
@@ -409,14 +410,23 @@ pub fn colorConstructorArgumentOrder(pool: anytype, module: []const u8, name: []
     for (arg_names) |name_id| {
         if (name_id == .none) positional += 1 else named += 1;
     }
-    if (positional == 0 or named == 0) return null;
+    if (named == 0 or (mixed_only and positional == 0)) return null;
+    // Positional arguments need not come first once a spread is expanded.
+    var positional_index: [8]usize = undefined;
+    if (positional > positional_index.len) return null;
+    var k: usize = 0;
+    for (arg_names, 0..) |name_id, j| {
+        if (name_id != .none) continue;
+        positional_index[k] = j;
+        k += 1;
+    }
     var buf: [160]u8 = undefined;
     for (overloads) |o| {
         if (bindError(pool, o, positional, named, arg_names, &buf) != null) continue;
         if (o.params.len > order.len) return null;
         var n: usize = 0;
         for (o.params, 0..) |param, i| {
-            const index: ?usize = if (i < positional) i else blk: {
+            const index: ?usize = if (i < positional) positional_index[i] else blk: {
                 for (arg_names, 0..) |name_id, j| {
                     if (name_id != .none and shared.identifierEq(bareName(pool, name_id), param)) break :blk j;
                 }

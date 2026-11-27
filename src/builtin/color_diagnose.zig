@@ -46,9 +46,20 @@ fn explainInner(ctx: *BuiltinContext, ctor: Constructor, args: []const Value, ar
     // hsl() takes $hue and $saturation only to say this.
     if (ctor == .hsl and args.len == 2) return fail(ctx, "Missing argument $lightness.", .{});
     if (args.len >= 3 and args.len <= 4 and (ctor == .rgb or ctor == .hsl or ctor == .hwb)) {
-        for (arg_names) |name| {
-            if (name != .none) return;
+        // Named channels are checked in the order of the parameters.
+        var ordered: [4]Value = undefined;
+        var order: [4]usize = undefined;
+        if (builtin_mod.colorConstructorArgumentOrder(ctx.intern_pool, "color", @tagName(ctor), arg_names, &order, false)) |n| {
+            if (n != args.len) return;
+            for (order[0..n], 0..) |index, i| ordered[i] = args[index];
+            return explainSeparateChannels(ctx, ctor, ordered[0..n]);
         }
+        return explainSeparateChannels(ctx, ctor, args);
+    }
+}
+
+fn explainSeparateChannels(ctx: *BuiltinContext, ctor: Constructor, args: []const Value) (Explained || shared.BuiltinError)!void {
+    {
         const names = channelNames(ctor);
         for (args[0..3], 0..) |arg, i| {
             if (isChannelValue(ctx, arg)) continue;
@@ -131,17 +142,45 @@ fn explainChannels(ctx: *BuiltinContext, ctor: Constructor, value: Value, param:
         }
     }
 
+    // `3 / foo` is kept as the unquoted string "3/foo": its parts are the
+    // last channel and the alpha.
+    if (alpha == null and channels.len > 0) {
+        const last = channels[channels.len - 1];
+        if (last.isString() and !last.stringQuoted(ctx.string_flags_pool.items) and !isSpecial(ctx, last)) {
+            const text = ctx.intern_pool.get(last.stringIntern());
+            if (std.mem.indexOfScalar(u8, text, '/')) |slash| {
+                if (std.mem.indexOfScalarPos(u8, text, slash + 1, '/') == null) {
+                    const names_split = channelNames(space_ctor);
+                    for (channels[0 .. channels.len - 1], 0..) |channel, i| {
+                        if (i < 3 and !isChannelValue(ctx, channel)) {
+                            return fail(ctx, "${s}: Expected {s} channel to be a number, was {s}.", .{ param, names_split[i], try inspect(ctx, channel) });
+                        }
+                    }
+                    const head = std.mem.trim(u8, text[0..slash], " ");
+                    const tail = std.mem.trim(u8, text[slash + 1 ..], " ");
+                    if (channels.len <= 3 and !isNumberText(head) and !std.ascii.eqlIgnoreCase(head, "none")) {
+                        return fail(ctx, "${s}: Expected {s} channel to be a number, was {s}.", .{ param, names_split[channels.len - 1], head });
+                    }
+                    if (!isNumberText(tail) and !std.ascii.eqlIgnoreCase(tail, "none")) {
+                        return fail(ctx, "${s}: {s} is not a number.", .{ param, tail });
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
     const names = channelNames(space_ctor);
     for (channels[0..@min(channels.len, 3)], 0..) |channel, i| {
         if (!isChannelValue(ctx, channel)) {
             return fail(ctx, "${s}: Expected {s} channel to be a number, was {s}.", .{ param, names[i], try inspect(ctx, channel) });
         }
     }
-    if (channels.len != 3) {
-        return fail(ctx, "${s}: The {s} color space has 3 channels but {s} has {d}.", .{ param, space_name, try listText(ctx, value), channels.len });
-    }
     if (alpha) |a| {
         if (!isChannelValue(ctx, a)) return fail(ctx, "${s}: {s} is not a number.", .{ param, try inspect(ctx, a) });
+    }
+    if (channels.len != 3) {
+        return fail(ctx, "${s}: The {s} color space has 3 channels but {s} has {d}.", .{ param, space_name, try listText(ctx, value), channels.len });
     }
     for (channels, 0..) |channel, i| try checkChannelUnit(ctx, space_ctor, i, channel);
     if (alpha) |a| try checkAlpha(ctx, a, "alpha");
@@ -198,6 +237,28 @@ fn isPredefinedSpace(name: []const u8) bool {
         if (std.ascii.eqlIgnoreCase(name, s)) return true;
     }
     return false;
+}
+
+/// Whether text is a number as Sass writes one, with any unit.
+fn isNumberText(text: []const u8) bool {
+    var i: usize = 0;
+    if (i < text.len and (text[i] == '+' or text[i] == '-')) i += 1;
+    const digits_start = i;
+    while (i < text.len and std.ascii.isDigit(text[i])) i += 1;
+    if (i < text.len and text[i] == '.') {
+        i += 1;
+        while (i < text.len and std.ascii.isDigit(text[i])) i += 1;
+    }
+    if (i == digits_start or (i == digits_start + 1 and text[digits_start] == '.')) return false;
+    if (i < text.len and (text[i] == 'e' or text[i] == 'E') and i + 1 < text.len and
+        (std.ascii.isDigit(text[i + 1]) or ((text[i + 1] == '+' or text[i + 1] == '-') and i + 2 < text.len and std.ascii.isDigit(text[i + 2]))))
+    {
+        i += 2;
+        while (i < text.len and std.ascii.isDigit(text[i])) i += 1;
+    }
+    if (i < text.len and text[i] == '%') return i + 1 == text.len;
+    while (i < text.len and (std.ascii.isAlphabetic(text[i]) or text[i] == '-' or text[i] == '_')) i += 1;
+    return i == text.len;
 }
 
 fn isAngleUnit(unit: []const u8) bool {

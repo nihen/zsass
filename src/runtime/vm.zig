@@ -8974,6 +8974,8 @@ pub const VM = struct {
         const site_count = self.callSites(sites[0..max_sites]);
         var label_buf: [64]u8 = undefined;
         for (sites[0..site_count], 0..) |site, i| {
+            // One frame stays for the innermost position.
+            if (n + 1 >= out.len) break;
             if (site.module_id >= self.program.modules.len) return 0;
             const m = &self.program.modules[site.module_id];
             var label = if (i == 0 and site.chunk == .top) top_label else diagnosticCallLabel(site.chunk, site.chunk_name, &label_buf);
@@ -9008,6 +9010,7 @@ pub const VM = struct {
             imported = true;
             if (site_count == 0) n = self.appendImportFrames(out, n, @intCast(fid), inner_mod.module_path, top_label, origin_index);
         }
+        if (n >= out.len) return n;
         const inner_ref = self.innerMostChunkRef();
         const inner_label = if (inner_ref == .top)
             (if (imported and site_count == 0) "@import" else top_label)

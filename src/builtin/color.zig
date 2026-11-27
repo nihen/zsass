@@ -548,7 +548,7 @@ const OverloadArgs = struct {
     fn bind(self: *OverloadArgs, ctx: *BuiltinContext, name: []const u8, args: []const Value, arg_names: []const InternId) Bound {
         var order: [4]usize = undefined;
         if (arg_names.len != args.len) return .{ .args = args, .names = arg_names };
-        const n = builtin_mod.colorConstructorArgumentOrder(ctx.intern_pool, "color", name, arg_names, &order) orelse
+        const n = builtin_mod.colorConstructorArgumentOrder(ctx.intern_pool, "color", name, arg_names, &order, true) orelse
             return .{ .args = args, .names = arg_names };
         for (order[0..n], 0..) |index, i| {
             self.args_buf[i] = args[index];
