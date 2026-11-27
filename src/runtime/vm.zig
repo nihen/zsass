@@ -7070,10 +7070,7 @@ pub const VM = struct {
     fn resolveParamDefaultOperand(self: *VM, operand: Chunk.ParamDefaultBinaryOperand, locals: []const Value) VMError!Value {
         return switch (operand) {
             .value => |v| v,
-            .local_slot => |slot| blk: {
-                if (slot >= locals.len) return error.InternalError;
-                break :blk locals[slot];
-            },
+            .local_slot => |slot| try self.paramDefaultLocal(locals, slot),
             .cross_slot => |target| blk: {
                 if (target.module_id >= self.mod_globals_bufs.len) return error.InternalError;
                 const row = self.mod_globals_bufs[target.module_id];
@@ -7086,10 +7083,7 @@ pub const VM = struct {
     fn evalParamDefaultAtomExpr(self: *VM, spec: Chunk.ParamDefaultAtomExpr, locals: []const Value) VMError!Value {
         return switch (spec) {
             .value => |v| v,
-            .local_slot => |slot| blk: {
-                if (slot >= locals.len) return error.InternalError;
-                break :blk locals[slot];
-            },
+            .local_slot => |slot| try self.paramDefaultLocal(locals, slot),
             .cross_slot => |target| blk: {
                 if (target.module_id >= self.mod_globals_bufs.len) return error.InternalError;
                 const row = self.mod_globals_bufs[target.module_id];
@@ -7189,10 +7183,7 @@ pub const VM = struct {
     fn evalParamDefaultExpr(self: *VM, spec: Chunk.ParamDefaultExpr, locals: []const Value) VMError!Value {
         return switch (spec) {
             .value => |v| v,
-            .local_slot => |slot| blk: {
-                if (slot >= locals.len) return error.InternalError;
-                break :blk locals[slot];
-            },
+            .local_slot => |slot| try self.paramDefaultLocal(locals, slot),
             .cross_slot => |target| blk: {
                 if (target.module_id >= self.mod_globals_bufs.len) return error.InternalError;
                 const row = self.mod_globals_bufs[target.module_id];
@@ -7269,14 +7260,23 @@ pub const VM = struct {
             try self.evalParamDefaultExpr(if_builtin.if_false, locals);
     }
 
+    /// A variable a parameter default reads: undefined when it is one only a
+    /// callable's reference made and nothing has set.
+    fn paramDefaultLocal(self: *VM, locals: []const Value, slot: anytype) VMError!Value {
+        const index: usize = slot;
+        if (self.slotIsUnknownGlobal(index)) {
+            error_format.setContextMessage("Undefined variable.");
+            return error.SassError;
+        }
+        if (index >= locals.len) return error.InternalError;
+        return locals[index];
+    }
+
     fn evalParamDefault(self: *VM, spec: Chunk.ParamDefault, locals: []const Value) VMError!?Value {
         return switch (spec) {
             .none => null,
             .value => |v| v,
-            .local_slot => |slot| blk: {
-                if (slot >= locals.len) return error.InternalError;
-                break :blk locals[slot];
-            },
+            .local_slot => |slot| try self.paramDefaultLocal(locals, slot),
             .cross_slot => |target| blk: {
                 if (target.module_id >= self.mod_globals_bufs.len) return error.InternalError;
                 const row = self.mod_globals_bufs[target.module_id];

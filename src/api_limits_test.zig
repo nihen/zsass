@@ -1021,6 +1021,14 @@ test "meta.load-css: a configured number with a unit reaches the module" {
     try std.testing.expectEqualStrings(".a {\n  b: 2px;\n}\n", results[0].css orelse return error.TestUnexpectedResult);
 }
 
+test "variables: a parameter default that reads a variable nothing set is an error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectError(error.SassError, compile(a, "@mixin m($x: $u) { b: $x; } .a { @include m; }", "", &.{}, quiet));
+    try std.testing.expectEqualStrings(".a {\n  b: 1px;\n}\n", try compile(a, "@mixin m($x: $u) { b: $x; } $u: 1px; .a { @include m; }", "", &.{}, quiet));
+}
+
 test "variables: a new variable in a top-level block is not the global a mixin reads" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

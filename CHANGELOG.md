@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- A parameter default that reads a variable nothing has set, such as
+  `@mixin m($x: $u)`, fails with "Undefined variable." instead of an
+  internal compiler error.
 - A new variable assigned in a top-level `@if` or loop stays in that
   block even when a function or mixin names a global of that name, so the
   mixin's read is undefined, as in the official CLI.
