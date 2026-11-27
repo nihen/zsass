@@ -207,7 +207,8 @@ fn selectorListStructuralHash(sl: *const SelectorList) u64 {
     return h;
 }
 
-fn complexStructuralHash(c: *const ComplexSelector) u64 {
+/// Equal complex selectors (`complexSelectorEql`) hash alike.
+pub fn complexStructuralHash(c: *const ComplexSelector) u64 {
     var h: u64 = 0x243f6a8885a308d3;
     for (c.components.items) |comp| {
         switch (comp) {
