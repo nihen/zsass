@@ -2351,6 +2351,40 @@ fn applyColorOpEntry(
     if (working_space == .hwb) normalizeHwbChannels(projected_channels);
 }
 
+/// The official CLI's error for changing a channel that is missing, or
+/// powerless, in the color as `space` has it.
+fn reportMissingChannelChange(ctx: *BuiltinContext, key: ColorOpChannel, color: color_mod.Color, space: color_mod.ColorSpace, missing: ColorMissingMask, legacy: bool) void {
+    reportMissingChannelNamed(ctx, colorOpChannelParamLabel(key), color, space, missing, legacy);
+}
+
+/// A space's channel names, as its parameters are called.
+fn spaceChannelName(space: color_mod.ColorSpace, idx: usize) []const u8 {
+    const names: [3][]const u8 = switch (space) {
+        .hsl => .{ "hue", "saturation", "lightness" },
+        .hwb => .{ "hue", "whiteness", "blackness" },
+        .lab, .oklab => .{ "lightness", "a", "b" },
+        .lch, .oklch => .{ "lightness", "chroma", "hue" },
+        .xyz_d50, .xyz_d65 => .{ "x", "y", "z" },
+        else => .{ "red", "green", "blue" },
+    };
+    return names[idx];
+}
+
+fn reportMissingChannelNamed(ctx: *BuiltinContext, name: []const u8, color: color_mod.Color, space: color_mod.ColorSpace, missing: ColorMissingMask, legacy: bool) void {
+    var shown_missing = missing;
+    if (hueChannelIndex(space)) |hue_idx| {
+        const channels3 = [3]f64{ color.channels[0], color.channels[1], color.channels[2] };
+        if (isPowerlessInSpace(space, channels3, hue_idx)) shown_missing |= @as(ColorMissingMask, 1) << @intCast(hue_idx);
+    }
+    // A color with a missing channel is written in the space's own syntax.
+    const shown = colorValueFromDeclaredColor(ctx, normalizeChannelColor(color), space, shown_missing, legacy and shown_missing == 0) catch return;
+    const text = shared.valueToInspectionString(ctx, shown) catch return;
+    defer ctx.allocator.free(text);
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "${s}: Because the CSS working group is still deciding on the best behavior, Sass doesn't currently support modifying missing channels (color: {s}).", .{ name, text }) catch return;
+    error_format.setContextMessage(msg);
+}
+
 fn postValidateColorOpChannel(
     kind: ColorOpKind,
     working_space: color_mod.ColorSpace,
@@ -2431,6 +2465,7 @@ fn applyColorOperation(
     }
     var projected_alpha = working.channels[3];
     var projected_missing = mapMissingChannels(source_missing, source_declared_space, working_space);
+    const working_missing = projected_missing;
 
     for (parsed.entries) |entry| {
         try applyColorOpEntry(
@@ -2451,7 +2486,13 @@ fn applyColorOperation(
     }
 
     for (parsed.entries) |entry| {
-        try postValidateColorOpChannel(kind, working_space, entry.key, projected_channels, projected_missing);
+        postValidateColorOpChannel(kind, working_space, entry.key, projected_channels, projected_missing) catch |err| {
+            if (kind != .change and err == error.SassError and colorOpChannelIndex(working_space, entry.key) != null) {
+                const same_space = working_space == source_declared_space;
+                reportMissingChannelChange(ctx, entry.key, working, working_space, working_missing, source_legacy and same_space);
+            }
+            return err;
+        };
     }
 
     const clamped_alpha = std.math.clamp(projected_alpha, 0.0, 1.0);
@@ -3708,7 +3749,10 @@ fn complementInSpace(ctx: *BuiltinContext, c: Value, working_space: color_mod.Co
         projected_missing |= powerlessChannelMask(working);
     }
     const hue_bit: ColorMissingMask = @as(ColorMissingMask, 1) << @intCast(hue_idx);
-    if ((projected_missing & hue_bit) != 0) return error.BuiltinType;
+    if ((projected_missing & hue_bit) != 0) {
+        reportMissingChannelChange(ctx, .hue, working, working_space, projected_missing, false);
+        return error.BuiltinType;
+    }
 
     var updated_channels = [3]f64{ working.channels[0], working.channels[1], working.channels[2] };
     for (0..3) |i| {
@@ -3897,7 +3941,13 @@ fn color_invertImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
         projected_missing & ~@as(ColorMissingMask, 0x6)
     else
         projected_missing;
-    if ((blocked_missing & invertModifiedChannelsMask(working_space)) != 0) return error.BuiltinType;
+    const blocked = blocked_missing & invertModifiedChannelsMask(working_space);
+    if (blocked != 0) {
+        const idx: usize = @ctz(blocked);
+        const name = if (idx == 3) "alpha" else spaceChannelName(working_space, idx);
+        reportMissingChannelNamed(ctx, name, normalizeChannelColor(working), working_space, projected_missing, false);
+        return error.BuiltinType;
+    }
 
     const legacy_rgb_channels = source_legacy and working_space == .srgb;
     const original_channels = if (legacy_rgb_channels)
