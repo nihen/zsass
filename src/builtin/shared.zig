@@ -176,6 +176,36 @@ pub fn reportArgumentTypeMismatch(ctx: *BuiltinContext, param_name: []const u8, 
     return error.BuiltinType;
 }
 
+/// `x` as an integer when it is one within Sass's precision (1e-11).
+pub fn fuzzyInt(x: f64) ?f64 {
+    if (!std.math.isFinite(x)) return null;
+    const r = @round(x);
+    return if (@abs(x - r) < 1e-11) r else null;
+}
+
+/// `$name: <value> is not an int.`, or `<value> is not an int.` without a
+/// name, as Sass reports for some string functions.
+pub fn reportNotInt(ctx: *BuiltinContext, param_name: ?[]const u8, value: Value) BuiltinError {
+    const val_str = valueToInspectionString(ctx, value) catch return error.BuiltinType;
+    defer ctx.allocator.free(val_str);
+    var buf: [256]u8 = undefined;
+    const msg = (if (param_name) |name|
+        std.fmt.bufPrint(&buf, "${s}: {s} is not an int.", .{ name, val_str })
+    else
+        std.fmt.bufPrint(&buf, "{s} is not an int.", .{val_str})) catch return error.BuiltinType;
+    error_format.setContextMessage(msg);
+    return error.BuiltinType;
+}
+
+/// `$name: <message>`.
+pub fn reportArgumentMessage(param_name: []const u8, comptime fmt: []const u8, args: anytype) BuiltinError {
+    var buf: [256]u8 = undefined;
+    const head = std.fmt.bufPrint(&buf, "${s}: ", .{param_name}) catch return error.BuiltinType;
+    const tail = std.fmt.bufPrint(buf[head.len..], fmt, args) catch return error.BuiltinType;
+    error_format.setContextMessage(buf[0 .. head.len + tail.len]);
+    return error.BuiltinType;
+}
+
 /// Like `reportArgumentTypeMismatch`, but with a free-form expectation phrase
 /// (`$name: <value> is <phrase>.`).
 pub fn reportArgumentMismatchPhrase(ctx: *BuiltinContext, param_name: []const u8, value: Value, phrase: []const u8) BuiltinError {
@@ -183,6 +213,26 @@ pub fn reportArgumentMismatchPhrase(ctx: *BuiltinContext, param_name: []const u8
     defer ctx.allocator.free(val_str);
     var buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "${s}: {s} is {s}.", .{ param_name, val_str, phrase }) catch return error.BuiltinType;
+    error_format.setContextMessage(msg);
+    return error.BuiltinType;
+}
+
+/// `<value> <phrase>.`, for arguments Sass does not name in the message.
+pub fn reportArgumentMismatchPhraseUnnamed(ctx: *BuiltinContext, value: Value, phrase: []const u8) BuiltinError {
+    const val_str = valueToInspectionString(ctx, value) catch return error.BuiltinType;
+    defer ctx.allocator.free(val_str);
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s} {s}.", .{ val_str, phrase }) catch return error.BuiltinType;
+    error_format.setContextMessage(msg);
+    return error.BuiltinType;
+}
+
+/// `$name: Expected <value> <phrase>.`, as in "Expected 1px to have no units".
+pub fn reportArgumentMismatchPhraseExpected(ctx: *BuiltinContext, param_name: []const u8, value: Value, phrase: []const u8) BuiltinError {
+    const val_str = valueToInspectionString(ctx, value) catch return error.BuiltinType;
+    defer ctx.allocator.free(val_str);
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "${s}: Expected {s} {s}.", .{ param_name, val_str, phrase }) catch return error.BuiltinType;
     error_format.setContextMessage(msg);
     return error.BuiltinType;
 }
