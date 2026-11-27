@@ -11,7 +11,7 @@ ARG ZSASS_VERSION
 ARG ZSASS_REPO=nihen/zsass
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl tar \
+    && apt-get install -y --no-install-recommends ca-certificates cosign curl tar \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /tmp/zsass
@@ -27,8 +27,18 @@ RUN set -eux; \
     asset="zsass-v${version}-linux-${asset_arch}.tar.gz"; \
     url="https://github.com/${ZSASS_REPO}/releases/download/v${version}/${asset}"; \
     curl --retry 3 --retry-delay 2 --retry-connrefused -fSL -o "${asset}" "${url}"; \
-    curl --retry 3 --retry-delay 2 --retry-connrefused -fSL -o "${asset}.sha256" "${url}.sha256"; \
+    for ext in sha256 sig pem; do \
+      curl --retry 3 --retry-delay 2 --retry-connrefused -fSL -o "${asset}.${ext}" "${url}.${ext}"; \
+    done; \
     sha256sum -c "${asset}.sha256"; \
+    # The signature ties the archive to the release workflow at this tag;
+    # the checksum alone comes from the same place as the archive.
+    cosign verify-blob \
+      --certificate "${asset}.pem" \
+      --signature "${asset}.sig" \
+      --certificate-identity "https://github.com/${ZSASS_REPO}/.github/workflows/release.yml@refs/tags/v${version}" \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      "${asset}"; \
     mkdir -p /out; \
     tar -xzf "${asset}" --strip-components=1 -C /out "zsass-v${version}-linux-${asset_arch}/zsass"; \
     chmod 0755 /out/zsass

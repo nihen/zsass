@@ -5,6 +5,11 @@ This runner checks one git repository at a time against Dart Sass CLI and
 zsass, writes durable pass/failure records into ../zsass-realworld-fixtures, and
 removes successful source checkouts. It intentionally does not add anything to
 zig build realworld.
+
+The repositories it downloads are untrusted. Package installs run with
+lifecycle scripts disabled, and bower (whose hooks run code) is skipped;
+--allow-lifecycle-scripts turns both back on for inputs you trust. Even
+then, run this in a disposable container or VM without credentials.
 """
 from __future__ import annotations
 
@@ -2103,6 +2108,20 @@ def package_roots_for_entries(entries: list[Path], source: Path) -> list[Path]:
     return [roots[k] for k in sorted(roots)]
 
 
+# Set from --allow-lifecycle-scripts. Off by default: an install would
+# otherwise run code from the downloaded project.
+ALLOW_LIFECYCLE_SCRIPTS = False
+
+
+def without_scripts(cmd: list[str]) -> list[str]:
+    """`cmd` with lifecycle scripts disabled, unless they are allowed."""
+    if ALLOW_LIFECYCLE_SCRIPTS or cmd[0] not in ("npm", "pnpm", "yarn"):
+        return cmd
+    if "--ignore-scripts" in cmd:
+        return cmd
+    return cmd + ["--ignore-scripts"]
+
+
 def install_command(pkg: Path) -> list[str]:
     if (pkg / "package-lock.json").exists() or (pkg / "npm-shrinkwrap.json").exists():
         return ["npm", "ci", "--no-audit", "--no-fund"]
@@ -2983,7 +3002,7 @@ def setup_node(entries: list[Path], source: Path) -> tuple[list[Path], list[str]
             for sass_lp in common_sass_load_paths(pkg):
                 load_paths.append(sass_lp)
             continue
-        cmd = install_command(pkg)
+        cmd = without_scripts(install_command(pkg))
         if shutil.which(cmd[0]) is None:
             if not sass_needs_node_modules(entries, source):
                 setup.append(f"{cmd[0]} not available but Sass has no tilde imports; skipping install")
@@ -2997,31 +3016,38 @@ def setup_node(entries: list[Path], source: Path) -> tuple[list[Path], list[str]
         if cp.returncode != 0 and cmd[:2] == ["npm", "ci"]:
             fallback = ["npm", "install", "--no-audit", "--no-fund"]
             setup.append(f"npm ci failed; fallback {' '.join(fallback)} in {pkg.relative_to(source).as_posix() or '.'}")
+            fallback = without_scripts(fallback)
             cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT)
         if cp.returncode != 0 and cmd[0] == "npm" and "ERESOLVE" in (cp.stderr + cp.stdout):
             fallback = ["npm", "install", "--legacy-peer-deps", "--no-audit", "--no-fund"]
             setup.append(f"npm peer resolution failed; fallback {' '.join(fallback)} in {pkg.relative_to(source).as_posix() or '.'}")
+            fallback = without_scripts(fallback)
             cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT)
         if (cp.returncode != 0 and cmd[0] == "npm" and
                 ("husky" in (cp.stderr + cp.stdout) or " command sh -c " in (cp.stderr + cp.stdout) or "node-sass" in (cp.stderr + cp.stdout) or "PhantomJS" in (cp.stderr + cp.stdout))):
             fallback = ["npm", "install", "--ignore-scripts", "--legacy-peer-deps", "--no-audit", "--no-fund"]
             setup.append(f"npm lifecycle script failed; fallback {' '.join(fallback)} in {pkg.relative_to(source).as_posix() or '.'}")
+            fallback = without_scripts(fallback)
             cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT)
         if cp.returncode != 0 and cmd[0] == "pnpm" and "LOCKFILE" in (cp.stderr + cp.stdout):
             fallback = ["pnpm", "install", "--no-frozen-lockfile"]
             setup.append(f"pnpm lockfile incompatible; fallback {' '.join(fallback)} in {pkg.relative_to(source).as_posix() or '.'}")
+            fallback = without_scripts(fallback)
             cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT)
         if cp.returncode != 0 and cmd[0] == "pnpm" and "ERR_PNPM_LOCKFILE_BREAKING_CHANGE" in (cp.stderr + cp.stdout):
             fallback = ["pnpm", "install", "--force"]
             setup.append(f"pnpm breaking lockfile failed; fallback {' '.join(fallback)} in {pkg.relative_to(source).as_posix() or '.'}")
+            fallback = without_scripts(fallback)
             cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT)
         if cp.returncode != 0 and cmd[0] == "yarn" and "frozen-lockfile" in (cp.stderr + cp.stdout):
             fallback = ["yarn", "install", "--no-frozen-lockfile"]
             setup.append(f"yarn frozen lockfile failed; fallback {' '.join(fallback)} in {pkg.relative_to(source).as_posix() or '.'}")
+            fallback = without_scripts(fallback)
             cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT)
         if cp.returncode != 0 and cmd[0] == "yarn" and ("node-sass" in (cp.stderr + cp.stdout) or " command failed" in (cp.stderr + cp.stdout)):
             fallback = ["yarn", "install", "--ignore-scripts", "--no-frozen-lockfile"]
             setup.append(f"yarn lifecycle script failed; fallback {' '.join(fallback)} in {pkg.relative_to(source).as_posix() or '.'}")
+            fallback = without_scripts(fallback)
             cp = run(fallback, cwd=pkg, timeout=INSTALL_TIMEOUT)
         if cp.returncode != 0:
             if not sass_needs_node_modules(entries, source):
@@ -3039,8 +3065,10 @@ def setup_node(entries: list[Path], source: Path) -> tuple[list[Path], list[str]
             setup.extend(repair_package_source_indexes(nm))
             load_paths.append(nm)
             load_paths.extend(node_module_sass_load_paths(nm))
-        if (pkg / "bower.json").exists() and shutil.which("npx") is not None:
-            bower_cmd = ["npx", "--yes", "bower", "install", "--allow-root"]
+        if (pkg / "bower.json").exists() and not ALLOW_LIFECYCLE_SCRIPTS:
+            setup.append(f"bower.json in {pkg.relative_to(source).as_posix() or '.'}: skipped; bower hooks run code (--allow-lifecycle-scripts)")
+        elif (pkg / "bower.json").exists() and shutil.which("bower") is not None:
+            bower_cmd = ["bower", "install", "--allow-root"]
             bower_cp = run(bower_cmd, cwd=pkg, timeout=INSTALL_TIMEOUT)
             setup.append(f"{' '.join(bower_cmd)} in {pkg.relative_to(source).as_posix() or '.'}")
             if bower_cp.returncode != 0:
@@ -3374,9 +3402,12 @@ def main() -> int:
     ap.add_argument("--package-version", help="Package/theme version for archive inputs.")
     ap.add_argument("--entry", action="append", default=[], help="Entry path relative to cloned repo source. Repeatable.")
     ap.add_argument("--max-entries", type=int, default=200, help="Safety cap; use --entry for huge repos.")
+    ap.add_argument("--allow-lifecycle-scripts", action="store_true", help="Run package lifecycle scripts and bower for trusted inputs. Off by default: they run code from the downloaded project.")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Per compiler invocation timeout in seconds.")
     ap.add_argument("--allow-normalized-pass", action="store_true", help="Deprecated no-op. Raw CSS mismatches always fail; normalized equality is reporting-only.")
     args = ap.parse_args()
+    global ALLOW_LIFECYCLE_SCRIPTS
+    ALLOW_LIFECYCLE_SCRIPTS = args.allow_lifecycle_scripts
     return check_repo(args)
 
 

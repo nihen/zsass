@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Security
+- The installers require the release archive's Sigstore signature: without
+  cosign they stop and say how to install it, and `--skip-signature`
+  (`-SkipSignature` on Windows) installs with the SHA256 check only. The
+  installers are published, signed, with each release, and the README
+  installs by downloading and verifying them instead of piping the default
+  branch into a shell. The container image and the Homebrew formula are
+  built only from archives whose signature verifies.
+- `scripts/compat_disposable.py` installs a downloaded project's packages
+  with lifecycle scripts disabled and skips bower, unless
+  `--allow-lifecycle-scripts` is given.
 - Compilation stops with an error instead of crashing, hanging, or running
   out of memory on small hostile inputs: deeply nested syntax, values or
   selectors nested at run time, endless loops, and `@extend`s whose

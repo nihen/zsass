@@ -69,6 +69,28 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
 
+      # The formula pins the archives' sha256. Take them only from archives
+      # that carry the release workflow's signature for this tag.
+      - name: Install cosign
+        if: steps.token.outputs.skip != 'true'
+        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9  # v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Verify the release archives
+        if: steps.token.outputs.skip != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          version="${VERSION}"
+          assets=()
+          for target in macos-aarch64 macos-x86_64 linux-aarch64 linux-x86_64; do
+            assets+=("zsass-v${version}-${target}.tar.gz")
+          done
+          zsass/scripts/verify-release-assets.sh "v${version}" "${assets[@]}"
+
       - name: Render formula
         if: steps.token.outputs.skip != 'true'
         shell: bash

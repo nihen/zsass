@@ -2,20 +2,23 @@
 # zsass binary installer for Windows.
 #
 # Detects arch, downloads the matching zip from GitHub Releases, verifies its
-# SHA256, and installs zsass.exe under <Prefix>\bin.
+# SHA256 and its Sigstore signature with cosign, and installs zsass.exe under
+# <Prefix>\bin. Without cosign it stops, unless -SkipSignature is given.
 #
-# Usage:
-#   iwr -useb https://raw.githubusercontent.com/nihen/zsass/main/scripts/install.ps1 | iex
-#   pwsh -File scripts/install.ps1 -Prefix "$env:LOCALAPPDATA\zsass" -Version v0.1.0
+# Usage (README.md shows how to verify this script before running it):
+#   pwsh -File install.ps1
+#   pwsh -File install.ps1 -Prefix "$env:LOCALAPPDATA\zsass" -Version v0.1.0
 #
 # Environment overrides:
-#   ZSASS_INSTALL_PREFIX   default install prefix (default: %LOCALAPPDATA%\zsass)
-#   ZSASS_VERSION          default version tag to install (default: latest)
+#   ZSASS_INSTALL_PREFIX          default install prefix (default: %LOCALAPPDATA%\zsass)
+#   ZSASS_VERSION                 default version tag to install (default: latest)
+#   ZSASS_INSTALL_SKIP_SIGSTORE=1 same as -SkipSignature
 
 [CmdletBinding()]
 param(
     [string]$Prefix,
     [string]$Version,
+    [switch]$SkipSignature,
     [switch]$Help
 )
 
@@ -24,11 +27,13 @@ $ErrorActionPreference = 'Stop'
 
 if ($Help) {
     @'
-Usage: install.ps1 [-Prefix <dir>] [-Version <tag>]
+Usage: install.ps1 [-Prefix <dir>] [-Version <tag>] [-SkipSignature]
 
 Parameters:
-  -Prefix    Install prefix; binary goes to <Prefix>\bin (default: %LOCALAPPDATA%\zsass)
-  -Version   Version tag to install, e.g. v0.1.0 (default: latest)
+  -Prefix         Install prefix; binary goes to <Prefix>\bin (default: %LOCALAPPDATA%\zsass)
+  -Version        Version tag to install, e.g. v0.1.0 (default: latest)
+  -SkipSignature  Install without checking the Sigstore signature
+                  (only the SHA256 from the same release is checked)
 '@ | Write-Host
     exit 0
 }
@@ -147,26 +152,31 @@ try {
         throw "SHA256 mismatch: expected $expected, got $actual"
     }
 
-    # Sigstore verification: when `cosign` is on PATH, the install is
-    # fail-closed. cosign missing -> skip silently (SHA256 + GitHub TLS
-    # still apply). Set $env:ZSASS_INSTALL_SKIP_SIGSTORE=1 to bypass even
-    # when cosign is present (intended for offline / locked-down installs).
+    # The SHA256 sidecar comes from the same place as the archive, so it only
+    # catches a damaged download. The Sigstore signature ties the archive to
+    # this repository's release workflow at this tag; it is checked before
+    # anything is extracted or run.
     $cosignCmd = Get-Command cosign -ErrorAction SilentlyContinue
-    if ($env:ZSASS_INSTALL_SKIP_SIGSTORE -eq '1') {
-        Write-Host '[zsass-install] note: ZSASS_INSTALL_SKIP_SIGSTORE=1 set; skipping signature verification'
-    } elseif ($null -ne $cosignCmd) {
-        Write-Host '[zsass-install] cosign found; verifying sigstore signature (fail-closed)'
+    if ($SkipSignature -or $env:ZSASS_INSTALL_SKIP_SIGSTORE -eq '1') {
+        Write-Warning '[zsass-install] skipping the Sigstore signature check as requested.'
+        Write-Warning '[zsass-install] the archive is trusted only as far as the download location is.'
+    } elseif ($null -eq $cosignCmd) {
+        throw @'
+[zsass-install] cosign is required to verify the release signature, and it was not found.
+[zsass-install] Install cosign (https://docs.sigstore.dev/cosign/system_config/installation/),
+[zsass-install] for example a binary from https://github.com/sigstore/cosign/releases,
+[zsass-install] then run this installer again. To install without the signature check,
+[zsass-install] pass -SkipSignature (or set $env:ZSASS_INSTALL_SKIP_SIGSTORE='1').
+'@
+    } else {
+        Write-Host '[zsass-install] verifying sigstore signature'
         $sigPath = Join-Path $tmp "$asset.sig"
         $pemPath = Join-Path $tmp "$asset.pem"
         try {
             Invoke-DownloadWithRetry -Uri "$url.sig" -OutFile $sigPath
-        } catch {
-            throw "Failed to download $($asset).sig from a release that should publish it ($($_.Exception.Message)). Aborting install. Set `$env:ZSASS_INSTALL_SKIP_SIGSTORE='1' to bypass."
-        }
-        try {
             Invoke-DownloadWithRetry -Uri "$url.pem" -OutFile $pemPath
         } catch {
-            throw "Failed to download $($asset).pem from a release that should publish it ($($_.Exception.Message)). Aborting install. Set `$env:ZSASS_INSTALL_SKIP_SIGSTORE='1' to bypass."
+            throw "Failed to download the signature of $asset from the release ($($_.Exception.Message)). Aborting install. Pass -SkipSignature to install without the signature check."
         }
         $cosignArgs = @(
             'verify-blob',
@@ -181,8 +191,6 @@ try {
             throw "cosign verify-blob FAILED (exit $LASTEXITCODE) for $asset"
         }
         Write-Host '[zsass-install] sigstore signature OK'
-    } else {
-        Write-Host '[zsass-install] note: cosign not in PATH; skipping signature verification (run cosign verify-blob manually for hardened install)'
     }
 
     Write-Host '[zsass-install] extracting'

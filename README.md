@@ -41,31 +41,49 @@ Dart Sass remains the default recommendation.
 
 ## Install
 
-The installer detects your OS / arch, downloads the matching tarball
-from GitHub Releases, verifies its SHA256, and drops the binary into
-`~/.local/bin` (Unix) or `%LOCALAPPDATA%\zsass\bin` (Windows).
+The installer detects your OS / arch, downloads the matching archive from
+GitHub Releases, verifies its SHA256 and its Sigstore signature, and drops
+the binary into `~/.local/bin` (Unix) or `%LOCALAPPDATA%\zsass\bin`
+(Windows). It needs [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+(`brew install cosign` on macOS, or a binary from the
+[cosign releases](https://github.com/sigstore/cosign/releases)).
+
+Each release publishes the installer with its own signature. Download it
+from the release, verify it, then run it:
 
 Linux / macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nihen/zsass/main/scripts/install.sh | sh
+TAG="$(curl -fsSL https://api.github.com/repos/nihen/zsass/releases/latest \
+  | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')"
+base="https://github.com/nihen/zsass/releases/download/${TAG}"
+curl -fsSLO "${base}/install.sh" -fsSLO "${base}/install.sh.sig" -fsSLO "${base}/install.sh.pem"
+cosign verify-blob --certificate install.sh.pem --signature install.sh.sig \
+  --certificate-identity "https://github.com/nihen/zsass/.github/workflows/release.yml@refs/tags/${TAG}" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  install.sh
+sh install.sh --version "${TAG}"
 ```
 
 Windows (PowerShell):
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/nihen/zsass/main/scripts/install.ps1 | iex
+$tag = (Invoke-RestMethod https://api.github.com/repos/nihen/zsass/releases/latest).tag_name
+$base = "https://github.com/nihen/zsass/releases/download/$tag"
+foreach ($f in 'install.ps1', 'install.ps1.sig', 'install.ps1.pem') {
+    Invoke-WebRequest "$base/$f" -OutFile $f
+}
+cosign verify-blob --certificate install.ps1.pem --signature install.ps1.sig `
+  --certificate-identity "https://github.com/nihen/zsass/.github/workflows/release.yml@refs/tags/$tag" `
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com `
+  install.ps1
+powershell -ExecutionPolicy Bypass -File install.ps1 -Version $tag
 ```
 
-Pin a version or change the prefix:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/nihen/zsass/main/scripts/install.sh \
-  | sh -s -- --version v0.1.0 --prefix ~/opt/zsass
-```
-
-If you would rather audit the installer first, the scripts live at
-[`scripts/install.sh`](scripts/install.sh) /
+Change the destination with `--prefix ~/opt/zsass` (`-Prefix` on Windows).
+Without cosign the installer stops; `--skip-signature` (`-SkipSignature`)
+installs anyway, checking only the SHA256 that comes from the same place as
+the archive. The scripts are [`scripts/install.sh`](scripts/install.sh) and
 [`scripts/install.ps1`](scripts/install.ps1).
 
 ### Homebrew (macOS / Linux)

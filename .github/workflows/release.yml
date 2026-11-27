@@ -191,6 +191,15 @@ jobs:
         with:
           cosign-release: 'v2.4.1'
 
+      # The installers are published from the tag and signed like the
+      # archives, so users can verify the script before running it instead
+      # of piping the default branch into a shell.
+      - name: Add the installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/install.sh scripts/install.ps1 dist/
+
       - name: Sign each artifact (sigstore keyless)
         shell: bash
         working-directory: dist
@@ -202,7 +211,7 @@ jobs:
             echo "::error::No archives found to sign"
             exit 1
           fi
-          for asset in "${archives[@]}"; do
+          for asset in "${archives[@]}" install.sh install.ps1; do
             cosign sign-blob --yes \
               --output-signature "${asset}.sig" \
               --output-certificate "${asset}.pem" \
@@ -219,6 +228,12 @@ jobs:
             dist/zsass-v*.sha256
             dist/zsass-v*.sig
             dist/zsass-v*.pem
+            dist/install.sh
+            dist/install.sh.sig
+            dist/install.sh.pem
+            dist/install.ps1
+            dist/install.ps1.sig
+            dist/install.ps1.pem
           fail_on_unmatched_files: true
           generate_release_notes: true
 
@@ -324,6 +339,28 @@ jobs:
           repository: nihen/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
+
+      # The formula pins the archives' sha256. Take them only from archives
+      # that carry the release workflow's signature for this tag.
+      - name: Install cosign
+        if: steps.token.outputs.skip != 'true'
+        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9  # v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Verify the release archives
+        if: steps.token.outputs.skip != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ env.TAG }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          assets=()
+          for target in macos-aarch64 macos-x86_64 linux-aarch64 linux-x86_64; do
+            assets+=("zsass-v${version}-${target}.tar.gz")
+          done
+          zsass/scripts/verify-release-assets.sh "v${version}" "${assets[@]}"
 
       - name: Render formula
         if: steps.token.outputs.skip != 'true'
