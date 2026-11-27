@@ -393,6 +393,10 @@ pub const Engine = struct {
     links_version: u32 = 0,
     by_target: std.StringHashMapUnmanaged(std.ArrayList(u32)) = .empty,
     steps_by_target: std.StringHashMapUnmanaged(std.ArrayList(u32)) = .empty,
+    /// Entries whose selector may hold a simple selector, in index order,
+    /// by `holderKey`: registration looks up the entries that hold its
+    /// target here instead of testing every entry.
+    holders: std.HashMapUnmanaged(HolderKey, std.ArrayList(u32), HolderKeyContext, std.hash_map.default_max_load_percentage) = .empty,
     mode: Mode = .written,
     /// `selector.replace()`: a compound that holds a target does not stay.
     replace: bool = false,
@@ -480,22 +484,31 @@ pub const Engine = struct {
         // The rules of the `@extend`s are rules too: when one of their
         // selectors holds the target, this one's own included, the target
         // is found.
-        for (self.entries.items) |*entry| {
-            if (complexHoldsSimple(&entry.complex, target)) {
+        // Only entries indexed under the target's key can hold it.
+        const holder_list: []const u32 = if (self.holders.get(holderKey(target))) |list| list.items else &.{};
+        for (holder_list) |index| {
+            if (complexHoldsSimple(&self.entries.items[index].complex, target)) {
                 self.steps.items[step_index].found = true;
                 break;
             }
         }
-        for (self.entries.items[0..direct_start]) |*entry| {
-            if (complexHoldsSimple(&entry.complex, target)) {
+        for (holder_list) |index| {
+            if (index >= direct_start) break;
+            if (complexHoldsSimple(&self.entries.items[index].complex, target)) {
                 earlier_holds = true;
                 break;
             }
         }
         if (!earlier_holds) return;
         const direct_end = self.entries.items.len;
-        var index: usize = 0;
-        while (index < direct_end) : (index += 1) {
+        // The loop adds entries, and with them to `holders`.
+        var candidates: std.ArrayList(u32) = .empty;
+        for (holder_list) |index| {
+            if (index >= direct_end) break;
+            try candidates.append(a, index);
+        }
+        for (candidates.items) |candidate| {
+            const index: usize = candidate;
             const entry = self.entries.items[index];
             if (!complexHoldsSimple(&entry.complex, target)) continue;
             // Nothing is dropped here: every result is an extender.
@@ -557,6 +570,22 @@ pub const Engine = struct {
             .written = written,
         });
         if (origin) |from| try self.entries.items[entry_index].origins.append(a, from);
+        try self.indexHolders(a, &self.entries.items[entry_index].complex, entry_index);
+    }
+
+    fn indexHolders(self: *Engine, a: Allocator, complex: *const ComplexSelector, entry_index: u32) Error!void {
+        if (stack_guard.overflowed()) return;
+        for (complex.components.items) |*component| {
+            if (component.* != .compound) continue;
+            for (component.compound.simple_selectors.items) |simple| {
+                const gop = try self.holders.getOrPut(a, holderKey(simple));
+                if (!gop.found_existing) gop.value_ptr.* = .empty;
+                const list = gop.value_ptr;
+                if (list.items.len == 0 or list.items[list.items.len - 1] != entry_index) try list.append(a, entry_index);
+                const inner = pseudoSelectorOf(simple) orelse continue;
+                for (inner.selectors.items) |*inner_complex| try self.indexHolders(a, inner_complex, entry_index);
+            }
+        }
     }
 
     /// The extenders registered, in order, each with its target.
@@ -1996,6 +2025,39 @@ fn pseudoWithSelector(a: Allocator, simple: SimpleSelector, complexes: []const C
 }
 
 /// Text that is the same for simple selectors that are the same.
+const HolderKey = struct {
+    kind: u8,
+    name: []const u8,
+};
+
+const HolderKeyContext = struct {
+    pub fn hash(_: HolderKeyContext, key: HolderKey) u64 {
+        var h = std.hash.Wyhash.init(key.kind);
+        h.update(key.name);
+        return h.final();
+    }
+    pub fn eql(_: HolderKeyContext, x: HolderKey, y: HolderKey) bool {
+        return x.kind == y.kind and std.mem.eql(u8, x.name, y.name);
+    }
+};
+
+/// A key that simple selectors equal under `simpleSelectorEql` always
+/// share: the kind and the name, which equality compares first. Selectors
+/// that differ elsewhere may share it too, so a lookup still checks.
+fn holderKey(simple: SimpleSelector) HolderKey {
+    return switch (simple) {
+        .class => |name| .{ .kind = 1, .name = name },
+        .id => |name| .{ .kind = 2, .name = name },
+        .placeholder => |name| .{ .kind = 3, .name = name },
+        .type_selector => |name| .{ .kind = 4, .name = name },
+        .universal => .{ .kind = 5, .name = "" },
+        .parent => .{ .kind = 6, .name = "" },
+        .attribute => |attr| .{ .kind = 7, .name = attr.name },
+        .pseudo_class => |pseudo| .{ .kind = 8, .name = pseudo.name },
+        .pseudo_element => |pseudo| .{ .kind = 9, .name = pseudo.name },
+    };
+}
+
 fn simpleKey(a: Allocator, simple: SimpleSelector) Error![]const u8 {
     return switch (simple) {
         .class => |name| a.print(".{s}", .{name}),

@@ -197,6 +197,11 @@ pub const ApplyState = struct {
     cached_sorted_indices: std.ArrayList(usize) = .empty,
     cached_ext_is_placeholder: std.ArrayList(bool) = .empty,
     cached_ext_index: ExtIndex = .empty,
+    /// Extensions by the multiset hash of their target, in index order, for
+    /// the lookups `addModuleEdge` makes per branch.
+    ext_by_target_hash: std.AutoHashMapUnmanaged(u64, std.ArrayListUnmanaged(u32)) = .empty,
+    /// The indices the last `markMatchesNonPropagated` marked.
+    mark_hits: std.ArrayListUnmanaged(u32) = .empty,
     /// One engine per module that has `@extend`s reaching this module's
     /// rules. This module's own comes first; the others follow, the module
     /// loaded last first.
@@ -233,6 +238,12 @@ pub const ApplyState = struct {
         self.unmatched_hints.deinit(self.allocator);
         self.deinitCachedExtIndex();
         self.cached_ext_index.deinit(self.allocator);
+        self.mark_hits.deinit(self.allocator);
+        {
+            var it = self.ext_by_target_hash.valueIterator();
+            while (it.next()) |list| list.deinit(self.allocator);
+            self.ext_by_target_hash.deinit(self.allocator);
+        }
         self.cached_sorted_indices.deinit(self.allocator);
         self.cached_ext_is_placeholder.deinit(self.allocator);
         for (self.extensions.items) |*ext| {
@@ -247,8 +258,19 @@ pub const ApplyState = struct {
 
     pub fn addExtension(self: *ApplyState, extension: Extension) !void {
         if (extension.is_propagated) self.has_propagated_extensions = true;
+        const index: u32 = @intCast(self.extensions.items.len);
+        const gop = try self.ext_by_target_hash.getOrPut(self.allocator, specificity.compoundMultisetHash(&extension.target));
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        try gop.value_ptr.append(self.allocator, index);
+        errdefer _ = gop.value_ptr.pop();
         try self.extensions.append(self.allocator, extension);
         self.invalidateExtensionCaches();
+    }
+
+    /// Indices of the extensions whose target may equal `target`.
+    fn extensionsWithTarget(self: *const ApplyState, target: *const CompoundSelector) []const u32 {
+        const list = self.ext_by_target_hash.getPtr(specificity.compoundMultisetHash(target)) orelse return &.{};
+        return list.items;
     }
 
     pub fn addExactOrderHint(self: *ApplyState, extension: Extension) !void {
@@ -638,6 +660,7 @@ pub const ApplyState = struct {
                 try complexContainsTargetInPseudos(outer_complex, &ext.target))
             {
                 matched[idx] = true;
+                try self.mark_hits.append(self.allocator, @intCast(idx));
             }
         }
     }
@@ -680,7 +703,7 @@ pub const ApplyState = struct {
         simple: SimpleSelector,
         matched: []bool,
         changed: *bool,
-    ) bool {
+    ) std.mem.Allocator.Error!bool {
         const candidates = if (self.cached_ext_index.get(ssKeyFromSimple(simple))) |list| list.items else return false;
         var marked_any = false;
         for (candidates) |idx| {
@@ -691,6 +714,7 @@ pub const ApplyState = struct {
                 continue;
             }
             matched[idx] = true;
+            try self.mark_hits.append(self.allocator, @intCast(idx));
             changed.* = true;
             marked_any = true;
         }
@@ -703,20 +727,20 @@ pub const ApplyState = struct {
         complex: *const ComplexSelector,
         matched: []bool,
         changed: *bool,
-    ) void {
+    ) std.mem.Allocator.Error!void {
         for (complex.components.items) |component| {
             if (component != .compound) continue;
             for (component.compound.simple_selectors.items) |ss| {
-                _ = self.markChainedNonPropagatedCandidatesForSimple(carrier, ss, matched, changed);
+                _ = try self.markChainedNonPropagatedCandidatesForSimple(carrier, ss, matched, changed);
                 switch (ss) {
                     .pseudo_class => |ps| {
                         if (ps.selector) |inner| {
-                            self.markChainedNonPropagatedCandidatesInSelectorList(carrier, inner, matched, changed);
+                            try self.markChainedNonPropagatedCandidatesInSelectorList(carrier, inner, matched, changed);
                         }
                     },
                     .pseudo_element => |ps| {
                         if (ps.selector) |inner| {
-                            self.markChainedNonPropagatedCandidatesInSelectorList(carrier, inner, matched, changed);
+                            try self.markChainedNonPropagatedCandidatesInSelectorList(carrier, inner, matched, changed);
                         }
                     },
                     else => {},
@@ -731,35 +755,36 @@ pub const ApplyState = struct {
         selector_list: *const SelectorList,
         matched: []bool,
         changed: *bool,
-    ) void {
+    ) std.mem.Allocator.Error!void {
         for (selector_list.selectors.items) |complex| {
-            self.markChainedNonPropagatedCandidatesInComplex(carrier, &complex, matched, changed);
+            try self.markChainedNonPropagatedCandidatesInComplex(carrier, &complex, matched, changed);
         }
     }
 
-    pub fn markMatchesNonPropagated(self: *ApplyState, selector_list: *const SelectorList, matched: []bool) !void {
+    /// Marks in `matched` the non-propagated extensions the selector list
+    /// matches, `matched` being all false on entry, and returns the indices
+    /// it marked. Only those indices are visited, so a rule costs what it
+    /// matches, not every extension of the module.
+    pub fn markMatchesNonPropagated(self: *ApplyState, selector_list: *const SelectorList, matched: []bool) ![]const u32 {
         if (matched.len != self.extensions.items.len) return error.InvalidMatchedSlice;
         try self.ensureApplyCaches();
+        self.mark_hits.clearRetainingCapacity();
         for (selector_list.selectors.items) |complex| {
             try self.markNonPropagatedCandidatesInComplex(&complex, &complex, matched);
         }
 
         // Same chained @extend support as markMatches(), but confined to local
         // (non-propagated) extensions so module boundaries remain respected.
-        const processed_carriers = try self.allocator.alloc(bool, self.extensions.items.len);
-        defer self.allocator.free(processed_carriers);
-        @memset(processed_carriers, false);
-        var changed = true;
-        while (changed) {
-            changed = false;
-            for (self.extensions.items, 0..) |carrier, carrier_idx| {
-                if (!matched[carrier_idx]) continue;
-                if (carrier.is_propagated) continue;
-                if (processed_carriers[carrier_idx]) continue;
-                processed_carriers[carrier_idx] = true;
-                self.markChainedNonPropagatedCandidatesInSelectorList(&carrier, &carrier.extender, matched, &changed);
-            }
+        // Each extension marked carries the chain once; what it marks joins
+        // the list behind it.
+        var next: usize = 0;
+        var changed = false;
+        while (next < self.mark_hits.items.len) : (next += 1) {
+            const carrier = self.extensions.items[self.mark_hits.items[next]];
+            if (carrier.is_propagated) continue;
+            try self.markChainedNonPropagatedCandidatesInSelectorList(&carrier, &carrier.extender, matched, &changed);
         }
+        return self.mark_hits.items;
     }
 };
 
@@ -850,7 +875,8 @@ pub const RuleModuleExtendState = struct {
         target: *const CompoundSelector,
         branch: *const ComplexSelector,
     ) !bool {
-        for (store.extensions.items) |*existing_ext| {
+        for (store.extensionsWithTarget(target)) |index| {
+            const existing_ext = &store.extensions.items[index];
             if (!compoundSelectorEql(&existing_ext.target, target)) continue;
             if (try selectorListHasExactBranch(&existing_ext.extender, branch)) return true;
         }
@@ -864,7 +890,8 @@ pub const RuleModuleExtendState = struct {
         current_eval_order: u32,
     ) !bool {
         var removed_any = false;
-        for (store.extensions.items) |*existing_ext| {
+        for (store.extensionsWithTarget(target)) |index| {
+            const existing_ext = &store.extensions.items[index];
             if (existing_ext.eval_order <= current_eval_order) continue;
             if (!compoundSelectorEql(&existing_ext.target, target)) continue;
             var idx: usize = existing_ext.extender.selectors.items.len;
@@ -1087,14 +1114,16 @@ pub const RuleModuleExtendState = struct {
         return self.module_stores[idx].selectorHasAnyExtensionTarget(selector_list);
     }
 
+    /// See `ApplyState.markMatchesNonPropagated`; the returned indices are
+    /// valid until the next call for the module.
     pub fn markModuleMatchesNonPropagated(
         self: *RuleModuleExtendState,
         module_idx: usize,
         selector_list: *const SelectorList,
         matched: []bool,
-    ) !void {
+    ) ![]const u32 {
         const idx = self.moduleIndex(module_idx);
-        try self.module_stores[idx].markMatchesNonPropagated(selector_list, matched);
+        return self.module_stores[idx].markMatchesNonPropagated(selector_list, matched);
     }
 
     fn moduleIndex(self: *const RuleModuleExtendState, module_idx: usize) usize {

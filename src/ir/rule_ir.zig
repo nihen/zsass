@@ -9851,6 +9851,7 @@ pub const RuleIR = struct {
             }
         }
 
+        var local_match_buf: []bool = &.{};
         for (self.nodes.items, 0..) |node, i| {
             if (node.kind != .rule_begin) continue;
             selector_visible[i] = false;
@@ -9991,20 +9992,29 @@ pub const RuleIR = struct {
             defer selector_list.deinit();
 
             var local_matches_opt: ?[]bool = null;
+            var local_hits: []const u32 = &.{};
             if (has_extensions and matched.len == extension_count) {
-                const local_matches = try temp.alloc(bool, extension_count);
-                @memset(local_matches, false);
-                try extend_state.markModuleMatchesNonPropagated(rule_module_idx, &selector_list, local_matches);
+                // One buffer serves every rule: all false between rules, as
+                // only the indices a rule marks are set and they are cleared
+                // again below.
+                if (local_match_buf.len < extension_count) {
+                    local_match_buf = try temp.alloc(bool, extension_count);
+                    @memset(local_match_buf, false);
+                }
+                const local_matches = local_match_buf[0..extension_count];
+                local_hits = try extend_state.markModuleMatchesNonPropagated(rule_module_idx, &selector_list, local_matches);
+                defer for (local_hits) |hit| {
+                    local_matches[hit] = false;
+                };
                 local_matches_opt = local_matches;
 
                 // An @extend declared inside @media only applies to rules in
                 // the same media context.
                 if (rule_media_context[i] != .unknown) {
                     const edge_indices = extend_state.moduleEdgeIndices(rule_module_idx);
-                    const check_len = @min(local_matches.len, edge_indices.len);
-                    var local_idx: usize = 0;
-                    while (local_idx < check_len) : (local_idx += 1) {
-                        if (!local_matches[local_idx]) continue;
+                    for (local_hits) |hit| {
+                        const local_idx: usize = hit;
+                        if (local_idx >= edge_indices.len) continue;
                         const edge_idx: usize = @intCast(edge_indices[local_idx]);
                         if (edge_idx >= self.extend_edges.items.len) continue;
                         const edge = self.extend_edges.items[edge_idx];
@@ -10020,21 +10030,14 @@ pub const RuleIR = struct {
                         }
                     }
                 }
-                for (local_matches, 0..) |is_match, match_idx| {
-                    if (is_match) matched[match_idx] = true;
-                }
+                for (local_hits) |hit| matched[hit] = true;
             }
 
             // A module without any registered extensions behaves exactly like a
             // module whose extensions all failed to match: the apply pass would
             // just clone the parsed list and re-serialize it. Route both shapes
             // through the same no-match fast paths below.
-            const no_local_match = if (local_matches_opt) |local_matches| blk: {
-                for (local_matches) |is_match| {
-                    if (is_match) break :blk false;
-                }
-                break :blk true;
-            } else !has_extensions;
+            const no_local_match = if (local_matches_opt != null) local_hits.len == 0 else !has_extensions;
             if (no_local_match) {
                 if (shouldPreserveRawSelectorWithoutExtend(selector_text)) {
                     try splitSelectorList(temp, selector_text, &merged);
