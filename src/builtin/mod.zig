@@ -284,9 +284,12 @@ fn resolveCaseSensitive(module: []const u8, name: []const u8) ?Id {
 pub fn reportSignatureMismatch(pool: anytype, id: Id, args_len: usize, arg_names: []const InternId) void {
     if (hasSpreadArgument(arg_names)) return;
     const row = signatureFor(id) orelse return;
-    // The probed signature is one overload's; the others bind differently,
-    // but none takes no arguments or more than the most any takes.
-    if (isOverloaded(row.name) and args_len != 0 and args_len <= row.max) return;
+    if (overloadsFor(row)) |overloads| {
+        var buf_o: [160]u8 = undefined;
+        const msg = overloadMismatch(pool, overloads, args_len, arg_names, &buf_o) orelse return;
+        error_format.setContextMessage(msg);
+        return;
+    }
     var positional: usize = 0;
     for (0..args_len) |i| {
         if (i >= arg_names.len or arg_names[i] == .none) positional += 1;
@@ -335,7 +338,10 @@ pub fn signatureFits(pool: anytype, id: Id, args_len: usize, arg_names: []const 
     // Spread arguments are not counted here; the function binds them.
     if (hasSpreadArgument(arg_names)) return true;
     const row = signatureFor(id) orelse return true;
-    if (isOverloaded(row.name)) return true;
+    if (overloadsFor(row)) |overloads| {
+        var buf_o: [160]u8 = undefined;
+        return overloadMismatch(pool, overloads, args_len, arg_names, &buf_o) == null;
+    }
     var positional: usize = 0;
     for (0..args_len) |i| {
         if (i >= arg_names.len or arg_names[i] == .none) positional += 1;
@@ -355,10 +361,160 @@ pub fn signatureFits(pool: anytype, id: Id, args_len: usize, arg_names: []const 
     return true;
 }
 
-fn isOverloaded(name: []const u8) bool {
-    const overloaded = [_][]const u8{ "rgb", "rgba", "hsl", "hsla", "hwb" };
-    for (overloaded) |o| {
-        if (std.mem.eql(u8, name, o)) return true;
+/// One way to call an overloaded function: its parameters, of which the
+/// first `required` must be passed.
+const Overload = struct { params: []const []const u8, required: usize };
+
+// The color constructors' overloads, as the Sass documentation lists them.
+// The official CLI also binds three channels apart from the four with
+// $alpha (it reports `rgb(1, 2, 3, $alpha: 1, $x: 1)` with "No parameters
+// named $alpha or $x."). The order is the one it tries them in.
+const rgb_overloads = [_]Overload{
+    .{ .params = &.{"channels"}, .required = 1 },
+    .{ .params = &.{ "red", "green", "blue" }, .required = 3 },
+    .{ .params = &.{ "red", "green", "blue", "alpha" }, .required = 3 },
+    .{ .params = &.{ "color", "alpha" }, .required = 2 },
+};
+const hsl_overloads = [_]Overload{
+    .{ .params = &.{"channels"}, .required = 1 },
+    .{ .params = &.{ "hue", "saturation", "lightness" }, .required = 3 },
+    .{ .params = &.{ "hue", "saturation", "lightness", "alpha" }, .required = 3 },
+    // Binds so that the function can say $lightness is missing.
+    .{ .params = &.{ "hue", "saturation" }, .required = 2 },
+};
+const hwb_overloads = [_]Overload{
+    .{ .params = &.{"channels"}, .required = 1 },
+    .{ .params = &.{ "hue", "whiteness", "blackness", "alpha" }, .required = 3 },
+};
+
+/// Whether one of a color constructor's overloads takes the arguments;
+/// `module` is empty for the global function.
+pub fn colorConstructorArgumentsBind(pool: anytype, module: []const u8, name: []const u8, args_len: usize, arg_names: []const InternId) bool {
+    const row: signatures.Row = .{ .module = module, .name = name, .max = -1, .required = &.{} };
+    const overloads = overloadsFor(&row) orelse return true;
+    var buf: [160]u8 = undefined;
+    return overloadMismatch(pool, overloads, args_len, arg_names, &buf) == null;
+}
+
+/// For a color constructor called with positional and named arguments
+/// both, the arguments in the order of the overload that takes them: the
+/// index into the arguments of each parameter it is passed, written to
+/// `order`. Null when no overload takes them or none is named.
+pub fn colorConstructorArgumentOrder(pool: anytype, module: []const u8, name: []const u8, arg_names: []const InternId, order: []usize) ?usize {
+    const row: signatures.Row = .{ .module = module, .name = name, .max = -1, .required = &.{} };
+    const overloads = overloadsFor(&row) orelse return null;
+    if (hasSpreadArgument(arg_names)) return null;
+    var positional: usize = 0;
+    var named: usize = 0;
+    for (arg_names) |name_id| {
+        if (name_id == .none) positional += 1 else named += 1;
+    }
+    if (positional == 0 or named == 0) return null;
+    var buf: [160]u8 = undefined;
+    for (overloads) |o| {
+        if (bindError(pool, o, positional, named, arg_names, &buf) != null) continue;
+        if (o.params.len > order.len) return null;
+        var n: usize = 0;
+        for (o.params, 0..) |param, i| {
+            const index: ?usize = if (i < positional) i else blk: {
+                for (arg_names, 0..) |name_id, j| {
+                    if (name_id != .none and shared.identifierEq(bareName(pool, name_id), param)) break :blk j;
+                }
+                break :blk null;
+            };
+            // Only a trailing optional parameter may be left out.
+            order[n] = index orelse break;
+            n += 1;
+        }
+        return if (n == positional + named) n else null;
+    }
+    return null;
+}
+
+fn overloadsFor(row: *const signatures.Row) ?[]const Overload {
+    const name = row.name;
+    if (std.mem.eql(u8, name, "rgb") or std.mem.eql(u8, name, "rgba")) return &rgb_overloads;
+    if (std.mem.eql(u8, name, "hsl") or std.mem.eql(u8, name, "hsla")) return &hsl_overloads;
+    // The global hwb() has only the one-argument form.
+    if (std.mem.eql(u8, name, "hwb") and row.module.len != 0) return &hwb_overloads;
+    return null;
+}
+
+/// Why no overload takes the arguments, as the official CLI says it: the
+/// error binding the first overload whose parameters fit the positional
+/// arguments, else the one taking the most, else the first. Null when one
+/// takes them.
+fn overloadMismatch(pool: anytype, overloads: []const Overload, args_len: usize, arg_names: []const InternId, buf: []u8) ?[]const u8 {
+    var positional: usize = 0;
+    var named: usize = 0;
+    for (0..args_len) |i| {
+        if (i >= arg_names.len or arg_names[i] == .none) positional += 1 else named += 1;
+    }
+    for (overloads) |o| {
+        if (bindError(pool, o, positional, named, arg_names, buf) == null) return null;
+    }
+    var widest = overloads[0];
+    for (overloads) |o| {
+        if (o.params.len > widest.params.len) widest = o;
+    }
+    const chosen = blk: {
+        for (overloads) |o| {
+            if (o.required <= positional and positional <= o.params.len) break :blk o;
+        }
+        break :blk if (positional > widest.params.len) widest else overloads[0];
+    };
+    return bindError(pool, chosen, positional, named, arg_names, buf);
+}
+
+fn bindError(pool: anytype, o: Overload, positional: usize, named: usize, arg_names: []const InternId, buf: []u8) ?[]const u8 {
+    for (o.params[0..@min(positional, o.params.len)]) |param| {
+        if (isNamed(pool, arg_names, param)) return std.fmt.bufPrint(buf, "Argument ${s} was passed both by position and by name.", .{param}) catch null;
+    }
+    if (positional > o.params.len) {
+        const kind = if (named > 0) " positional" else "";
+        const noun = if (o.params.len == 1) "argument" else "arguments";
+        const verb = if (positional == 1) "was" else "were";
+        return std.fmt.bufPrint(buf, "Only {d}{s} {s} allowed, but {d} {s} passed.", .{ o.params.len, kind, noun, positional, verb }) catch null;
+    }
+    for (o.params[0..o.required], 0..) |param, i| {
+        if (i < positional) continue;
+        if (!isNamed(pool, arg_names, param)) return std.fmt.bufPrint(buf, "Missing argument ${s}.", .{param}) catch null;
+    }
+    var unknown: [8][]const u8 = undefined;
+    var n_unknown: usize = 0;
+    for (arg_names) |name_id| {
+        if (name_id == .none) continue;
+        const bare = bareName(pool, name_id);
+        var known = false;
+        for (o.params) |param| {
+            if (shared.identifierEq(bare, param)) known = true;
+        }
+        if (!known and n_unknown < unknown.len) {
+            unknown[n_unknown] = bare;
+            n_unknown += 1;
+        }
+    }
+    if (n_unknown == 0) return null;
+    if (n_unknown == 1) return std.fmt.bufPrint(buf, "No parameter named ${s}.", .{unknown[0]}) catch null;
+    var w: std.Io.Writer = .fixed(buf);
+    w.writeAll("No parameters named ") catch return null;
+    for (unknown[0..n_unknown], 0..) |u, i| {
+        if (i > 0) w.writeAll(if (i == n_unknown - 1) " or " else ", ") catch return null;
+        w.print("${s}", .{u}) catch return null;
+    }
+    w.writeAll(".") catch return null;
+    return w.buffered();
+}
+
+fn bareName(pool: anytype, name_id: InternId) []const u8 {
+    const raw = pool.get(name_id);
+    return if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
+}
+
+fn isNamed(pool: anytype, arg_names: []const InternId, param: []const u8) bool {
+    for (arg_names) |name_id| {
+        if (name_id == .none) continue;
+        if (shared.identifierEq(bareName(pool, name_id), param)) return true;
     }
     return false;
 }

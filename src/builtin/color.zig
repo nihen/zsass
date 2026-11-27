@@ -11,6 +11,7 @@ const shared = @import("shared.zig");
 const error_format = @import("../runtime/error_format.zig");
 const value_format = @import("../runtime/value_format.zig");
 const color_diagnose = @import("color_diagnose.zig");
+const builtin_mod = @import("mod.zig");
 
 const Value = shared.Value;
 const ColorMissingMask = shared.ColorMissingMask;
@@ -536,6 +537,27 @@ fn coerceModernConstructorArityToType(space: color_mod.ColorSpace, args: []const
     return args[0].kind() == .list;
 }
 
+/// A color constructor's arguments, positional and named both, put in the
+/// order of the overload that takes them, all by position.
+const OverloadArgs = struct {
+    args_buf: [4]Value,
+    names_buf: [4]InternId,
+
+    const Bound = struct { args: []const Value, names: []const InternId };
+
+    fn bind(self: *OverloadArgs, ctx: *BuiltinContext, name: []const u8, args: []const Value, arg_names: []const InternId) Bound {
+        var order: [4]usize = undefined;
+        if (arg_names.len != args.len) return .{ .args = args, .names = arg_names };
+        const n = builtin_mod.colorConstructorArgumentOrder(ctx.intern_pool, "color", name, arg_names, &order) orelse
+            return .{ .args = args, .names = arg_names };
+        for (order[0..n], 0..) |index, i| {
+            self.args_buf[i] = args[index];
+            self.names_buf[i] = .none;
+        }
+        return .{ .args = self.args_buf[0..n], .names = self.names_buf[0..n] };
+    }
+};
+
 /// A constructor's failure, with the official CLI's reason when it gave
 /// none.
 fn explainedColorError(ctx: *BuiltinContext, ctor: color_diagnose.Constructor, args: []const Value, arg_names: []const InternId, err: BuiltinError) BuiltinError {
@@ -736,11 +758,15 @@ fn color_rgbImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
 }
 
 pub fn color_rgb(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return color_rgbImpl(ctx, args, arg_names, "rgb") catch |err| explainedColorError(ctx, .rgb, args, arg_names, err);
+    var buf: OverloadArgs = undefined;
+    const a = buf.bind(ctx, "rgb", args, arg_names);
+    return color_rgbImpl(ctx, a.args, a.names, "rgb") catch |err| explainedColorError(ctx, .rgb, a.args, a.names, err);
 }
 
 pub fn color_rgba(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return color_rgbImpl(ctx, args, arg_names, "rgba") catch |err| explainedColorError(ctx, .rgb, args, arg_names, err);
+    var buf: OverloadArgs = undefined;
+    const a = buf.bind(ctx, "rgba", args, arg_names);
+    return color_rgbImpl(ctx, a.args, a.names, "rgba") catch |err| explainedColorError(ctx, .rgb, a.args, a.names, err);
 }
 
 fn serializeFallbackFunction(ctx: *BuiltinContext, name: []const u8, args: []const Value) BuiltinError!Value {
@@ -1145,11 +1171,15 @@ fn color_hslImpl(
 }
 
 pub fn color_hsl(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return color_hslImpl(ctx, args, arg_names, "hsl") catch |err| explainedColorError(ctx, .hsl, args, arg_names, err);
+    var buf: OverloadArgs = undefined;
+    const a = buf.bind(ctx, "hsl", args, arg_names);
+    return color_hslImpl(ctx, a.args, a.names, "hsl") catch |err| explainedColorError(ctx, .hsl, a.args, a.names, err);
 }
 
 pub fn color_hsla(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return color_hslImpl(ctx, args, arg_names, "hsla") catch |err| explainedColorError(ctx, .hsl, args, arg_names, err);
+    var buf: OverloadArgs = undefined;
+    const a = buf.bind(ctx, "hsla", args, arg_names);
+    return color_hslImpl(ctx, a.args, a.names, "hsla") catch |err| explainedColorError(ctx, .hsl, a.args, a.names, err);
 }
 
 fn parseLegacyHueOrMissing(ctx: *BuiltinContext, arg: Value) ?ParsedColorComponent {
@@ -1314,7 +1344,9 @@ fn color_hwbImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
 }
 
 pub fn color_hwb(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return color_hwbImpl(ctx, args, arg_names) catch |err| explainedColorError(ctx, .hwb, args, arg_names, err);
+    var buf: OverloadArgs = undefined;
+    const a = buf.bind(ctx, "hwb", args, arg_names);
+    return color_hwbImpl(ctx, a.args, a.names) catch |err| explainedColorError(ctx, .hwb, a.args, a.names, err);
 }
 
 /// The global hwb() has only the one-argument form; its arguments are

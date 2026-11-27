@@ -8,6 +8,7 @@ const shared = @import("shared.zig");
 const color_mod = @import("../color/color.zig");
 const error_format = @import("../runtime/error_format.zig");
 const value_format = @import("../runtime/value_format.zig");
+const builtin_mod = @import("mod.zig");
 
 const Value = shared.Value;
 const InternId = shared.InternId;
@@ -28,16 +29,22 @@ fn explainInner(ctx: *BuiltinContext, ctor: Constructor, args: []const Value, ar
         // Spread arguments are bound by the constructor itself.
         if (@backingInt(name) == std.math.maxInt(u32)) return;
     }
+    // Arguments no overload takes are the caller's to report.
+    if (ctor == .rgb or ctor == .hsl or ctor == .hwb) {
+        if (!builtin_mod.colorConstructorArgumentsBind(ctx.intern_pool, "color", @tagName(ctor), args.len, arg_names)) return;
+    }
     const one_arg_name: []const u8 = if (ctor == .color) "description" else "channels";
     if (args.len == 1) {
         if (arg_names.len > 0 and arg_names[0] != .none and !shared.argNameMatches(ctx, arg_names[0], one_arg_name)) return;
         return explainChannels(ctx, ctor, args[0], one_arg_name);
     }
-    if (ctor == .rgb and args.len == 2) return explainColorAndAlpha(ctx, args);
-    // Two arguments fit neither form: hsl() is missing its lightness, and
-    // hwb() takes its channels as one argument.
+    if (ctor == .rgb and args.len == 2) {
+        // $color and $alpha; mixed ones are already put in that order.
+        const swapped = arg_names.len == 2 and arg_names[0] != .none and shared.argNameMatches(ctx, arg_names[0], "alpha");
+        return explainColorAndAlpha(ctx, if (swapped) &.{ args[1], args[0] } else args);
+    }
+    // hsl() takes $hue and $saturation only to say this.
     if (ctor == .hsl and args.len == 2) return fail(ctx, "Missing argument $lightness.", .{});
-    if (ctor == .hwb and args.len == 2) return fail(ctx, "Only 1 argument allowed, but 2 were passed.", .{});
     if (args.len >= 3 and args.len <= 4 and (ctor == .rgb or ctor == .hsl or ctor == .hwb)) {
         for (arg_names) |name| {
             if (name != .none) return;
