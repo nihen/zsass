@@ -2168,6 +2168,17 @@ pub const VM = struct {
         return fr.locals[slot];
     }
 
+    /// `readFrameLocalWithFallback` for a read that uses the value, which
+    /// fails on a variable nothing set (see `slotIsUnknownGlobal`).
+    fn readFrameLocalChecked(self: *const VM, fr: *const Frame, slot: usize) VMError!Value {
+        const v = try self.readFrameLocalWithFallback(fr, slot);
+        if (slot < fr.declared.len and !fr.declared[slot] and self.slotIsUnknownGlobal(slot)) {
+            error_format.setContextMessage("Undefined variable.");
+            return error.SassError;
+        }
+        return v;
+    }
+
     fn readFrameLocalWithFallback(self: *const VM, fr: *const Frame, slot: usize) VMError!Value {
         if (slot >= fr.locals.len) return error.BadJump;
         if (slot < fr.declared.len and !fr.declared[slot] and self.current_module < self.program.modules.len) {
@@ -3194,7 +3205,7 @@ pub const VM = struct {
     inline fn opBranchIfFalseLocal(self: *VM, inst: Instruction) VMError!void {
         const slot: usize = @intCast(inst.arg_a);
         const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
-        const v = try self.maybeResolveParentSelectorValue(try self.readFrameLocalWithFallback(&fr, slot));
+        const v = try self.maybeResolveParentSelectorValue(try self.readFrameLocalChecked(&fr, slot));
         if (!v.isTruthy()) {
             const off: i32 = @bitCast(inst.arg_b);
             self.pc = @intCast(@as(i64, @intCast(self.pc)) + @as(i64, off));
@@ -3328,8 +3339,8 @@ pub const VM = struct {
         const meta = chunk.fused_cmp_meta[meta_idx];
         if (self.frame_stack.items.len == 0) return error.InternalError;
         const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
-        const raw_a = try self.readFrameLocalWithFallback(&fr, @intCast(meta.lhs_slot));
-        const raw_b = try self.readFrameLocalWithFallback(&fr, @intCast(meta.rhs_slot));
+        const raw_a = try self.readFrameLocalChecked(&fr, @intCast(meta.lhs_slot));
+        const raw_b = try self.readFrameLocalChecked(&fr, @intCast(meta.rhs_slot));
         const ok: bool = blk: {
             if (raw_a.isNumber() and raw_b.isNumber() and
                 raw_a.unitId(&self.number_pool) == .none and
@@ -3369,8 +3380,8 @@ pub const VM = struct {
         const meta = chunk.fused_binop_meta[meta_idx];
         if (self.frame_stack.items.len == 0) return error.InternalError;
         const fr = &self.frame_stack.items[self.frame_stack.items.len - 1];
-        const raw_a = try self.readFrameLocalWithFallback(fr, @intCast(meta.lhs_slot));
-        const raw_b = try self.readFrameLocalWithFallback(fr, @intCast(meta.rhs_slot));
+        const raw_a = try self.readFrameLocalChecked(fr, @intCast(meta.lhs_slot));
+        const raw_b = try self.readFrameLocalChecked(fr, @intCast(meta.rhs_slot));
         const result: Value = blk: {
             // Unitless number pairs compute numerically regardless of
             // css-math preserve context (combineAddUnits succeeds), so
@@ -3411,7 +3422,7 @@ pub const VM = struct {
         if (self.frame_stack.items.len == 0) return error.InternalError;
         const fr = &self.frame_stack.items[self.frame_stack.items.len - 1];
         if (slot >= fr.locals.len or slot >= fr.declared.len) return error.BadJump;
-        const raw_a = try self.readFrameLocalWithFallback(fr, slot);
+        const raw_a = try self.readFrameLocalChecked(fr, slot);
         const c = chunk.const_pool[idx];
         const result: Value = blk: {
             if (raw_a.isNumber() and c.isNumber() and
@@ -3434,7 +3445,7 @@ pub const VM = struct {
         const idx: usize = @intCast(inst.arg_b);
         if (idx >= chunk.const_pool.len) return error.BadJump;
         const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
-        const l = try self.maybeResolveParentSelectorValue(try self.readFrameLocalWithFallback(&fr, slot));
+        const l = try self.maybeResolveParentSelectorValue(try self.readFrameLocalChecked(&fr, slot));
         const c = chunk.const_pool[idx];
         try self.push(try addValues(
             self.intern_pool,
@@ -3462,7 +3473,7 @@ pub const VM = struct {
                 .{ slot, self.pc - 1, declared, @tagName(raw.kind()), self.frame_stack.items.len },
             );
         }
-        const l = try self.maybeResolveParentSelectorValue(try self.readFrameLocalWithFallback(&fr, slot));
+        const l = try self.maybeResolveParentSelectorValue(try self.readFrameLocalChecked(&fr, slot));
         const c = chunk.const_pool[idx];
         const preserve_css_math = self.pendingCssMathCallPreserveContext(chunk);
         const out = mulValues(
@@ -3489,7 +3500,7 @@ pub const VM = struct {
         const idx: usize = @intCast(inst.arg_b);
         if (idx >= chunk.const_pool.len) return error.BadJump;
         const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
-        const raw_local = try self.maybeResolveParentSelectorValue(try self.readFrameLocalWithFallback(&fr, slot));
+        const raw_local = try self.maybeResolveParentSelectorValue(try self.readFrameLocalChecked(&fr, slot));
         const raw_const = chunk.const_pool[idx];
         const local_val = try self.coerceSlashFreeValue(raw_local);
         const const_val = try self.coerceSlashFreeValue(raw_const);
@@ -3505,7 +3516,7 @@ pub const VM = struct {
         if (idx >= chunk.const_pool.len) return error.BadJump;
         const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
         const c = chunk.const_pool[idx];
-        const l = try self.maybeResolveParentSelectorValue(try self.readFrameLocalWithFallback(&fr, slot));
+        const l = try self.maybeResolveParentSelectorValue(try self.readFrameLocalChecked(&fr, slot));
         try self.push(try addValues(
             self.intern_pool,
             &self.number_pool,
@@ -4208,7 +4219,7 @@ pub const VM = struct {
                 const slot: usize = @intCast(inst.arg_a);
                 const prop: u32 = inst.arg_b;
                 const fr = self.frame_stack.items[self.frame_stack.items.len - 1];
-                const val_raw = try self.maybeResolveParentSelectorValue(try self.readFrameLocalWithFallback(&fr, slot));
+                const val_raw = try self.maybeResolveParentSelectorValue(try self.readFrameLocalChecked(&fr, slot));
                 // A variable-referenced slash list must coerce to its numeric
                 // division at the declaration boundary (sass-spec
                 // values/numbers/divide/slash_free/variable.hrx::local:

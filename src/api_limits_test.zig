@@ -974,6 +974,9 @@ test "variables: a function or mixin reading a variable nothing set is an error"
     const a = arena.allocator();
     if (compile(a, "@mixin m { b: $u; } .a { @include m; }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
     if (compile(a, "@function f() { @return $u; } .a { b: f(); }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    // Also where the read is fused with what uses it.
+    if (compile(a, "@function f() { @return $u + 1; } .a { b: f(); }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    if (compile(a, "@mixin m { @if $u { b: c; } } .a { @include m; }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
     // Set before the call, plainly or with !default: fine.
     try std.testing.expectEqualStrings(".a {\n  b: 1px;\n}\n", try compile(a, "@mixin m { b: $u; } $u: 1px; .a { @include m; }", "", &.{}, quiet));
     try std.testing.expectEqualStrings(".a {\n  b: 2px;\n}\n", try compile(a, "@mixin m { b: $u; } $u: 2px !default; .a { @include m; }", "", &.{}, quiet));

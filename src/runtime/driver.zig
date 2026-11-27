@@ -246,7 +246,10 @@ fn printUserFacingError(err: anyerror, input_path: []const u8) void {
         cliErrPrint("zsass: driver error: {}\n", .{err});
     }
     // The VM error path writes its report where it has the call stack.
-    if (error_format.error_state.reported) return;
+    if (error_format.error_state.reported) {
+        error_format.error_state.reported = false;
+        return;
+    }
     const msg = error_format.errorToUserMessageWithContext(err);
     if (error_format.ansiDiagnosticsEnabled()) {
         cliErrPrint("\x1b[31mError:\x1b[0m {s}\n", .{msg});
@@ -366,11 +369,16 @@ fn buildVmErrorTrace(
     call_sites: []const vm_mod.VM.CallSite,
 ) bool {
     const snapshot = &error_format.error_state.error_stack_snapshot;
-    if (call_sites.len + 1 > snapshot.len) return false;
+    if (snapshot.len < 3) return false;
     const root_idx = program_ptr.root_index;
     var n: usize = 0;
-    // Outermost first, as the snapshot keeps them.
+    // Outermost first, as the snapshot keeps them. A chain too long for it
+    // keeps the outermost call and the innermost ones.
+    const room = snapshot.len - 1;
+    const skip_from: usize = if (call_sites.len > room) 1 else call_sites.len;
+    const skip_to: usize = if (call_sites.len > room) call_sites.len - (room - 1) else call_sites.len;
     for (call_sites, 0..) |site, i| {
+        if (i >= skip_from and i < skip_to) continue;
         if (site.module_id >= program_ptr.modules.len) return false;
         const m = &program_ptr.modules[site.module_id];
         if (m.line_starts.len == 0) return false;
@@ -2583,6 +2591,9 @@ fn runEnd2EndWithBudget(
     cross_entry_states: ?*cross_entry_state_mod.CrossEntryModuleStates,
     budget: *resource_budget.ResourceBudget,
 ) !void {
+    // A report a previous entry wrote must not hide this entry's errors,
+    // which can come before the error context is cleared (the CSS cache).
+    error_format.error_state.reported = false;
     if (opts.update_mode) {
         if (opts.stdin_source == null and
             !std.mem.eql(u8, input_path, "-") and
