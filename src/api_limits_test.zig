@@ -946,3 +946,12 @@ test "selector functions: comments in a selector argument read as spaces" {
     , "", &.{}, quiet));
     if (compile(a, "@use \"sass:selector\"; a { b: selector.parse(\".a /* open\"); }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
 }
+
+test "@supports: parentheses around one group drop inside operations and in @import" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("@supports (x) and (y) {\n  a {\n    b: c;\n  }\n}\n", try compile(a, "@supports ((x)) and ((y)) { a { b: c; } }", "", &.{}, quiet));
+    try std.testing.expectEqualStrings("@supports ((a: b) or (c: d)) and (e: f) {\n  a {\n    b: c;\n  }\n}\n", try compile(a, "@supports (((a: b) or (c: d))) and (e: f) { a { b: c; } }", "", &.{}, quiet));
+    try std.testing.expectEqualStrings("@import url(a.css) supports(display: grid);\n", try compile(a, "@import url(a.css) supports(((display: grid)));", "", &.{}, quiet));
+}

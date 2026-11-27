@@ -95,16 +95,16 @@ fn normalizeSupportsPreludeInner(
                                 const recursed = try normalizeSupportsPreludeInner(allocator, trimmed_inner, normalize_parens);
                                 defer allocator.free(recursed);
                                 if (normalize_parens) {
+                                    // Parentheses around one parenthesized group add
+                                    // nothing: `((x)) and ((y))` is `(x) and (y)`.
                                     const rec_trimmed = std.mem.trim(u8, recursed, " \t\n\r");
-                                    if (rec_trimmed.len >= 2 and
-                                        rec_trimmed[0] == '(' and
-                                        rec_trimmed[rec_trimmed.len - 1] == ')')
-                                    {
-                                        const rec_inner = rec_trimmed[1 .. rec_trimmed.len - 1];
-                                        if (findDeclarationColon(rec_inner) != null) {
-                                            result.appendSlice(allocator, rec_trimmed) catch return error.OutOfMemory;
-                                            i = close + 1;
-                                            continue;
+                                    if (rec_trimmed.len >= 2 and rec_trimmed[0] == '(') {
+                                        if (findMatchingParen(rec_trimmed, 0)) |rec_close| {
+                                            if (rec_close == rec_trimmed.len - 1) {
+                                                result.appendSlice(allocator, rec_trimmed) catch return error.OutOfMemory;
+                                                i = close + 1;
+                                                continue;
+                                            }
                                         }
                                     }
                                 }
