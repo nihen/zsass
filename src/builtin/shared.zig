@@ -36,6 +36,13 @@ pub const BuiltinError = error{
     FatalDeprecation,
 } || resource_budget.LimitError;
 
+/// Storage behind a list made by `list.append`: `buf[0..used]` are its
+/// items, and `buf[used..]` is room no list has used yet.
+pub const ListTail = struct {
+    buf: []Value,
+    used: usize,
+};
+
 pub const BuiltinContext = struct {
     allocator: std.mem.Allocator,
     intern_pool: *InternPool,
@@ -56,6 +63,9 @@ pub const BuiltinContext = struct {
     /// Set with `ListSidecarSetter.from(vm)` during construction. test via `dummy_vm` is null
     /// (vm is a fake pointer such as `@ptrFromInt(1)`, so it will never be dispatched).
     list_parent_sel_none_hook: ?ListSidecarHook = null,
+    /// Whether the hook above marked a handle; lets an append check only the
+    /// new item. Null when unknown.
+    list_parent_sel_none_query: ?ListSidecarQuery = null,
     /// Called with the text of a calculation a built-in function leaves
     /// as CSS and with where in it the arguments are that were strings.
     /// Compressed output writes those as they are.
@@ -74,6 +84,12 @@ pub const BuiltinContext = struct {
     /// list_pool item slices are immutable after creation, so `(list handle, raw needle)`
     /// is a stable key within one VM execution.
     list_index_cache: ?*std.AutoHashMapUnmanaged(ListIndexCacheKey, Value) = null,
+    /// Lists made by `list.append` that still own spare room after their
+    /// last item, by handle. Appending to such a list writes into that room
+    /// and moves the entry to the new handle, so a loop of appends copies
+    /// each item a constant number of times instead of once per append.
+    /// Null disables the reuse.
+    list_append_tails: ?*std.AutoHashMapUnmanaged(u32, ListTail) = null,
     slash_list_preserve: ?*const std.AutoHashMapUnmanaged(u32, void) = null,
     deprecation_opts: ?*deprecation_mod.DeprecationOpts = null,
 };
@@ -286,6 +302,8 @@ pub fn maybeNoteListParentSelNoneHook(
 pub const CalcTextArgsHook = *const fn (*anyopaque, InternId, []const u8, []const [2]usize) std.mem.Allocator.Error!void;
 
 pub const ListSidecarHook = *const fn (*anyopaque, u32, []const Value) std.mem.Allocator.Error!void;
+
+pub const ListSidecarQuery = *const fn (*const anyopaque, u32) bool;
 
 pub fn pushColorEntry(ctx: *BuiltinContext, entry: ColorEntry) BuiltinError!Value {
     const handle = value_mod.pushColorEntry(ctx.color_pool, ctx.allocator, entry) catch return error.OutOfMemory;
