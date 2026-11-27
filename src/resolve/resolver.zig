@@ -1666,10 +1666,6 @@ fn nodeContainsCalcArgOpaqueCssFunction(ast: *const ast_flat.Ast, ctx: *Ctx, nod
 }
 
 fn resolveCalcArgInterpPart(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex, span: Span) ResolveError!ExprIndex {
-    // Interpolated Sass is not part of a surrounding calculation.
-    const saved_in_calculation = ctx.in_calculation_args;
-    ctx.in_calculation_args = false;
-    defer ctx.in_calculation_args = saved_in_calculation;
     const n = ast.getNode(node);
     if (extractCalcArgStaticNumberInfo(ast, ctx, node)) |num| {
         return try appendNumberLiteral(ctx.prog, ctx.a, num.value, num.unit_id, span);
