@@ -1,12 +1,18 @@
 # Keeps the commit-pinned Actions and the Dockerfile's digest-pinned base
-# image up to date; the version stays in the comment after each pin.
+# image up to date; the version stays in the comment after each pin. The
+# cooldown leaves a new release a week to be found out before it is
+# proposed.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
