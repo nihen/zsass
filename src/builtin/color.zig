@@ -1957,7 +1957,13 @@ fn parseColorOpArgs(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
             .is_none = isNoneColorToken(ctx, arg),
             .number = if (arg.kind() == .number) arg.asF64(ctx.number_pool) else null,
         });
-        if (out.first_channel == null and key != .alpha) out.first_channel = key;
+        // Hue is in both hsl and hwb, so a later channel only one legacy
+        // format has decides the space.
+        if (key != .alpha and (out.first_channel == null or
+            (out.first_channel.? == .hue and legacyChannelFamily(key) != .none)))
+        {
+            out.first_channel = key;
+        }
         switch (key) {
             .red, .green, .blue => out.has_rgb_channel = true,
             .saturation, .lightness => out.has_hsl_channel = true,
@@ -1968,12 +1974,18 @@ fn parseColorOpArgs(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
 
     if (out.color == null) return shared.reportMissingArgument("color");
     if ((out.has_rgb_channel and (out.has_hsl_channel or out.has_hwb_channel)) or (out.has_hwb_channel and out.has_hsl_channel)) {
-        // Legacy channels of two formats: the first one's space has no
-        // channel of the other.
-        const first_family = legacyChannelFamily(out.first_channel orelse .red);
+        // Legacy channels of two formats: the space is the first one's that
+        // only one format has (hue is in both hsl and hwb), and the first
+        // channel it lacks is reported.
+        var first_family: LegacyChannelFamily = .none;
+        for (entries.items) |entry| {
+            first_family = legacyChannelFamily(entry.key);
+            if (first_family != .none) break;
+        }
         for (entries.items) |entry| {
             const family = legacyChannelFamily(entry.key);
-            if (family != .none and family != first_family) return reportNoSuchChannel(entry.key, @tagName(first_family));
+            const lacking = if (entry.key == .hue) first_family == .rgb else family != .none and family != first_family;
+            if (lacking) return reportNoSuchChannel(entry.key, @tagName(first_family));
         }
         return colorOpSemanticError();
     }
