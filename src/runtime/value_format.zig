@@ -122,9 +122,17 @@ pub fn formatCompoundUnitNumber(alloc: std.mem.Allocator, value: f64, unit: []co
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(alloc);
     try out.appendSlice(alloc, "calc(");
-    try out.print(alloc, "{d}", .{value});
-    if (n_num > 0) try out.appendSlice(alloc, numerators[0]);
-    for (numerators[@min(n_num, 1)..n_num]) |factor| try out.print(alloc, " * 1{s}", .{factor});
+    // A number that is no finite one is a keyword, which takes no unit.
+    const finite = std.math.isFinite(value);
+    if (std.math.isNan(value)) {
+        try out.appendSlice(alloc, "NaN");
+    } else if (std.math.isInf(value)) {
+        try out.appendSlice(alloc, if (value < 0) "-infinity" else "infinity");
+    } else {
+        try out.print(alloc, "{d}", .{value});
+    }
+    if (finite and n_num > 0) try out.appendSlice(alloc, numerators[0]);
+    for (numerators[if (finite) @min(n_num, 1) else 0..n_num]) |factor| try out.print(alloc, " * 1{s}", .{factor});
     for (denominators[0..n_den]) |factor| try out.print(alloc, " / 1{s}", .{factor});
     try out.append(alloc, ')');
     return try out.toOwnedSlice(alloc);

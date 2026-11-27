@@ -3819,26 +3819,26 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
     const has_custom_function_binding = ns_id == .none and
         (lookupIdentifierIdInsensitive(&ctx.prog.function_names, name_slice) != null or
             ctx.lookupStarFunction(name_slice) != null);
+    // A module's function brought in by `@use ... as *` is no calculation.
+    const is_calculation_call = ns_id == .none and !has_custom_function_binding and !raw_name_is_interpolated and
+        lookupIdentifierIdInsensitive(&ctx.star_builtin_fns, name_slice) == null;
 
     // A calculation whose var() or interpolation may make up the arguments
     // it lacks is left to the browser.
-    const calc_passthrough = ns_id == .none and !has_custom_function_binding and !raw_name_is_interpolated and
-        isStrictCalculationFunctionName(name_slice) and arg_count > 0 and blk: {
-        const arity = calculationArity(name_slice);
-        if (arg_count > arity.max) break :blk calculationArgsMayExpand(ast, off, arg_count, false);
-        break :blk arg_count < arity.min and calculationArgsMayExpand(ast, off, arg_count, true);
-    };
+    const calc_passthrough = is_calculation_call and isStrictCalculationFunctionName(name_slice) and arg_count > 0 and
+        arg_count < calculationArity(name_slice).min and calculationArgsMayExpand(ast, off, arg_count);
     // What is no calculation fails when it is evaluated, as in the
     // official CLI: not in a function that is never called.
-    if (ns_id == .none and !has_custom_function_binding and !raw_name_is_interpolated) {
+    if (is_calculation_call) {
         var arity_buf: [128]u8 = undefined;
         const problem: ?CalcProblem = if (isStrictCalculationFunctionName(name_slice))
             calculationArgsProblem(ast, ctx, name_slice, off, arg_count, &arity_buf)
         else if (identifierEq(name_slice, "round") or identifierEq(name_slice, "abs")) blk: {
             // These fall back to the Sass functions, but not for a count of
             // arguments neither takes.
+            // A rest argument is counted once it is expanded.
             const max: u32 = if (identifierEq(name_slice, "round")) 3 else 1;
-            if (arg_count == 0 or (arg_count > max and !calculationArgsMayExpand(ast, off, arg_count, false))) {
+            if (arg_count == 0 or (arg_count > max and !calculationArgsHaveSplat(ast, off, arg_count))) {
                 break :blk .{ .msg = calculationArityMessage(&arity_buf, arg_count, 1, max), .span = span };
             }
             break :blk null;
@@ -4680,14 +4680,10 @@ fn calculationArgsProblem(ast: *const ast_flat.Ast, ctx: *Ctx, name: []const u8,
         if (arg_name != .none) return .{ .msg = "Keyword arguments can't be used with calculations.", .span = nodeSpan(ast, node) };
         if (ast.getNode(node).tag == .expr_splat) return .{ .msg = "Rest arguments can't be used with calculations.", .span = nodeSpan(ast, node) };
     }
+    // Too many arguments are reported before what they are; too few after.
     const arity = calculationArity(name);
-    // A var() or interpolation may stand for several arguments, and too
-    // few are checked once a variable's or function's value is known.
-    const too_few = arg_count < arity.min and (arg_count == 0 or !calculationArgsMayExpand(ast, call_extra, arg_count, true) and !calculationArgsDeferred(ast, call_extra, arg_count));
-    const too_many = arg_count > arity.max and !calculationArgsMayExpand(ast, call_extra, arg_count, false);
-    if (too_few or too_many) {
-        const first: Span = if (arg_count > 0) nodeSpan(ast, @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start)))) else .{ .start = 0, .end = 0 };
-        return .{ .msg = calculationArityMessage(buf, arg_count, arity.min, arity.max), .span = first };
+    if (arg_count > arity.max) {
+        return .{ .msg = calculationArityMessage(buf, arg_count, arity.min, arity.max), .span = nodeSpan(ast, @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start)))) };
     }
     for (0..arg_count) |i| {
         const node: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start + @as(u32, @intCast(i)))));
@@ -4700,6 +4696,13 @@ fn calculationArgsProblem(ast: *const ast_flat.Ast, ctx: *Ctx, name: []const u8,
             };
             return .{ .msg = msg, .span = nodeSpan(ast, found.node) };
         }
+    }
+    // A var() or interpolation may stand for several arguments, and too
+    // few are checked once a variable's or function's value is known.
+    const too_few = arg_count < arity.min and (arg_count == 0 or !calculationArgsMayExpand(ast, call_extra, arg_count) and !calculationArgsDeferred(ast, call_extra, arg_count));
+    if (too_few) {
+        const first: Span = if (arg_count > 0) nodeSpan(ast, @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start)))) else .{ .start = 0, .end = 0 };
+        return .{ .msg = calculationArityMessage(buf, arg_count, arity.min, arity.max), .span = first };
     }
     return null;
 }
@@ -4742,46 +4745,82 @@ fn calculationArgsDeferred(ast: *const ast_flat.Ast, call_extra: ExtraIndex, arg
     const arg_nodes_start: ExtraIndex = call_extra + 3;
     for (0..arg_count) |i| {
         const node: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start + @as(u32, @intCast(i)))));
-        const n = ast.getNode(node);
-        switch (n.tag) {
-            .expr_variable, .expr_namespaced_var => return true,
-            .expr_func_call => {
-                const text = if (n.span_end <= ast.source.len and n.span_start < n.span_end) ast.source[n.span_start..n.span_end] else "";
-                const paren = std.mem.indexOfScalar(u8, text, '(') orelse text.len;
-                const fname = text[0..paren];
-                if (!isCssCalculationFunctionName(fname) and !identifierEq(fname, "calc-size")) return true;
-            },
-            else => {},
-        }
+        if (calcArgDeferred(ast, node)) return true;
     }
     return false;
 }
 
-/// Whether an argument may stand for several: var(), env(), attr(), or
-/// interpolation, or be text the browser reads: an identifier.
-fn calculationArgsMayExpand(ast: *const ast_flat.Ast, call_extra: ExtraIndex, arg_count: u32, with_identifiers: bool) bool {
+fn calcArgDeferred(ast: *const ast_flat.Ast, node: NodeIndex) bool {
+    const n = ast.getNode(node);
+    return switch (n.tag) {
+        .expr_variable, .expr_namespaced_var => true,
+        .expr_paren => calcArgDeferred(ast, @fromBackingInt(@intCast(n.payload))),
+        .expr_func_call => !isCalculationCallNode(ast, n),
+        else => false,
+    };
+}
+
+fn nodeText(ast: *const ast_flat.Ast, n: ast_flat.AstNode) []const u8 {
+    return if (n.span_end <= ast.source.len and n.span_start < n.span_end) ast.source[n.span_start..n.span_end] else "";
+}
+
+fn isCalculationCallNode(ast: *const ast_flat.Ast, n: ast_flat.AstNode) bool {
+    const text = nodeText(ast, n);
+    const fname = text[0 .. std.mem.indexOfScalar(u8, text, '(') orelse text.len];
+    return isCssCalculationFunctionName(fname) or identifierEq(fname, "calc-size");
+}
+
+fn calculationArgsHaveSplat(ast: *const ast_flat.Ast, call_extra: ExtraIndex, arg_count: u32) bool {
     const arg_nodes_start: ExtraIndex = call_extra + 3;
     for (0..arg_count) |i| {
         const node: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start + @as(u32, @intCast(i)))));
-        const n = ast.getNode(node);
-        switch (n.tag) {
-            .expr_interp, .expr_string_interp => return true,
-            .expr_unquoted_ident => {
-                const text = if (n.span_end <= ast.source.len and n.span_start < n.span_end) ast.source[n.span_start..n.span_end] else "";
-                if (with_identifiers and color_mod.lookupNamedColor(text) == null) return true;
-            },
-            .expr_func_call => {
-                const text = if (n.span_end <= ast.source.len and n.span_start < n.span_end) ast.source[n.span_start..n.span_end] else "";
-                if (std.ascii.startsWithIgnoreCase(text, "var(") or std.ascii.startsWithIgnoreCase(text, "env(") or
-                    std.ascii.startsWithIgnoreCase(text, "attr(")) return true;
-            },
-            else => {
-                const text = if (n.span_end <= ast.source.len and n.span_start < n.span_end) ast.source[n.span_start..n.span_end] else "";
-                if (std.mem.indexOf(u8, text, "#{") != null) return true;
-            },
-        }
+        if (ast.getNode(node).tag == .expr_splat) return true;
     }
     return false;
+}
+
+/// Whether an argument may stand for several, so that too few are no
+/// error: var(), env(), attr(), an unquoted interpolation, or an
+/// identifier the browser reads, alone or in parentheses or a space list.
+fn calculationArgsMayExpand(ast: *const ast_flat.Ast, call_extra: ExtraIndex, arg_count: u32) bool {
+    const arg_nodes_start: ExtraIndex = call_extra + 3;
+    for (0..arg_count) |i| {
+        const node: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start + @as(u32, @intCast(i)))));
+        if (calcArgMayExpand(ast, node)) return true;
+    }
+    return false;
+}
+
+fn calcArgMayExpand(ast: *const ast_flat.Ast, node: NodeIndex) bool {
+    const n = ast.getNode(node);
+    switch (n.tag) {
+        .expr_interp => return true,
+        .expr_string_interp => return (n.flags & 1) == 0,
+        .expr_unquoted_ident => {
+            const text = nodeText(ast, n);
+            // Named colors and the calculation constants are values.
+            const constants = [_][]const u8{ "pi", "e", "infinity", "-infinity", "nan" };
+            for (constants) |c| {
+                if (std.ascii.eqlIgnoreCase(text, c)) return false;
+            }
+            return color_mod.lookupNamedColor(text) == null;
+        },
+        .expr_func_call => {
+            const text = nodeText(ast, n);
+            return std.ascii.startsWithIgnoreCase(text, "var(") or std.ascii.startsWithIgnoreCase(text, "env(") or
+                std.ascii.startsWithIgnoreCase(text, "attr(");
+        },
+        .expr_paren => return calcArgMayExpand(ast, @fromBackingInt(@intCast(n.payload))),
+        .expr_space_list => {
+            const off: ExtraIndex = n.payload;
+            const count = ast.getExtraU32(off);
+            for (0..count) |i| {
+                if (calcArgMayExpand(ast, @fromBackingInt(@intCast(ast.getExtraU32(off + 1 + @as(u32, @intCast(i))))))) return true;
+            }
+            return false;
+        },
+        else => return false,
+    }
 }
 
 fn calculationIssue(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ?CalcIssueAt {
@@ -4802,12 +4841,21 @@ fn calculationIssue(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ?CalcI
             if (op == .add or op == .sub) {
                 // The operator is the first + or - after the left operand
                 // (the right one's span may start at it).
+                // Comments are skipped to find it; one after it counts as
+                // whitespace, one before it does not.
                 const op_char: u8 = if (op == .add) '+' else '-';
                 var pos: usize = ast.getNode(lhs).span_end;
-                while (pos < source.len and std.ascii.isWhitespace(source[pos])) pos += 1;
+                while (pos < source.len) {
+                    if (std.ascii.isWhitespace(source[pos])) {
+                        pos += 1;
+                    } else if (std.mem.startsWith(u8, source[pos..], "/*")) {
+                        const close = std.mem.indexOfPos(u8, source, pos + 2, "*/") orelse break;
+                        pos = close + 2;
+                    } else break;
+                }
                 if (pos + 1 < source.len and source[pos] == op_char) {
                     const before = pos > 0 and std.ascii.isWhitespace(source[pos - 1]);
-                    const after = std.ascii.isWhitespace(source[pos + 1]);
+                    const after = std.ascii.isWhitespace(source[pos + 1]) or std.mem.startsWith(u8, source[pos + 1 ..], "/*");
                     if (!before or !after) return .{ .issue = .whitespace, .node = node };
                 }
             }
@@ -4876,7 +4924,7 @@ fn calculationIssue(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ?CalcI
         .expr_comma_list, .expr_bracketed_list, .expr_map_literal, .expr_bool_true, .expr_bool_false, .expr_null, .expr_color_hex => {
             return .{ .issue = .expression, .node = node };
         },
-        .expr_string_literal => {
+        .expr_string_literal, .expr_string_interp => {
             if ((n.flags & 1) != 0) return .{ .issue = .expression, .node = node };
             return null;
         },
