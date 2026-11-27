@@ -87,6 +87,7 @@ fn builtinPreservesSlashLists(builtin_id: u32) bool {
 
 pub fn builtinContext(self: anytype) builtin_mod.BuiltinContext {
     return .{
+        .call_name = self.current_builtin_call_name,
         .allocator = self.allocator,
         .intern_pool = self.intern_pool,
         .list_pool = &self.list_pool,
@@ -107,6 +108,10 @@ pub fn builtinContext(self: anytype) builtin_mod.BuiltinContext {
         .deprecation_opts = &self.deprecation_opts,
         .budget = self.budget,
     };
+}
+
+pub fn builtinCallSiteOf(self: anytype) ?deprecation_mod.CallSite {
+    return builtinCallSite(self);
 }
 
 fn builtinCallSite(self: anytype) ?deprecation_mod.CallSite {

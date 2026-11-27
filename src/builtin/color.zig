@@ -1614,30 +1614,78 @@ fn parseLegacyPercentAmount(ctx: *BuiltinContext, arg: Value) BuiltinError!f64 {
     return value;
 }
 
-fn emitColorDeprecation(ctx: *BuiltinContext, func_name: []const u8) BuiltinError!void {
+const ColorFunctionKind = enum { lighten, darken, saturate, desaturate, opacify, transparentize, adjust_hue };
+
+/// The `color-functions` deprecation as the official CLI writes it: the
+/// call by the name it was made, with the color.scale() and color.adjust()
+/// calls that do the same to this color.
+fn emitColorFunctionDeprecation(ctx: *BuiltinContext, default_name: []const u8, kind: ColorFunctionKind, c: Value, amount: f64) BuiltinError!void {
     const opts = ctx.deprecation_opts orelse return;
-    try deprecation_mod.emitDeprecation(opts, .color_functions, func_name, "", 0, 0);
+    if (!deprecation_mod.mayReport(opts, .color_functions)) return;
+    const name = if (ctx.call_name.len != 0) ctx.call_name else default_name;
+    const more_info = "More info: https://sass-lang.com/d/color-functions";
+    var buf: [512]u8 = undefined;
+    if (kind == .adjust_hue) {
+        const deg = try formatColorFunctionAmount(ctx, amount, "deg");
+        defer ctx.allocator.free(deg);
+        const msg = std.fmt.bufPrint(&buf, "{s}() is deprecated. Suggestion:\n\ncolor.adjust($color, $hue: {s})\n\n{s}", .{ name, deg, more_info }) catch return;
+        return deprecation_mod.emitDeprecation(opts, .color_functions, msg, "", 0, 0);
+    }
+    const hsl = colorToHsl(ctx, c);
+    const alpha = std.math.clamp(colorEntryOf(ctx, c).channels[3], 0.0, 1.0);
+    const channel: []const u8 = switch (kind) {
+        .lighten, .darken => "lightness",
+        .saturate, .desaturate => "saturation",
+        else => "alpha",
+    };
+    const negative = kind == .darken or kind == .desaturate or kind == .transparentize;
+    const signed = if (negative) -amount else amount;
+    // How far toward the end of the channel's range the change goes.
+    const scale: f64 = switch (kind) {
+        .lighten => if (hsl[2] >= 100.0) 100.0 else amount / (100.0 - hsl[2]) * 100.0,
+        .darken => if (hsl[2] <= 0.0) -100.0 else -amount / hsl[2] * 100.0,
+        .saturate => if (hsl[1] >= 100.0) 100.0 else amount / (100.0 - hsl[1]) * 100.0,
+        .desaturate => if (hsl[1] <= 0.0) -100.0 else -amount / hsl[1] * 100.0,
+        .opacify => if (alpha >= 1.0) 100.0 else amount / (1.0 - alpha) * 100.0,
+        .transparentize => if (alpha <= 0.0) -100.0 else -amount / alpha * 100.0,
+        .adjust_hue => unreachable,
+    };
+    const adjust_unit: ?[]const u8 = if (kind == .opacify or kind == .transparentize) null else "%";
+    const adjust_text = try formatColorFunctionAmount(ctx, signed, adjust_unit);
+    defer ctx.allocator.free(adjust_text);
+    if (amount == 0.0) {
+        const msg = std.fmt.bufPrint(&buf, "{s}() is deprecated. Suggestion:\n\ncolor.adjust($color, ${s}: {s})\n\n{s}", .{ name, channel, adjust_text, more_info }) catch return;
+        return deprecation_mod.emitDeprecation(opts, .color_functions, msg, "", 0, 0);
+    }
+    const scale_text = try formatColorFunctionAmount(ctx, @max(-100.0, @min(100.0, scale)), "%");
+    defer ctx.allocator.free(scale_text);
+    const msg = std.fmt.bufPrint(&buf, "{s}() is deprecated. Suggestions:\n\ncolor.scale($color, ${s}: {s})\ncolor.adjust($color, ${s}: {s})\n\n{s}", .{ name, channel, scale_text, channel, adjust_text, more_info }) catch return;
+    return deprecation_mod.emitDeprecation(opts, .color_functions, msg, "", 0, 0);
+}
+
+fn formatColorFunctionAmount(ctx: *BuiltinContext, value: f64, unit: ?[]const u8) BuiltinError![]const u8 {
+    return value_format.formatNumberWithUnit(ctx.allocator, value, unit) catch error.OutOfMemory;
 }
 
 pub fn color_lighten(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 2);
-    try emitColorDeprecation(ctx, "lighten() is deprecated; use color.adjust() with $lightness instead");
     const c = tryCoerceColorArg(ctx, args[0]) orelse return reportArgumentTypeMismatch(ctx, "color", args[0], "color");
     const amt = parseLegacyPercentAmount(ctx, args[1]) catch |err| switch (err) {
         error.BuiltinType => return reportArgumentTypeMismatch(ctx, "amount", args[1], "number"),
         else => return err,
     };
+    try emitColorFunctionDeprecation(ctx, "lighten", .lighten, c, amt);
     return hslAdjustedColor(ctx, c, 0.0, 0.0, amt);
 }
 
 pub fn color_darken(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 2);
-    try emitColorDeprecation(ctx, "darken() is deprecated; use color.adjust() with $lightness instead");
     const c = tryCoerceColorArg(ctx, args[0]) orelse return reportArgumentTypeMismatch(ctx, "color", args[0], "color");
     const amt = parseLegacyPercentAmount(ctx, args[1]) catch |err| switch (err) {
         error.BuiltinType => return reportArgumentTypeMismatch(ctx, "amount", args[1], "number"),
         else => return err,
     };
+    try emitColorFunctionDeprecation(ctx, "darken", .darken, c, amt);
     return hslAdjustedColor(ctx, c, 0.0, 0.0, -amt);
 }
 
@@ -1670,33 +1718,33 @@ pub fn color_saturate(ctx: *BuiltinContext, args: []const Value) BuiltinError!Va
         return error.BuiltinType;
     }
     try expectArity(args, 2);
-    try emitColorDeprecation(ctx, "saturate() is deprecated; use color.adjust() with $saturation instead");
     const c = tryCoerceColorArg(ctx, args[0]) orelse return reportArgumentTypeMismatch(ctx, "color", args[0], "color");
     const amt = parseLegacyPercentAmount(ctx, args[1]) catch |err| switch (err) {
         error.BuiltinType => return reportArgumentTypeMismatch(ctx, "amount", args[1], "number"),
         else => return err,
     };
+    try emitColorFunctionDeprecation(ctx, "saturate", .saturate, c, amt);
     return hslAdjustedColor(ctx, c, 0.0, amt, 0.0);
 }
 
 pub fn color_desaturate(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 2);
-    try emitColorDeprecation(ctx, "desaturate() is deprecated; use color.adjust() with $saturation instead");
     const c = tryCoerceColorArg(ctx, args[0]) orelse return reportArgumentTypeMismatch(ctx, "color", args[0], "color");
     const amt = parseLegacyPercentAmount(ctx, args[1]) catch |err| switch (err) {
         error.BuiltinType => return reportArgumentTypeMismatch(ctx, "amount", args[1], "number"),
         else => return err,
     };
+    try emitColorFunctionDeprecation(ctx, "desaturate", .desaturate, c, amt);
     return hslAdjustedColor(ctx, c, 0.0, -amt, 0.0);
 }
 
 pub fn color_adjust_hue(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 2);
-    try emitColorDeprecation(ctx, "adjust-hue() is deprecated; use color.adjust() with $hue instead");
     const c = tryCoerceColorArg(ctx, args[0]) orelse return reportArgumentTypeMismatch(ctx, "color", args[0], "color");
     const parsed_delta = parseLegacyHueOrMissing(ctx, args[1]) orelse return reportArgumentTypeMismatch(ctx, "degrees", args[1], "number");
     if (parsed_delta.missing) return reportArgumentTypeMismatch(ctx, "degrees", args[1], "number");
     const delta = parsed_delta.value;
+    try emitColorFunctionDeprecation(ctx, "adjust-hue", .adjust_hue, c, delta);
     return hslAdjustedColor(ctx, c, delta, 0.0, 0.0);
 }
 
@@ -3991,6 +4039,11 @@ fn opacifyImpl(ctx: *BuiltinContext, args: []const Value, comptime alpha_sign: f
     if (args[1].kind() != .number) return error.BuiltinType;
     const amount = args[1].asF64(ctx.number_pool);
     if (std.math.isNan(amount) or amount < 0.0 or amount > 1.0) return error.BuiltinType;
+    if (alpha_sign > 0) {
+        try emitColorFunctionDeprecation(ctx, "opacify", .opacify, c, amount);
+    } else {
+        try emitColorFunctionDeprecation(ctx, "transparentize", .transparentize, c, amount);
+    }
     const source_entry = colorEntryOf(ctx, c);
     const alpha = std.math.clamp(source_entry.channels[3] + alpha_sign * amount, 0.0, 1.0);
     if ((source_entry.space == .hsl or source_entry.space == .hwb) and source_entry.missing == 0) {
@@ -4017,14 +4070,12 @@ fn opacifyImpl(ctx: *BuiltinContext, args: []const Value, comptime alpha_sign: f
 pub fn color_opacify(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     // Its arguments are bound before it warns.
     if (args.len != 2) return badArity(2, args.len);
-    try emitColorDeprecation(ctx, "opacify()/fade-in() is deprecated; use color.adjust() with $alpha instead");
     return opacifyImpl(ctx, args, 1.0);
 }
 
 pub fn color_transparentize(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     // Its arguments are bound before it warns.
     if (args.len != 2) return badArity(2, args.len);
-    try emitColorDeprecation(ctx, "transparentize()/fade-out() is deprecated; use color.adjust() with $alpha instead");
     return opacifyImpl(ctx, args, -1.0);
 }
 

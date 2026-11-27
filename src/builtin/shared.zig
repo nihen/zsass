@@ -44,6 +44,9 @@ pub const ListTail = struct {
 };
 
 pub const BuiltinContext = struct {
+    /// The global name the function was called by, when it was called by
+    /// one (`fade-in`, not `opacify`), for its deprecation's wording.
+    call_name: []const u8 = "",
     allocator: std.mem.Allocator,
     intern_pool: *InternPool,
     list_pool: *std.ArrayListUnmanaged([]Value),

@@ -16,6 +16,8 @@ pub const DeprecationKind = enum {
     duplicate_var_flags, // !default + !global repeat
     null_alpha, // null alpha (rgb(... / null) etc.)
     css_function_mixin, // CSS level/mixin name conflict
+    global_builtin, // a global built-in function with a module equivalent
+    if_function, // the Sass if() function syntax
 
     pub fn kindName(k: DeprecationKind) []const u8 {
         return switch (k) {
@@ -30,6 +32,8 @@ pub const DeprecationKind = enum {
             .duplicate_var_flags => "duplicate-var-flags",
             .null_alpha => "null-alpha",
             .css_function_mixin => "css-function-mixin",
+            .global_builtin => "global-builtin",
+            .if_function => "if-function",
         };
     }
 
@@ -371,6 +375,7 @@ fn stripOuterParens(text: []const u8) []const u8 {
 /// Whether a deprecation of `kind` may be written or fail the compilation,
 /// before a caller builds its message.
 pub fn mayReport(opts: *const DeprecationOpts, kind: DeprecationKind) bool {
+    if (active_recorder != null) return true;
     if (opts.fatal.contains(kind)) return true;
     return !opts.quiet and !opts.silenced.contains(kind);
 }

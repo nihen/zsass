@@ -9,6 +9,7 @@ const list = @import("list.zig");
 const map = @import("map.zig");
 const meta_dispatch_abi = @import("meta_dispatch_abi.zig");
 const signatures = @import("signatures.zig");
+const global_builtins = @import("global_builtins.zig");
 const error_format = @import("../runtime/error_format.zig");
 
 const Value = shared.Value;
@@ -277,6 +278,7 @@ fn resolveCaseSensitive(module: []const u8, name: []const u8) ?Id {
 /// allowed, but 3 were passed.", "Missing argument $color."), from the
 /// signatures the CLI reports.
 pub fn reportSignatureMismatch(pool: anytype, id: Id, args_len: usize, arg_names: []const InternId) void {
+    if (hasSpreadArgument(arg_names)) return;
     const row = signatureFor(id) orelse return;
     var positional: usize = 0;
     for (0..args_len) |i| {
@@ -304,17 +306,81 @@ pub fn reportSignatureMismatch(pool: anytype, id: Id, args_len: usize, arg_names
     }
 }
 
-fn signatureFor(id: Id) ?*const signatures.Row {
-    // A module function's row before a global's: they share an id when
-    // they are the same function.
-    for (&signatures.rows) |*row| {
-        if (row.module.len != 0 and resolve(row.module, row.name) == id) return row;
+/// 1 + the row of `global_builtins.rows` for the global function `name`,
+/// or 0 when calling it by that name does not warn.
+pub fn globalBuiltinRow(name: []const u8) u16 {
+    for (global_builtins.rows, 0..) |row, i| {
+        if (shared.identifierEq(name, row.name)) return @intCast(i + 1);
     }
-    for (&signatures.rows) |*row| {
-        if (row.module.len == 0 and resolveLegacyGlobal(row.name) == id) return row;
-    }
-    return null;
+    return 0;
 }
+
+pub fn globalBuiltinReplacement(row: u16) []const u8 {
+    return global_builtins.rows[row - 1].replacement;
+}
+
+pub fn globalBuiltinName(row: u16) []const u8 {
+    return global_builtins.rows[row - 1].name;
+}
+
+/// Whether arguments fit the function, as far as its signature says.
+pub fn signatureFits(pool: anytype, id: Id, args_len: usize, arg_names: []const InternId) bool {
+    // Spread arguments are not counted here; the function binds them.
+    if (hasSpreadArgument(arg_names)) return true;
+    const row = signatureFor(id) orelse return true;
+    var positional: usize = 0;
+    for (0..args_len) |i| {
+        if (i >= arg_names.len or arg_names[i] == .none) positional += 1;
+    }
+    if (row.max >= 0 and positional > @as(usize, @intCast(row.max))) return false;
+    for (row.required, 0..) |param, idx| {
+        if (idx < positional) continue;
+        var named = false;
+        for (arg_names) |name_id| {
+            if (name_id == .none) continue;
+            const raw = pool.get(name_id);
+            const bare = if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
+            if (shared.identifierEq(bare, param)) named = true;
+        }
+        if (!named) return false;
+    }
+    return true;
+}
+
+/// Whether a name is the marker of a `$args...` spread, which no pool holds.
+fn hasSpreadArgument(arg_names: []const InternId) bool {
+    for (arg_names) |name_id| {
+        if (@backingInt(name_id) == std.math.maxInt(u32)) return true;
+    }
+    return false;
+}
+
+fn signatureFor(id: Id) ?*const signatures.Row {
+    if (id >= signature_by_id.len) return null;
+    const row = signature_by_id[id];
+    return if (row == no_signature) null else &signatures.rows[row];
+}
+
+const no_signature = std.math.maxInt(u16);
+
+/// The signature row of each built-in id, built when compiling: a module
+/// function's row before a global's, as they share an id when they are the
+/// same function.
+const signature_by_id: [512]u16 = blk: {
+    @setEvalBranchQuota(10_000_000);
+    var table: [512]u16 = @splat(no_signature);
+    for (signatures.rows, 0..) |row, i| {
+        if (row.module.len == 0) continue;
+        const id = resolve(row.module, row.name) orelse continue;
+        if (id < table.len and table[id] == no_signature) table[id] = i;
+    }
+    for (signatures.rows, 0..) |row, i| {
+        if (row.module.len != 0) continue;
+        const id = resolveLegacyGlobal(row.name) orelse continue;
+        if (id < table.len and table[id] == no_signature) table[id] = i;
+    }
+    break :blk table;
+};
 
 pub fn resolveLegacyGlobalMixin(name: []const u8) ?Id {
     if (shared.identifierEq(name, "apply")) return meta_apply_mixin_id;

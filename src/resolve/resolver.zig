@@ -4116,6 +4116,7 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
         }
     }
     if (ns_id == .none and identifierEq(name_slice, "if")) {
+        try warnLegacyIfFunction(ast, ctx, off, arg_count, span);
         return resolveLegacyIfBuiltinExpr(ctx, arg_buf.items, arg_name_buf.items, span);
     }
     const local_fid = lookupIdentifierIdInsensitive(&ctx.prog.function_names, name_slice);
@@ -4188,6 +4189,7 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
                 .prebound_accepts_content = prebound.accepts_content,
                 .prebound_capture_callers_locals = prebound.captures_callers_locals,
                 .prebound_name = prebound.name,
+                .global_name = try ctx.pool.intern(name_slice),
             });
             return try appendExpr(ctx.prog, ctx.a, .{
                 .kind = .builtin_call,
@@ -7513,6 +7515,54 @@ fn resolveCssIfValueExpr(ctx: *Ctx, text: []const u8, span: Span) ResolveError!E
         return try appendNullLiteralExpr(ctx, span);
     }
     return parseSubExpr(ctx, normalized, span) catch resolveInterpolatedTextExpr(ctx, normalized, span, true);
+}
+
+/// The `if-function` deprecation for the Sass `if()` at `span`, as the
+/// official CLI writes it when parsing: with positional arguments, the CSS
+/// `if()` that replaces it (`if(sass(c): a; else: b)`, without the `else`
+/// when it is `null`).
+fn warnLegacyIfFunction(ast: *const ast_flat.Ast, ctx: *Ctx, call_extra: ExtraIndex, arg_count: u32, span: Span) ResolveError!void {
+    const loader = ctx.loader orelse return;
+    const opts = loader.deprecation_opts orelse return;
+    if (!deprecation_mod.mayReport(opts, .if_function)) return;
+    const source = ast.source;
+    const head = "The Sass if() syntax is deprecated in favor of the modern CSS syntax.";
+    const more_info = "More info: https://sass-lang.com/d/if-function";
+    var suggestion: ?[]u8 = null;
+    defer if (suggestion) |text| ctx.a.free(text);
+    if (arg_count == 3) {
+        const arg_nodes_start: ExtraIndex = call_extra + 3;
+        const arg_names_start: ExtraIndex = arg_nodes_start + arg_count;
+        var texts: [3][]const u8 = undefined;
+        var positional = true;
+        for (0..3) |i| {
+            const name: InternId = @fromBackingInt(@intCast(ast.getExtraU32(arg_names_start + @as(u32, @intCast(i)))));
+            if (name != .none) positional = false;
+            const node = ast.getNode(@fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start + @as(u32, @intCast(i))))));
+            if (node.span_end > source.len or node.span_start > node.span_end) positional = false;
+            if (positional) texts[i] = std.mem.trim(u8, source[node.span_start..node.span_end], " \t\r\n");
+        }
+        if (positional) {
+            suggestion = if (std.mem.eql(u8, texts[2], "null"))
+                try std.fmt.allocPrint(ctx.a, "if(sass({s}): {s})", .{ texts[0], texts[1] })
+            else
+                try std.fmt.allocPrint(ctx.a, "if(sass({s}): {s}; else: {s})", .{ texts[0], texts[1], texts[2] });
+        }
+    }
+    const msg = if (suggestion) |text|
+        try std.fmt.allocPrint(ctx.a, "{s}\n\nSuggestion: {s}\n\n{s}", .{ head, text, more_info })
+    else
+        try std.fmt.allocPrint(ctx.a, "{s}\n\n{s}", .{ head, more_info });
+    defer ctx.a.free(msg);
+    const pos = data_mod.spanStartLineColOneBased(source.len, ctx.prog.line_starts, span.start);
+    const end_pos = data_mod.spanStartLineColOneBased(source.len, ctx.prog.line_starts, span.end);
+    deprecation_mod.emitDeprecationSpan(opts, .if_function, msg, ctx.module_path, pos.line, pos.col, if (end_pos.line == pos.line) end_pos.col else 0) catch |err| switch (err) {
+        error.FatalDeprecation => {
+            error_format.recordErrorSpan(span.start, span.end, 0);
+            return error.SassError;
+        },
+        else => return error.SassError,
+    };
 }
 
 fn appendIfBuiltinExpr(ctx: *Ctx, cond: ExprIndex, if_true: ExprIndex, if_false: ExprIndex, span: Span) ResolveError!ExprIndex {

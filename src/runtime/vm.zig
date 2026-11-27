@@ -502,6 +502,8 @@ pub const VM = struct {
     /// The VM whose `meta.load-css()` runs this one, whose trace continues
     /// this one's.
     diag_parent: ?*VM = null,
+    /// The global name of the built-in being called, when called by one.
+    current_builtin_call_name: []const u8 = "",
     /// The module the code at `current_source_span` belongs to.
     current_source_module: u32 = 0,
     /// The `@use`/`@forward` that is running each module running now,
@@ -4158,6 +4160,10 @@ pub const VM = struct {
             else
                 try self.coerceSlashFreeValue(resolved);
         }
+        if (meta.global_replacement != 0) try self.warnGlobalBuiltin(builtin_id, meta.global_replacement, args, arg_names);
+        const saved_call_name = self.current_builtin_call_name;
+        self.current_builtin_call_name = if (meta.global_replacement != 0) builtin_mod.globalBuiltinName(meta.global_replacement) else "";
+        defer self.current_builtin_call_name = saved_call_name;
         const prev_slot_hint = self.current_builtin_local_slot_hint;
         self.current_builtin_local_slot_hint = meta.local_slot_hint;
         defer self.current_builtin_local_slot_hint = prev_slot_hint;
@@ -6640,6 +6646,33 @@ pub const VM = struct {
             std.fmt.bufPrint(&buf, "Undefined operation \"{s}{s}\".", .{ op, text })) catch return err;
         error_format.setContextMessage(msg);
         return err;
+    }
+
+    /// The `global-builtin` deprecation for a call by a global name, once
+    /// its arguments are bound, as the official CLI warns: not when they do
+    /// not fit, nor for a CSS filter function (`grayscale(50%)`).
+    fn warnGlobalBuiltin(self: *VM, builtin_id: u32, row: u16, args: []const Value, arg_names: []const InternId) VMError!void {
+        if (!deprecation_mod.mayReport(&self.deprecation_opts, .global_builtin)) return;
+        if (!builtin_mod.signatureFits(self.intern_pool, builtin_id, args.len, arg_names)) return;
+        const replacement = builtin_mod.globalBuiltinReplacement(row);
+        const filter_names = [_][]const u8{ "grayscale", "invert", "saturate", "opacity", "alpha" };
+        const name = builtin_mod.globalBuiltinName(row);
+        for (filter_names) |filter| {
+            if (std.mem.eql(u8, name, filter) and (args.len == 0 or !self.isColorArgument(args[0]))) return;
+        }
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Global built-in functions are deprecated and will be removed in Dart Sass 3.0.0.\nUse {s} instead.\n\nMore info and automated migrator: https://sass-lang.com/d/import", .{replacement}) catch return;
+        const site = vm_dispatch.builtinCallSiteOf(self) orelse return;
+        const saved_site = deprecation_mod.builtin_call_site;
+        deprecation_mod.builtin_call_site = site;
+        defer deprecation_mod.builtin_call_site = saved_site;
+        try deprecation_mod.emitDeprecation(&self.deprecation_opts, .global_builtin, msg, "", 0, 0);
+    }
+
+    fn isColorArgument(self: *const VM, v: Value) bool {
+        if (v.kind() == .color) return true;
+        if (!v.isString() or v.stringQuoted(self.string_flags_pool.items)) return false;
+        return color_mod.lookupNamedColor(self.intern_pool.get(v.stringIntern())) != null;
     }
 
     /// A value as `meta.inspect()` writes it; the text is interned.

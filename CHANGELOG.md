@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- A global built-in function with a module equivalent warns as the
+  official CLI does (`global-builtin`: "Use math.percentage instead."),
+  once its arguments are bound and not for the CSS filter functions
+  (`grayscale(50%)`); the table of replacements is generated from the
+  official CLI by `scripts/probe_global_builtins.py`.
+- The Sass `if()` function warns when parsed (`if-function`), with the CSS
+  `if()` that replaces it, `if(sass(c): a; else: b)`.
+- lighten(), darken(), saturate(), desaturate(), opacify(), fade-in(),
+  transparentize(), fade-out(), and adjust-hue() warn as the official CLI
+  does, by the name they were called, with the color.scale() and
+  color.adjust() calls that do the same to the color, after their
+  arguments are checked.
 - Errors for incompatible units name the operands as the official CLI
   does: `1px - 1s`, `1px < 1s`, and `1px % 1s` report "1px and 1s have
   incompatible units.", and calc(), min(), max(), clamp(), round(),
