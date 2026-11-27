@@ -59,7 +59,7 @@ fn classifyCalcUnit(unit: []const u8) CalcUnitCategory {
         return .angle;
     if (std.mem.eql(u8, unit, "s") or std.mem.eql(u8, unit, "ms"))
         return .time;
-    if (std.ascii.eqlIgnoreCase(unit, "hz") or std.ascii.eqlIgnoreCase(unit, "khz"))
+    if (std.mem.eql(u8, unit, "Hz") or std.mem.eql(u8, unit, "kHz"))
         return .frequency;
     if (std.mem.eql(u8, unit, "dpi") or std.mem.eql(u8, unit, "dpcm") or
         std.mem.eql(u8, unit, "dppx") or std.mem.eql(u8, unit, "x"))

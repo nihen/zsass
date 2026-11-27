@@ -607,7 +607,7 @@ fn divValues(env: anytype, a: Value, b: Value, lhs_written_as_slash: bool) Error
             out_unit = .none;
         } else if (ub == .none) {
             out_unit = ua;
-        } else if (ua != .none and std.ascii.eqlIgnoreCase(env.pool().get(ua), env.pool().get(ub))) {
+        } else if (ua != .none and std.mem.eql(u8, env.pool().get(ua), env.pool().get(ub))) {
             out_unit = .none;
         } else if (ua != .none) {
             if (convertComparableUnitValueRuntime(denominator, env.pool().get(ub), env.pool().get(ua))) |converted| {
@@ -804,7 +804,7 @@ fn combineAddUnits(pool: *InternPool, number_pool: *value_mod.NumberPool, lhs: V
     if (ub == .none) {
         return .{ .unit = ua, .rhs = rhs.asF64(number_pool) };
     }
-    if (std.ascii.eqlIgnoreCase(pool.get(ua), pool.get(ub))) {
+    if (std.mem.eql(u8, pool.get(ua), pool.get(ub))) {
         return .{ .unit = ua, .rhs = rhs.asF64(number_pool) };
     }
     if (convertComparableUnitValueRuntime(rhs.asF64(number_pool), pool.get(ub), pool.get(ua))) |converted_rhs| {
@@ -848,7 +848,7 @@ fn comparableNumbers(pool: *InternPool, number_pool: *value_mod.NumberPool, allo
     if (ca.desc == null and cb.desc == null) {
         return .{ .a = ca.value, .b = cb.value };
     }
-    if (ca.desc != null and cb.desc != null and std.ascii.eqlIgnoreCase(ca.desc.?, cb.desc.?)) {
+    if (ca.desc != null and cb.desc != null and std.mem.eql(u8, ca.desc.?, cb.desc.?)) {
         return .{ .a = ca.value, .b = cb.value };
     }
     return error.SassError;
@@ -860,7 +860,7 @@ const ComparableUnitInfo = struct {
 };
 
 fn convertComparableUnitRuntime(value: f64, from: []const u8, to: []const u8) ?f64 {
-    if (std.ascii.eqlIgnoreCase(from, to)) return value;
+    if (std.mem.eql(u8, from, to)) return value;
     const from_u = comparableUnitInfo(from) orelse return null;
     const to_u = comparableUnitInfo(to) orelse return null;
     if (from_u.family != to_u.family) return null;
@@ -868,28 +868,28 @@ fn convertComparableUnitRuntime(value: f64, from: []const u8, to: []const u8) ?f
 }
 
 fn comparableUnitInfo(unit: []const u8) ?ComparableUnitInfo {
-    if (std.ascii.eqlIgnoreCase(unit, "px")) return .{ .family = .length, .factor = 1.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "in")) return .{ .family = .length, .factor = 96.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "cm")) return .{ .family = .length, .factor = 96.0 / 2.54 };
-    if (std.ascii.eqlIgnoreCase(unit, "mm")) return .{ .family = .length, .factor = 96.0 / 25.4 };
-    if (std.ascii.eqlIgnoreCase(unit, "pt")) return .{ .family = .length, .factor = 96.0 / 72.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "pc")) return .{ .family = .length, .factor = 16.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "q")) return .{ .family = .length, .factor = 96.0 / 101.6 };
+    if (std.mem.eql(u8, unit, "px")) return .{ .family = .length, .factor = 1.0 };
+    if (std.mem.eql(u8, unit, "in")) return .{ .family = .length, .factor = 96.0 };
+    if (std.mem.eql(u8, unit, "cm")) return .{ .family = .length, .factor = 96.0 / 2.54 };
+    if (std.mem.eql(u8, unit, "mm")) return .{ .family = .length, .factor = 96.0 / 25.4 };
+    if (std.mem.eql(u8, unit, "pt")) return .{ .family = .length, .factor = 96.0 / 72.0 };
+    if (std.mem.eql(u8, unit, "pc")) return .{ .family = .length, .factor = 16.0 };
+    if (std.mem.eql(u8, unit, "q")) return .{ .family = .length, .factor = 96.0 / 101.6 };
 
-    if (std.ascii.eqlIgnoreCase(unit, "deg")) return .{ .family = .angle, .factor = 1.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "rad")) return .{ .family = .angle, .factor = 180.0 / std.math.pi };
-    if (std.ascii.eqlIgnoreCase(unit, "grad")) return .{ .family = .angle, .factor = 0.9 };
-    if (std.ascii.eqlIgnoreCase(unit, "turn")) return .{ .family = .angle, .factor = 360.0 };
+    if (std.mem.eql(u8, unit, "deg")) return .{ .family = .angle, .factor = 1.0 };
+    if (std.mem.eql(u8, unit, "rad")) return .{ .family = .angle, .factor = 180.0 / std.math.pi };
+    if (std.mem.eql(u8, unit, "grad")) return .{ .family = .angle, .factor = 0.9 };
+    if (std.mem.eql(u8, unit, "turn")) return .{ .family = .angle, .factor = 360.0 };
 
-    if (std.ascii.eqlIgnoreCase(unit, "s")) return .{ .family = .time, .factor = 1.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "ms")) return .{ .family = .time, .factor = 0.001 };
+    if (std.mem.eql(u8, unit, "s")) return .{ .family = .time, .factor = 1.0 };
+    if (std.mem.eql(u8, unit, "ms")) return .{ .family = .time, .factor = 0.001 };
 
-    if (std.ascii.eqlIgnoreCase(unit, "hz")) return .{ .family = .frequency, .factor = 1.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "khz")) return .{ .family = .frequency, .factor = 1000.0 };
+    if (std.mem.eql(u8, unit, "Hz")) return .{ .family = .frequency, .factor = 1.0 };
+    if (std.mem.eql(u8, unit, "kHz")) return .{ .family = .frequency, .factor = 1000.0 };
 
-    if (std.ascii.eqlIgnoreCase(unit, "dppx")) return .{ .family = .resolution, .factor = 1.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "dpi")) return .{ .family = .resolution, .factor = 1.0 / 96.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "dpcm")) return .{ .family = .resolution, .factor = 2.54 / 96.0 };
+    if (std.mem.eql(u8, unit, "dppx")) return .{ .family = .resolution, .factor = 1.0 };
+    if (std.mem.eql(u8, unit, "dpi")) return .{ .family = .resolution, .factor = 1.0 / 96.0 };
+    if (std.mem.eql(u8, unit, "dpcm")) return .{ .family = .resolution, .factor = 2.54 / 96.0 };
     return null;
 }
 
@@ -899,28 +899,28 @@ const CanonicalComparableFactorRuntime = struct {
 };
 
 fn canonicalComparableFactorRuntime(unit: []const u8) ?CanonicalComparableFactorRuntime {
-    if (std.ascii.eqlIgnoreCase(unit, "px")) return .{ .name = "px", .factor = 1.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "in")) return .{ .name = "px", .factor = 96.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "cm")) return .{ .name = "px", .factor = 96.0 / 2.54 };
-    if (std.ascii.eqlIgnoreCase(unit, "mm")) return .{ .name = "px", .factor = 96.0 / 25.4 };
-    if (std.ascii.eqlIgnoreCase(unit, "pt")) return .{ .name = "px", .factor = 96.0 / 72.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "pc")) return .{ .name = "px", .factor = 16.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "q")) return .{ .name = "px", .factor = 96.0 / 101.6 };
+    if (std.mem.eql(u8, unit, "px")) return .{ .name = "px", .factor = 1.0 };
+    if (std.mem.eql(u8, unit, "in")) return .{ .name = "px", .factor = 96.0 };
+    if (std.mem.eql(u8, unit, "cm")) return .{ .name = "px", .factor = 96.0 / 2.54 };
+    if (std.mem.eql(u8, unit, "mm")) return .{ .name = "px", .factor = 96.0 / 25.4 };
+    if (std.mem.eql(u8, unit, "pt")) return .{ .name = "px", .factor = 96.0 / 72.0 };
+    if (std.mem.eql(u8, unit, "pc")) return .{ .name = "px", .factor = 16.0 };
+    if (std.mem.eql(u8, unit, "q")) return .{ .name = "px", .factor = 96.0 / 101.6 };
 
-    if (std.ascii.eqlIgnoreCase(unit, "deg")) return .{ .name = "deg", .factor = 1.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "rad")) return .{ .name = "deg", .factor = 180.0 / std.math.pi };
-    if (std.ascii.eqlIgnoreCase(unit, "grad")) return .{ .name = "deg", .factor = 0.9 };
-    if (std.ascii.eqlIgnoreCase(unit, "turn")) return .{ .name = "deg", .factor = 360.0 };
+    if (std.mem.eql(u8, unit, "deg")) return .{ .name = "deg", .factor = 1.0 };
+    if (std.mem.eql(u8, unit, "rad")) return .{ .name = "deg", .factor = 180.0 / std.math.pi };
+    if (std.mem.eql(u8, unit, "grad")) return .{ .name = "deg", .factor = 0.9 };
+    if (std.mem.eql(u8, unit, "turn")) return .{ .name = "deg", .factor = 360.0 };
 
-    if (std.ascii.eqlIgnoreCase(unit, "s")) return .{ .name = "s", .factor = 1.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "ms")) return .{ .name = "s", .factor = 0.001 };
+    if (std.mem.eql(u8, unit, "s")) return .{ .name = "s", .factor = 1.0 };
+    if (std.mem.eql(u8, unit, "ms")) return .{ .name = "s", .factor = 0.001 };
 
-    if (std.ascii.eqlIgnoreCase(unit, "Hz")) return .{ .name = "Hz", .factor = 1.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "kHz")) return .{ .name = "Hz", .factor = 1000.0 };
+    if (std.mem.eql(u8, unit, "Hz")) return .{ .name = "Hz", .factor = 1.0 };
+    if (std.mem.eql(u8, unit, "kHz")) return .{ .name = "Hz", .factor = 1000.0 };
 
-    if (std.ascii.eqlIgnoreCase(unit, "dppx")) return .{ .name = "dppx", .factor = 1.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "dpi")) return .{ .name = "dppx", .factor = 1.0 / 96.0 };
-    if (std.ascii.eqlIgnoreCase(unit, "dpcm")) return .{ .name = "dppx", .factor = 2.54 / 96.0 };
+    if (std.mem.eql(u8, unit, "dppx")) return .{ .name = "dppx", .factor = 1.0 };
+    if (std.mem.eql(u8, unit, "dpi")) return .{ .name = "dppx", .factor = 1.0 / 96.0 };
+    if (std.mem.eql(u8, unit, "dpcm")) return .{ .name = "dppx", .factor = 2.54 / 96.0 };
     return null;
 }
 
@@ -974,7 +974,7 @@ fn comparableUnitInfoRuntime(unit: []const u8) ?ComparableUnitInfo {
 }
 
 fn convertComparableUnitValueRuntime(value: f64, from: []const u8, to: []const u8) ?f64 {
-    if (std.ascii.eqlIgnoreCase(from, to)) return value;
+    if (std.mem.eql(u8, from, to)) return value;
     const from_u = comparableUnitInfoRuntime(from) orelse return null;
     const to_u = comparableUnitInfoRuntime(to) orelse return null;
     if (from_u.family != to_u.family) return null;
@@ -1296,7 +1296,7 @@ fn simplifyUnitFactorsCaseInsensitive(
         var matched = false;
         var j: usize = 0;
         while (j < denominators.items.len) : (j += 1) {
-            if (!std.ascii.eqlIgnoreCase(n, denominators.items[j])) continue;
+            if (!std.mem.eql(u8, n, denominators.items[j])) continue;
             _ = numerators.swapRemove(i);
             _ = denominators.swapRemove(j);
             matched = true;

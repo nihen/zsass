@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- Units are case-sensitive, as in the official CLI: `1PX + 1in` and
+  `1Px + 1px` fail with incompatible units instead of converting, and the
+  known units are spelled `q`, `Hz`, and `kHz`.
 - A top-level read of a global that only an unrun `!global` in a flow
   block sets fails with "Undefined variable.", as one in a callable does.
 - A function or mixin that reads a global only a `!global` assignment

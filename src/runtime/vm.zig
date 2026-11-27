@@ -8809,7 +8809,7 @@ pub const VM = struct {
         if (ca.desc == null and cb.desc == null) {
             return .{ .a = ca.value, .b = cb.value };
         }
-        if (ca.desc != null and cb.desc != null and std.ascii.eqlIgnoreCase(ca.desc.?, cb.desc.?)) {
+        if (ca.desc != null and cb.desc != null and std.mem.eql(u8, ca.desc.?, cb.desc.?)) {
             return .{ .a = ca.value, .b = cb.value };
         }
         return error.SassError;
@@ -9460,7 +9460,7 @@ fn combineAddUnits(pool: *InternPool, number_pool: *NumberPool, lhs: Value, rhs:
     if (ub == .none) {
         return .{ .unit = ua, .rhs = rhs.asF64(number_pool) };
     }
-    if (std.ascii.eqlIgnoreCase(pool.get(ua), pool.get(ub))) {
+    if (std.mem.eql(u8, pool.get(ua), pool.get(ub))) {
         return .{ .unit = ua, .rhs = rhs.asF64(number_pool) };
     }
 
@@ -9488,26 +9488,26 @@ const CssMathUnitCategoryRuntime = enum {
 };
 
 fn cssMathUnitCategoryRuntime(unit: []const u8) CssMathUnitCategoryRuntime {
-    if (std.ascii.eqlIgnoreCase(unit, "px") or
-        std.ascii.eqlIgnoreCase(unit, "cm") or
-        std.ascii.eqlIgnoreCase(unit, "mm") or
-        std.ascii.eqlIgnoreCase(unit, "in") or
-        std.ascii.eqlIgnoreCase(unit, "pt") or
-        std.ascii.eqlIgnoreCase(unit, "pc") or
-        std.ascii.eqlIgnoreCase(unit, "q")) return .length;
+    if (std.mem.eql(u8, unit, "px") or
+        std.mem.eql(u8, unit, "cm") or
+        std.mem.eql(u8, unit, "mm") or
+        std.mem.eql(u8, unit, "in") or
+        std.mem.eql(u8, unit, "pt") or
+        std.mem.eql(u8, unit, "pc") or
+        std.mem.eql(u8, unit, "q")) return .length;
 
-    if (std.ascii.eqlIgnoreCase(unit, "deg") or
-        std.ascii.eqlIgnoreCase(unit, "rad") or
-        std.ascii.eqlIgnoreCase(unit, "grad") or
-        std.ascii.eqlIgnoreCase(unit, "turn")) return .angle;
+    if (std.mem.eql(u8, unit, "deg") or
+        std.mem.eql(u8, unit, "rad") or
+        std.mem.eql(u8, unit, "grad") or
+        std.mem.eql(u8, unit, "turn")) return .angle;
 
-    if (std.ascii.eqlIgnoreCase(unit, "s") or std.ascii.eqlIgnoreCase(unit, "ms")) return .time;
+    if (std.mem.eql(u8, unit, "s") or std.mem.eql(u8, unit, "ms")) return .time;
 
-    if (std.ascii.eqlIgnoreCase(unit, "hz") or std.ascii.eqlIgnoreCase(unit, "khz")) return .frequency;
+    if (std.mem.eql(u8, unit, "Hz") or std.mem.eql(u8, unit, "kHz")) return .frequency;
 
-    if (std.ascii.eqlIgnoreCase(unit, "dpi") or
-        std.ascii.eqlIgnoreCase(unit, "dpcm") or
-        std.ascii.eqlIgnoreCase(unit, "dppx")) return .resolution;
+    if (std.mem.eql(u8, unit, "dpi") or
+        std.mem.eql(u8, unit, "dpcm") or
+        std.mem.eql(u8, unit, "dppx")) return .resolution;
 
     return .unknown;
 }
@@ -10044,7 +10044,7 @@ fn simplifyUnitFactorsCaseInsensitive(
         var matched = false;
         var j: usize = 0;
         while (j < denominators.items.len) : (j += 1) {
-            if (!std.ascii.eqlIgnoreCase(n, denominators.items[j])) continue;
+            if (!std.mem.eql(u8, n, denominators.items[j])) continue;
             _ = numerators.orderedRemove(i);
             _ = denominators.orderedRemove(j);
             matched = true;
@@ -10293,7 +10293,7 @@ fn divValues(
             out_unit = .none;
         } else if (ub == .none) {
             out_unit = ua;
-        } else if (ua != .none and std.ascii.eqlIgnoreCase(pool.get(ua), pool.get(ub))) {
+        } else if (ua != .none and std.mem.eql(u8, pool.get(ua), pool.get(ub))) {
             out_unit = .none;
         } else if (ua != .none) {
             if (convertComparableUnitValueRuntime(denominator, pool.get(ub), pool.get(ua))) |converted| {

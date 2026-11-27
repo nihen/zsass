@@ -1061,3 +1061,13 @@ test "math: compound units differing in case are incompatible; unitless compares
     if (compile(a, "@use \"sass:math\"; a { b: math.min(2px * 1s, 1PX * 1s); }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
     try std.testing.expectEqualStrings("a {\n  b: 0;\n}\n", try compile(a, "@use \"sass:math\"; a { b: math.min(1px * 1px, 0); }", "", &.{}, quiet));
 }
+
+test "units: units are case-sensitive" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "a { b: 1PX + 1in; }", "a { b: 1Px + 1px; }", "a { b: 10Q + 1mm; }", "a { b: 1hz + 1khz; }" }) |src| {
+        if (compile(a, src, "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    }
+    try std.testing.expectEqualStrings("a {\n  b: 5q;\n  c: 1001Hz;\n  d: false;\n}\n", try compile(a, "@use \"sass:math\"; a { b: 1q + 1mm; c: 1Hz + 1kHz; d: math.compatible(1PX, 1in); }", "", &.{}, quiet));
+}

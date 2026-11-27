@@ -252,26 +252,26 @@ fn unitSlice(ctx: *BuiltinContext, id: InternId) ?[]const u8 {
 }
 
 fn unitCategory(unit: []const u8) UnitCategory {
-    if (std.ascii.eqlIgnoreCase(unit, "px") or
-        std.ascii.eqlIgnoreCase(unit, "cm") or
-        std.ascii.eqlIgnoreCase(unit, "mm") or
-        std.ascii.eqlIgnoreCase(unit, "in") or
-        std.ascii.eqlIgnoreCase(unit, "pt") or
-        std.ascii.eqlIgnoreCase(unit, "pc") or
-        std.ascii.eqlIgnoreCase(unit, "q")) return .length;
+    if (std.mem.eql(u8, unit, "px") or
+        std.mem.eql(u8, unit, "cm") or
+        std.mem.eql(u8, unit, "mm") or
+        std.mem.eql(u8, unit, "in") or
+        std.mem.eql(u8, unit, "pt") or
+        std.mem.eql(u8, unit, "pc") or
+        std.mem.eql(u8, unit, "q")) return .length;
 
-    if (std.ascii.eqlIgnoreCase(unit, "deg") or
-        std.ascii.eqlIgnoreCase(unit, "rad") or
-        std.ascii.eqlIgnoreCase(unit, "grad") or
-        std.ascii.eqlIgnoreCase(unit, "turn")) return .angle;
+    if (std.mem.eql(u8, unit, "deg") or
+        std.mem.eql(u8, unit, "rad") or
+        std.mem.eql(u8, unit, "grad") or
+        std.mem.eql(u8, unit, "turn")) return .angle;
 
-    if (std.ascii.eqlIgnoreCase(unit, "s") or std.ascii.eqlIgnoreCase(unit, "ms")) return .time;
+    if (std.mem.eql(u8, unit, "s") or std.mem.eql(u8, unit, "ms")) return .time;
 
-    if (std.ascii.eqlIgnoreCase(unit, "hz") or std.ascii.eqlIgnoreCase(unit, "khz")) return .frequency;
+    if (std.mem.eql(u8, unit, "Hz") or std.mem.eql(u8, unit, "kHz")) return .frequency;
 
-    if (std.ascii.eqlIgnoreCase(unit, "dpi") or
-        std.ascii.eqlIgnoreCase(unit, "dpcm") or
-        std.ascii.eqlIgnoreCase(unit, "dppx")) return .resolution;
+    if (std.mem.eql(u8, unit, "dpi") or
+        std.mem.eql(u8, unit, "dpcm") or
+        std.mem.eql(u8, unit, "dppx")) return .resolution;
 
     return .unknown;
 }
@@ -285,7 +285,7 @@ fn knownCalculationUnitsIncompatible(unit_a: ?[]const u8, unit_b: ?[]const u8) b
     if (unit_a == null and unit_b == null) return false;
     const a = unit_a.?;
     const b = unit_b.?;
-    if (std.ascii.eqlIgnoreCase(a, b)) return false;
+    if (std.mem.eql(u8, a, b)) return false;
     const cat_a = unitCategory(a);
     const cat_b = unitCategory(b);
     if (cat_a == .unknown or cat_b == .unknown) return false;
@@ -293,55 +293,55 @@ fn knownCalculationUnitsIncompatible(unit_a: ?[]const u8, unit_b: ?[]const u8) b
 }
 
 fn toCanonical(value: f64, unit: []const u8) ?f64 {
-    if (std.ascii.eqlIgnoreCase(unit, "px")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "in")) return value * 96.0;
-    if (std.ascii.eqlIgnoreCase(unit, "cm")) return value * 96.0 / 2.54;
-    if (std.ascii.eqlIgnoreCase(unit, "mm")) return value * 96.0 / 25.4;
-    if (std.ascii.eqlIgnoreCase(unit, "pt")) return value * 96.0 / 72.0;
-    if (std.ascii.eqlIgnoreCase(unit, "pc")) return value * 96.0 / 6.0;
-    if (std.ascii.eqlIgnoreCase(unit, "q")) return value * 96.0 / 101.6;
+    if (std.mem.eql(u8, unit, "px")) return value;
+    if (std.mem.eql(u8, unit, "in")) return value * 96.0;
+    if (std.mem.eql(u8, unit, "cm")) return value * 96.0 / 2.54;
+    if (std.mem.eql(u8, unit, "mm")) return value * 96.0 / 25.4;
+    if (std.mem.eql(u8, unit, "pt")) return value * 96.0 / 72.0;
+    if (std.mem.eql(u8, unit, "pc")) return value * 96.0 / 6.0;
+    if (std.mem.eql(u8, unit, "q")) return value * 96.0 / 101.6;
 
-    if (std.ascii.eqlIgnoreCase(unit, "deg")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "rad")) return value * 180.0 / std.math.pi;
-    if (std.ascii.eqlIgnoreCase(unit, "grad")) return value * 0.9;
-    if (std.ascii.eqlIgnoreCase(unit, "turn")) return value * 360.0;
+    if (std.mem.eql(u8, unit, "deg")) return value;
+    if (std.mem.eql(u8, unit, "rad")) return value * 180.0 / std.math.pi;
+    if (std.mem.eql(u8, unit, "grad")) return value * 0.9;
+    if (std.mem.eql(u8, unit, "turn")) return value * 360.0;
 
-    if (std.ascii.eqlIgnoreCase(unit, "s")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "ms")) return value / 1000.0;
+    if (std.mem.eql(u8, unit, "s")) return value;
+    if (std.mem.eql(u8, unit, "ms")) return value / 1000.0;
 
-    if (std.ascii.eqlIgnoreCase(unit, "hz")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "khz")) return value * 1000.0;
+    if (std.mem.eql(u8, unit, "Hz")) return value;
+    if (std.mem.eql(u8, unit, "kHz")) return value * 1000.0;
 
-    if (std.ascii.eqlIgnoreCase(unit, "dppx")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "dpi")) return value / 96.0;
-    if (std.ascii.eqlIgnoreCase(unit, "dpcm")) return value * 2.54 / 96.0;
+    if (std.mem.eql(u8, unit, "dppx")) return value;
+    if (std.mem.eql(u8, unit, "dpi")) return value / 96.0;
+    if (std.mem.eql(u8, unit, "dpcm")) return value * 2.54 / 96.0;
 
     return null;
 }
 
 fn fromCanonical(value: f64, unit: []const u8) ?f64 {
-    if (std.ascii.eqlIgnoreCase(unit, "px")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "in")) return value / 96.0;
-    if (std.ascii.eqlIgnoreCase(unit, "cm")) return value * 2.54 / 96.0;
-    if (std.ascii.eqlIgnoreCase(unit, "mm")) return value * 25.4 / 96.0;
-    if (std.ascii.eqlIgnoreCase(unit, "pt")) return value * 72.0 / 96.0;
-    if (std.ascii.eqlIgnoreCase(unit, "pc")) return value * 6.0 / 96.0;
-    if (std.ascii.eqlIgnoreCase(unit, "q")) return value * 101.6 / 96.0;
+    if (std.mem.eql(u8, unit, "px")) return value;
+    if (std.mem.eql(u8, unit, "in")) return value / 96.0;
+    if (std.mem.eql(u8, unit, "cm")) return value * 2.54 / 96.0;
+    if (std.mem.eql(u8, unit, "mm")) return value * 25.4 / 96.0;
+    if (std.mem.eql(u8, unit, "pt")) return value * 72.0 / 96.0;
+    if (std.mem.eql(u8, unit, "pc")) return value * 6.0 / 96.0;
+    if (std.mem.eql(u8, unit, "q")) return value * 101.6 / 96.0;
 
-    if (std.ascii.eqlIgnoreCase(unit, "deg")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "rad")) return value * std.math.pi / 180.0;
-    if (std.ascii.eqlIgnoreCase(unit, "grad")) return value / 0.9;
-    if (std.ascii.eqlIgnoreCase(unit, "turn")) return value / 360.0;
+    if (std.mem.eql(u8, unit, "deg")) return value;
+    if (std.mem.eql(u8, unit, "rad")) return value * std.math.pi / 180.0;
+    if (std.mem.eql(u8, unit, "grad")) return value / 0.9;
+    if (std.mem.eql(u8, unit, "turn")) return value / 360.0;
 
-    if (std.ascii.eqlIgnoreCase(unit, "s")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "ms")) return value * 1000.0;
+    if (std.mem.eql(u8, unit, "s")) return value;
+    if (std.mem.eql(u8, unit, "ms")) return value * 1000.0;
 
-    if (std.ascii.eqlIgnoreCase(unit, "hz")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "khz")) return value / 1000.0;
+    if (std.mem.eql(u8, unit, "Hz")) return value;
+    if (std.mem.eql(u8, unit, "kHz")) return value / 1000.0;
 
-    if (std.ascii.eqlIgnoreCase(unit, "dppx")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "dpi")) return value * 96.0;
-    if (std.ascii.eqlIgnoreCase(unit, "dpcm")) return value * 96.0 / 2.54;
+    if (std.mem.eql(u8, unit, "dppx")) return value;
+    if (std.mem.eql(u8, unit, "dpi")) return value * 96.0;
+    if (std.mem.eql(u8, unit, "dpcm")) return value * 96.0 / 2.54;
 
     return null;
 }
@@ -352,7 +352,7 @@ fn convertUnit(value: f64, from: ?[]const u8, to: ?[]const u8) ?f64 {
 
     const from_u = from.?;
     const to_u = to.?;
-    if (std.ascii.eqlIgnoreCase(from_u, to_u)) return value;
+    if (std.mem.eql(u8, from_u, to_u)) return value;
 
     const from_cat = unitCategory(from_u);
     const to_cat = unitCategory(to_u);
@@ -374,10 +374,10 @@ fn convertNumberToTargetUnit(ctx: *BuiltinContext, value: Value, target_unit: In
 
 fn convertAngleToRadians(value: f64, unit: ?[]const u8) f64 {
     if (unit) |u| {
-        if (std.ascii.eqlIgnoreCase(u, "deg")) return value * std.math.pi / 180.0;
-        if (std.ascii.eqlIgnoreCase(u, "grad")) return value * std.math.pi / 200.0;
-        if (std.ascii.eqlIgnoreCase(u, "turn")) return value * 2.0 * std.math.pi;
-        if (std.ascii.eqlIgnoreCase(u, "rad")) return value;
+        if (std.mem.eql(u8, u, "deg")) return value * std.math.pi / 180.0;
+        if (std.mem.eql(u8, u, "grad")) return value * std.math.pi / 200.0;
+        if (std.mem.eql(u8, u, "turn")) return value * 2.0 * std.math.pi;
+        if (std.mem.eql(u8, u, "rad")) return value;
     }
     return value;
 }
@@ -426,8 +426,6 @@ fn matchUnitFactors(ctx: *BuiltinContext, from: []const []const u8, to: []const 
     outer: for (from) |f| {
         for (to, 0..) |t, i| {
             if (used[i]) continue;
-            // Units differing only in case are different units.
-            if (!std.mem.eql(u8, f, t) and std.ascii.eqlIgnoreCase(f, t)) continue;
             const c = convertUnit(1.0, f, t) orelse continue;
             used[i] = true;
             factor *= c;
@@ -1358,7 +1356,7 @@ fn combineLegacyRoundAddSub(
     if (rhs_unit == null) {
         return try numberLike(ctx, lhs.asF64(ctx.number_pool) + rhs_value, lhs.unitId(ctx.number_pool));
     }
-    if (std.ascii.eqlIgnoreCase(lhs_unit.?, rhs_unit.?)) {
+    if (std.mem.eql(u8, lhs_unit.?, rhs_unit.?)) {
         return try numberLike(ctx, lhs.asF64(ctx.number_pool) + rhs_value, lhs.unitId(ctx.number_pool));
     }
     if (knownCalculationUnitsIncompatible(lhs_unit, rhs_unit)) {
@@ -1456,7 +1454,7 @@ fn simplifyUnitFactors(
         var removed = false;
         var j: usize = 0;
         while (j < denominators.items.len) : (j += 1) {
-            if (std.ascii.eqlIgnoreCase(numerators.items[i], denominators.items[j])) {
+            if (std.mem.eql(u8, numerators.items[i], denominators.items[j])) {
                 _ = numerators.orderedRemove(i);
                 _ = denominators.orderedRemove(j);
                 removed = true;
@@ -1842,7 +1840,7 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
         if (arg_unit) |unit| {
             if (unitCategory(unit) == .unknown) {
                 if (first_unknown_unit) |prev_unit| {
-                    if (!std.ascii.eqlIgnoreCase(prev_unit, unit)) saw_multiple_unknown_units = true;
+                    if (!std.mem.eql(u8, prev_unit, unit)) saw_multiple_unknown_units = true;
                 } else {
                     first_unknown_unit = unit;
                 }
@@ -2254,7 +2252,7 @@ pub fn math_div(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
         if (ua != .none and ub != .none) {
             const ua_slice = unitSlice(ctx, ua).?;
             const ub_slice = unitSlice(ctx, ub).?;
-            if (std.ascii.eqlIgnoreCase(ua_slice, ub_slice)) {
+            if (std.mem.eql(u8, ua_slice, ub_slice)) {
                 out_unit = .none;
             } else if (convertUnit(1.0, ub_slice, ua_slice) != null) {
                 if (convertUnit(a, ua_slice, ub_slice)) |converted| numerator = converted;
