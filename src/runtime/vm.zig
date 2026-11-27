@@ -4160,7 +4160,8 @@ pub const VM = struct {
             else
                 try self.coerceSlashFreeValue(resolved);
         }
-        if (meta.global_replacement != 0) try self.warnGlobalBuiltin(builtin_id, meta.global_replacement, args, arg_names);
+        // Spread arguments are bound once expanded, below.
+        if (meta.global_replacement != 0 and !names_seen.splat) try self.warnGlobalBuiltin(builtin_id, meta.global_replacement, args, arg_names);
         const saved_call_name = self.current_builtin_call_name;
         self.current_builtin_call_name = if (meta.global_replacement != 0) builtin_mod.globalBuiltinName(meta.global_replacement) else "";
         defer self.current_builtin_call_name = saved_call_name;
@@ -4173,6 +4174,7 @@ pub const VM = struct {
         } else {
             const expanded = try self.expandCallArgsWithSplat(args, arg_names);
             defer self.freeExpandedCallArgs(expanded);
+            if (meta.global_replacement != 0) try self.warnGlobalBuiltin(builtin_id, meta.global_replacement, expanded.args, expanded.arg_names);
             const raw_out = try self.dispatchBuiltinArgs(builtin_id, expanded.args, expanded.arg_names);
             const out = try self.maybeSerializeDirectBuiltinColorWithSplat(builtin_id, true, raw_out);
             try self.push(out);
@@ -8963,9 +8965,11 @@ pub const VM = struct {
             n += 1;
         }
 
-        // Code an `@import` brought in is spanned in the imported file.
+        // Code an `@import` brought in is spanned in the imported file; the
+        // trace runs through each @import that brought it, outermost first.
         var path: []const u8 = inner_mod.module_path;
         var module_id: ?u32 = @intCast(fid);
+        var imported = false;
         const origin_index: usize = @backingInt(self.current_origin);
         if (self.current_origin != .invalid and origin_index < self.program.origins.len and
             self.program.origins[origin_index].kind == .import_stylesheet)
@@ -8974,10 +8978,15 @@ pub const VM = struct {
             if (origin_path.len != 0 and !std.mem.eql(u8, origin_path, inner_mod.module_path)) {
                 path = origin_path;
                 module_id = null;
+                imported = true;
+                if (site_count == 0) n = self.appendImportFrames(out, n, @intCast(fid), inner_mod.module_path, top_label, origin_index);
             }
         }
         const inner_ref = self.innerMostChunkRef();
-        const inner_label = if (inner_ref == .top) top_label else diagnosticCallLabel(inner_ref, self.innerMostChunkName(), &label_buf);
+        const inner_label = if (inner_ref == .top)
+            (if (imported and site_count == 0) "@import" else top_label)
+        else
+            diagnosticCallLabel(inner_ref, self.innerMostChunkName(), &label_buf);
         const source = self.diagnosticSource(module_id, path) orelse {
             // No source to show: the position alone, from the module's line
             // table when the code is the module's own.
@@ -9006,6 +9015,41 @@ pub const VM = struct {
     fn slashDivMessage(self: *VM, module_id: u32, path: []const u8, direct_value: bool) ?[]u8 {
         const source = self.diagnosticSource(module_id, path) orelse return null;
         return deprecation_mod.slashDivMessage(self.allocator, source, self.current_source_span.start, self.current_source_span.end, direct_value);
+    }
+
+    /// The frames of the @import rules that brought in the code of
+    /// `origin_index`, outermost first: the module's own at its first rule,
+    /// then each imported file at the rule importing the next.
+    fn appendImportFrames(self: *VM, out: []error_format.ErrorTraceFrame, start: usize, module_id: u32, module_path: []const u8, module_label: []const u8, origin_index: usize) usize {
+        var chain: [error_format.max_error_stack]usize = undefined;
+        var depth: usize = 0;
+        var cursor: usize = origin_index;
+        while (depth < chain.len) {
+            chain[depth] = cursor;
+            depth += 1;
+            const parent = self.program.origins[cursor].parent_import_origin;
+            const parent_index: usize = @backingInt(parent);
+            if (parent == .invalid or parent_index >= self.program.origins.len) break;
+            cursor = parent_index;
+        }
+        var n = start;
+        var i: usize = depth;
+        while (i > 0) : (i -= 1) {
+            if (n + 1 >= out.len) break;
+            const origin = self.program.origins[chain[i - 1]];
+            const is_outermost = i == depth;
+            const file_path = if (is_outermost) module_path else self.program.origins[chain[i]].source_path;
+            const file_source = (if (is_outermost) self.diagnosticSource(module_id, file_path) else self.diagnosticSource(null, file_path)) orelse return start;
+            if (origin.import_offset == std.math.maxInt(u32)) return start;
+            const end = @min(@as(usize, origin.import_offset), file_source.len);
+            const line_start = if (std.mem.lastIndexOfScalar(u8, file_source[0..end], '\n')) |nl| nl + 1 else 0;
+            const line_no: u32 = @intCast(std.mem.count(u8, file_source[0..line_start], "\n") + 1);
+            const col_no: u32 = @intCast(end - line_start + 1);
+            const label = if (is_outermost) module_label else "@import";
+            error_format.fillTraceFrame(&out[n], file_path, label, line_no, col_no, line_no, col_no, "");
+            n += 1;
+        }
+        return n;
     }
 
     fn moduleRunLabel(site: ModuleRunSite) []const u8 {

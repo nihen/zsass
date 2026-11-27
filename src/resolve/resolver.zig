@@ -380,6 +380,8 @@ const PendingCallableDefault = struct {
     callable_id: u32,
     param_index: u32,
     expr_text: []const u8,
+    /// Where `expr_text` starts in the module's source.
+    expr_offset: u32 = 0,
     use_bindings: []const PendingUseBinding,
 };
 
@@ -506,6 +508,9 @@ const Ctx = struct {
     calc_arg_mode: bool = false,
     /// Resolving the arguments of a CSS calculation function.
     in_calculation_args: bool = false,
+    /// How far `ast.source` is from the source spans refer to, inside a
+    /// sub-parse: a position there plus this is one in the module's source.
+    sub_source_delta: i64 = 0,
     /// `infinity` / `pi` etc. in CSS math call arguments such as clamp/hypot
     /// Use number-ish identifier for numerical resolution without turning it into a marker.
     calc_arg_allow_numberish_ident_literals: bool = false,
@@ -5283,6 +5288,13 @@ fn subParseError(err: anyerror) ResolveError {
 }
 
 fn parseSubExpr(ctx: *Ctx, inner: []const u8, outer_span: Span) ResolveError!ExprIndex {
+    return parseSubExprAt(ctx, inner, outer_span, null);
+}
+
+/// `parseSubExpr` of a copy of the text at `base` in the source spans
+/// refer to; null when `inner` is a slice of the current source, or is
+/// placed at `outer_span`.
+fn parseSubExprAt(ctx: *Ctx, inner: []const u8, outer_span: Span, base: ?u32) ResolveError!ExprIndex {
     var sub_ast = ast_flat.Ast.init(ctx.a, inner, .none);
     defer sub_ast.deinit();
     var lexer = lexer_mod.Lexer.init(ctx.a, inner);
@@ -5332,12 +5344,41 @@ fn parseSubExpr(ctx: *Ctx, inner: []const u8, outer_span: Span) ResolveError!Exp
         .resolving_callable_default = ctx.resolving_callable_default,
         .deferred_callable_default_use_bindings = ctx.deferred_callable_default_use_bindings,
         .mixin_accepts_content = ctx.mixin_accepts_content,
+        .sub_source_delta = subSourceDelta(ctx, inner, 0, base),
     };
     const expr_base = ctx.prog.exprs.items.len;
     const call_base = ctx.prog.builtin_calls.items.len;
     const result = try resolveExpr(&sub_ast, &sub_ctx, expr_root);
-    rebaseSubExprSpans(ctx, inner, 0, outer_span, expr_base, call_base);
+    if (base) |b| {
+        shiftSubExprSpans(ctx, b, expr_base, call_base);
+    } else {
+        rebaseSubExprSpans(ctx, inner, 0, outer_span, expr_base, call_base);
+    }
     return result;
+}
+
+/// How far the source a sub-parse of `inner` (after `prefix_len` bytes of
+/// its own) reads is from the one spans refer to: `base` when it is a copy
+/// of the text there, else from where `inner` lies in the current source.
+fn subSourceDelta(ctx: *const Ctx, inner: []const u8, prefix_len: u32, base: ?u32) i64 {
+    if (base) |b| return @as(i64, b) - @as(i64, prefix_len);
+    const source = ctx.ast.source;
+    const src_start = @intFromPtr(source.ptr);
+    const inner_start = @intFromPtr(inner.ptr);
+    if (inner_start < src_start or inner_start + inner.len > src_start + source.len) return ctx.sub_source_delta;
+    return ctx.sub_source_delta + @as(i64, @intCast(inner_start - src_start)) - @as(i64, prefix_len);
+}
+
+fn shiftSubExprSpans(ctx: *Ctx, base: u32, expr_base: usize, call_base: usize) void {
+    for (ctx.prog.exprs.items[expr_base..]) |*e| {
+        e.span.start += base;
+        e.span.end += base;
+    }
+    for (ctx.prog.builtin_calls.items[call_base..]) |*c| {
+        if (c.span_start == std.math.maxInt(u32)) continue;
+        c.span_start += base;
+        c.span_end += base;
+    }
 }
 
 /// The expressions a sub-parse made are spanned within the text it parsed,
@@ -7554,11 +7595,15 @@ fn warnLegacyIfFunction(ast: *const ast_flat.Ast, ctx: *Ctx, call_extra: ExtraIn
     else
         try std.fmt.allocPrint(ctx.a, "{s}\n\n{s}", .{ head, more_info });
     defer ctx.a.free(msg);
-    const pos = data_mod.spanStartLineColOneBased(source.len, ctx.prog.line_starts, span.start);
-    const end_pos = data_mod.spanStartLineColOneBased(source.len, ctx.prog.line_starts, span.end);
+    // Inside a sub-parse, positions are moved into the module's source.
+    const start: u32 = @intCast(@as(i64, span.start) + ctx.sub_source_delta);
+    const end: u32 = @intCast(@as(i64, span.end) + ctx.sub_source_delta);
+    const module_len: usize = if (ctx.prog.line_starts.len > 0) std.math.maxInt(u32) else source.len;
+    const pos = data_mod.spanStartLineColOneBased(module_len, ctx.prog.line_starts, start);
+    const end_pos = data_mod.spanStartLineColOneBased(module_len, ctx.prog.line_starts, end);
     deprecation_mod.emitDeprecationSpan(opts, .if_function, msg, ctx.module_path, pos.line, pos.col, if (end_pos.line == pos.line) end_pos.col else 0) catch |err| switch (err) {
         error.FatalDeprecation => {
-            error_format.recordErrorSpan(span.start, span.end, 0);
+            error_format.recordErrorSpan(start, end, 0);
             return error.SassError;
         },
         else => return error.SassError,
@@ -9714,6 +9759,7 @@ fn resolveExprFromSourceText(ctx: *Ctx, raw_src: []const u8) ResolveError!ExprIn
 
     var sub_ctx = ctx.*;
     sub_ctx.ast = &sub_ast;
+    sub_ctx.sub_source_delta = subSourceDelta(ctx, raw_src, 0, null);
     const expr_base = ctx.prog.exprs.items.len;
     const call_base = ctx.prog.builtin_calls.items.len;
     const result = try resolveExprMaybeStaticLiteral(&sub_ast, &sub_ctx, expr_root);
@@ -9782,6 +9828,7 @@ fn resolveIncludeArgsFromSource(ctx: *Ctx, inner_src: []const u8) ResolveError!R
 
     var sub_ctx = ctx.*;
     sub_ctx.ast = &sub_ast;
+    sub_ctx.sub_source_delta = subSourceDelta(ctx, inner_src, "__zsass_include(".len, null);
     const expr_base = ctx.prog.exprs.items.len;
     const call_base = ctx.prog.builtin_calls.items.len;
     defer rebaseSubExprSpans(ctx, inner_src, "__zsass_include(".len, null, expr_base, call_base);
@@ -10097,6 +10144,11 @@ fn queueCallableDefaultNodes(
     for (default_nodes, 0..) |maybe_node, i| {
         const node = maybe_node orelse continue;
         const text = try dupExprNodeTextTrimmed(ctx, node);
+        const node_start = ctx.ast.getNode(node).span_start;
+        const leading = if (node_start < ctx.ast.source.len)
+            (std.mem.indexOfNone(u8, ctx.ast.source[node_start..], " \t\r\n") orelse 0)
+        else
+            0;
         const use_bindings = captured_use_bindings orelse blk: {
             const snap = try snapshotStringMap(UseBinding, ctx.a, &ctx.prog.use_map);
             captured_use_bindings = snap;
@@ -10107,6 +10159,7 @@ fn queueCallableDefaultNodes(
             .callable_id = callable_id,
             .param_index = @intCast(i),
             .expr_text = text,
+            .expr_offset = @intCast(@as(i64, node_start) + @as(i64, @intCast(leading)) + ctx.sub_source_delta),
             .use_bindings = use_bindings,
         });
     }
@@ -10115,6 +10168,7 @@ fn queueCallableDefaultNodes(
 fn resolveDeferredCallableDefaultExpr(
     ctx: *Ctx,
     expr_text: []const u8,
+    expr_offset: u32,
     use_bindings: []const PendingUseBinding,
     param_names: []const InternId,
     param_slots: []const SlotId,
@@ -10149,10 +10203,10 @@ fn resolveDeferredCallableDefaultExpr(
     ctx.deferred_callable_default_use_bindings = use_bindings;
     defer ctx.deferred_callable_default_use_bindings = saved_use_bindings;
 
-    return try parseSubExpr(ctx, expr_text, .{
-        .start = 0,
-        .end = @intCast(expr_text.len),
-    });
+    return try parseSubExprAt(ctx, expr_text, .{
+        .start = expr_offset,
+        .end = expr_offset + @as(u32, @intCast(expr_text.len)),
+    }, expr_offset);
 }
 
 fn resolvePendingCallableDefaults(ctx: *Ctx) ResolveError!void {
@@ -10166,6 +10220,7 @@ fn resolvePendingCallableDefaults(ctx: *Ctx) ResolveError!void {
                 const de = resolveDeferredCallableDefaultExpr(
                     ctx,
                     pending.expr_text,
+                    pending.expr_offset,
                     pending.use_bindings,
                     mixin.param_names,
                     mixin.param_slots,
@@ -10183,6 +10238,7 @@ fn resolvePendingCallableDefaults(ctx: *Ctx) ResolveError!void {
                 const de = resolveDeferredCallableDefaultExpr(
                     ctx,
                     pending.expr_text,
+                    pending.expr_offset,
                     pending.use_bindings,
                     func.param_names,
                     func.param_slots,
@@ -10770,6 +10826,7 @@ const preamble_ctx_default_only = [_][]const u8{
     "allow_unknown_var_literal",
     "calc_arg_mode",
     "in_calculation_args",
+    "sub_source_delta",
     "calc_arg_allow_numberish_ident_literals",
     "in_declaration_value",
     "slash_paren_depth",

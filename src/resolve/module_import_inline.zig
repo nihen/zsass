@@ -91,8 +91,10 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: 
 
     if (loader.deprecation_opts) |dep_opts| {
         // Located at the URL, as the official CLI reports it.
-        const pos = spanStartLineColOneBased(ctx.ast.source.len, ctx.prog.line_starts, url_span.start);
-        const end_pos = spanStartLineColOneBased(ctx.ast.source.len, ctx.prog.line_starts, url_span.end);
+        // The rule is in the file being resolved, an imported one too, whose
+        // lines the module's table does not have.
+        const pos = sourceLineCol(ctx.ast.source, url_span.start);
+        const end_pos = sourceLineCol(ctx.ast.source, url_span.end);
         deprecation_mod.emitDeprecationSpan(
             dep_opts,
             .import,
@@ -171,7 +173,7 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: 
         ctx.origin_stack.items[ctx.origin_stack.items.len - 1]
     else
         .invalid;
-    const loader_import_origin_idx = try appendImportOrigin(loader, resolved_path, parent_import_origin);
+    const loader_import_origin_idx = try appendImportOrigin(loader, resolved_path, parent_import_origin, url_span.start);
     try ctx.origin_stack.append(ctx.a, loader_import_origin_idx);
     defer _ = ctx.origin_stack.pop();
 
@@ -233,4 +235,10 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: 
     }
 
     return try deps.appendNoop(ctx, span);
+}
+
+fn sourceLineCol(source: []const u8, offset: u32) struct { line: u32, col: u32 } {
+    const end = @min(@as(usize, offset), source.len);
+    const line_start = if (std.mem.lastIndexOfScalar(u8, source[0..end], '\n')) |nl| nl + 1 else 0;
+    return .{ .line = @intCast(std.mem.count(u8, source[0..line_start], "\n") + 1), .col = @intCast(end - line_start + 1) };
 }

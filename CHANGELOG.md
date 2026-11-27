@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- A warning from code that `@import` brought in points into the imported
+  file, and its trace lists each `@import` that led there, as the
+  official CLI does.
 - color.scale(), color.adjust(), and color.change() report argument
   errors as the official CLI does ("$red: Expected 1px to have unit "%"
   or no units.", "$chroma: Color space rgb doesn't have a channel with

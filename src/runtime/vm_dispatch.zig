@@ -147,7 +147,10 @@ pub fn dispatchBuiltinArgs(self: anytype, builtin_id: u32, args: []const Value, 
         // No message, or one that does not name the argument: the
         // signature's, when the arguments do not fit it.
         const unnamed = if (error_format.currentContextMessage()) |msg| std.mem.eql(u8, msg, error_format.missingArgumentMessage()) else true;
-        if (e != error.OutOfMemory and unnamed) {
+        // Only a failure to bind the arguments (which some functions
+        // report as a plain error); a type error is the function's to
+        // explain.
+        if ((e == error.BuiltinArity or e == error.SassError) and unnamed) {
             builtin_mod.reportSignatureMismatch(self.intern_pool, builtin_id, args.len, arg_names);
         }
         return reportBuiltinDispatchFailure(self, builtin_id, e);

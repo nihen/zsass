@@ -280,6 +280,9 @@ fn resolveCaseSensitive(module: []const u8, name: []const u8) ?Id {
 pub fn reportSignatureMismatch(pool: anytype, id: Id, args_len: usize, arg_names: []const InternId) void {
     if (hasSpreadArgument(arg_names)) return;
     const row = signatureFor(id) orelse return;
+    // The probed signature is one overload's; the others bind differently,
+    // but none takes no arguments or more than the most any takes.
+    if (isOverloaded(row.name) and args_len != 0 and args_len <= row.max) return;
     var positional: usize = 0;
     for (0..args_len) |i| {
         if (i >= arg_names.len or arg_names[i] == .none) positional += 1;
@@ -328,6 +331,7 @@ pub fn signatureFits(pool: anytype, id: Id, args_len: usize, arg_names: []const 
     // Spread arguments are not counted here; the function binds them.
     if (hasSpreadArgument(arg_names)) return true;
     const row = signatureFor(id) orelse return true;
+    if (isOverloaded(row.name)) return true;
     var positional: usize = 0;
     for (0..args_len) |i| {
         if (i >= arg_names.len or arg_names[i] == .none) positional += 1;
@@ -345,6 +349,14 @@ pub fn signatureFits(pool: anytype, id: Id, args_len: usize, arg_names: []const 
         if (!named) return false;
     }
     return true;
+}
+
+fn isOverloaded(name: []const u8) bool {
+    const overloaded = [_][]const u8{ "rgb", "rgba", "hsl", "hsla", "hwb" };
+    for (overloaded) |o| {
+        if (std.mem.eql(u8, name, o)) return true;
+    }
+    return false;
 }
 
 /// Whether a name is the marker of a `$args...` spread, which no pool holds.

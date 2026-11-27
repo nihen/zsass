@@ -2131,7 +2131,7 @@ fn validateColorOpNumber(
     legacy_rgb_channels: bool,
 ) BuiltinError!f64 {
     if (number.kind() != .number) {
-        if (kind == .change) return shared.reportArgumentMismatchPhrase(ctx, colorOpChannelParamLabel(key), number, "is not a number or unquoted \"none\"");
+        if (kind == .change) return shared.reportArgumentMismatchPhrase(ctx, colorOpChannelParamLabel(key), number, "not a number or unquoted \"none\"");
         return reportArgumentTypeMismatch(ctx, colorOpChannelParamLabel(key), number, "number");
     }
 

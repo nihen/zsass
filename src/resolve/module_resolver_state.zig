@@ -51,7 +51,7 @@ pub fn deinitAll(self: *ModuleResolver) void {
     }
 }
 
-pub fn appendImportOrigin(self: *ModuleResolver, source_path: []const u8, parent_import_origin: OriginId) error{OutOfMemory}!OriginId {
+pub fn appendImportOrigin(self: *ModuleResolver, source_path: []const u8, parent_import_origin: OriginId, import_offset: u32) error{OutOfMemory}!OriginId {
     const owned_path = try self.records_alloc.dupe(u8, source_path);
     const idx_u32: u32 = @intCast(self.import_origins_ptr.items.len);
     try self.import_origins_ptr.append(self.records_alloc, .{
@@ -59,6 +59,7 @@ pub fn appendImportOrigin(self: *ModuleResolver, source_path: []const u8, parent
         .source_path = owned_path,
         .module_id = std.math.maxInt(u32),
         .parent_import_origin = parent_import_origin,
+        .import_offset = import_offset,
     });
     return @fromBackingInt(@intCast(idx_u32));
 }
