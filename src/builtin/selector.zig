@@ -85,7 +85,56 @@ fn selectorValueToString(ctx: *BuiltinContext, value: Value, depth: u8) BuiltinE
 }
 
 fn selectorArgString(ctx: *BuiltinContext, value: Value) BuiltinError![]u8 {
-    return selectorValueToString(ctx, value, 0);
+    const text = try selectorValueToString(ctx, value, 0);
+    if (std.mem.indexOf(u8, text, "/*") == null and std.mem.indexOf(u8, text, "//") == null) return text;
+    defer ctx.allocator.free(text);
+    return stripSelectorComments(ctx.allocator, text);
+}
+
+/// A selector argument may hold comments, as a stylesheet's selectors do:
+/// `/* ... */` reads as a space and `//` runs to the end of the line.
+/// Quoted strings and escapes are kept as they are; an unterminated
+/// `/*` is an error.
+fn stripSelectorComments(allocator: std.mem.Allocator, text: []const u8) BuiltinError![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, text.len);
+    var i: usize = 0;
+    var quote: u8 = 0;
+    while (i < text.len) {
+        const c = text[i];
+        if (c == '\\' and i + 1 < text.len) {
+            out.appendSliceAssumeCapacity(text[i .. i + 2]);
+            i += 2;
+            continue;
+        }
+        if (quote != 0) {
+            if (c == quote) quote = 0;
+            out.appendAssumeCapacity(c);
+            i += 1;
+            continue;
+        }
+        if (c == '"' or c == '\'') {
+            quote = c;
+            out.appendAssumeCapacity(c);
+            i += 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '*') {
+            // An unterminated comment is a syntax error, as in a stylesheet.
+            const end = std.mem.indexOfPos(u8, text, i + 2, "*/") orelse return error.SassError;
+            out.appendAssumeCapacity(' ');
+            i = end + 2;
+            continue;
+        }
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '/') {
+            i = std.mem.indexOfScalarPos(u8, text, i, '\n') orelse text.len;
+            continue;
+        }
+        out.appendAssumeCapacity(c);
+        i += 1;
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 fn selectorArgCssString(ctx: *BuiltinContext, value: Value) BuiltinError![]u8 {
