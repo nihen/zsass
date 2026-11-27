@@ -223,6 +223,10 @@ fn piecesOf(a: Allocator, complex: *const ComplexSelector, mark: Specificity) Er
 }
 
 /// A deep copy of `items` in `a`, sharing nothing with where they were made.
+/// Below this, the extension steps of one selector keep everything they
+/// made; compacting would cost more than it saves.
+const compact_min_bytes: usize = 1 << 20;
+
 fn cloneItems(a: Allocator, items: []const Item) Error![]Item {
     const out = try a.alloc(Item, items.len);
     for (items, out) |item, *copy| {
@@ -392,6 +396,9 @@ pub const Engine = struct {
     /// Counts the changes to which entry belongs to which `@extend`.
     links_version: u32 = 0,
     by_target: std.StringHashMapUnmanaged(std.ArrayList(u32)) = .empty,
+    /// `by_target` split by the extender's structure, for the duplicate
+    /// check `addEntry` makes: entries with an equal extender share a key.
+    by_target_extender: std.AutoHashMapUnmanaged(u64, std.ArrayList(u32)) = .empty,
     steps_by_target: std.StringHashMapUnmanaged(std.ArrayList(u32)) = .empty,
     /// Entries whose selector may hold a simple selector, in index order,
     /// by `holderKey`: registration looks up the entries that hold its
@@ -528,7 +535,8 @@ pub const Engine = struct {
     fn addEntry(self: *Engine, targets: []const SimpleSelector, item: Item, step: u32, owner: u32, origin: ?u32, direct: bool, written: bool) Error!void {
         const a = self.arena.allocator();
         const first_key = try simpleKey(a, targets[0]);
-        if (self.by_target.get(first_key)) |list| {
+        const extender_hash = spec_mod.complexStructuralHash(&item.complex);
+        if (self.by_target_extender.get(targetExtenderKey(first_key, extender_hash))) |list| {
             for (list.items) |index| {
                 const existing = &self.entries.items[index];
                 // An extendee given twice to a selector function is taken
@@ -555,9 +563,13 @@ pub const Engine = struct {
         try charge(self.budget, @max(item.pieces.len, 1));
         const entry_index: u32 = @intCast(self.entries.items.len);
         for (targets) |target| {
-            const gop = try self.by_target.getOrPut(a, try simpleKey(a, target));
+            const key = try simpleKey(a, target);
+            const gop = try self.by_target.getOrPut(a, key);
             if (!gop.found_existing) gop.value_ptr.* = .empty;
             try gop.value_ptr.append(a, entry_index);
+            const xgop = try self.by_target_extender.getOrPut(a, targetExtenderKey(key, extender_hash));
+            if (!xgop.found_existing) xgop.value_ptr.* = .empty;
+            try xgop.value_ptr.append(a, entry_index);
         }
         try self.entries.append(a, .{
             .target = targets[0],
@@ -691,26 +703,35 @@ pub const Engine = struct {
 
         var next_step: u32 = 0;
         while (next_step < self.steps.items.len and self.steps.items[next_step].order < snapshot) next_step += 1;
-        // Each step works in an arena of its own and keeps only a copy of its
-        // result, so a selector extended by many `@extend`s in turn holds one
-        // step's worth of memory, not the work of every step before.
+        // Each step's result goes into an arena that keeps it with what the
+        // steps before left. When that arena holds several times what the
+        // current items need, they are copied to a fresh one and the old
+        // one is freed: a selector extended by many `@extend`s in turn holds
+        // a bounded multiple of its live size, and each item is copied a
+        // constant number of times on average, not once per step.
         const parent = scratch.child_allocator;
-        var kept: ?std.heap.ArenaAllocator = null;
-        defer if (kept) |*k| k.deinit();
+        var kept = std.heap.ArenaAllocator.init(parent);
+        defer kept.deinit();
+        var live_bytes: usize = 0;
         while (true) {
             // Steps can be many; a caller's deadline applies between them.
             if (self.budget) |b| try b.checkCancelled();
-            var work = std.heap.ArenaAllocator.init(parent);
-            defer work.deinit();
-            const step_index = try self.firstStepHeld(work.allocator(), current, next_step) orelse break;
-            const extended = try self.extendItems(work.allocator(), current, .{ .step = step_index });
-            var next = std.heap.ArenaAllocator.init(parent);
-            errdefer next.deinit();
-            const copied = try cloneItems(next.allocator(), extended);
-            if (kept) |*k| k.deinit();
-            kept = next;
-            current = copied;
+            const step_index = blk: {
+                var probe = std.heap.ArenaAllocator.init(parent);
+                defer probe.deinit();
+                break :blk try self.firstStepHeld(probe.allocator(), current, next_step) orelse break;
+            };
+            current = try self.extendItems(kept.allocator(), current, .{ .step = step_index });
             next_step = step_index + 1;
+            const held = kept.queryCapacity();
+            if (held > compact_min_bytes and held > live_bytes *| 4) {
+                var next = std.heap.ArenaAllocator.init(parent);
+                errdefer next.deinit();
+                current = try cloneItems(next.allocator(), current);
+                kept.deinit();
+                kept = next;
+                live_bytes = kept.queryCapacity();
+            }
         }
 
         var result = SelectorList.init(out);
@@ -2056,6 +2077,10 @@ fn holderKey(simple: SimpleSelector) HolderKey {
         .pseudo_class => |pseudo| .{ .kind = 8, .name = pseudo.name },
         .pseudo_element => |pseudo| .{ .kind = 9, .name = pseudo.name },
     };
+}
+
+fn targetExtenderKey(target_key: []const u8, extender_hash: u64) u64 {
+    return std.hash.Wyhash.hash(extender_hash, target_key);
 }
 
 fn simpleKey(a: Allocator, simple: SimpleSelector) Error![]const u8 {
