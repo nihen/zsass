@@ -10,6 +10,7 @@ const intern_pool_mod = @import("../runtime/intern_pool.zig");
 const shared = @import("shared.zig");
 const error_format = @import("../runtime/error_format.zig");
 const value_format = @import("../runtime/value_format.zig");
+const color_diagnose = @import("color_diagnose.zig");
 
 const Value = shared.Value;
 const ColorMissingMask = shared.ColorMissingMask;
@@ -535,6 +536,13 @@ fn coerceModernConstructorArityToType(space: color_mod.ColorSpace, args: []const
     return args[0].kind() == .list;
 }
 
+/// A constructor's failure, with the official CLI's reason when it gave
+/// none.
+fn explainedColorError(ctx: *BuiltinContext, ctor: color_diagnose.Constructor, args: []const Value, arg_names: []const InternId, err: BuiltinError) BuiltinError {
+    if (err != error.OutOfMemory and error_format.currentContextMessage() == null) color_diagnose.explain(ctx, ctor, args, arg_names);
+    return normalizeColorUserError(err);
+}
+
 fn normalizeColorUserError(err: BuiltinError) BuiltinError {
     return switch (err) {
         error.BuiltinType, error.BuiltinArity => error.SassError,
@@ -728,11 +736,11 @@ fn color_rgbImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
 }
 
 pub fn color_rgb(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return color_rgbImpl(ctx, args, arg_names, "rgb") catch |err| normalizeColorUserError(err);
+    return color_rgbImpl(ctx, args, arg_names, "rgb") catch |err| explainedColorError(ctx, .rgb, args, arg_names, err);
 }
 
 pub fn color_rgba(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return color_rgbImpl(ctx, args, arg_names, "rgba") catch |err| normalizeColorUserError(err);
+    return color_rgbImpl(ctx, args, arg_names, "rgba") catch |err| explainedColorError(ctx, .rgb, args, arg_names, err);
 }
 
 fn serializeFallbackFunction(ctx: *BuiltinContext, name: []const u8, args: []const Value) BuiltinError!Value {
@@ -1137,11 +1145,11 @@ fn color_hslImpl(
 }
 
 pub fn color_hsl(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return color_hslImpl(ctx, args, arg_names, "hsl") catch |err| normalizeColorUserError(err);
+    return color_hslImpl(ctx, args, arg_names, "hsl") catch |err| explainedColorError(ctx, .hsl, args, arg_names, err);
 }
 
 pub fn color_hsla(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return color_hslImpl(ctx, args, arg_names, "hsla") catch |err| normalizeColorUserError(err);
+    return color_hslImpl(ctx, args, arg_names, "hsla") catch |err| explainedColorError(ctx, .hsl, args, arg_names, err);
 }
 
 fn parseLegacyHueOrMissing(ctx: *BuiltinContext, arg: Value) ?ParsedColorComponent {
@@ -1306,7 +1314,7 @@ fn color_hwbImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
 }
 
 pub fn color_hwb(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return color_hwbImpl(ctx, args, arg_names) catch |err| normalizeColorUserError(err);
+    return color_hwbImpl(ctx, args, arg_names) catch |err| explainedColorError(ctx, .hwb, args, arg_names, err);
 }
 
 const MixHueMethod = enum {
@@ -2869,7 +2877,7 @@ fn color_colorImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const
 }
 
 pub fn color_color(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return color_colorImpl(ctx, args, arg_names) catch |err| normalizeColorUserError(err);
+    return color_colorImpl(ctx, args, arg_names) catch |err| explainedColorError(ctx, .color, args, arg_names, err);
 }
 
 fn colorSpaceNameEq(name: []const u8, canonical: []const u8) bool {
@@ -4473,19 +4481,19 @@ fn colorModernConstructor(
 }
 
 pub fn color_lab(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return colorModernConstructor(ctx, args, arg_names, "lab", .lab) catch |err| normalizeColorUserError(err);
+    return colorModernConstructor(ctx, args, arg_names, "lab", .lab) catch |err| explainedColorError(ctx, .lab, args, arg_names, err);
 }
 
 pub fn color_lch(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return colorModernConstructor(ctx, args, arg_names, "lch", .lch) catch |err| normalizeColorUserError(err);
+    return colorModernConstructor(ctx, args, arg_names, "lch", .lch) catch |err| explainedColorError(ctx, .lch, args, arg_names, err);
 }
 
 pub fn color_oklab(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return colorModernConstructor(ctx, args, arg_names, "oklab", .oklab) catch |err| normalizeColorUserError(err);
+    return colorModernConstructor(ctx, args, arg_names, "oklab", .oklab) catch |err| explainedColorError(ctx, .oklab, args, arg_names, err);
 }
 
 pub fn color_oklch(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    return colorModernConstructor(ctx, args, arg_names, "oklch", .oklch) catch |err| normalizeColorUserError(err);
+    return colorModernConstructor(ctx, args, arg_names, "oklch", .oklch) catch |err| explainedColorError(ctx, .oklch, args, arg_names, err);
 }
 
 fn channelIndexForSpaceStrict(space: color_mod.ColorSpace, ch_name: []const u8) ?usize {

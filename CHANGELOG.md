@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- The color constructors rgb(), hsl(), hwb(), lab(), lch(), oklab(),
+  oklch(), and color() say why they reject their arguments, as the
+  official CLI does: the list's shape ("Expected a space- or
+  slash-separated list, was (1, 2, 3)"), the number of channels ("The
+  rgb color space has 3 channels but (1 2) has 2."), a channel that is not
+  a number or has the wrong unit, the alpha, and the color space.
 - A warning from code that `@import` brought in points into the imported
   file, and its trace lists each `@import` that led there, as the
   official CLI does.

@@ -279,7 +279,7 @@ pub fn reportArgumentMismatchPhraseExpected(ctx: *BuiltinContext, param_name: []
     return error.BuiltinType;
 }
 
-fn valueToInspectionString(ctx: *BuiltinContext, v: Value) BuiltinError![]const u8 {
+pub fn valueToInspectionString(ctx: *BuiltinContext, v: Value) BuiltinError![]const u8 {
     var inspect_ctx: value_inspect.Context = .{
         .allocator = ctx.allocator,
         .intern_pool = ctx.intern_pool,
