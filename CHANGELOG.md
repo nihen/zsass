@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- A calculation's arguments are checked as the official CLI checks them,
+  when the calculation is evaluated: "This operation can't be used in a
+  calculation." for `%`, `==`, `and`, and the like; "This expression
+  can't be used in a calculation." for a quoted string, boolean, null,
+  color, list, or unary operation; "Missing math operator."; a `+` or `-`
+  without whitespace around it; the count of arguments ("2 arguments
+  required, but only 1 was passed."); and keyword and rest arguments.
+  zsass accepted some of these (`calc($x % 2)`, `calc(-$x)`,
+  `sin($number: 1)`) and rejected `pow(var(--a))`, `calc(#{7 % 3})`, and
+  `round(7 % 3)`.
+- `acos(1px)`, `sqrt(16px)`, `pow(10%, 10)`, and the like report
+  "Expected 1px to have no units.", and `sin(1px)` "$number: Expected 1px
+  to have an angle unit (deg, grad, rad, turn).", as the official CLI
+  does.
+- `meta.inspect()` and error messages write a number whose unit has
+  several factors as the official CLI does: `calc(2px * 1px)`,
+  `calc(0.5 / 1px)`.
+- `color.adjust()`, `color.scale()`, `color.complement()`, and
+  `color.invert()` report changing a missing or powerless channel as the
+  official CLI does ("$hue: Because the CSS working group is still
+  deciding on the best behavior, Sass doesn't currently support
+  modifying missing channels (color: hsl(none 0% 50.1960784314%)).").
 - An error in code that `@import` brought in, and the Sass `if()`
   warning in an imported file, point into that file, and their trace
   lists each `@import` and call that led there, as the official CLI
