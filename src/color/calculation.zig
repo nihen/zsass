@@ -952,6 +952,10 @@ fn combineUnits(allocator: Allocator, left: ?[]const u8, right: ?[]const u8, op:
 fn convertCompatibleUnit(value: f64, from: ?[]const u8, to: ?[]const u8) ?f64 {
     if (from == null or to == null) return null;
     if (std.mem.eql(u8, from.?, to.?)) return value;
+    // `px` and `s` are both canonical, so their family has to match too.
+    const from_family = unitFamily(from.?) orelse return null;
+    const to_family = unitFamily(to.?) orelse return null;
+    if (from_family != to_family) return null;
     const canonical = toCanonicalUnit(value, from.?) orelse return null;
     return fromCanonicalUnit(canonical, to.?);
 }
@@ -962,7 +966,7 @@ fn unitFamily(unit: []const u8) ?UnitFamily {
     if (std.mem.eql(u8, unit, "px") or std.mem.eql(u8, unit, "in") or
         std.mem.eql(u8, unit, "cm") or std.mem.eql(u8, unit, "mm") or
         std.mem.eql(u8, unit, "pt") or std.mem.eql(u8, unit, "pc") or
-        std.mem.eql(u8, unit, "Q") or std.mem.eql(u8, unit, "q"))
+        std.mem.eql(u8, unit, "q"))
         return .length;
     if (std.mem.eql(u8, unit, "deg") or std.mem.eql(u8, unit, "rad") or
         std.mem.eql(u8, unit, "grad") or std.mem.eql(u8, unit, "turn"))

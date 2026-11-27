@@ -257,6 +257,11 @@ pub const FrameSlotPool = struct {
     }
 };
 
+const ParamDefaultCtx = struct {
+    module_id: u32,
+    declared: []const bool,
+};
+
 pub const Frame = struct {
     locals: []Value,
     declared: []bool = &.{},
@@ -479,6 +484,8 @@ pub const VM = struct {
     /// Repeated `list.index()` over immutable list handles.
     list_index_cache: std.AutoHashMapUnmanaged(builtin_mod.ListIndexCacheKey, Value) = .empty,
     list_append_tails: std.AutoHashMapUnmanaged(u32, builtin_mod.ListTail) = .empty,
+    /// The callee's module and frame while its arguments are bound.
+    param_default_ctx: ?ParamDefaultCtx = null,
     /// Legacy global builtin lookup cache for Indirect CSS/string callable fallback.
     /// value=maxInt(u32) is miss sentinel.
     legacy_global_builtin_cache: std.AutoHashMapUnmanaged(InternId, u32) = .empty,
@@ -3017,7 +3024,10 @@ pub const VM = struct {
     /// The slot is one the resolver gave a name a callable used but nothing
     /// declared, and no assignment to the module global has run.
     fn slotIsUnknownGlobal(self: *const VM, slot: usize) bool {
-        const module_id = self.current_module;
+        return self.slotIsUnknownGlobalIn(self.current_module, slot);
+    }
+
+    fn slotIsUnknownGlobalIn(self: *const VM, module_id: u32, slot: usize) bool {
         if (module_id >= self.program.modules.len) return false;
         const mod = &self.program.modules[module_id];
         if (slot >= mod.unknown_global_slots.len or !mod.unknown_global_slots[slot]) return false;
@@ -7070,10 +7080,7 @@ pub const VM = struct {
     fn resolveParamDefaultOperand(self: *VM, operand: Chunk.ParamDefaultBinaryOperand, locals: []const Value) VMError!Value {
         return switch (operand) {
             .value => |v| v,
-            .local_slot => |slot| blk: {
-                if (slot >= locals.len) return error.InternalError;
-                break :blk locals[slot];
-            },
+            .local_slot => |slot| try self.paramDefaultLocal(locals, slot),
             .cross_slot => |target| blk: {
                 if (target.module_id >= self.mod_globals_bufs.len) return error.InternalError;
                 const row = self.mod_globals_bufs[target.module_id];
@@ -7086,10 +7093,7 @@ pub const VM = struct {
     fn evalParamDefaultAtomExpr(self: *VM, spec: Chunk.ParamDefaultAtomExpr, locals: []const Value) VMError!Value {
         return switch (spec) {
             .value => |v| v,
-            .local_slot => |slot| blk: {
-                if (slot >= locals.len) return error.InternalError;
-                break :blk locals[slot];
-            },
+            .local_slot => |slot| try self.paramDefaultLocal(locals, slot),
             .cross_slot => |target| blk: {
                 if (target.module_id >= self.mod_globals_bufs.len) return error.InternalError;
                 const row = self.mod_globals_bufs[target.module_id];
@@ -7189,10 +7193,7 @@ pub const VM = struct {
     fn evalParamDefaultExpr(self: *VM, spec: Chunk.ParamDefaultExpr, locals: []const Value) VMError!Value {
         return switch (spec) {
             .value => |v| v,
-            .local_slot => |slot| blk: {
-                if (slot >= locals.len) return error.InternalError;
-                break :blk locals[slot];
-            },
+            .local_slot => |slot| try self.paramDefaultLocal(locals, slot),
             .cross_slot => |target| blk: {
                 if (target.module_id >= self.mod_globals_bufs.len) return error.InternalError;
                 const row = self.mod_globals_bufs[target.module_id];
@@ -7269,14 +7270,27 @@ pub const VM = struct {
             try self.evalParamDefaultExpr(if_builtin.if_false, locals);
     }
 
+    /// A variable a parameter default reads: undefined when it is one only a
+    /// callable's reference made and nothing has set.
+    fn paramDefaultLocal(self: *VM, locals: []const Value, slot: anytype) VMError!Value {
+        const index: usize = slot;
+        // Defaults are read in the callee's module and frame, which are not
+        // current yet while its arguments are bound.
+        const ctx = self.param_default_ctx orelse ParamDefaultCtx{ .module_id = self.current_module, .declared = &.{} };
+        const set_in_frame = index < ctx.declared.len and ctx.declared[index];
+        if (!set_in_frame and self.slotIsUnknownGlobalIn(ctx.module_id, index)) {
+            error_format.setContextMessage("Undefined variable.");
+            return error.SassError;
+        }
+        if (index >= locals.len) return error.InternalError;
+        return locals[index];
+    }
+
     fn evalParamDefault(self: *VM, spec: Chunk.ParamDefault, locals: []const Value) VMError!?Value {
         return switch (spec) {
             .none => null,
             .value => |v| v,
-            .local_slot => |slot| blk: {
-                if (slot >= locals.len) return error.InternalError;
-                break :blk locals[slot];
-            },
+            .local_slot => |slot| try self.paramDefaultLocal(locals, slot),
             .cross_slot => |target| blk: {
                 if (target.module_id >= self.mod_globals_bufs.len) return error.InternalError;
                 const row = self.mod_globals_bufs[target.module_id];
@@ -7510,6 +7524,9 @@ pub const VM = struct {
             &.{}
         else
             try self.allocateGlobalWriteback(target_module, callee.local_count);
+        const saved_default_ctx = self.param_default_ctx;
+        self.param_default_ctx = .{ .module_id = target_module, .declared = declared };
+        defer self.param_default_ctx = saved_default_ctx;
         try self.bindCallableArgs(callee, locals, declared, args, arg_names, rest_separator_override);
         const has_pending_content = self.pending_content_chunk != content_none_sentinel;
         if (has_pending_content and switch (target) {
@@ -7857,6 +7874,9 @@ pub const VM = struct {
         }
         self.overlayCurrentFrameGlobalWritebacksForContent(target_module, locals, declared, global_writeback);
 
+        const saved_default_ctx = self.param_default_ctx;
+        self.param_default_ctx = .{ .module_id = target_module, .declared = declared };
+        defer self.param_default_ctx = saved_default_ctx;
         try self.bindCallableArgs(callee, locals, declared, args, arg_names, rest_separator_override);
         const next_binding = if (caller_frame) |fr|
             contentParentBindingFromFrame(fr)
@@ -8789,7 +8809,7 @@ pub const VM = struct {
         if (ca.desc == null and cb.desc == null) {
             return .{ .a = ca.value, .b = cb.value };
         }
-        if (ca.desc != null and cb.desc != null and std.ascii.eqlIgnoreCase(ca.desc.?, cb.desc.?)) {
+        if (ca.desc != null and cb.desc != null and std.mem.eql(u8, ca.desc.?, cb.desc.?)) {
             return .{ .a = ca.value, .b = cb.value };
         }
         return error.SassError;
@@ -9440,7 +9460,7 @@ fn combineAddUnits(pool: *InternPool, number_pool: *NumberPool, lhs: Value, rhs:
     if (ub == .none) {
         return .{ .unit = ua, .rhs = rhs.asF64(number_pool) };
     }
-    if (std.ascii.eqlIgnoreCase(pool.get(ua), pool.get(ub))) {
+    if (std.mem.eql(u8, pool.get(ua), pool.get(ub))) {
         return .{ .unit = ua, .rhs = rhs.asF64(number_pool) };
     }
 
@@ -9468,26 +9488,26 @@ const CssMathUnitCategoryRuntime = enum {
 };
 
 fn cssMathUnitCategoryRuntime(unit: []const u8) CssMathUnitCategoryRuntime {
-    if (std.ascii.eqlIgnoreCase(unit, "px") or
-        std.ascii.eqlIgnoreCase(unit, "cm") or
-        std.ascii.eqlIgnoreCase(unit, "mm") or
-        std.ascii.eqlIgnoreCase(unit, "in") or
-        std.ascii.eqlIgnoreCase(unit, "pt") or
-        std.ascii.eqlIgnoreCase(unit, "pc") or
-        std.ascii.eqlIgnoreCase(unit, "q")) return .length;
+    if (std.mem.eql(u8, unit, "px") or
+        std.mem.eql(u8, unit, "cm") or
+        std.mem.eql(u8, unit, "mm") or
+        std.mem.eql(u8, unit, "in") or
+        std.mem.eql(u8, unit, "pt") or
+        std.mem.eql(u8, unit, "pc") or
+        std.mem.eql(u8, unit, "q")) return .length;
 
-    if (std.ascii.eqlIgnoreCase(unit, "deg") or
-        std.ascii.eqlIgnoreCase(unit, "rad") or
-        std.ascii.eqlIgnoreCase(unit, "grad") or
-        std.ascii.eqlIgnoreCase(unit, "turn")) return .angle;
+    if (std.mem.eql(u8, unit, "deg") or
+        std.mem.eql(u8, unit, "rad") or
+        std.mem.eql(u8, unit, "grad") or
+        std.mem.eql(u8, unit, "turn")) return .angle;
 
-    if (std.ascii.eqlIgnoreCase(unit, "s") or std.ascii.eqlIgnoreCase(unit, "ms")) return .time;
+    if (std.mem.eql(u8, unit, "s") or std.mem.eql(u8, unit, "ms")) return .time;
 
-    if (std.ascii.eqlIgnoreCase(unit, "hz") or std.ascii.eqlIgnoreCase(unit, "khz")) return .frequency;
+    if (std.mem.eql(u8, unit, "Hz") or std.mem.eql(u8, unit, "kHz")) return .frequency;
 
-    if (std.ascii.eqlIgnoreCase(unit, "dpi") or
-        std.ascii.eqlIgnoreCase(unit, "dpcm") or
-        std.ascii.eqlIgnoreCase(unit, "dppx")) return .resolution;
+    if (std.mem.eql(u8, unit, "dpi") or
+        std.mem.eql(u8, unit, "dpcm") or
+        std.mem.eql(u8, unit, "dppx")) return .resolution;
 
     return .unknown;
 }
@@ -10024,7 +10044,7 @@ fn simplifyUnitFactorsCaseInsensitive(
         var matched = false;
         var j: usize = 0;
         while (j < denominators.items.len) : (j += 1) {
-            if (!std.ascii.eqlIgnoreCase(n, denominators.items[j])) continue;
+            if (!std.mem.eql(u8, n, denominators.items[j])) continue;
             _ = numerators.orderedRemove(i);
             _ = denominators.orderedRemove(j);
             matched = true;
@@ -10273,7 +10293,7 @@ fn divValues(
             out_unit = .none;
         } else if (ub == .none) {
             out_unit = ua;
-        } else if (ua != .none and std.ascii.eqlIgnoreCase(pool.get(ua), pool.get(ub))) {
+        } else if (ua != .none and std.mem.eql(u8, pool.get(ua), pool.get(ub))) {
             out_unit = .none;
         } else if (ua != .none) {
             if (convertComparableUnitValueRuntime(denominator, pool.get(ub), pool.get(ua))) |converted| {

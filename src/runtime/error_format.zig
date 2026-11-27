@@ -282,7 +282,7 @@ pub const ErrorStackFrame = struct {
 
 /// max 16 stages. The actual stack for dart is usually 4-8 layers, so 16 is enough. If over, keep inner-most
 /// (silently drop new push).
-pub const max_error_stack: usize = 16;
+pub const max_error_stack: usize = 64;
 
 /// snapshot inline the **pre-extracted** information of error_stack at the time of calling recordErrorSpan
 /// Fixed to buffer. The slice pointer in source/path has been resolved (= scratch arena deinit /

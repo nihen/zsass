@@ -981,3 +981,122 @@ test "variables: a function or mixin reading a variable nothing set is an error"
     try std.testing.expectEqualStrings(".a {\n  b: 1px;\n}\n", try compile(a, "@mixin m { b: $u; } $u: 1px; .a { @include m; }", "", &.{}, quiet));
     try std.testing.expectEqualStrings(".a {\n  b: 2px;\n}\n", try compile(a, "@mixin m { b: $u; } $u: 2px !default; .a { @include m; }", "", &.{}, quiet));
 }
+
+test "string.unquote: an `&` it returns is text, not the parent selector" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings(".p {\n  z: &;\n  y: 1 2 &;\n}\n", try compile(a, "@use 'sass:list'; @use 'sass:string'; .p { z: string.unquote('&'); y: list.append((1 2), string.unquote('&')); }", "", &.{}, quiet));
+    try std.testing.expectEqualStrings(".p-x {\n  a: b;\n}\n", try compile(a, "@use 'sass:string'; .p { #{string.unquote('&')}-x { a: b; } }", "", &.{}, quiet));
+}
+
+test "meta.get-function: the global min() is the Sass function" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    if (compile(a, "@use \"sass:meta\"; a { b: meta.call(meta.get-function(\"min\"), 1px, 2em); }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expectEqualStrings("a {\n  b: 2px;\n}\n", try compile(a, "@use \"sass:meta\"; a { b: meta.call(meta.get-function(\"max\"), 1px, 2px); }", "", &.{}, quiet));
+}
+
+test "math.min/max: compound units are compared factor by factor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("a {\n  b: calc(1px * 1px);\n  c: calc(2px * 1px);\n  d: calc(1px * 1em);\n}\n", try compile(a, "@use \"sass:math\"; a { b: math.min(calc(1px * 1px), calc(2px * 1px)); c: math.max(1px * 1px, 2px * 1px); d: math.min(1px * 1em, 1em * 2px); }", "", &.{}, quiet));
+    if (compile(a, "@use \"sass:math\"; a { b: math.min(1px * 1px, 1px); }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+}
+
+test "meta.load-css: a configured number with a unit reaches the module" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeFile(tmp.dir, "_lib.scss", "$u: original !default; @mixin m { b: $u; } .a { @include m; }");
+    try writeFile(tmp.dir, "main.scss", "@use \"sass:meta\"; @include meta.load-css(\"lib\", $with: (u: 2px));");
+    const root = try tmpPath(a, &tmp);
+    const main = try std.fs.path.join(a, &.{ root, "main.scss" });
+    const results = try api.compileFiles(a, &.{main}, .{ .quiet = true, .jobs = 1 });
+    try std.testing.expectEqualStrings(".a {\n  b: 2px;\n}\n", results[0].css orelse return error.TestUnexpectedResult);
+}
+
+test "variables: a parameter default that reads a variable nothing set is an error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectError(error.SassError, compile(a, "@mixin m($x: $u) { b: $x; } .a { @include m; }", "", &.{}, quiet));
+    try std.testing.expectEqualStrings(".a {\n  b: 1px;\n}\n", try compile(a, "@mixin m($x: $u) { b: $x; } $u: 1px; .a { @include m; }", "", &.{}, quiet));
+}
+
+test "variables: a new variable in a top-level block is not the global a mixin reads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    if (compile(a, "@mixin m { b: $u; } @if true { $u: 2px; } .a { @include m; }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expectEqualStrings(".a {\n  b: 2px;\n}\n", try compile(a, "@mixin m { b: $u; } $u: 1px; @if true { $u: 2px; } .a { @include m; }", "", &.{}, quiet));
+}
+
+test "variables: a global only an unrun !global sets is undefined in a mixin" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    if (compile(a, "@mixin m { @if false { $u: 1 !global; } b: $u; } .a { @include m; }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expectEqualStrings(".a {\n  b: 3px;\n}\n", try compile(a, "@mixin s { $u: 3px !global; } @mixin m { b: $u; } .a { @include s; @include m; }", "", &.{}, quiet));
+}
+
+test "variables: hyphen and underscore name one global; an unrun top-level !global is undefined" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings(".a {\n  b: 2;\n}\n", try compile(a, "@mixin m { a: $foo-bar; } $foo_bar: 1; @if true { $foo-bar: 2; } .a { b: $foo_bar; }", "", &.{}, quiet));
+    if (compile(a, "@if false { $u: 1 !global; } .a { b: $u; }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expectEqualStrings(".a {\n  b: 1;\n}\n", try compile(a, "@if true { $u: 1 !global; } .a { b: $u; }", "", &.{}, quiet));
+}
+
+test "math: compound units differing in case are incompatible; unitless compares" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    if (compile(a, "@use \"sass:math\"; a { b: math.min(2px * 1s, 1PX * 1s); }", "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expectEqualStrings("a {\n  b: 0;\n}\n", try compile(a, "@use \"sass:math\"; a { b: math.min(1px * 1px, 0); }", "", &.{}, quiet));
+}
+
+test "units: units are case-sensitive" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "a { b: 1PX + 1in; }", "a { b: 1Px + 1px; }", "a { b: 10Q + 1mm; }", "a { b: 1hz + 1khz; }" }) |src| {
+        if (compile(a, src, "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    }
+    try std.testing.expectEqualStrings("a {\n  b: 5q;\n  c: 1001Hz;\n  d: false;\n}\n", try compile(a, "@use \"sass:math\"; a { b: 1q + 1mm; c: 1Hz + 1kHz; d: math.compatible(1PX, 1in); }", "", &.{}, quiet));
+}
+
+test "units: CSS math keeps units differing in case" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("a {\n  b: min(2px, 3PX);\n  c: calc(2px + 3PX);\n  d: calc(1em + 2EM);\n  e: calc(2q + 3Q);\n}\n", try compile(a, "a { b: min(2px, 3PX); c: calc(2px + 3PX); d: calc(1em + 2EM); e: calc(2q + 3Q); }", "", &.{}, quiet));
+}
+
+test "units: CSS math rejects units known incompatible whatever their case" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "a { b: calc(1PX + 1s); }", "a { b: calc(1Q + 1deg); }", "a { b: min(1PX, 1s); }" }) |src| {
+        if (compile(a, src, "", &.{}, quiet)) |_| return error.TestUnexpectedResult else |_| {}
+    }
+    try std.testing.expectEqualStrings("a {\n  b: calc(1X + 1s);\n}\n", try compile(a, "a { b: calc(1X + 1s); }", "", &.{}, quiet));
+}
+
+test "calc: interpolated terms are not checked as numbers; runtime calc does not add incompatible units" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("a {\n  b: calc(2 * 1PX + 1s);\n}\n", try compile(a, "a { b: calc(#{2} * 1PX + 1s); }", "", &.{}, quiet));
+    const out = try compile(a, "$x: 1px; $t: 1ms; a { b: calc($t + 1s); c: calc($x + 2in); }", "", &.{}, quiet);
+    try std.testing.expectEqualStrings("a {\n  b: 1001ms;\n  c: 193px;\n}\n", out);
+    if (compile(a, "$x: 1px; a { b: calc($x + 2ms); }", "", &.{}, quiet)) |css| {
+        try std.testing.expect(std.mem.indexOf(u8, css, "1.002px") == null);
+    } else |_| {}
+}

@@ -354,7 +354,8 @@ fn unquotedStringNeedsDeclTextPreserve(raw: []const u8) bool {
 }
 
 fn markUnquotedStringPreserve(raw: []const u8, value: Value) Value {
-    const literal = value.withPreserveLiteralText();
+    // What unquote() returns is a string it computed: `&` in it stays text.
+    const literal = value.withPreserveLiteralText().withPreserveAmpersand();
     return if (unquotedStringNeedsDeclTextPreserve(raw)) literal.withPreserveDeclText() else literal;
 }
 
@@ -377,7 +378,7 @@ pub fn string_unquote(ctx: *BuiltinContext, args: []const Value) BuiltinError!Va
                 return markUnquotedStringPreserve(compact, Value.string(id, false));
             }
         }
-        return args[0].withPreserveLiteralText();
+        return args[0].withPreserveLiteralText().withPreserveAmpersand();
     }
     const raw = ctx.intern_pool.get(args[0].stringIntern());
     return markUnquotedStringPreserve(raw, Value.string(args[0].stringIntern(), false));

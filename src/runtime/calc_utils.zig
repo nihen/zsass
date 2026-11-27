@@ -38,10 +38,12 @@ const CalcUnitCategory = enum(u4) {
 fn classifyCalcUnit(unit: []const u8) CalcUnitCategory {
     if (unit.len == 0) return .unitless;
     if (std.mem.eql(u8, unit, "%")) return .percent;
+    // Only whether two units are known to be incompatible depends on this,
+    // and that ignores case: `calc(1PX + 1s)` is an error.
 
-    const abs_lengths = [_][]const u8{ "px", "cm", "mm", "in", "pt", "pc", "q", "Q" };
+    const abs_lengths = [_][]const u8{ "px", "cm", "mm", "in", "pt", "pc", "q" };
     for (abs_lengths) |l| {
-        if (std.mem.eql(u8, unit, l)) return .abs_length;
+        if (std.ascii.eqlIgnoreCase(unit, l)) return .abs_length;
     }
 
     const rel_lengths = [_][]const u8{
@@ -51,18 +53,18 @@ fn classifyCalcUnit(unit: []const u8) CalcUnitCategory {
         "cqmin", "cqmax", "lh",  "rlh", "cap", "ic",
     };
     for (rel_lengths) |l| {
-        if (std.mem.eql(u8, unit, l)) return .rel_length;
+        if (std.ascii.eqlIgnoreCase(unit, l)) return .rel_length;
     }
 
-    if (std.mem.eql(u8, unit, "deg") or std.mem.eql(u8, unit, "grad") or
-        std.mem.eql(u8, unit, "rad") or std.mem.eql(u8, unit, "turn"))
+    if (std.ascii.eqlIgnoreCase(unit, "deg") or std.ascii.eqlIgnoreCase(unit, "grad") or
+        std.ascii.eqlIgnoreCase(unit, "rad") or std.ascii.eqlIgnoreCase(unit, "turn"))
         return .angle;
-    if (std.mem.eql(u8, unit, "s") or std.mem.eql(u8, unit, "ms"))
+    if (std.ascii.eqlIgnoreCase(unit, "s") or std.ascii.eqlIgnoreCase(unit, "ms"))
         return .time;
-    if (std.ascii.eqlIgnoreCase(unit, "hz") or std.ascii.eqlIgnoreCase(unit, "khz"))
+    if (std.ascii.eqlIgnoreCase(unit, "Hz") or std.ascii.eqlIgnoreCase(unit, "kHz"))
         return .frequency;
-    if (std.mem.eql(u8, unit, "dpi") or std.mem.eql(u8, unit, "dpcm") or
-        std.mem.eql(u8, unit, "dppx") or std.mem.eql(u8, unit, "x"))
+    if (std.ascii.eqlIgnoreCase(unit, "dpi") or std.ascii.eqlIgnoreCase(unit, "dpcm") or
+        std.ascii.eqlIgnoreCase(unit, "dppx") or std.mem.eql(u8, unit, "x"))
         return .resolution;
     return .other_unit;
 }

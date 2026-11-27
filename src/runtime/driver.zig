@@ -2828,7 +2828,7 @@ fn runEnd2EndWithBudget(
         // Rendered with (`{imported} l:c {fn-name}()\n {entry} l:c root stylesheet`).
         // Take exact callsite span of entry in outermostCallerInfo() of VM and innerMostChunkName()
         // Reflect the function/mixin name in the inner frame label.
-        var call_sites: [32]vm_mod.VM.CallSite = undefined;
+        var call_sites: [error_format.max_error_stack]vm_mod.VM.CallSite = undefined;
         const call_count = vm.callSites(&call_sites);
         if (frame_info.has_frame and (call_count > 0 or !file_id_is_entry) and
             buildVmErrorTrace(&vm, program_ptr, frame_info.source.?, frame_info.path, ctx.span_start, ctx.span_end, module_path, call_sites[0..call_count]))

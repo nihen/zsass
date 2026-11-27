@@ -814,9 +814,23 @@ const Ctx = struct {
         // If persistent scope exists, implicit global write will not be performed even if global has the same name
         // (passes global path only when `!global` is specified).
         if (self.nearestPersistentScopeIndex() == null) {
-            if (lookupGlobalSlot(self.prog, name)) |s| return s;
+            if (lookupGlobalSlot(self.prog, name)) |s| {
+                // A slot a callable's reference made is no variable yet: a
+                // new variable in the block stays the block's own.
+                if (self.isUndeclaredCallableGlobal(s, name)) return null;
+                return s;
+            }
         }
         return null;
+    }
+
+    fn isUndeclaredCallableGlobal(self: *const Ctx, slot: SlotId, name: []const u8) bool {
+        // `$foo-bar` and `$foo_bar` are one variable.
+        if (lookupVoidFlagInsensitive(&self.prog.declared_global_names, name)) return false;
+        for (self.prog.unknown_global_slots.items) |s| {
+            if (s == slot) return true;
+        }
+        return false;
     }
 
     fn lookupStarVar(self: *Ctx, name_id: InternId) ?CrossVarTarget {
@@ -4370,14 +4384,14 @@ fn extractStaticNumberInfo(ast: *const ast_flat.Ast, node: NodeIndex) ?StaticNum
     };
 }
 
-fn staticUnitsEqualIgnoreCase(ctx: *Ctx, lhs: InternId, rhs: InternId) bool {
+fn staticUnitsEqual(ctx: *Ctx, lhs: InternId, rhs: InternId) bool {
     if (lhs == .none or rhs == .none) return lhs == rhs;
-    return std.ascii.eqlIgnoreCase(ctx.pool.get(lhs), ctx.pool.get(rhs));
+    return std.mem.eql(u8, ctx.pool.get(lhs), ctx.pool.get(rhs));
 }
 
 fn convertComparableUnitValueStatic(ctx: *Ctx, value: f64, from: InternId, to: InternId) ?f64 {
     if (from == .none or to == .none) return null;
-    if (staticUnitsEqualIgnoreCase(ctx, from, to)) return value;
+    if (staticUnitsEqual(ctx, from, to)) return value;
     const from_info = comparableUnitInfo(ctx.pool.get(from)) orelse return null;
     const to_info = comparableUnitInfo(ctx.pool.get(to)) orelse return null;
     if (from_info.family != to_info.family) return null;
@@ -4395,7 +4409,7 @@ fn combineStaticAddSub(ctx: *Ctx, lhs: StaticNumberInfo, rhs: StaticNumberInfo, 
     if (rhs.unit_id == .none) {
         return .{ .value = lhs.value + rhs_value, .unit_id = lhs.unit_id };
     }
-    if (staticUnitsEqualIgnoreCase(ctx, lhs.unit_id, rhs.unit_id)) {
+    if (staticUnitsEqual(ctx, lhs.unit_id, rhs.unit_id)) {
         return .{ .value = lhs.value + rhs_value, .unit_id = lhs.unit_id };
     }
     const rhs_converted = convertComparableUnitValueStatic(ctx, rhs_value, rhs.unit_id, lhs.unit_id) orelse return null;
@@ -4421,7 +4435,7 @@ fn combineStaticDiv(ctx: *Ctx, lhs: StaticNumberInfo, rhs: StaticNumberInfo) ?St
         return .{ .value = lhs.value / rhs.value, .unit_id = lhs.unit_id };
     }
     if (lhs.unit_id == .none) return null;
-    if (staticUnitsEqualIgnoreCase(ctx, lhs.unit_id, rhs.unit_id)) {
+    if (staticUnitsEqual(ctx, lhs.unit_id, rhs.unit_id)) {
         return .{ .value = lhs.value / rhs.value, .unit_id = .none };
     }
     const rhs_converted = convertComparableUnitValueStatic(ctx, rhs.value, rhs.unit_id, lhs.unit_id) orelse return null;
@@ -4524,7 +4538,7 @@ fn calcArgBinaryNeedsLiteralPreserve(
 
     const lu = ctx.pool.get(l.unit_id);
     const ru = ctx.pool.get(r.unit_id);
-    if (std.ascii.eqlIgnoreCase(lu, ru)) return false;
+    if (std.mem.eql(u8, lu, ru)) return false;
 
     const l_is_percent = std.mem.eql(u8, lu, "%");
     const r_is_percent = std.mem.eql(u8, ru, "%");
@@ -4629,7 +4643,7 @@ fn comparableUnitInfo(unit: []const u8) ?struct { family: enum { length, angle, 
     if (std.mem.eql(u8, unit, "mm")) return .{ .family = .length, .factor = 96.0 / 25.4 };
     if (std.mem.eql(u8, unit, "pt")) return .{ .family = .length, .factor = 96.0 / 72.0 };
     if (std.mem.eql(u8, unit, "pc")) return .{ .family = .length, .factor = 16.0 };
-    if (std.mem.eql(u8, unit, "Q") or std.mem.eql(u8, unit, "q")) return .{ .family = .length, .factor = 96.0 / 101.6 };
+    if (std.mem.eql(u8, unit, "q")) return .{ .family = .length, .factor = 96.0 / 101.6 };
 
     // Angle
     if (std.mem.eql(u8, unit, "deg")) return .{ .family = .angle, .factor = 1.0 };
@@ -6750,11 +6764,12 @@ fn validateRawCalcCallSyntax(_: *Ctx, raw_text: []const u8) ResolveError!void {
     if (std.mem.trim(u8, inner, " \t\r\n").len == 0) return error.SassError;
     if (calcTextHasTopLevelComma(inner)) return error.SassError;
     if (calc_utils.calcHasBadWhitespace(inner)) return error.SassError;
-    if (calc_utils.calcHasKnownIncompatibleUnits(inner)) return error.SassError;
     if (calcHasModuloOperatorResolver(inner)) return error.SassError;
 
     // Expressions containing variables/interpolation are evaluated on the runtime side.
+    // Their terms are not numbers yet: `calc(#{2} * 1px + 1s)` is valid CSS.
     if (std.mem.findScalar(u8, inner, '$') != null or std.mem.indexOf(u8, inner, "#{") != null) return;
+    if (calc_utils.calcHasKnownIncompatibleUnits(inner)) return error.SassError;
 }
 
 fn resolveCssSpecialCallExprFromSourceText(ctx: *Ctx, raw_text: []const u8, span: Span) ResolveError!?ExprIndex {
@@ -8750,8 +8765,14 @@ fn resolveVariableDeclStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtI
                     break :blk try encodeCrossAssignSlot(target.module_id, target.slot);
                 }
             }
-            if (lookupGlobalSlot(ctx.prog, name)) |s| break :blk s;
-            break :blk try ctx.declareGlobal(name_id);
+            const global_slot = lookupGlobalSlot(ctx.prog, name) orelse try ctx.declareGlobal(name_id);
+            // Set by an assignment that may never run: reading it unset is
+            // an error, as for a slot a callable's reference made. One that
+            // does run marks it declared.
+            if (ctx.in_callable or ctx.flow_control_depth > 0) {
+                try ctx.prog.unknown_global_slots.append(ctx.a, global_slot);
+            }
+            break :blk global_slot;
         } else blk: {
             if ((flags_u & 2) != 0) {
                 if (lookupGlobalSlot(ctx.prog, ctx.pool.get(name_id))) |s| break :blk s;
@@ -9383,7 +9404,9 @@ fn predeclareGlobalSlotsInStmt(ctx: *Ctx, node: NodeIndex) ResolveError!void {
             const name = ctx.pool.get(name_id);
             try ctx.markDeclaredGlobal(name_id);
             if (lookupGlobalSlot(ctx.prog, name) != null) return;
-            _ = try ctx.declareGlobal(name_id);
+            // Only a `!global` in a flow block declares it, which may not run.
+            const slot = try ctx.declareGlobal(name_id);
+            try ctx.prog.unknown_global_slots.append(ctx.a, slot);
         },
         .stmt_if => {
             const off: ExtraIndex = n.payload;

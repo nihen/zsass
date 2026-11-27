@@ -4,6 +4,7 @@ const stack_guard = @import("../runtime/stack_guard.zig");
 const shared = @import("shared.zig");
 const error_format = @import("../runtime/error_format.zig");
 const float_int = @import("../runtime/float_int.zig");
+const value_format = @import("../runtime/value_format.zig");
 const deprecation_mod = @import("../runtime/deprecation.zig");
 const intern_pool_mod = @import("../runtime/intern_pool.zig");
 
@@ -251,26 +252,26 @@ fn unitSlice(ctx: *BuiltinContext, id: InternId) ?[]const u8 {
 }
 
 fn unitCategory(unit: []const u8) UnitCategory {
-    if (std.ascii.eqlIgnoreCase(unit, "px") or
-        std.ascii.eqlIgnoreCase(unit, "cm") or
-        std.ascii.eqlIgnoreCase(unit, "mm") or
-        std.ascii.eqlIgnoreCase(unit, "in") or
-        std.ascii.eqlIgnoreCase(unit, "pt") or
-        std.ascii.eqlIgnoreCase(unit, "pc") or
-        std.ascii.eqlIgnoreCase(unit, "q")) return .length;
+    if (std.mem.eql(u8, unit, "px") or
+        std.mem.eql(u8, unit, "cm") or
+        std.mem.eql(u8, unit, "mm") or
+        std.mem.eql(u8, unit, "in") or
+        std.mem.eql(u8, unit, "pt") or
+        std.mem.eql(u8, unit, "pc") or
+        std.mem.eql(u8, unit, "q")) return .length;
 
-    if (std.ascii.eqlIgnoreCase(unit, "deg") or
-        std.ascii.eqlIgnoreCase(unit, "rad") or
-        std.ascii.eqlIgnoreCase(unit, "grad") or
-        std.ascii.eqlIgnoreCase(unit, "turn")) return .angle;
+    if (std.mem.eql(u8, unit, "deg") or
+        std.mem.eql(u8, unit, "rad") or
+        std.mem.eql(u8, unit, "grad") or
+        std.mem.eql(u8, unit, "turn")) return .angle;
 
-    if (std.ascii.eqlIgnoreCase(unit, "s") or std.ascii.eqlIgnoreCase(unit, "ms")) return .time;
+    if (std.mem.eql(u8, unit, "s") or std.mem.eql(u8, unit, "ms")) return .time;
 
-    if (std.ascii.eqlIgnoreCase(unit, "hz") or std.ascii.eqlIgnoreCase(unit, "khz")) return .frequency;
+    if (std.mem.eql(u8, unit, "Hz") or std.mem.eql(u8, unit, "kHz")) return .frequency;
 
-    if (std.ascii.eqlIgnoreCase(unit, "dpi") or
-        std.ascii.eqlIgnoreCase(unit, "dpcm") or
-        std.ascii.eqlIgnoreCase(unit, "dppx")) return .resolution;
+    if (std.mem.eql(u8, unit, "dpi") or
+        std.mem.eql(u8, unit, "dpcm") or
+        std.mem.eql(u8, unit, "dppx")) return .resolution;
 
     return .unknown;
 }
@@ -284,63 +285,84 @@ fn knownCalculationUnitsIncompatible(unit_a: ?[]const u8, unit_b: ?[]const u8) b
     if (unit_a == null and unit_b == null) return false;
     const a = unit_a.?;
     const b = unit_b.?;
-    if (std.ascii.eqlIgnoreCase(a, b)) return false;
-    const cat_a = unitCategory(a);
-    const cat_b = unitCategory(b);
+    if (std.mem.eql(u8, a, b)) return false;
+    const cat_a = unitFamilyIgnoringCase(a);
+    const cat_b = unitFamilyIgnoringCase(b);
     if (cat_a == .unknown or cat_b == .unknown) return false;
     return cat_a != cat_b;
 }
 
+/// The family of a unit for telling whether two are known to be
+/// incompatible, which ignores case (`min(1PX, 1s)` is an error), unlike
+/// conversion (`1PX + 1px` is too).
+fn unitFamilyIgnoringCase(unit: []const u8) UnitCategory {
+    const families = [_]struct { name: []const u8, cat: UnitCategory }{
+        .{ .name = "px", .cat = .length },       .{ .name = "cm", .cat = .length },
+        .{ .name = "mm", .cat = .length },       .{ .name = "in", .cat = .length },
+        .{ .name = "pt", .cat = .length },       .{ .name = "pc", .cat = .length },
+        .{ .name = "q", .cat = .length },        .{ .name = "deg", .cat = .angle },
+        .{ .name = "rad", .cat = .angle },       .{ .name = "grad", .cat = .angle },
+        .{ .name = "turn", .cat = .angle },      .{ .name = "s", .cat = .time },
+        .{ .name = "ms", .cat = .time },         .{ .name = "hz", .cat = .frequency },
+        .{ .name = "khz", .cat = .frequency },   .{ .name = "dpi", .cat = .resolution },
+        .{ .name = "dpcm", .cat = .resolution }, .{ .name = "dppx", .cat = .resolution },
+    };
+    for (families) |f| {
+        if (std.ascii.eqlIgnoreCase(unit, f.name)) return f.cat;
+    }
+    return .unknown;
+}
+
 fn toCanonical(value: f64, unit: []const u8) ?f64 {
-    if (std.ascii.eqlIgnoreCase(unit, "px")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "in")) return value * 96.0;
-    if (std.ascii.eqlIgnoreCase(unit, "cm")) return value * 96.0 / 2.54;
-    if (std.ascii.eqlIgnoreCase(unit, "mm")) return value * 96.0 / 25.4;
-    if (std.ascii.eqlIgnoreCase(unit, "pt")) return value * 96.0 / 72.0;
-    if (std.ascii.eqlIgnoreCase(unit, "pc")) return value * 96.0 / 6.0;
-    if (std.ascii.eqlIgnoreCase(unit, "q")) return value * 96.0 / 101.6;
+    if (std.mem.eql(u8, unit, "px")) return value;
+    if (std.mem.eql(u8, unit, "in")) return value * 96.0;
+    if (std.mem.eql(u8, unit, "cm")) return value * 96.0 / 2.54;
+    if (std.mem.eql(u8, unit, "mm")) return value * 96.0 / 25.4;
+    if (std.mem.eql(u8, unit, "pt")) return value * 96.0 / 72.0;
+    if (std.mem.eql(u8, unit, "pc")) return value * 96.0 / 6.0;
+    if (std.mem.eql(u8, unit, "q")) return value * 96.0 / 101.6;
 
-    if (std.ascii.eqlIgnoreCase(unit, "deg")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "rad")) return value * 180.0 / std.math.pi;
-    if (std.ascii.eqlIgnoreCase(unit, "grad")) return value * 0.9;
-    if (std.ascii.eqlIgnoreCase(unit, "turn")) return value * 360.0;
+    if (std.mem.eql(u8, unit, "deg")) return value;
+    if (std.mem.eql(u8, unit, "rad")) return value * 180.0 / std.math.pi;
+    if (std.mem.eql(u8, unit, "grad")) return value * 0.9;
+    if (std.mem.eql(u8, unit, "turn")) return value * 360.0;
 
-    if (std.ascii.eqlIgnoreCase(unit, "s")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "ms")) return value / 1000.0;
+    if (std.mem.eql(u8, unit, "s")) return value;
+    if (std.mem.eql(u8, unit, "ms")) return value / 1000.0;
 
-    if (std.ascii.eqlIgnoreCase(unit, "hz")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "khz")) return value * 1000.0;
+    if (std.mem.eql(u8, unit, "Hz")) return value;
+    if (std.mem.eql(u8, unit, "kHz")) return value * 1000.0;
 
-    if (std.ascii.eqlIgnoreCase(unit, "dppx")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "dpi")) return value / 96.0;
-    if (std.ascii.eqlIgnoreCase(unit, "dpcm")) return value * 2.54 / 96.0;
+    if (std.mem.eql(u8, unit, "dppx")) return value;
+    if (std.mem.eql(u8, unit, "dpi")) return value / 96.0;
+    if (std.mem.eql(u8, unit, "dpcm")) return value * 2.54 / 96.0;
 
     return null;
 }
 
 fn fromCanonical(value: f64, unit: []const u8) ?f64 {
-    if (std.ascii.eqlIgnoreCase(unit, "px")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "in")) return value / 96.0;
-    if (std.ascii.eqlIgnoreCase(unit, "cm")) return value * 2.54 / 96.0;
-    if (std.ascii.eqlIgnoreCase(unit, "mm")) return value * 25.4 / 96.0;
-    if (std.ascii.eqlIgnoreCase(unit, "pt")) return value * 72.0 / 96.0;
-    if (std.ascii.eqlIgnoreCase(unit, "pc")) return value * 6.0 / 96.0;
-    if (std.ascii.eqlIgnoreCase(unit, "q")) return value * 101.6 / 96.0;
+    if (std.mem.eql(u8, unit, "px")) return value;
+    if (std.mem.eql(u8, unit, "in")) return value / 96.0;
+    if (std.mem.eql(u8, unit, "cm")) return value * 2.54 / 96.0;
+    if (std.mem.eql(u8, unit, "mm")) return value * 25.4 / 96.0;
+    if (std.mem.eql(u8, unit, "pt")) return value * 72.0 / 96.0;
+    if (std.mem.eql(u8, unit, "pc")) return value * 6.0 / 96.0;
+    if (std.mem.eql(u8, unit, "q")) return value * 101.6 / 96.0;
 
-    if (std.ascii.eqlIgnoreCase(unit, "deg")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "rad")) return value * std.math.pi / 180.0;
-    if (std.ascii.eqlIgnoreCase(unit, "grad")) return value / 0.9;
-    if (std.ascii.eqlIgnoreCase(unit, "turn")) return value / 360.0;
+    if (std.mem.eql(u8, unit, "deg")) return value;
+    if (std.mem.eql(u8, unit, "rad")) return value * std.math.pi / 180.0;
+    if (std.mem.eql(u8, unit, "grad")) return value / 0.9;
+    if (std.mem.eql(u8, unit, "turn")) return value / 360.0;
 
-    if (std.ascii.eqlIgnoreCase(unit, "s")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "ms")) return value * 1000.0;
+    if (std.mem.eql(u8, unit, "s")) return value;
+    if (std.mem.eql(u8, unit, "ms")) return value * 1000.0;
 
-    if (std.ascii.eqlIgnoreCase(unit, "hz")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "khz")) return value / 1000.0;
+    if (std.mem.eql(u8, unit, "Hz")) return value;
+    if (std.mem.eql(u8, unit, "kHz")) return value / 1000.0;
 
-    if (std.ascii.eqlIgnoreCase(unit, "dppx")) return value;
-    if (std.ascii.eqlIgnoreCase(unit, "dpi")) return value * 96.0;
-    if (std.ascii.eqlIgnoreCase(unit, "dpcm")) return value * 96.0 / 2.54;
+    if (std.mem.eql(u8, unit, "dppx")) return value;
+    if (std.mem.eql(u8, unit, "dpi")) return value * 96.0;
+    if (std.mem.eql(u8, unit, "dpcm")) return value * 96.0 / 2.54;
 
     return null;
 }
@@ -351,7 +373,7 @@ fn convertUnit(value: f64, from: ?[]const u8, to: ?[]const u8) ?f64 {
 
     const from_u = from.?;
     const to_u = to.?;
-    if (std.ascii.eqlIgnoreCase(from_u, to_u)) return value;
+    if (std.mem.eql(u8, from_u, to_u)) return value;
 
     const from_cat = unitCategory(from_u);
     const to_cat = unitCategory(to_u);
@@ -373,10 +395,10 @@ fn convertNumberToTargetUnit(ctx: *BuiltinContext, value: Value, target_unit: In
 
 fn convertAngleToRadians(value: f64, unit: ?[]const u8) f64 {
     if (unit) |u| {
-        if (std.ascii.eqlIgnoreCase(u, "deg")) return value * std.math.pi / 180.0;
-        if (std.ascii.eqlIgnoreCase(u, "grad")) return value * std.math.pi / 200.0;
-        if (std.ascii.eqlIgnoreCase(u, "turn")) return value * 2.0 * std.math.pi;
-        if (std.ascii.eqlIgnoreCase(u, "rad")) return value;
+        if (std.mem.eql(u8, u, "deg")) return value * std.math.pi / 180.0;
+        if (std.mem.eql(u8, u, "grad")) return value * std.math.pi / 200.0;
+        if (std.mem.eql(u8, u, "turn")) return value * 2.0 * std.math.pi;
+        if (std.mem.eql(u8, u, "rad")) return value;
     }
     return value;
 }
@@ -384,6 +406,55 @@ fn convertAngleToRadians(value: f64, unit: ?[]const u8) f64 {
 fn numberToDeg(ctx: *BuiltinContext, value: f64) BuiltinError!Value {
     const deg = try internString(ctx, "deg");
     return numberLike(ctx, value, deg);
+}
+
+/// What a number in `from` units is multiplied by to be in `to` units, when
+/// either is a compound unit such as `px*px` or `px/s`: each factor has to
+/// convert to a factor of the other. Null when they are incompatible.
+fn compoundUnitFactor(ctx: *BuiltinContext, from: ?[]const u8, to: ?[]const u8) BuiltinError!?f64 {
+    // A unitless number compares with any other.
+    if (from == null or to == null) return 1;
+    var from_num: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer from_num.deinit(ctx.allocator);
+    var from_den: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer from_den.deinit(ctx.allocator);
+    var to_num: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer to_num.deinit(ctx.allocator);
+    var to_den: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer to_den.deinit(ctx.allocator);
+    appendUnitTextFactors(ctx.allocator, from.?, &from_num, &from_den, false) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    appendUnitTextFactors(ctx.allocator, to.?, &to_num, &to_den, false) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    if (from_num.items.len != to_num.items.len or from_den.items.len != to_den.items.len) return null;
+    var factor: f64 = 1;
+    factor *= (try matchUnitFactors(ctx, from_num.items, to_num.items)) orelse return null;
+    factor /= (try matchUnitFactors(ctx, from_den.items, to_den.items)) orelse return null;
+    return factor;
+}
+
+/// The product of the conversions that pair each of `from` with a distinct
+/// factor of `to`, or null when one has no partner.
+fn matchUnitFactors(ctx: *BuiltinContext, from: []const []const u8, to: []const []const u8) BuiltinError!?f64 {
+    const used = try ctx.allocator.alloc(bool, to.len);
+    defer ctx.allocator.free(used);
+    @memset(used, false);
+    var factor: f64 = 1;
+    outer: for (from) |f| {
+        for (to, 0..) |t, i| {
+            if (used[i]) continue;
+            const c = convertUnit(1.0, f, t) orelse continue;
+            used[i] = true;
+            factor *= c;
+            continue :outer;
+        }
+        return null;
+    }
+    return factor;
 }
 
 fn minMaxComparableValue(ctx: *BuiltinContext, source: Value, target_unit: InternId) BuiltinError!f64 {
@@ -530,7 +601,7 @@ fn cssMathUnitsNeedPassthrough(unit_a: ?[]const u8, unit_b: ?[]const u8, preserv
     if (unit_a == null and unit_b == null) return false;
     const a = unit_a.?;
     const b = unit_b.?;
-    if (std.ascii.eqlIgnoreCase(a, b)) return false;
+    if (std.mem.eql(u8, a, b)) return false;
     if (convertUnit(1.0, a, b) != null) return false;
     return !knownCalculationUnitsIncompatible(unit_a, unit_b);
 }
@@ -1306,7 +1377,7 @@ fn combineLegacyRoundAddSub(
     if (rhs_unit == null) {
         return try numberLike(ctx, lhs.asF64(ctx.number_pool) + rhs_value, lhs.unitId(ctx.number_pool));
     }
-    if (std.ascii.eqlIgnoreCase(lhs_unit.?, rhs_unit.?)) {
+    if (std.mem.eql(u8, lhs_unit.?, rhs_unit.?)) {
         return try numberLike(ctx, lhs.asF64(ctx.number_pool) + rhs_value, lhs.unitId(ctx.number_pool));
     }
     if (knownCalculationUnitsIncompatible(lhs_unit, rhs_unit)) {
@@ -1404,7 +1475,7 @@ fn simplifyUnitFactors(
         var removed = false;
         var j: usize = 0;
         while (j < denominators.items.len) : (j += 1) {
-            if (std.ascii.eqlIgnoreCase(numerators.items[i], denominators.items[j])) {
+            if (std.mem.eql(u8, numerators.items[i], denominators.items[j])) {
                 _ = numerators.orderedRemove(i);
                 _ = denominators.orderedRemove(j);
                 removed = true;
@@ -1724,14 +1795,44 @@ fn minmaxVariadic(ctx: *BuiltinContext, args: []const Value, is_min: bool, css_n
 }
 
 fn reportIncompatibleUnits(ctx: *BuiltinContext, a: Value, b: Value) BuiltinError {
-    const sa = try valueToCssString(ctx, a);
+    const sa = try numberTextForMessage(ctx, a);
     defer ctx.allocator.free(sa);
-    const sb = try valueToCssString(ctx, b);
+    const sb = try numberTextForMessage(ctx, b);
     defer ctx.allocator.free(sb);
     var buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "{s} and {s} have incompatible units.", .{ sa, sb }) catch return error.SassError;
     error_format.setContextMessage(msg);
     return error.SassError;
+}
+
+/// A number as Sass shows it in a message: a compound unit as a calculation,
+/// `calc(1px * 1px)`.
+fn numberTextForMessage(ctx: *BuiltinContext, v: Value) BuiltinError![]const u8 {
+    const unit = unitSlice(ctx, v.unitId(ctx.number_pool)) orelse return valueToCssString(ctx, v);
+    if (!isGeneratedUnitDescription(unit)) return valueToCssString(ctx, v);
+    var num: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer num.deinit(ctx.allocator);
+    var den: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer den.deinit(ctx.allocator);
+    appendUnitTextFactors(ctx.allocator, unit, &num, &den, false) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return valueToCssString(ctx, v),
+    };
+    const core = value_format.formatNumberCore(ctx.allocator, v.asF64(ctx.number_pool)) catch return error.OutOfMemory;
+    defer ctx.allocator.free(core);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(ctx.allocator);
+    try out.appendSlice(ctx.allocator, "calc(");
+    try out.appendSlice(ctx.allocator, core);
+    var rest: []const []const u8 = num.items;
+    if (rest.len > 0) {
+        try out.appendSlice(ctx.allocator, rest[0]);
+        rest = rest[1..];
+    }
+    for (rest) |u| try out.print(ctx.allocator, " * 1{s}", .{u});
+    for (den.items) |u| try out.print(ctx.allocator, " / 1{s}", .{u});
+    try out.append(ctx.allocator, ')');
+    return out.toOwnedSlice(ctx.allocator);
 }
 
 fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, css_name: []const u8, mode: MinMaxMode) BuiltinError!Value {
@@ -1755,11 +1856,12 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
             return error.BuiltinType;
         }
         const arg_unit = unitSlice(ctx, arg.unitId(ctx.number_pool));
-        if (arg_unit != null and isGeneratedUnitDescription(arg_unit.?)) return error.SassError;
+        // Compound units are compared factor by factor below.
+        if (arg_unit != null and isGeneratedUnitDescription(arg_unit.?)) continue;
         if (arg_unit) |unit| {
             if (unitCategory(unit) == .unknown) {
                 if (first_unknown_unit) |prev_unit| {
-                    if (!std.ascii.eqlIgnoreCase(prev_unit, unit)) saw_multiple_unknown_units = true;
+                    if (!std.mem.eql(u8, prev_unit, unit)) saw_multiple_unknown_units = true;
                 } else {
                     first_unknown_unit = unit;
                 }
@@ -1782,6 +1884,21 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
     for (values[1..]) |arg| {
         const best_unit = unitSlice(ctx, best.unitId(ctx.number_pool));
         const arg_unit = unitSlice(ctx, arg.unitId(ctx.number_pool));
+        const best_compound = best_unit != null and isGeneratedUnitDescription(best_unit.?);
+        const arg_compound = arg_unit != null and isGeneratedUnitDescription(arg_unit.?);
+        if (best_compound or arg_compound) {
+            const factor = (try compoundUnitFactor(ctx, arg_unit, best_unit)) orelse {
+                if (mode == .module) return reportIncompatibleUnits(ctx, best, arg);
+                return error.SassError;
+            };
+            const converted = arg.asF64(ctx.number_pool) * factor;
+            if (std.math.isNan(converted)) return numberLike(ctx, std.math.nan(f64), arg.unitId(ctx.number_pool));
+            if ((is_min and converted < best_converted) or (!is_min and converted > best_converted)) {
+                best = arg;
+                best_converted = best.asF64(ctx.number_pool);
+            }
+            continue;
+        }
         if (cssMathUnitsNeedPassthrough(best_unit, arg_unit, false)) {
             if (mode == .module) return reportIncompatibleUnits(ctx, best, arg);
             return buildCssMathCall(ctx, css_name, args);
@@ -1807,7 +1924,18 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
     return best;
 }
 
+/// The global abs(): warns about a percentage, which a later Sass leaves to
+/// the CSS abs().
 pub fn math_abs(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    return mathAbs(ctx, args, arg_names, true);
+}
+
+/// `math.abs()`: takes a percentage without a warning.
+pub fn math_abs_module(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    return mathAbs(ctx, args, arg_names, false);
+}
+
+fn mathAbs(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId, global: bool) BuiltinError!Value {
     const bound = try bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{"number"}, 1);
     const arg = bound[0].?;
     const named = arg_names.len > 0 and arg_names[0] != .none;
@@ -1821,9 +1949,13 @@ pub fn math_abs(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     };
     if (number.kind() == .number) {
         const unit = if (number.unitId(ctx.number_pool) == .none) null else ctx.intern_pool.get(number.unitId(ctx.number_pool));
-        if (unit != null and std.ascii.eqlIgnoreCase(unit.?, "%")) {
+        if (global and unit != null and std.ascii.eqlIgnoreCase(unit.?, "%")) {
             if (ctx.deprecation_opts) |opts| {
-                try deprecation_mod.emitDeprecation(opts, .abs_percent, "abs() with percentage is deprecated", "", 0, 0);
+                const shown = try valueToCssString(ctx, number);
+                defer ctx.allocator.free(shown);
+                var buf: [512]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "Passing percentage units to the global abs() function is deprecated.\nIn the future, this will emit a CSS abs() function to be resolved by the browser.\nTo preserve current behavior: math.abs({s})\nTo emit a CSS abs() now: abs(#{{{s}}})\nMore info: https://sass-lang.com/d/abs-percent", .{ shown, shown }) catch return error.SassError;
+                try deprecation_mod.emitDeprecation(opts, .abs_percent, msg, "", 0, 0);
             }
         }
     }
@@ -2141,7 +2273,7 @@ pub fn math_div(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
         if (ua != .none and ub != .none) {
             const ua_slice = unitSlice(ctx, ua).?;
             const ub_slice = unitSlice(ctx, ub).?;
-            if (std.ascii.eqlIgnoreCase(ua_slice, ub_slice)) {
+            if (std.mem.eql(u8, ua_slice, ub_slice)) {
                 out_unit = .none;
             } else if (convertUnit(1.0, ub_slice, ua_slice) != null) {
                 if (convertUnit(a, ua_slice, ub_slice)) |converted| numerator = converted;
@@ -2422,6 +2554,18 @@ pub fn math_rem(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     return numberLike(ctx, result, y.unitId(ctx.number_pool));
 }
 
+fn warnRandomLimitUnit(ctx: *BuiltinContext, limit: Value) BuiltinError!void {
+    const unit_id = limit.unitId(ctx.number_pool);
+    if (unit_id == .none) return;
+    const opts = ctx.deprecation_opts orelse return;
+    const unit = ctx.intern_pool.get(unit_id);
+    const shown = try numberTextForMessage(ctx, limit);
+    defer ctx.allocator.free(shown);
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "math.random() will no longer ignore $limit units ({s}) in a future release.\n\nRecommendation: math.random(math.div($limit, 1{s})) * 1{s}\n\nTo preserve current behavior: math.random(math.div($limit, 1{s}))\n\nMore info: https://sass-lang.com/d/function-units", .{ shown, unit, unit, unit }) catch return;
+    try deprecation_mod.emitDeprecation(opts, .function_units, msg, "", 0, 0);
+}
+
 pub fn math_random(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
     if (args.len > 1) return badArity(1, args.len);
     const bound = try bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{"limit"}, 0);
@@ -2432,6 +2576,7 @@ pub fn math_random(ctx: *BuiltinContext, args: []const Value, arg_names: []const
         }
 
         if (limit_value.kind() != .number) return reportArgumentTypeMismatch(ctx, "limit", limit_value, "number");
+        try warnRandomLimitUnit(ctx, limit_value);
         const raw = limit_value.asF64(ctx.number_pool);
         const rounded = shared.fuzzyInt(raw) orelse return shared.reportNotInt(ctx, "limit", limit_value);
         // Past the 64-bit range a number is not an int either.

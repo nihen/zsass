@@ -146,6 +146,16 @@ fn resolveCssMathLegacyGlobal(name: []const u8) ?Id {
 }
 
 /// Fallback for non-namespaced calls for compatibility purposes.
+/// The `sass:math` function behind a CSS math global that has a separate
+/// id for the CSS form: `min()`/`max()`.
+pub fn sassFunctionForCssMathGlobal(id: Id) Id {
+    return switch (id) {
+        4 => 116,
+        5 => 117,
+        else => id,
+    };
+}
+
 pub fn resolveLegacyGlobal(name: []const u8) ?Id {
     // `scale()` is frequently used as a CSS transform function and is a Sass legacy global
     // Not builtin. Only `scale-color()` is builtin resolved.
@@ -271,7 +281,7 @@ const ResolveRow = struct { m: []const u8, n: []const u8, id: Id };
 fn buildResolveTable() []const ResolveRow {
     // zig fmt: off
     const rows: []const ResolveRow = &.{
-        .{ .m = "math", .n = "abs", .id = 0 },
+        .{ .m = "math", .n = "abs", .id = 118 },
         .{ .m = "math", .n = "floor", .id = 1 },
         .{ .m = "math", .n = "ceil", .id = 2 },
         .{ .m = "math", .n = "round", .id = 113 },
@@ -469,6 +479,7 @@ pub fn dispatch(ctx: *BuiltinContext, id: Id, args: []const Value, arg_names: []
     }
     return switch (id) {
         0 => math.math_abs(ctx, args, arg_names),
+        118 => math.math_abs_module(ctx, args, arg_names),
         1 => math.math_floor(ctx, args, arg_names),
         2 => math.math_ceil(ctx, args, arg_names),
         3 => math.math_round(ctx, args, arg_names),
@@ -594,7 +605,8 @@ pub fn dispatch(ctx: *BuiltinContext, id: Id, args: []const Value, arg_names: []
 const testing = std.testing;
 
 test "resolveLegacyGlobal: css math names are case-insensitive" {
-    try testing.expectEqual(resolve("math", "abs"), resolveLegacyGlobal("AbS"));
+    try testing.expectEqual(@as(?Id, 0), resolveLegacyGlobal("AbS"));
+    try testing.expectEqual(@as(?Id, 118), resolve("math", "abs"));
     // The bare globals are CSS min()/max(), which keep incompatible units as
     // CSS; the sass:math members refuse them.
     try testing.expectEqual(@as(?Id, 4), resolveLegacyGlobal("MiN"));

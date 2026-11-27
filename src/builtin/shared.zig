@@ -214,6 +214,18 @@ fn exactNumberText(ctx: *BuiltinContext, buf: []u8, value: Value) ![]const u8 {
     return std.fmt.bufPrint(buf, "{d}{s}{s}", .{ x, if (whole) ".0" else "", unit });
 }
 
+/// The `function-units` deprecation for an index or count whose unit Sass
+/// ignores today: `$n: Passing a number with unit px is deprecated.`
+pub fn warnIgnoredUnit(ctx: *BuiltinContext, param_name: []const u8, value: Value) BuiltinError!void {
+    const unit_id = value.unitId(ctx.number_pool);
+    if (unit_id == .none) return;
+    const opts = ctx.deprecation_opts orelse return;
+    const unit = ctx.intern_pool.get(unit_id);
+    var buf: [384]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "${s}: Passing a number with unit {s} is deprecated.\n\nTo preserve current behavior: calc(${s} / 1{s})\n\nMore info: https://sass-lang.com/d/function-units", .{ param_name, unit, param_name, unit }) catch return;
+    try deprecation_mod.emitDeprecation(opts, .function_units, msg, "", 0, 0);
+}
+
 /// `$name: <message>`.
 pub fn reportArgumentMessage(param_name: []const u8, comptime fmt: []const u8, args: anytype) BuiltinError {
     var buf: [256]u8 = undefined;

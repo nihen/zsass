@@ -409,6 +409,12 @@ pub const Value = extern struct {
         return .{ .bits = self.bits | (@as(u64, string_preserve_literal_text_bit) << aux_shift) };
     }
 
+    /// An `&` in the text is text, not the parent selector.
+    pub inline fn withPreserveAmpersand(self: Value) Value {
+        std.debug.assert(self.kind() == .string);
+        return .{ .bits = self.bits | (@as(u64, string_preserve_ampersand_bit) << aux_shift) };
+    }
+
     pub inline fn withPreserveDeclText(self: Value) Value {
         std.debug.assert(self.kind() == .string);
         return .{ .bits = self.bits | (@as(u64, string_preserve_decl_text_bit) << aux_shift) };

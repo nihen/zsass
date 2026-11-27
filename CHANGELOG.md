@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- A `calc()` with a variable no longer adds units of different kinds as
+  if they converted: `calc($x + 2ms)` with `$x: 1px` gave `1.002px`.
+- A `calc()` with interpolation, such as `calc(#{2} * 1px + 1s)`, is kept
+  as CSS instead of failing.
+- Units are case-sensitive, as in the official CLI: `1PX + 1in` and
+  `1Px + 1px` fail with incompatible units instead of converting, and the
+  known units are spelled `q`, `Hz`, and `kHz`.
+- A top-level read of a global that only an unrun `!global` in a flow
+  block sets fails with "Undefined variable.", as one in a callable does.
+- A function or mixin that reads a global only a `!global` assignment
+  inside a callable or flow block sets, which has not run, fails with
+  "Undefined variable." instead of reading null.
+- Deprecation warnings from built-in functions are located where the
+  function was called, instead of at `0:0`.
+- `math.random()`, `list.nth()`, and `list.set-nth()` warn
+  (`function-units`) about a number with a unit they ignore, and only the
+  global `abs()` warns (`abs-percent`) about a percentage, not
+  `math.abs()`, as the official CLI does.
+- A parameter default that reads a variable nothing has set, such as
+  `@mixin m($x: $u)`, fails with "Undefined variable." instead of an
+  internal compiler error.
+- A new variable assigned in a top-level `@if` or loop stays in that
+  block even when a function or mixin names a global of that name, so the
+  mixin's read is undefined, as in the official CLI.
+- `meta.load-css()` passes a configured number with a unit, such as
+  `$with: (u: 2px)`, to the module; it was lost, leaving the default or
+  nothing.
+- `min()`, `max()`, `math.min()`, and `math.max()` compare numbers with
+  compound units, such as `calc(1px * 1px)` or `1px / 1s`, when every
+  unit factor converts, instead of failing; incompatible ones report
+  `calc(1px * 1px) and 1px have incompatible units.` as the official CLI
+  does.
+- `meta.get-function("min")` and `"max"` return the Sass functions, which
+  refuse incompatible units and `var()`, as the official CLI does; a plain
+  `min()` call still stays as CSS.
+- `string.unquote("&")` gives the text `&`, not the parent selector,
+  as the official CLI does.
 - A list built up with `list.append()` in a loop takes memory and time in
   proportion to its length. Each append copied the whole list, so 25000
   appends needed about 2.5 GB and hit the memory limit; they now take

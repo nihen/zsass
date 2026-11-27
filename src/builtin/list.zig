@@ -102,6 +102,7 @@ fn listItemTruthy(value: Value) bool {
 
 fn parseListIndexArg(ctx: *BuiltinContext, param_name: []const u8, value: Value) BuiltinError!i64 {
     if (value.kind() != .number) return reportArgumentTypeMismatch(ctx, param_name, value, "number");
+    try shared.warnIgnoredUnit(ctx, param_name, value);
     const raw = value.asF64(ctx.number_pool);
     const whole = shared.fuzzyInt(raw) orelse return shared.reportNotInt(ctx, param_name, value);
     const idx = float_int.toI64(whole) orelse return shared.reportNotInt(ctx, param_name, value);

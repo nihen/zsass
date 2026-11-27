@@ -1164,7 +1164,10 @@ fn resolveCurrentFunctionCallable(ctx: *BuiltinContext, name: []const u8) Builti
         return try makeBuiltinFunctionCallable(ctx, entry.value, entry.key, false);
     }
     if (builtin_mod.resolveLegacyGlobal(name)) |builtin_id| {
-        return try makeBuiltinFunctionCallable(ctx, builtin_id, name, false);
+        // As a function value, the global min()/max() are the Sass
+        // functions, not the CSS ones a plain call can stay as.
+        const id = builtin_mod.sassFunctionForCssMathGlobal(builtin_id);
+        return try makeBuiltinFunctionCallable(ctx, id, name, false);
     }
     return null;
 }
