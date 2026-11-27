@@ -504,6 +504,8 @@ const Ctx = struct {
     /// Keep bare identifier as literal_string with marker,
     /// Enable arithmetic preserving on the runtime side.
     calc_arg_mode: bool = false,
+    /// Resolving the arguments of a CSS calculation function.
+    in_calculation_args: bool = false,
     /// `infinity` / `pi` etc. in CSS math call arguments such as clamp/hypot
     /// Use number-ish identifier for numerical resolution without turning it into a marker.
     calc_arg_allow_numberish_ident_literals: bool = false,
@@ -3700,7 +3702,7 @@ fn resolveExprParen(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Span)
         const li = try resolveExpr(ast, ctx, lhs);
         const ri = try resolveExpr(ast, ctx, rhs);
         const bidx: u32 = @intCast(ctx.prog.binary_exprs.items.len);
-        try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = .div });
+        try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = .div, .in_calculation = ctx.calc_arg_mode or ctx.in_calculation_args });
         // Spanned as written inside the parentheses, as diagnostics show it.
         const inner_span = Span{ .start = inner_node.span_start, .end = inner_node.span_end };
         return try appendExpr(ctx.prog, ctx.a, .{ .kind = .binary, .payload = bidx, .span = inner_span });
@@ -3862,6 +3864,11 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
         !has_custom_function_binding and
         isCssMathLegacyCalcFunctionName(name_slice);
     const calc_arg_mode = is_vendor_calc_special or is_calc_size_call or is_css_math_legacy_call;
+    // The arguments of a CSS calculation function are a calculation's,
+    // where `/` divides without a deprecation; those of any other call are
+    // not, even inside one.
+    const args_in_calculation = calc_arg_mode or
+        (ns_id == .none and !has_custom_function_binding and isCssCalculationFunctionName(name_slice));
     const calc_arg_allow_numberish_ident_literals = is_css_math_legacy_call;
     const preserve_unquote_calc_first_arg =
         ns_id == .none and (identifierEq(name_slice, "invert") or identifierEq(name_slice, "saturate"));
@@ -3886,6 +3893,9 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
             const inherit_calc_arg_mode = saved_calc_arg_mode and ns_id == .none and !has_custom_function_binding;
             ctx.calc_arg_mode = inherit_calc_arg_mode or calc_arg_mode;
             defer ctx.calc_arg_mode = saved_calc_arg_mode;
+            const saved_in_calculation = ctx.in_calculation_args;
+            ctx.in_calculation_args = args_in_calculation;
+            defer ctx.in_calculation_args = saved_in_calculation;
             const saved_calc_arg_allow_numberish = ctx.calc_arg_allow_numberish_ident_literals;
             ctx.calc_arg_allow_numberish_ident_literals =
                 saved_calc_arg_allow_numberish or calc_arg_allow_numberish_ident_literals;
@@ -3915,6 +3925,9 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
         const inherit_calc_arg_mode = saved_calc_arg_mode and ns_id == .none and !has_custom_function_binding;
         ctx.calc_arg_mode = inherit_calc_arg_mode or calc_arg_mode;
         defer ctx.calc_arg_mode = saved_calc_arg_mode;
+        const saved_in_calculation = ctx.in_calculation_args;
+        ctx.in_calculation_args = args_in_calculation;
+        defer ctx.in_calculation_args = saved_in_calculation;
         const saved_calc_arg_allow_numberish = ctx.calc_arg_allow_numberish_ident_literals;
         ctx.calc_arg_allow_numberish_ident_literals =
             saved_calc_arg_allow_numberish or calc_arg_allow_numberish_ident_literals;
@@ -4315,7 +4328,7 @@ fn resolveExprRecorded(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex, n: 
                 break :ri try resolveExpr(ast, ctx, rhs);
             };
             const bidx: u32 = @intCast(ctx.prog.binary_exprs.items.len);
-            try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = mapBinOp(op) });
+            try ctx.prog.binary_exprs.append(ctx.a, .{ .lhs = li, .rhs = ri, .op = mapBinOp(op), .in_calculation = ctx.calc_arg_mode or ctx.in_calculation_args });
             return try appendExpr(ctx.prog, ctx.a, .{ .kind = .binary, .payload = bidx, .span = span });
         },
         .expr_unary_op => {
@@ -4557,6 +4570,18 @@ fn extractCalcArgStaticNumberInfo(ast: *const ast_flat.Ast, ctx: *Ctx, node: Nod
         },
         else => null,
     };
+}
+
+/// The CSS functions whose arguments are a calculation.
+fn isCssCalculationFunctionName(name: []const u8) bool {
+    const calculation_names = [_][]const u8{
+        "calc", "clamp", "hypot", "max",  "min",  "round", "abs", "sign", "sqrt", "pow", "sin",
+        "cos",  "tan",   "asin",  "acos", "atan", "atan2", "mod", "rem",  "exp",  "log",
+    };
+    for (calculation_names) |candidate| {
+        if (identifierEq(name, candidate)) return true;
+    }
+    return false;
 }
 
 fn isCssMathLegacyCalcFunctionName(name: []const u8) bool {
@@ -10682,6 +10707,7 @@ const preamble_ctx_default_only = [_][]const u8{
     "property_namespace_depth",
     "allow_unknown_var_literal",
     "calc_arg_mode",
+    "in_calculation_args",
     "calc_arg_allow_numberish_ident_literals",
     "in_declaration_value",
     "slash_paren_depth",

@@ -2518,7 +2518,9 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
             try compileExpr(ctx, b.lhs);
             try compileExpr(ctx, b.rhs);
             const direct_value = b.op == .div and ctx.direct_value != null and ctx.direct_value.? == e;
-            try ctx.cb.emit(mapBinOpcode(b.op), @intFromBool(b.op == .div and b.lhs_written_slash), @intFromBool(direct_value));
+            const div_flags: u32 = @as(u32, @intFromBool(direct_value)) |
+                (@as(u32, @intFromBool(b.op == .div and b.in_calculation)) << 1);
+            try ctx.cb.emit(mapBinOpcode(b.op), @intFromBool(b.op == .div and b.lhs_written_slash), div_flags);
         },
         .unary => {
             const u = resolved.unary_exprs.items[ex.payload];

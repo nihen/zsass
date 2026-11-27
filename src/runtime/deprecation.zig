@@ -281,7 +281,29 @@ fn isNumberLiteralText(text: []const u8) bool {
 fn withoutComments(text: []const u8, buf: []u8) ?[]const u8 {
     var n: usize = 0;
     var i: usize = 0;
+    var quote: u8 = 0;
     while (i < text.len) {
+        // A quoted string is kept as written, comment-like text and all.
+        if (quote != 0 or text[i] == '"' or text[i] == '\'') {
+            const c = text[i];
+            if (quote == 0) {
+                quote = c;
+            } else if (c == '\\' and i + 1 < text.len) {
+                if (n + 2 > buf.len) return null;
+                buf[n] = c;
+                buf[n + 1] = text[i + 1];
+                n += 2;
+                i += 2;
+                continue;
+            } else if (c == quote) {
+                quote = 0;
+            }
+            if (n == buf.len) return null;
+            buf[n] = c;
+            n += 1;
+            i += 1;
+            continue;
+        }
         if (i + 1 < text.len and text[i] == '/' and text[i + 1] == '*') {
             const close = std.mem.indexOfPos(u8, text, i + 2, "*/") orelse text.len;
             i = @min(close + 2, text.len);

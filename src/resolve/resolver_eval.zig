@@ -192,12 +192,14 @@ fn evalBinary(env: anytype, prog: anytype, payload: u32, expr_idx: anytype) Erro
         .div => blk: {
             // Dividing numbers with `/` is deprecated: folding it would lose
             // the warning, so the VM divides them and warns.
+            // A calculation's `/` is not deprecated.
+            const deprecated = !b.in_calculation and lhs.kind() == .number and rhs.kind() == .number;
             if (@hasDecl(@TypeOf(env.*), "probeDeprecations")) {
-                if (env.probeDeprecations() and lhs.kind() == .number and rhs.kind() == .number) return error.NonStaticExpr;
+                if (env.probeDeprecations() and deprecated) return error.NonStaticExpr;
             }
             // A value only the resolver evaluates warns here.
             if (@hasDecl(@TypeOf(env.*), "slashDivDeprecation")) {
-                if (lhs.kind() == .number and rhs.kind() == .number) try env.slashDivDeprecation(expr_idx);
+                if (deprecated) try env.slashDivDeprecation(expr_idx);
             }
             break :blk try divValues(env, lhs, rhs, b.lhs_written_slash);
         },

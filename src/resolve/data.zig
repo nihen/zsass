@@ -312,6 +312,9 @@ pub const ResolvedProgram = struct {
         /// them (`1/2`), outside parentheses. They are still that text
         /// when the right side turns out not to be a number.
         lhs_written_slash: bool = false,
+        /// In the arguments of a CSS calculation function (`calc()`,
+        /// `min()`, ...), where `/` divides without a deprecation.
+        in_calculation: bool = false,
     }) = .empty,
     unary_exprs: std.ArrayListUnmanaged(struct { operand: ExprIndex, op: UnaryOp }) = .empty,
     call_exprs: std.ArrayListUnmanaged(struct {

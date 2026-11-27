@@ -2854,13 +2854,15 @@ pub const VM = struct {
                 const b = try self.maybeResolveParentSelectorValue(try self.pop());
                 const a = try self.maybeResolveParentSelectorValue(try self.pop());
                 const slash_dep: ?deprecation_mod.SlashDivDeprecationSite = blk: {
+                    // A calculation's `/` is not deprecated.
+                    if ((inst.arg_b & 2) != 0) break :blk null;
                     const fid: usize = self.diagnosticModuleIndex();
                     if (fid >= self.program.modules.len) break :blk null;
                     const mod = &self.program.modules[fid];
                     if (mod.module_path.len == 0) break :blk null;
                     const pos = self.diagnosticLineCol(@intCast(fid), mod, self.current_source_span.start) orelse break :blk null;
                     const message = if (a.kind() == .number and b.kind() == .number and deprecation_mod.mayReport(&self.deprecation_opts, .slash_div))
-                        self.slashDivMessage(@intCast(fid), mod.module_path, inst.arg_b != 0)
+                        self.slashDivMessage(@intCast(fid), mod.module_path, (inst.arg_b & 1) != 0)
                     else
                         null;
                     break :blk .{
