@@ -90,6 +90,8 @@ pub const Chunk = struct {
         /// 1 + the row in `global_builtins.rows` when it is called by a
         /// global name that warns; 0 otherwise.
         global_replacement: u16 = 0,
+        /// Called by a global name (`acos()`, not `math.acos()`).
+        global_call: bool = false,
     };
 
     /// Slot bundle for one fused `@for` loop (for_test / for_step operand).
@@ -2636,6 +2638,7 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
             const meta_idx = try addBuiltinCallMeta(ctx, c.arg_start, c.arg_count, remapLocalSlotHint(ctx, c.local_slot_hint));
             if (c.global_name != .none) {
                 ctx.cb.builtin_call_meta.items[meta_idx].global_replacement = builtin_mod.globalBuiltinRow(ctx.pool.get(c.global_name));
+                ctx.cb.builtin_call_meta.items[meta_idx].global_call = true;
             }
             try ctx.cb.emit(.call_builtin, try checkedU16(c.builtin_id, "builtin id"), meta_idx);
         },

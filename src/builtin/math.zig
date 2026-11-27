@@ -2400,7 +2400,7 @@ pub fn math_exp(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
         else => return err,
     };
 
-    if (number.unitId(ctx.number_pool) != .none) return error.SassError;
+    if (number.unitId(ctx.number_pool) != .none) return reportUnitMismatch(ctx, number, "number", false, "to have no units");
     return Value.numberUnitless(canonicalizeSignedZero(@exp(number.asF64(ctx.number_pool))));
 }
 
@@ -2780,7 +2780,7 @@ pub fn math_sqrt(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
         else => return err,
     };
 
-    if (number.unitId(ctx.number_pool) != .none) return error.SassError;
+    if (number.unitId(ctx.number_pool) != .none) return reportUnitMismatch(ctx, number, "number", false, "to have no units");
     return Value.numberUnitless(@sqrt(number.asF64(ctx.number_pool)));
 }
 
@@ -2811,7 +2811,8 @@ pub fn math_pow(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
         else => return err,
     };
 
-    if (base.unitId(ctx.number_pool) != .none or exponent.unitId(ctx.number_pool) != .none) return error.SassError;
+    if (base.unitId(ctx.number_pool) != .none) return reportUnitMismatch(ctx, base, "base", false, "to have no units");
+    if (exponent.unitId(ctx.number_pool) != .none) return reportUnitMismatch(ctx, exponent, "exponent", false, "to have no units");
 
     const base_v = base.asF64(ctx.number_pool);
     const exp_v = exponent.asF64(ctx.number_pool);
@@ -2842,7 +2843,7 @@ pub fn math_log(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
         },
         else => return err,
     };
-    if (number_value.unitId(ctx.number_pool) != .none) return error.SassError;
+    if (number_value.unitId(ctx.number_pool) != .none) return reportUnitMismatch(ctx, number_value, "number", false, "to have no units");
     const number = number_value.asF64(ctx.number_pool);
 
     if (base_arg) |base| {
@@ -2857,11 +2858,28 @@ pub fn math_log(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
             },
             else => return err,
         };
-        if (base_value.unitId(ctx.number_pool) != .none) return error.SassError;
+        if (base_value.unitId(ctx.number_pool) != .none) return reportUnitMismatch(ctx, base_value, "base", false, "to have no units");
         return Value.numberUnitless(@log(number) / @log(base_value.asF64(ctx.number_pool)));
     }
 
     return Value.numberUnitless(@log(number));
+}
+
+/// "Expected 1px to have no units.", naming the parameter unless the
+/// function was called by its global name (`always_named` names it then
+/// too), as the official CLI writes it. The number is written in full.
+fn reportUnitMismatch(ctx: *BuiltinContext, number: Value, param: []const u8, always_named: bool, expectation: []const u8) BuiltinError {
+    const unit = unitSlice(ctx, number.unitId(ctx.number_pool)) orelse return error.SassError;
+    // A unit of several factors is written as a calculation; not here.
+    if (std.mem.indexOfAny(u8, unit, "*/") != null) return error.SassError;
+    var buf: [256]u8 = undefined;
+    const prefix_name = !ctx.global_call or always_named;
+    const msg = if (prefix_name)
+        std.fmt.bufPrint(&buf, "${s}: Expected {d}{s} {s}.", .{ param, number.asF64(ctx.number_pool), unit, expectation })
+    else
+        std.fmt.bufPrint(&buf, "Expected {d}{s} {s}.", .{ number.asF64(ctx.number_pool), unit, expectation });
+    error_format.setContextMessage(msg catch return error.SassError);
+    return error.SassError;
 }
 
 fn forwardTrig(
@@ -2885,7 +2903,7 @@ fn forwardTrig(
     };
     if (number.unitId(ctx.number_pool) != .none) {
         const unit = unitSlice(ctx, number.unitId(ctx.number_pool)).?;
-        if (unitCategory(unit) != .angle) return error.SassError;
+        if (unitCategory(unit) != .angle) return reportUnitMismatch(ctx, number, "number", true, "to have an angle unit (deg, grad, rad, turn)");
     }
     const radians = convertAngleToRadians(number.asF64(ctx.number_pool), unitSlice(ctx, number.unitId(ctx.number_pool)));
     var result = op(radians);
@@ -2912,7 +2930,7 @@ fn inverseTrig(
         },
         else => return err,
     };
-    if (number.unitId(ctx.number_pool) != .none) return error.SassError;
+    if (number.unitId(ctx.number_pool) != .none) return reportUnitMismatch(ctx, number, "number", false, "to have no units");
     const value = op(number.asF64(ctx.number_pool)) * 180.0 / std.math.pi;
     return numberToDeg(ctx, value);
 }

@@ -504,6 +504,7 @@ pub const VM = struct {
     diag_parent: ?*VM = null,
     /// The global name of the built-in being called, when called by one.
     current_builtin_call_name: []const u8 = "",
+    current_builtin_global_call: bool = false,
     /// The module the code at `current_source_span` belongs to.
     current_source_module: u32 = 0,
     /// The `@use`/`@forward` that is running each module running now,
@@ -4165,6 +4166,9 @@ pub const VM = struct {
         const saved_call_name = self.current_builtin_call_name;
         self.current_builtin_call_name = if (meta.global_replacement != 0) builtin_mod.globalBuiltinName(meta.global_replacement) else "";
         defer self.current_builtin_call_name = saved_call_name;
+        const saved_global_call = self.current_builtin_global_call;
+        self.current_builtin_global_call = meta.global_call;
+        defer self.current_builtin_global_call = saved_global_call;
         const prev_slot_hint = self.current_builtin_local_slot_hint;
         self.current_builtin_local_slot_hint = meta.local_slot_hint;
         defer self.current_builtin_local_slot_hint = prev_slot_hint;
