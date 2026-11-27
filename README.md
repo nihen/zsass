@@ -120,7 +120,7 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD":/work -w /work ghcr.io/nihe
 For reproducible builds, pin the release tag instead of `latest`:
 
 ```bash
-docker run --rm ghcr.io/nihen/zsass:0.5.1 --version
+docker run --rm ghcr.io/nihen/zsass:0.5.2 --version
 ```
 
 The `--user` flag keeps generated files owned by your host user on
