@@ -1250,6 +1250,7 @@ pub const Parser = struct {
         // slice, mirroring the legacy parser behaviour.
         var interp_depth: u32 = 0;
         var group_depth: u32 = 0;
+        var group_stack: [16]u8 = undefined;
         var last_significant_end: u32 = prop_start;
         // CSS hack allowance: a declaration may begin with a bare `:`
         // (e.g. `:x: y;` inside a plain CSS ruleset).  The legacy parser
@@ -1281,6 +1282,7 @@ pub const Parser = struct {
                 continue;
             }
             if (tok.tag == .lparen or tok.tag == .lbracket) {
+                if (group_depth < group_stack.len) group_stack[group_depth] = if (tok.tag == .lparen) '(' else '[';
                 group_depth += 1;
                 last_significant_end = tok.span.end;
                 self.advance();
@@ -1288,6 +1290,10 @@ pub const Parser = struct {
             }
             if ((tok.tag == .rparen or tok.tag == .rbracket) and group_depth > 0) {
                 group_depth -= 1;
+                if (group_depth < group_stack.len) {
+                    const open = group_stack[group_depth];
+                    if ((open == '(') != (tok.tag == .rparen)) return self.failExpectingCloser(open);
+                }
                 last_significant_end = tok.span.end;
                 self.advance();
                 continue;

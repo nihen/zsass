@@ -246,6 +246,8 @@ pub fn compileSourceToCss(
     // The compiler keeps what it allocates for the whole compile and gives
     // it back in one go, as the CLI does. Values made along the way, such
     // as the lists built-in functions return, have no other owner.
+    // A guess an earlier compile on this thread left explains nothing here.
+    error_format_mod.setFallbackMessage(null);
     var budget = resource_budget.ResourceBudget.init(opts.limits, opts.cancellation_check, opts.cancellation_ctx);
     var limited_alloc = resource_budget.LimitedAllocator.init(&budget, alloc);
     var arena = std.heap.ArenaAllocator.init(limited_alloc.allocator());
@@ -342,6 +344,8 @@ pub fn compileSourceToCssWithSourceMap(
     source_map_output_css_path: ?[]const u8,
     opts: CompileOptions,
 ) anyerror!CompileCssWithSourceMapResult {
+    // A guess an earlier compile on this thread left explains nothing here.
+    error_format_mod.setFallbackMessage(null);
     var budget = resource_budget.ResourceBudget.init(opts.limits, opts.cancellation_check, opts.cancellation_ctx);
     var limited_alloc = resource_budget.LimitedAllocator.init(&budget, alloc);
     var arena = std.heap.ArenaAllocator.init(limited_alloc.allocator());

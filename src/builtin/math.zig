@@ -487,7 +487,9 @@ fn ensureNoNamedArgs(args: []const Value, arg_names: []const InternId) BuiltinEr
 }
 
 fn roundStrategyMayBeVar(ctx: *BuiltinContext, value: Value) BuiltinError!bool {
-    if (!value.isString() and value.kind() != .calc_fragment and value.kind() != .interp_fragment) return false;
+    // `var(--s) up` is a space list.
+    const space_list = value.kind() == .list and !value.listComma(ctx.list_meta_pool.items) and !value.listBracketed(ctx.list_meta_pool.items);
+    if (!space_list and !value.isString() and value.kind() != .calc_fragment and value.kind() != .interp_fragment) return false;
     if (value.isString() and value.stringQuoted(ctx.string_flags_pool.items)) return false;
     const text = try valueToCssString(ctx, value);
     defer ctx.allocator.free(text);
@@ -1955,9 +1957,11 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
     }
 
     var first_unknown_unit: ?[]const u8 = null;
-    var first_unknown_value: Value = undefined;
     var saw_multiple_unknown_units = false;
     var unitless_after_unknown_pair: ?Value = null;
+    // The first number with a unit, which an error names with the other.
+    var first_with_unit: ?Value = null;
+    var second_unknown: ?Value = null;
 
     for (values) |arg| {
         if (arg.kind() != .number) {
@@ -1969,19 +1973,33 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
         // Compound units are compared factor by factor below.
         if (arg_unit != null and isGeneratedUnitDescription(arg_unit.?)) continue;
         if (arg_unit) |unit| {
+            if (first_with_unit == null) first_with_unit = arg;
             if (unitCategory(unit) == .unknown) {
                 if (first_unknown_unit) |prev_unit| {
-                    if (!std.mem.eql(u8, prev_unit, unit)) saw_multiple_unknown_units = true;
+                    if (!std.mem.eql(u8, prev_unit, unit) and !saw_multiple_unknown_units) {
+                        saw_multiple_unknown_units = true;
+                        second_unknown = arg;
+                    }
                 } else {
                     first_unknown_unit = unit;
-                    first_unknown_value = arg;
                 }
             }
         } else if (saw_multiple_unknown_units and unitless_after_unknown_pair == null) {
             unitless_after_unknown_pair = arg;
         }
     }
-    if (unitless_after_unknown_pair) |unitless| return reportCalcIncompatible(ctx, first_unknown_value, unitless);
+    if (unitless_after_unknown_pair) |unitless| {
+        // sass:math's function compares the numbers in turn; the CSS one
+        // names the first number with a unit and the unitless one.
+        if (mode == .module) {
+            const first_unknown = for (values) |v| {
+                const u = unitSlice(ctx, v.unitId(ctx.number_pool));
+                if (u != null and unitCategory(u.?) == .unknown) break v;
+            } else values[0];
+            return reportIncompatibleUnits(ctx, first_unknown, second_unknown.?);
+        }
+        return reportCalcIncompatible(ctx, first_with_unit.?, unitless);
+    }
 
     const first = values[0];
 
