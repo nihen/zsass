@@ -7,6 +7,7 @@ const extend_mod = @import("../selector/extend.zig");
 const extend_engine_mod = @import("../selector/extend_engine.zig");
 const extend_specificity = @import("../selector/extend_specificity.zig");
 const shared = @import("shared.zig");
+const error_format = @import("../runtime/error_format.zig");
 const intern_pool_mod = @import("../runtime/intern_pool.zig");
 
 const Value = shared.Value;
@@ -82,6 +83,39 @@ fn selectorValueToString(ctx: *BuiltinContext, value: Value, depth: u8) BuiltinE
         return try buf.toOwnedSlice(ctx.allocator);
     }
     return error.BuiltinType;
+}
+
+/// A selector argument's text, or the official CLI's error naming the
+/// parameter (none for selector.append() and selector.nest()).
+fn selectorArgStringNamed(ctx: *BuiltinContext, value: Value, comptime param: []const u8) BuiltinError![]u8 {
+    return selectorArgString(ctx, value) catch |err| {
+        if (err != error.BuiltinType or error_format.currentContextMessage() != null) return err;
+        const text = shared.valueToInspectionString(ctx, value) catch return err;
+        defer ctx.allocator.free(text);
+        // A list is shown in parentheses.
+        const is_list = value.kind() == .list and !value.listBracketed(ctx.list_meta_pool.items) and
+            !(text.len > 0 and text[0] == '(');
+        const prefix = if (param.len == 0) "" else "$" ++ param ++ ": ";
+        var buf: [512]u8 = undefined;
+        const msg = (if (is_list)
+            std.fmt.bufPrint(&buf, "{s}({s}) is not a valid selector: it must be a string,\na list of strings, or a list of lists of strings.", .{ prefix, text })
+        else
+            std.fmt.bufPrint(&buf, "{s}{s} is not a valid selector: it must be a string,\na list of strings, or a list of lists of strings.", .{ prefix, text })) catch return err;
+        error_format.setContextMessage(msg);
+        return err;
+    };
+}
+
+/// A selector parsed from an argument's text; text that ends too soon is
+/// reported as the official CLI does.
+fn parseSelectorArg(ctx: *BuiltinContext, text: []const u8, comptime param: []const u8) BuiltinError!SelectorList {
+    return selector_mod.parse(ctx.allocator, text) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        if (err == error.UnexpectedEnd) {
+            error_format.setContextMessage(if (param.len == 0) "expected more input." else "$" ++ param ++ ": expected more input.");
+        }
+        return error.SassError;
+    };
 }
 
 fn selectorArgString(ctx: *BuiltinContext, value: Value) BuiltinError![]u8 {
@@ -177,10 +211,10 @@ fn selectorListToValue(ctx: *BuiltinContext, list: *const SelectorList) BuiltinE
 pub fn selector_parse(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
     const bound = try bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{"selector"}, 1);
     const selector_val = bound[0] orelse return reportMissingArgument("selector");
-    const selector_str = try selectorArgString(ctx, selector_val);
+    const selector_str = try selectorArgStringNamed(ctx, selector_val, "selector");
     defer ctx.allocator.free(selector_str);
 
-    var parsed = selector_mod.parse(ctx.allocator, selector_str) catch return error.SassError;
+    var parsed = try parseSelectorArg(ctx, selector_str, "selector");
     defer parsed.deinit();
     if (selector_mod.hasParentReference(&parsed)) return error.BuiltinType;
     return selectorListToValue(ctx, &parsed);
@@ -189,9 +223,9 @@ pub fn selector_parse(ctx: *BuiltinContext, args: []const Value, arg_names: []co
 pub fn selector_nest(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     if (args.len == 0) return error.BuiltinArity;
 
-    const first_str = try selectorArgString(ctx, args[0]);
+    const first_str = try selectorArgStringNamed(ctx, args[0], "");
     defer ctx.allocator.free(first_str);
-    var current = selector_mod.parse(ctx.allocator, first_str) catch return error.SassError;
+    var current = try parseSelectorArg(ctx, first_str, "");
     if (selector_mod.hasParentReference(&current)) {
         if (hasParentSuffix(first_str)) {
             current.deinit();
@@ -200,11 +234,11 @@ pub fn selector_nest(ctx: *BuiltinContext, args: []const Value) BuiltinError!Val
     }
 
     for (args[1..]) |arg_val| {
-        const child_str = try selectorArgString(ctx, arg_val);
+        const child_str = try selectorArgStringNamed(ctx, arg_val, "");
         defer ctx.allocator.free(child_str);
-        var child = selector_mod.parse(ctx.allocator, child_str) catch {
+        var child = parseSelectorArg(ctx, child_str, "") catch |err| {
             current.deinit();
-            return error.SassError;
+            return err;
         };
         defer child.deinit();
 
@@ -223,9 +257,9 @@ pub fn selector_nest(ctx: *BuiltinContext, args: []const Value) BuiltinError!Val
 pub fn selector_append(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     if (args.len == 0) return error.BuiltinArity;
 
-    const first_str = try selectorArgString(ctx, args[0]);
+    const first_str = try selectorArgStringNamed(ctx, args[0], "");
     defer ctx.allocator.free(first_str);
-    var current = selector_mod.parse(ctx.allocator, first_str) catch return error.SassError;
+    var current = try parseSelectorArg(ctx, first_str, "");
     if (selector_mod.hasParentReference(&current) or !selectorAppendBaseIsValid(&current)) {
         current.deinit();
         return error.SassError;
@@ -233,9 +267,9 @@ pub fn selector_append(ctx: *BuiltinContext, args: []const Value) BuiltinError!V
     defer current.deinit();
 
     for (args[1..]) |arg_val| {
-        const suffix_str = try selectorArgString(ctx, arg_val);
+        const suffix_str = try selectorArgStringNamed(ctx, arg_val, "");
         defer ctx.allocator.free(suffix_str);
-        var suffix = selector_mod.parse(ctx.allocator, suffix_str) catch return error.SassError;
+        var suffix = try parseSelectorArg(ctx, suffix_str, "");
         defer suffix.deinit();
         if (selector_mod.hasParentReference(&suffix) or !selectorAppendSuffixIsValid(&suffix)) {
             return error.SassError;
@@ -270,16 +304,16 @@ pub fn selector_unify(ctx: *BuiltinContext, args: []const Value, arg_names: []co
     const sel1_val = bound[0] orelse return reportMissingArgument("selector1");
     const sel2_val = bound[1] orelse return reportMissingArgument("selector2");
 
-    const sel1_str = try selectorArgString(ctx, sel1_val);
+    const sel1_str = try selectorArgStringNamed(ctx, sel1_val, "selector1");
     defer ctx.allocator.free(sel1_str);
-    const sel2_str = try selectorArgString(ctx, sel2_val);
+    const sel2_str = try selectorArgStringNamed(ctx, sel2_val, "selector2");
     defer ctx.allocator.free(sel2_str);
 
-    var sel1 = selector_mod.parse(ctx.allocator, sel1_str) catch return error.SassError;
+    var sel1 = try parseSelectorArg(ctx, sel1_str, "selector1");
     defer sel1.deinit();
     if (selector_mod.hasParentReference(&sel1)) return error.BuiltinType;
 
-    var sel2 = selector_mod.parse(ctx.allocator, sel2_str) catch return error.SassError;
+    var sel2 = try parseSelectorArg(ctx, sel2_str, "selector2");
     defer sel2.deinit();
     if (selector_mod.hasParentReference(&sel2)) return error.BuiltinType;
 
@@ -316,16 +350,16 @@ pub fn selector_is_super(ctx: *BuiltinContext, args: []const Value, arg_names: [
     const super_val = bound[0] orelse return reportMissingArgument("super");
     const sub_val = bound[1] orelse return reportMissingArgument("sub");
 
-    const super_str = try selectorArgString(ctx, super_val);
+    const super_str = try selectorArgStringNamed(ctx, super_val, "super");
     defer ctx.allocator.free(super_str);
-    const sub_str = try selectorArgString(ctx, sub_val);
+    const sub_str = try selectorArgStringNamed(ctx, sub_val, "sub");
     defer ctx.allocator.free(sub_str);
 
-    var super_sel = selector_mod.parse(ctx.allocator, super_str) catch return error.SassError;
+    var super_sel = try parseSelectorArg(ctx, super_str, "super");
     defer super_sel.deinit();
     if (selector_mod.hasParentReference(&super_sel)) return error.SassError;
 
-    var sub_sel = selector_mod.parse(ctx.allocator, sub_str) catch return error.SassError;
+    var sub_sel = try parseSelectorArg(ctx, sub_str, "sub");
     defer sub_sel.deinit();
     if (selector_mod.hasParentReference(&sub_sel)) return error.SassError;
 
@@ -338,11 +372,11 @@ pub fn selector_extend(ctx: *BuiltinContext, args: []const Value, arg_names: []c
     const extendee_val = bound[1] orelse return reportMissingArgument("extendee");
     const extender_val = bound[2] orelse return reportMissingArgument("extender");
 
-    const sel_str = try selectorArgString(ctx, selector_val);
+    const sel_str = try selectorArgStringNamed(ctx, selector_val, "selector");
     defer ctx.allocator.free(sel_str);
-    const extendee_str = try selectorArgString(ctx, extendee_val);
+    const extendee_str = try selectorArgStringNamed(ctx, extendee_val, "extendee");
     defer ctx.allocator.free(extendee_str);
-    const extender_str = try selectorArgString(ctx, extender_val);
+    const extender_str = try selectorArgStringNamed(ctx, extender_val, "extender");
     defer ctx.allocator.free(extender_str);
 
     return selectorExtendCore(ctx, sel_str, extendee_str, extender_str);
@@ -354,11 +388,11 @@ pub fn selector_replace(ctx: *BuiltinContext, args: []const Value, arg_names: []
     const original_val = bound[1] orelse return reportMissingArgument("original");
     const replacement_val = bound[2] orelse return reportMissingArgument("replacement");
 
-    const sel_str = try selectorArgString(ctx, selector_val);
+    const sel_str = try selectorArgStringNamed(ctx, selector_val, "selector");
     defer ctx.allocator.free(sel_str);
-    const original_str = try selectorArgString(ctx, original_val);
+    const original_str = try selectorArgStringNamed(ctx, original_val, "original");
     defer ctx.allocator.free(original_str);
-    const replacement_str = try selectorArgString(ctx, replacement_val);
+    const replacement_str = try selectorArgStringNamed(ctx, replacement_val, "replacement");
     defer ctx.allocator.free(replacement_str);
 
     return selectorReplaceCore(ctx, sel_str, original_str, replacement_str);
@@ -438,18 +472,18 @@ fn selectorExtendCore(
     extendee_str: []const u8,
     extender_str: []const u8,
 ) BuiltinError!Value {
-    var sel = selector_mod.parse(ctx.allocator, sel_str) catch return error.SassError;
+    var sel = try parseSelectorArg(ctx, sel_str, "selector");
     defer sel.deinit();
     if (selectorListHasShallowParentSelector(&sel)) return error.BuiltinType;
 
-    var extendee = selector_mod.parse(ctx.allocator, extendee_str) catch return error.SassError;
+    var extendee = try parseSelectorArg(ctx, extendee_str, "extendee");
     defer extendee.deinit();
     for (extendee.selectors.items) |extendee_complex| {
         if (compoundCountInComplex(&extendee_complex) > 1) return error.BuiltinType;
         if (complexHasShallowParentSelector(&extendee_complex)) return error.BuiltinType;
     }
 
-    var extender = selector_mod.parse(ctx.allocator, extender_str) catch return error.SassError;
+    var extender = try parseSelectorArg(ctx, extender_str, "extender");
     defer extender.deinit();
     if (selectorListHasShallowParentSelector(&extender)) return error.BuiltinType;
 
@@ -526,18 +560,18 @@ fn selectorReplaceCore(
     original_str: []const u8,
     replacement_str: []const u8,
 ) BuiltinError!Value {
-    var sel = selector_mod.parse(ctx.allocator, sel_str) catch return error.SassError;
+    var sel = try parseSelectorArg(ctx, sel_str, "selector");
     defer sel.deinit();
     if (selectorListHasShallowParentSelector(&sel)) return error.SassError;
 
-    var original = selector_mod.parse(ctx.allocator, original_str) catch return error.SassError;
+    var original = try parseSelectorArg(ctx, original_str, "original");
     defer original.deinit();
     for (original.selectors.items) |original_complex| {
         if (compoundCountInComplex(&original_complex) > 1) return error.SassError;
         if (complexHasShallowParentSelector(&original_complex)) return error.SassError;
     }
 
-    var replacement = selector_mod.parse(ctx.allocator, replacement_str) catch return error.SassError;
+    var replacement = try parseSelectorArg(ctx, replacement_str, "replacement");
     defer replacement.deinit();
     if (selectorListHasShallowParentSelector(&replacement)) return error.SassError;
 

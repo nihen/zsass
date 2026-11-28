@@ -1,4 +1,5 @@
 const std = @import("std");
+const error_format = @import("error_format.zig");
 const file_access_mod = @import("../resolve/file_access.zig");
 const deprecation_mod = @import("deprecation.zig");
 const resource_budget = @import("resource_budget.zig");
@@ -367,6 +368,19 @@ fn loadCssNameIsAmbiguous(map: *const std.StringHashMapUnmanaged(void), name: []
     return false;
 }
 
+/// "_other.scss was already loaded, so it can't be configured using
+/// \"with\".", with the path as written from the working directory.
+fn reportAlreadyLoaded(self: anytype, path: []const u8) void {
+    const cwd = zsass_io.realPathAlloc(std.Io.Dir.cwd(), ".", self.allocator) catch null;
+    defer if (cwd) |c| self.allocator.free(c);
+    const shown = if (cwd) |c| std.fs.path.relativeAlloc(self.allocator, c, null, c, path) catch null else null;
+    defer if (shown) |t| self.allocator.free(t);
+    var buf: [1024]u8 = undefined;
+    if (std.fmt.bufPrint(&buf, "{s} was already loaded, so it can't be configured using \"with\".", .{shown orelse path})) |msg| {
+        error_format.setContextMessage(msg);
+    } else |_| {}
+}
+
 pub fn buildLoadCssSeedBindings(self: anytype, child_vm: anytype, config: LoadCssConfig) ![]LoadCssSeedBinding {
     if (config.entries.len == 0) return try self.allocator.alloc(LoadCssSeedBinding, 0);
     const root_mod = &child_vm.program.modules[child_vm.program.root_index];
@@ -375,12 +389,26 @@ pub fn buildLoadCssSeedBindings(self: anytype, child_vm: anytype, config: LoadCs
     try out.ensureTotalCapacity(self.allocator, config.entries.len);
     for (config.entries) |entry| {
         if (loadCssNameIsAmbiguous(&root_mod.ambiguous_export_default_vars, entry.name)) return error.SassError;
-        const target = lookupLoadCssVarTarget(&root_mod.exported_default_vars, entry.name) orelse return error.SassError;
+        const target = lookupLoadCssVarTarget(&root_mod.exported_default_vars, entry.name) orelse {
+            var buf: [512]u8 = undefined;
+            if (std.fmt.bufPrint(&buf, "${s} was not declared with !default in the @used module.", .{entry.name})) |msg| {
+                error_format.setContextMessage(msg);
+            } else |_| {}
+            return error.SassError;
+        };
         if (target.module_id >= child_vm.program.modules.len) return error.SassError;
         const row_len = child_vm.program.modules[target.module_id].max_slot;
         if (target.slot >= row_len) return error.SassError;
         const target_path = child_vm.program.modules[target.module_id].module_path;
-        if (self.isLoadCssModulePathLoaded(target_path)) return error.SassError;
+        if (self.isLoadCssModulePathLoaded(target_path)) {
+            // The loaded module is named by its path; one it forwards is not.
+            if (target.module_id == child_vm.program.root_index) {
+                reportAlreadyLoaded(self, target_path);
+            } else {
+                error_format.setContextMessage("This module was already loaded, so it can't be configured using \"with\".");
+            }
+            return error.SassError;
+        }
         const cloned = try cloneValueForLoadCssChild(self, child_vm, entry.value);
         try out.append(self.allocator, .{
             .module_id = target.module_id,
@@ -1045,7 +1073,10 @@ pub fn invokeMetaLoadCss(self: anytype, args: []const Value, arg_names: []const 
 
     const resolved_path = (try resolveLoadCssPath(self, url)) orelse return error.SassError;
     defer self.allocator.free(resolved_path);
-    if (!config.isEmpty() and self.isLoadCssModulePathLoaded(resolved_path)) return error.SassError;
+    if (!config.isEmpty() and self.isLoadCssModulePathLoaded(resolved_path)) {
+        reportAlreadyLoaded(self, resolved_path);
+        return error.SassError;
+    }
     var stack = self.load_css_stack_ptr orelse blk: {
         self.load_css_stack_ptr = &self.load_css_stack_owner;
         break :blk self.load_css_stack_ptr.?;

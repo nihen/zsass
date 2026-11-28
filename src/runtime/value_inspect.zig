@@ -99,7 +99,24 @@ fn formatCallableValue(ctx: *const Context, value: Value) std.mem.Allocator.Erro
 
 fn formatListValue(ctx: *const Context, value: Value) std.mem.Allocator.Error![]const u8 {
     std.debug.assert(value.kind() == .list);
+    // A list is shown as meta.inspect() writes it, in parentheses unless
+    // it has its own.
+    const inner = try formatListInspect(ctx, value);
+    // Brackets, a map's parentheses, an empty list's, and those of a list
+    // of one with a trailing separator are the list's own.
+    const view = value_mod.inspectLogicalListView(ctx.list_pool.items, value);
+    const own = if (view) |v|
+        v.bracketed or (v.is_map and v.items.len % 2 == 0) or v.items.len == 0 or
+            (v.items.len == 1 and (v.separator == .comma or v.separator == .slash))
+    else
+        true;
+    if (own) return inner;
+    defer ctx.allocator.free(inner);
+    return std.fmt.allocPrint(ctx.allocator, "({s})", .{inner});
+}
 
+/// A list as meta.inspect() writes it.
+fn formatListInspect(ctx: *const Context, value: Value) std.mem.Allocator.Error![]const u8 {
     const view = value_mod.inspectLogicalListView(ctx.list_pool.items, value) orelse return ctx.allocator.dupe(u8, "()");
     const items = view.items;
 
@@ -114,16 +131,14 @@ fn formatListValue(ctx: *const Context, value: Value) std.mem.Allocator.Error![]
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(ctx.allocator);
 
-    const open_bracket: u8 = if (view.bracketed) '[' else '(';
-    const close_bracket: u8 = if (view.bracketed) ']' else ')';
-
-    try out.append(ctx.allocator, open_bracket);
-
     if (items.len == 1 and (view.separator == .comma or view.separator == .slash)) {
-        const inner = try formatValueForArgMismatch(ctx, items[0]);
+        try out.append(ctx.allocator, if (view.bracketed) '[' else '(');
+        const inner = try formatInspectItem(ctx, items[0]);
         defer ctx.allocator.free(inner);
-
+        const needs_parens = value_mod.inspectNestedListNeedsParens(ctx.list_pool.items, items[0], view.separator);
+        if (needs_parens) try out.append(ctx.allocator, '(');
         try out.appendSlice(ctx.allocator, inner);
+        if (needs_parens) try out.append(ctx.allocator, ')');
         if (view.separator == .comma) {
             try out.append(ctx.allocator, ',');
         } else if (view.bracketed) {
@@ -131,24 +146,29 @@ fn formatListValue(ctx: *const Context, value: Value) std.mem.Allocator.Error![]
         } else {
             try out.append(ctx.allocator, '/');
         }
-        try out.append(ctx.allocator, close_bracket);
+        try out.append(ctx.allocator, if (view.bracketed) ']' else ')');
         return out.toOwnedSlice(ctx.allocator);
     }
 
+    if (view.bracketed) try out.append(ctx.allocator, '[');
     const sep = value_mod.listSeparatorCssFrom(view.separator);
-    try out.ensureUnusedCapacity(ctx.allocator, items.len * (sep.len + 2) + 1);
     for (items, 0..) |item, i| {
         if (i > 0) try out.appendSlice(ctx.allocator, sep);
-        const part = try formatValueForArgMismatch(ctx, item);
+        const part = try formatInspectItem(ctx, item);
         defer ctx.allocator.free(part);
         const needs_parens = value_mod.inspectNestedListNeedsParens(ctx.list_pool.items, item, view.separator);
         if (needs_parens) try out.append(ctx.allocator, '(');
         try out.appendSlice(ctx.allocator, part);
         if (needs_parens) try out.append(ctx.allocator, ')');
     }
-
-    try out.append(ctx.allocator, close_bracket);
+    if (view.bracketed) try out.append(ctx.allocator, ']');
     return out.toOwnedSlice(ctx.allocator);
+}
+
+/// An item of a list, written as meta.inspect() writes it.
+fn formatInspectItem(ctx: *const Context, item: Value) std.mem.Allocator.Error![]const u8 {
+    if (item.kind() == .list) return formatListInspect(ctx, item);
+    return formatValueForArgMismatch(ctx, item);
 }
 
 fn formatMapListValue(ctx: *const Context, items: []const Value) std.mem.Allocator.Error![]const u8 {
@@ -165,9 +185,10 @@ fn formatMapListValue(ctx: *const Context, items: []const Value) std.mem.Allocat
 
         const key_raw = items[i];
         const val_raw = items[i + 1];
-        const key = try formatValueForArgMismatch(ctx, key_raw);
+        // Keys and values are written as meta.inspect() writes them.
+        const key = try formatInspectItem(ctx, key_raw);
         defer ctx.allocator.free(key);
-        const val = try formatValueForArgMismatch(ctx, val_raw);
+        const val = try formatInspectItem(ctx, val_raw);
         defer ctx.allocator.free(val);
 
         const wrap_key = value_mod.inspectMapListNeedsParens(ctx.list_pool.items, key_raw, .key);
