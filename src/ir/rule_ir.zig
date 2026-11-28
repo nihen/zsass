@@ -12224,8 +12224,14 @@ pub const RuleIR = struct {
         if (parsed.selectors.items.len == 0) return error.SassError;
 
         for (parsed.selectors.items) |complex| {
-            const target = singleExtendTargetCompound(&complex) orelse return error.SassError;
-            if (target.simple_selectors.items.len != 1) return error.SassError;
+            const target = singleExtendTargetCompound(&complex) orelse {
+                error_format.setContextMessage("complex selectors may not be extended.");
+                return error.SassError;
+            };
+            if (target.simple_selectors.items.len != 1) {
+                error_format.setContextMessage("compound selectors may no longer be extended.");
+                return error.SassError;
+            }
         }
     }
 

@@ -2215,7 +2215,10 @@ pub const VM = struct {
     fn requireDeclaredFrameSlot(self: *const VM, fr: *const Frame, slot: usize) VMError!Value {
         _ = self;
         if (slot >= fr.locals.len or slot >= fr.declared.len) return error.BadJump;
-        if (!fr.declared[slot]) return error.SassError;
+        if (!fr.declared[slot]) {
+            error_format.setContextMessage("Undefined variable.");
+            return error.SassError;
+        }
         return fr.locals[slot];
     }
 
@@ -4201,7 +4204,10 @@ pub const VM = struct {
         _ = chunk;
         switch (inst.opcode()) {
             .record_extend => {
-                if (self.selector_stack.items.len == 0) return error.SassError;
+                if (self.selector_stack.items.len == 0) {
+                    error_format.setContextMessage("@extend may only be used within style rules.");
+                    return error.SassError;
+                }
                 const extending_selector = self.selector_stack.items[self.selector_stack.items.len - 1];
                 const optional = (inst.arg_a & 0x1) != 0;
                 const dynamic_target = (inst.arg_a & 0x4) != 0;
@@ -6998,6 +7004,24 @@ pub const VM = struct {
         return self.coerceSlashFreeValue(value);
     }
 
+    /// "Variable keyword argument map must have string keys." with the key
+    /// and the map, as the official CLI writes them.
+    fn reportKeywordMapKey(self: *VM, key: Value, pairs: []const Value) VMError!void {
+        var text: std.ArrayListUnmanaged(u8) = .empty;
+        defer text.deinit(self.allocator);
+        const key_text = try self.inspectForMessage(key);
+        try text.print(self.allocator, "Variable keyword argument map must have string keys.\n{s} is not a string in (", .{key_text});
+        var i: usize = 0;
+        while (i + 1 < pairs.len) : (i += 2) {
+            if (i > 0) try text.appendSlice(self.allocator, ", ");
+            const k = try self.inspectForMessage(pairs[i]);
+            const v = try self.inspectForMessage(pairs[i + 1]);
+            try text.print(self.allocator, "{s}: {s}", .{ k, v });
+        }
+        try text.appendSlice(self.allocator, ").");
+        error_format.setContextMessage(text.items);
+    }
+
     fn appendKeywordPairsToExpanded(
         self: *VM,
         key_values: []const Value,
@@ -7008,7 +7032,10 @@ pub const VM = struct {
         var i: usize = 0;
         while (i + 1 < key_values.len) : (i += 2) {
             const key_v = key_values[i];
-            if (key_v.kind() != .string or key_v.stringNamedColorLiteral(self.string_flags_pool.items)) return error.SassError;
+            if (key_v.kind() != .string or key_v.stringNamedColorLiteral(self.string_flags_pool.items)) {
+                try self.reportKeywordMapKey(key_v, key_values);
+                return error.SassError;
+            }
             try out_args.append(self.allocator, key_values[i + 1]);
             try out_names.append(self.allocator, key_v.stringIntern());
         }
@@ -8807,7 +8834,10 @@ pub const VM = struct {
     pub fn buildCssCallableResult(self: *VM, name_id: InternId, args: []const Value, arg_names: []const InternId) VMError!Value {
         if (arg_names.len != 0) {
             for (arg_names) |arg_name| {
-                if (arg_name != .none) return error.SassError;
+                if (arg_name != .none) {
+                    error_format.setContextMessage("Plain CSS functions don't support keyword arguments.");
+                    return error.SassError;
+                }
             }
         }
         const name = self.intern_pool.get(name_id);

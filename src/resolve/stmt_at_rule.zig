@@ -83,8 +83,10 @@ pub fn resolveAtRuleStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: an
     const is_keyframes_at_rule = isKeyframesAtRuleRawName(raw_name);
     const is_media_at_rule = cssIdentEquals(raw_name, "media") and !has_interpolated_name;
     const is_supports_at_rule = cssIdentEquals(raw_name, "supports") and !has_interpolated_name;
-    if (ctx.callable_decl_context == .function) return error.SassError;
-    if (ctx.property_namespace_depth > 0) return error.SassError;
+    if (ctx.callable_decl_context == .function or ctx.property_namespace_depth > 0) {
+        error_format.setContextMessage("This at-rule is not allowed here.");
+        return error.SassError;
+    }
     const allow_unknown_var_in_prelude = is_supports_at_rule or has_interpolated_name;
     var allow_unknown_var_in_body = false;
     var media_flags: u8 = 0;
