@@ -1450,7 +1450,7 @@ pub const Parser = struct {
                         self.pos += 1;
                         continue;
                     }
-                    return error.SyntaxError;
+                    return self.failExpecting("multiple statements on one line are not supported in the indented syntax.");
                 }
             }
         }
@@ -4859,7 +4859,7 @@ pub const Parser = struct {
         try self.enterSyntax();
         defer self.leaveSyntax();
         if (!self.isAtEnd() and self.current().tag == .lbrace) {
-            if (self.is_indented_syntax) return error.SyntaxError;
+            if (self.is_indented_syntax) return self.failExpecting("Expected newline.");
             return self.parseBraceBlockBody(ast);
         }
         return self.parseIndentedBlockBody(ast);

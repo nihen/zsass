@@ -8468,7 +8468,14 @@ fn resolveLegacyIfBuiltinExpr(
         return error.SassError;
     }
 
-    if (condition_expr == null or if_true_expr == null) return error.SassError;
+    if (condition_expr == null) {
+        error_format.setContextMessage("Missing argument $condition.");
+        return error.SassError;
+    }
+    if (if_true_expr == null) {
+        error_format.setContextMessage("Missing argument $if-true.");
+        return error.SassError;
+    }
 
     const else_expr = if (if_false_expr) |v|
         v
@@ -9583,7 +9590,10 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
             }
         }
     }
-    if (ctx.callable_decl_context == .function) return error.SassError;
+    if (ctx.callable_decl_context == .function) {
+        error_format.setContextMessage("@function rules may not contain declarations.");
+        return error.SassError;
+    }
     const pd = try resolveDeclPropData(ctx, prop_n, span);
     const saved_in_declaration_value = ctx.in_declaration_value;
     ctx.in_declaration_value = true;
@@ -10657,7 +10667,10 @@ fn resolveIncludeStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex 
     const unescaped_name = try css_utils.unescapeSassIdentifier(ctx.a, raw_name_slice);
     defer if (unescaped_name.ptr != raw_name_slice.ptr) ctx.a.free(unescaped_name);
     const name_slice = unescaped_name;
-    if (isDoubleDashIdentifier(name_slice)) return error.Unsupported;
+    if (isDoubleDashIdentifier(name_slice)) {
+        error_format.setContextMessage("Sass @mixin names beginning with -- are forbidden for forward-compatibility with plain CSS mixins.");
+        return error.SassError;
+    }
     var callee_module = local_module_id_sentinel;
     // SAFETY: initialized before first read in this scope.
     var mid: MixinId = undefined;
@@ -13679,7 +13692,7 @@ test "resolver: custom css @function body keeps unknown var literal" {
 }
 
 test "resolver: include name starting with -- errors even with __ declaration" {
-    try std.testing.expectError(error.Unsupported, parseAndResolve(std.testing.allocator,
+    try std.testing.expectError(error.SassError, parseAndResolve(std.testing.allocator,
         \\@mixin __a() { b: c; }
         \\d { @include --a; }
     ));

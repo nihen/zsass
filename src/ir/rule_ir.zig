@@ -12220,7 +12220,10 @@ pub const RuleIR = struct {
 
         var parsed = selector_mod.parse(allocator, trimmed) catch return error.SassError;
         defer parsed.deinit();
-        if (selector_mod.hasParentReference(&parsed)) return error.SassError;
+        if (selector_mod.hasParentReference(&parsed)) {
+            error_format.setContextMessage("Parent selectors aren't allowed here.");
+            return error.SassError;
+        }
         if (parsed.selectors.items.len == 0) return error.SassError;
 
         for (parsed.selectors.items) |complex| {
