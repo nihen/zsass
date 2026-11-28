@@ -707,7 +707,9 @@ fn inspectStringValue(ctx: *BuiltinContext, value: Value) BuiltinError![]const u
                 try acc.appendSlice(ctx.allocator, cp_slice);
                 continue;
             };
-            if (css_utils.isPrivateUseCodePoint(cp)) {
+            // Control characters other than a tab are escaped as CSS output
+            // escapes them.
+            if (css_utils.isPrivateUseCodePoint(cp) or (cp < 0x20 and cp != '\t') or cp == 0x7f) {
                 var buf: [16]u8 = undefined;
                 const escaped = std.fmt.bufPrint(&buf, "\\{x}", .{cp}) catch |err| {
                     std.debug.panic("meta.inspectStringValue formatting failed: {s}", .{@errorName(err)});
