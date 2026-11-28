@@ -9531,6 +9531,7 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
         const raw_prop_text = if (raw_end > raw_start) ctx.ast.source[raw_start..raw_end] else "";
         const trimmed_prop_text = std.mem.trim(u8, raw_prop_text, " \t\r\n");
         if (ctx.property_namespace_depth > 0 and std.mem.startsWith(u8, trimmed_prop_text, "--")) {
+            error_format.setContextMessage("Declarations whose names begin with \"--\" may not be nested.");
             return error.SassError;
         }
     }
@@ -11136,7 +11137,10 @@ fn resolveMixinDecl(ctx: *Ctx, n: AstNode, span: Span) !void {
     const raw_name = ctx.pool.get(name_id);
     const unescaped_name = try css_utils.unescapeSassIdentifier(ctx.a, raw_name);
     defer if (unescaped_name.ptr != raw_name.ptr) ctx.a.free(unescaped_name);
-    if (isDoubleDashIdentifier(unescaped_name)) return error.Unsupported;
+    if (isDoubleDashIdentifier(unescaped_name)) {
+        error_format.setContextMessage("Sass @mixin names beginning with -- are forbidden for forward-compatibility with plain CSS mixins.");
+        return error.SassError;
+    }
     const name_str = unescaped_name;
     ctx.markScopeRestoreDirty();
     // Record prev state just before mutation (was_present + old value or absent).
