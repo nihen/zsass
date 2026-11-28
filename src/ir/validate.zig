@@ -535,6 +535,8 @@ test "validate: plain css selector allows escaped ampersand literal" {
 /// - More than 2 comparison operators (invalid triple-range)
 /// - Mismatched direction (e.g., (1px > width < 2px))
 /// - Spaced operators like "< =" (should be "<=")
+const missing_media_condition = "expected media condition in parentheses.";
+
 fn validateMediaRangeFeature(inner: []const u8) EvalError!void {
     const s = std.mem.trim(u8, inner, " \t\r\n");
     if (s.len == 0) return;
@@ -564,7 +566,7 @@ fn validateMediaRangeFeature(inner: []const u8) EvalError!void {
         }
 
         if (s[i] == ':' and saw_comparison) {
-            return EvalError.SassError;
+            return conditionError("expected \")\".");
         }
 
         // Check for spaced operator: "< =" or "> ="
@@ -573,7 +575,7 @@ fn validateMediaRangeFeature(inner: []const u8) EvalError!void {
             if (next.len > 0 and next[0] == '=' and
                 (s[i + 1] == ' ' or s[i + 1] == '\t'))
             {
-                return EvalError.SassError;
+                return conditionError("Expected expression.");
             }
         }
 
@@ -603,7 +605,7 @@ fn validateMediaRangeFeature(inner: []const u8) EvalError!void {
         }
 
         if (op) |o| {
-            if (op_count >= 4) return EvalError.SassError;
+            if (op_count >= 4) return conditionError("expected \")\".");
             ops[op_count] = o;
             op_count += 1;
             saw_comparison = true;
@@ -611,7 +613,7 @@ fn validateMediaRangeFeature(inner: []const u8) EvalError!void {
     }
 
     // More than 2 comparison operators is invalid
-    if (op_count > 2) return EvalError.SassError;
+    if (op_count > 2) return conditionError("expected \")\".");
 
     // 2 operators: check they are in the same direction (both < family or both > family)
     if (op_count == 2) {
@@ -620,10 +622,10 @@ fn validateMediaRangeFeature(inner: []const u8) EvalError!void {
         const second_lt = ops[1] == .lt or ops[1] == .lte;
         const second_gt = ops[1] == .gt or ops[1] == .gte;
         // Both must be in the same direction (or second is eq which is error anyway)
-        if (is_lt and !second_lt) return EvalError.SassError;
-        if (is_gt and !second_gt) return EvalError.SassError;
+        if (is_lt and !second_lt) return conditionError("expected \")\".");
+        if (is_gt and !second_gt) return conditionError("expected \")\".");
         // eq = eq is also invalid (two = operators)
-        if (ops[0] == .eq or ops[1] == .eq) return EvalError.SassError;
+        if (ops[0] == .eq or ops[1] == .eq) return conditionError("expected \")\".");
     }
 }
 
@@ -666,17 +668,17 @@ pub fn validateMediaQueryPrelude(prelude: []const u8, had_interpolation: bool) E
             if (vi + 4 <= t.len and
                 t[vi] == 'n' and t[vi + 1] == 'o' and t[vi + 2] == 't' and t[vi + 3] == '(')
             {
-                return EvalError.SassError;
+                return conditionError("Expected whitespace.");
             }
             if (vi + 4 <= t.len and
                 t[vi] == 'a' and t[vi + 1] == 'n' and t[vi + 2] == 'd' and t[vi + 3] == '(')
             {
-                return EvalError.SassError;
+                return conditionError("Expected whitespace.");
             }
             if (vi + 3 <= t.len and
                 t[vi] == 'o' and t[vi + 1] == 'r' and t[vi + 2] == '(')
             {
-                return EvalError.SassError;
+                return conditionError("Expected whitespace.");
             }
         }
         vi += 1;
@@ -760,7 +762,7 @@ fn validateSingleMediaQuery(t: []const u8, had_interpolation: bool) EvalError!vo
 
     // Standalone "not" without anything - invalid (e.g. @media not {...})
     if (s.len == 3 and s[0] == 'n' and s[1] == 'o' and s[2] == 't') {
-        return EvalError.SassError;
+        return conditionError(missing_media_condition);
     }
 
     var pos: usize = 0;
@@ -803,10 +805,10 @@ fn validateSingleMediaQuery(t: []const u8, had_interpolation: bool) EvalError!vo
             (rem.len == 3 or rem[3] == ' ' or rem[3] == '(' or rem[3] == '{'))
         {
             const after = if (rem.len > 3) std.mem.trimStart(u8, rem[3..], " \t") else "";
-            if (after.len == 0) return EvalError.SassError;
-            if (found_or) return EvalError.SassError;
+            if (after.len == 0) return conditionError(missing_media_condition);
+            if (found_or) return conditionError("expected \"{\".");
             // "and" after "not (cond)" is not valid
-            if (after_not_cond) return EvalError.SassError;
+            if (after_not_cond) return conditionError("expected \"{\".");
             found_and = true;
             after_not_cond = false;
             prev_was_interp = false;
@@ -817,13 +819,13 @@ fn validateSingleMediaQuery(t: []const u8, had_interpolation: bool) EvalError!vo
             (rem.len == 2 or rem[2] == ' ' or rem[2] == '(' or rem[2] == '{'))
         {
             const after = if (rem.len > 2) std.mem.trimStart(u8, rem[2..], " \t") else "";
-            if (after.len == 0) return EvalError.SassError;
-            if (found_and) return EvalError.SassError;
-            if (has_type_query) return EvalError.SassError;
+            if (after.len == 0) return conditionError(missing_media_condition);
+            if (found_and) return conditionError("expected \"{\".");
+            if (has_type_query) return conditionError("expected \"{\".");
             // "or" after interpolation is not allowed
-            if (prev_was_interp) return EvalError.SassError;
+            if (prev_was_interp) return conditionError("expected \"{\".");
             // "or" after "not (cond)" is not valid
-            if (after_not_cond) return EvalError.SassError;
+            if (after_not_cond) return conditionError("expected \"{\".");
             found_or = true;
             after_not_cond = false;
             prev_was_interp = false;
@@ -835,14 +837,14 @@ fn validateSingleMediaQuery(t: []const u8, had_interpolation: bool) EvalError!vo
         {
             // "not" after "and" is valid: "a and not (b)"
             // "not" after "or" is NOT valid (Sass restriction)
-            if (found_or) return EvalError.SassError;
+            if (found_or) return conditionError(missing_media_condition);
             // Check what follows "not":
             // - If followed by ( then it's "not (...)" - valid
             // - If followed by a word then it's "not media-type" which is valid at top level
             //   (e.g. "not print") but not after "and"
             const after_nt = if (rem.len > 3) std.mem.trimStart(u8, rem[3..], " \t") else "";
-            if (after_nt.len == 0) return EvalError.SassError; // trailing "not"
-            if (after_nt[0] != '(' and found_and) return EvalError.SassError;
+            if (after_nt.len == 0) return conditionError(missing_media_condition); // trailing "not"
+            if (after_nt[0] != '(' and found_and) return conditionError(missing_media_condition);
             // If "not (cond)" pattern: consume the paren group now so the
             // subsequent paren-handling code does not reset after_not_cond.
             if (after_nt.len > 0 and after_nt[0] == '(') {
@@ -878,19 +880,26 @@ fn validateSingleMediaQuery(t: []const u8, had_interpolation: bool) EvalError!vo
 // ---------------------------------------------------------------------------
 
 /// Validate @supports prelude for invalid syntax.
+/// The official CLI's message for a malformed condition.
+fn conditionError(comptime msg: []const u8) EvalError {
+    error_format.setContextMessage(msg);
+    return EvalError.SassError;
+}
+
 pub fn validateSupportsPrelude(prelude: []const u8) EvalError!void {
     const t = std.mem.trim(u8, prelude, " \t\n\r");
-    if (t.len == 0) return EvalError.SassError;
+    if (t.len == 0) return conditionError("expected \"(\".");
 
     if (t[0] == '(') {
-        try validateSupportsConditionList(t);
+        try validateSupportsConditionListOp(t, 0, false);
         return;
     }
+    if (std.ascii.eqlIgnoreCase(t, "not")) return conditionError("expected \"(\".");
 
     // "not " - valid start if followed by ( group or function call
     if (t.len >= 4 and t[0] == 'n' and t[1] == 'o' and t[2] == 't' and t[3] == ' ') {
         const after = std.mem.trimStart(u8, t[4..], " \t");
-        if (after.len == 0) return EvalError.SassError;
+        if (after.len == 0) return conditionError("expected \"(\".");
         if (after[0] == '(') {
             // "not" takes exactly one condition - no trailing and/or
             var not_depth: u32 = 1;
@@ -898,9 +907,9 @@ pub fn validateSupportsPrelude(prelude: []const u8) EvalError!void {
             while (not_idx < after.len and not_depth > 0) : (not_idx += 1) {
                 if (after[not_idx] == '(') not_depth += 1 else if (after[not_idx] == ')') not_depth -= 1;
             }
-            const not_rest = std.mem.trim(u8, after[not_idx..], " \t\n\r");
-            if (not_rest.len > 0) return EvalError.SassError;
             try validateSupportsParenCondition(after[0..not_idx]);
+            const not_rest = std.mem.trim(u8, after[not_idx..], " \t\n\r");
+            if (not_rest.len > 0) return conditionError("expected \"{\".");
             return;
         }
         // "not ident(...)" - function call form
@@ -909,7 +918,7 @@ pub fn validateSupportsPrelude(prelude: []const u8) EvalError!void {
         if (not_ident_end > 0 and not_ident_end < after.len and after[not_ident_end] == '(') {
             return;
         }
-        return EvalError.SassError;
+        return conditionError("Expected @supports condition.");
     }
 
     // "not(" without space - invalid
@@ -924,7 +933,7 @@ pub fn validateSupportsPrelude(prelude: []const u8) EvalError!void {
         return;
     }
 
-    return EvalError.SassError;
+    return conditionError("Expected @supports condition.");
 }
 
 /// Validate the content inside a @supports paren group.
@@ -935,7 +944,7 @@ fn validateSupportsParenCondition(text: []const u8) EvalError!void {
     if (inner.len == 0) return EvalError.SassError;
 
     if (inner[0] == '(') {
-        try validateSupportsConditionList(inner);
+        try validateSupportsConditionListOp(inner, 0, true);
         return;
     }
 
@@ -943,7 +952,7 @@ fn validateSupportsParenCondition(text: []const u8) EvalError!void {
     if (inner.len >= 4 and inner[0] == 'n' and inner[1] == 'o' and inner[2] == 't' and inner[3] == ' ') {
         const after_not = std.mem.trimStart(u8, inner[4..], " \t");
         if (after_not.len == 0 or after_not[0] != '(') {
-            return EvalError.SassError;
+            return conditionError("Expected @supports condition.");
         }
         return;
     }
@@ -964,7 +973,7 @@ fn validateSupportsParenCondition(text: []const u8) EvalError!void {
     // CSS @supports accepts "general-enclosed" which is any non-empty content
     // in parens, EXCEPT content that starts with a digit (not a valid identifier).
     if (std.ascii.isDigit(inner[0])) {
-        return EvalError.SassError;
+        return conditionError("Expected identifier.");
     }
 }
 
@@ -977,33 +986,33 @@ fn validateSupportsDeclarationText(inner: []const u8) EvalError!void {
 
     const is_custom = prop.len >= 2 and prop[0] == '-' and prop[1] == '-';
     if (is_custom) {
-        if (value_raw.len == 0) return EvalError.SassError;
+        if (value_raw.len == 0) return conditionError("Expected token.");
         return;
     }
 
     for (prop) |c| {
-        if (isWhitespace(c)) return EvalError.SassError;
+        if (isWhitespace(c)) return conditionError("expected \":\".");
     }
 
     const value = std.mem.trim(u8, value_raw, " \t\n\r");
     if (value.len == 0) return EvalError.SassError;
 }
 
-/// Validate a @supports condition list.
-fn validateSupportsConditionList(t: []const u8) EvalError!void {
-    return validateSupportsConditionListOp(t, 0); // 0 = no operator seen yet
-}
-
-fn validateSupportsConditionListOp(t: []const u8, prev_op: u8) EvalError!void {
+/// Validate a @supports condition list; `prev_op` is the `and` (`a`) or
+/// `or` (`r`) that came before, and `nested` whether it is in parentheses.
+fn validateSupportsConditionListOp(t: []const u8, prev_op: u8, nested: bool) EvalError!void {
     try stack_guard.check();
     const s = std.mem.trim(u8, t, " \t\n\r");
-    if (s.len == 0) return EvalError.SassError;
+    if (s.len == 0) return conditionError("expected \"(\".");
 
     if (s[0] != '(') {
         var ident_end: usize = 0;
         while (ident_end < s.len and isIdentChar(s[ident_end])) : (ident_end += 1) {}
+        if (ident_end == 3 and std.ascii.eqlIgnoreCase(s[0..3], "not")) {
+            return conditionError("\"not\" is not a valid identifier here.");
+        }
         if (ident_end == 0 or ident_end >= s.len or s[ident_end] != '(') {
-            return EvalError.SassError;
+            return conditionError("expected \"(\".");
         }
         return;
     }
@@ -1019,26 +1028,28 @@ fn validateSupportsConditionListOp(t: []const u8, prev_op: u8) EvalError!void {
 
     const rest = std.mem.trim(u8, s[idx..], " \t\n\r");
     if (rest.len == 0) return;
+    if (std.mem.eql(u8, rest, "and") or std.mem.eql(u8, rest, "or")) return conditionError("expected \"(\".");
 
     if (rest.len >= 4 and rest[0] == 'a' and rest[1] == 'n' and rest[2] == 'd' and isWhitespace(rest[3])) {
-        if (prev_op == 'r') return EvalError.SassError; // or before and
+        if (prev_op == 'r') return conditionError("Expected \"or\".");
         const rest_after = std.mem.trimStart(u8, rest[4..], " \t\n\r");
         if (rest_after.len >= 4 and rest_after[0] == 'n' and rest_after[1] == 'o' and
             rest_after[2] == 't' and rest_after[3] == '(')
         {
-            return EvalError.SassError;
+            return conditionError("\"not\" is not a valid identifier here.");
         }
-        try validateSupportsConditionListOp(rest_after, 'a');
+        try validateSupportsConditionListOp(rest_after, 'a', nested);
         return;
     }
     if (rest.len >= 3 and rest[0] == 'o' and rest[1] == 'r' and isWhitespace(rest[2])) {
-        if (prev_op == 'a') return EvalError.SassError; // and before or
+        if (prev_op == 'a') return conditionError("Expected \"and\".");
         const rest_after = std.mem.trimStart(u8, rest[3..], " \t\n\r");
-        try validateSupportsConditionListOp(rest_after, 'r');
+        try validateSupportsConditionListOp(rest_after, 'r', nested);
         return;
     }
 
-    return EvalError.SassError;
+    if (nested) return conditionError("expected \")\".");
+    return conditionError("expected \"{\".");
 }
 
 // ---------------------------------------------------------------------------
