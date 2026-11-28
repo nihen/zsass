@@ -1055,7 +1055,11 @@ pub const VM = struct {
                 &self.stream_chunk_extend_targets,
             ) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                else => return false,
+                // The @extend may never run; its error is the run's to report.
+                else => {
+                    error_format.clearContextMessage();
+                    return false;
+                },
             };
         }
         return true;
@@ -7004,18 +7008,28 @@ pub const VM = struct {
         return self.coerceSlashFreeValue(value);
     }
 
+    /// A map key or value as a map writes it: a comma list in parentheses.
+    fn inspectMapEntryForMessage(self: *VM, v: Value) VMError![]const u8 {
+        const text = try self.inspectForMessage(v);
+        if (v.kind() != .list or !v.listComma(self.list_meta_pool.items) or v.listBracketed(self.list_meta_pool.items)) return text;
+        if (text.len > 0 and text[0] == '(') return text;
+        const wrapped = try std.fmt.allocPrint(self.allocator, "({s})", .{text});
+        defer self.allocator.free(wrapped);
+        return self.intern_pool.get(try self.intern_pool.intern(wrapped));
+    }
+
     /// "Variable keyword argument map must have string keys." with the key
     /// and the map, as the official CLI writes them.
     fn reportKeywordMapKey(self: *VM, key: Value, pairs: []const Value) VMError!void {
         var text: std.ArrayListUnmanaged(u8) = .empty;
         defer text.deinit(self.allocator);
-        const key_text = try self.inspectForMessage(key);
+        const key_text = try self.inspectMapEntryForMessage(key);
         try text.print(self.allocator, "Variable keyword argument map must have string keys.\n{s} is not a string in (", .{key_text});
         var i: usize = 0;
         while (i + 1 < pairs.len) : (i += 2) {
             if (i > 0) try text.appendSlice(self.allocator, ", ");
-            const k = try self.inspectForMessage(pairs[i]);
-            const v = try self.inspectForMessage(pairs[i + 1]);
+            const k = try self.inspectMapEntryForMessage(pairs[i]);
+            const v = try self.inspectMapEntryForMessage(pairs[i + 1]);
             try text.print(self.allocator, "{s}: {s}", .{ k, v });
         }
         try text.appendSlice(self.allocator, ").");
@@ -12338,7 +12352,8 @@ fn normalizeUnicodeRangeDeclText(alloc: std.mem.Allocator, raw: []const u8) VMEr
 
     const ur_len = css_utils.unicodeRangeLen(trimmed);
     // The whole word, which says what of it is no range.
-    const word_end = std.mem.indexOfAny(u8, trimmed, " \t\n\r,") orelse trimmed.len;
+    var word_end: usize = 0;
+    while (word_end < trimmed.len and (std.ascii.isAlphanumeric(trimmed[word_end]) or trimmed[word_end] == '+' or trimmed[word_end] == '-' or trimmed[word_end] == '?' or trimmed[word_end] == '_')) : (word_end += 1) {}
     // `U+4??-x` is the range and then text.
     if (ur_len == 0 or (ur_len < word_end and trimmed[ur_len - 1] != '?')) {
         ir_validate.validateUnicodeRange(trimmed[0..word_end]) catch return error.SassError;

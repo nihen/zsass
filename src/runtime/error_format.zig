@@ -209,7 +209,10 @@ pub fn errorToUserMessageWithContext(err: anyerror) []const u8 {
     const by_tag = errorToUserMessage(err);
     // The guess only stands in for the generic syntax error.
     if (fallback_message) |m| {
-        if (std.mem.eql(u8, by_tag, "Invalid CSS syntax.")) return m;
+        // A loaded file's syntax error reaches here as the load's.
+        if (std.mem.eql(u8, by_tag, "Invalid CSS syntax.") or
+            std.mem.eql(u8, by_tag, "Failed to parse imported file.") or
+            std.mem.eql(u8, by_tag, "Compilation failed.")) return m;
     }
     return by_tag;
 }

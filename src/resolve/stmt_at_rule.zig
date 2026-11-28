@@ -83,8 +83,9 @@ pub fn resolveAtRuleStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: an
     const is_keyframes_at_rule = isKeyframesAtRuleRawName(raw_name);
     const is_media_at_rule = cssIdentEquals(raw_name, "media") and !has_interpolated_name;
     const is_supports_at_rule = cssIdentEquals(raw_name, "supports") and !has_interpolated_name;
-    // An interpolated name is reported as no identifier.
-    if (!has_interpolated_name and (ctx.callable_decl_context == .function or ctx.property_namespace_depth > 0)) {
+    // A name that starts with interpolation is reported as no identifier.
+    const name_starts_interpolated = has_interpolated_name and std.mem.startsWith(u8, std.mem.trimStart(u8, interpolated_at_rule_name, "@"), "#{");
+    if (!name_starts_interpolated and (ctx.callable_decl_context == .function or ctx.property_namespace_depth > 0)) {
         error_format.setContextMessage("This at-rule is not allowed here.");
         return error.SassError;
     }
