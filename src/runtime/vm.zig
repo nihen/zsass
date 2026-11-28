@@ -7615,8 +7615,17 @@ pub const VM = struct {
         if (arg_base + callee.argc > callee.local_count) return error.InternalError;
         const has_rest = callee.has_rest and callee.argc > 0;
         const fixed_argc: usize = if (has_rest) callee.argc - 1 else callee.argc;
-        if (!has_rest and args.len > fixed_argc) {
-            return setTooManyArgumentsError(fixed_argc, args.len);
+        const positional_count: usize = blk: {
+            if (arg_names.len == 0) break :blk args.len;
+            var n: usize = 0;
+            for (arg_names) |name_id| {
+                if (name_id == .none) n += 1;
+            }
+            break :blk n;
+        };
+        if (!has_rest and positional_count > fixed_argc) {
+            if (positional_count < args.len) return setTooManyPositionalArgumentsError(fixed_argc, positional_count);
+            return setTooManyArgumentsError(fixed_argc, positional_count);
         }
         if (arg_names.len != 0 and callee.param_names.len != callee.argc) return error.InternalError;
 
@@ -7636,6 +7645,9 @@ pub const VM = struct {
             try rest_keywords.ensureTotalCapacity(self.allocator, args.len * 2);
         }
 
+        // Names no parameter has are reported after a missing argument.
+        var unknown_names: [8]InternId = undefined;
+        var unknown_count: usize = 0;
         var next_pos: usize = 0;
         for (args, 0..) |arg, i| {
             const name_id = if (arg_names.len == 0) InternId.none else arg_names[i];
@@ -7665,6 +7677,14 @@ pub const VM = struct {
             }
             if (matched) |slot_idx| {
                 if (bound[slot_idx]) {
+                    if (slot_idx < next_pos) {
+                        const param_name = self.intern_pool.get(callee.param_names[slot_idx]);
+                        const bare = if (param_name.len > 0 and param_name[0] == '$') param_name[1..] else param_name;
+                        var buf: [160]u8 = undefined;
+                        const msg = std.fmt.bufPrint(&buf, "Argument ${s} was passed both by position and by name.", .{bare}) catch return error.BuiltinArity;
+                        error_format.setContextMessage(msg);
+                        return error.BuiltinArity;
+                    }
                     error_format.setContextMessage("Duplicate argument.");
                     return error.BuiltinArity;
                 }
@@ -7674,11 +7694,9 @@ pub const VM = struct {
                 continue;
             }
             if (!has_rest) {
-                const raw_name = self.intern_pool.get(name_id);
-                var buf: [128]u8 = undefined;
-                const msg = std.fmt.bufPrint(&buf, "No parameter named ${s}.", .{raw_name}) catch return error.BuiltinArity;
-                error_format.setContextMessage(msg);
-                return error.BuiltinArity;
+                if (unknown_count < unknown_names.len) unknown_names[unknown_count] = name_id;
+                unknown_count += 1;
+                continue;
             }
             const norm_name = try self.internNormalizedKeywordName(name_id);
             try rest_keywords.append(self.allocator, Value.string(norm_name, false));
@@ -7698,6 +7716,19 @@ pub const VM = struct {
             const param_name = self.intern_pool.get(callee.param_names[pi]);
             return setMissingNamedArgumentError(param_name);
         }
+        if (unknown_count > 0) {
+            const shown = @min(unknown_count, unknown_names.len);
+            var buf: [512]u8 = undefined;
+            var w: std.Io.Writer = .fixed(&buf);
+            w.writeAll(if (shown == 1) "No parameter named " else "No parameters named ") catch {};
+            for (unknown_names[0..shown], 0..) |name_id, i| {
+                if (i > 0) w.writeAll(if (i == shown - 1) " or " else ", ") catch {};
+                w.print("${s}", .{self.intern_pool.get(name_id)}) catch {};
+            }
+            w.writeAll(".") catch {};
+            error_format.setContextMessage(w.buffered());
+            return error.BuiltinArity;
+        }
 
         if (has_rest) {
             const rest_val = try self.buildRestListValue(rest_positional.items, rest_separator_override);
@@ -7713,6 +7744,20 @@ pub const VM = struct {
     fn setTooManyArgumentsError(expected: usize, got: usize) VMError {
         var buf: [128]u8 = undefined;
         const msg = error_format.formatTooManyArguments(&buf, expected, got) catch return error.BuiltinArity;
+        error_format.setContextMessage(msg);
+        return error.BuiltinArity;
+    }
+
+    /// With arguments passed by name too, the official CLI counts the
+    /// positional ones.
+    fn setTooManyPositionalArgumentsError(expected: usize, got: usize) VMError {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Only {d} positional {s} allowed, but {d} {s} passed.", .{
+            expected,
+            if (expected == 1) "argument" else "arguments",
+            got,
+            if (got == 1) "was" else "were",
+        }) catch return error.BuiltinArity;
         error_format.setContextMessage(msg);
         return error.BuiltinArity;
     }
