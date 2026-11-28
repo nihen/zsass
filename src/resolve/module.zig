@@ -2,6 +2,7 @@ const std = @import("std");
 const stack_guard = @import("../runtime/stack_guard.zig");
 const file_access_mod = @import("file_access.zig");
 const zsass_io = @import("../runtime/io.zig");
+const error_format = @import("../runtime/error_format.zig");
 const pkg_importer = @import("pkg_importer.zig");
 const test_utils = struct {
     fn writeFile(dir: *std.Io.Dir, path: []const u8, contents: []const u8) !void {
@@ -131,6 +132,43 @@ pub const ResolveOptions = struct {
     /// Confines the files resolution may look at; null leaves them open.
     file_access: ?*const file_access_mod.FileAccess = null,
 };
+
+/// The one candidate that exists, its index plus `base`; more than one is
+/// ambiguous, reported as the official CLI reports it, each path from the
+/// working directory, in order.
+fn findOnlyCandidate(allocator: std.mem.Allocator, probe: anytype, candidates: []const ?[]const u8, base: usize) (std.mem.Allocator.Error || error{AmbiguousImport})!?usize {
+    var found: [8]usize = undefined;
+    var n: usize = 0;
+    for (candidates, 0..) |candidate_opt, idx| {
+        const candidate = candidate_opt orelse continue;
+        if (!probedFileExists(probe, candidate)) continue;
+        if (n < found.len) found[n] = idx;
+        n += 1;
+    }
+    if (n == 0) return null;
+    if (n == 1) return found[0] + base;
+    const cwd = zsass_io.realPathAlloc(std.Io.Dir.cwd(), ".", allocator) catch null;
+    defer if (cwd) |c| allocator.free(c);
+    var shown: [8][]const u8 = undefined;
+    var count: usize = 0;
+    defer for (shown[0..count]) |t| allocator.free(t);
+    for (found[0..@min(n, found.len)]) |idx| {
+        const path = candidates[idx].?;
+        shown[count] = if (cwd) |c| (std.fs.path.relativeAlloc(allocator, c, null, c, path) catch try allocator.dupe(u8, path)) else try allocator.dupe(u8, path);
+        count += 1;
+    }
+    std.mem.sort([]const u8, shown[0..count], {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lt);
+    var buf: [2048]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    w.writeAll("It's not clear which file to import. Found:") catch {};
+    for (shown[0..count]) |t| w.print("\n  {s}", .{t}) catch {};
+    error_format.setContextMessage(w.buffered());
+    return error.AmbiguousImport;
+}
 
 pub fn resolveUrl(
     allocator: std.mem.Allocator,
@@ -478,27 +516,10 @@ fn tryCandidatePhase(
 
     var found_idx: ?usize = null;
     if (kind == .normal_non_index) {
-        for (candidates[0..4], 0..) |candidate_opt, idx| {
-            const candidate = candidate_opt.?;
-            if (!probedFileExists(probe, candidate)) continue;
-            if (found_idx != null) return error.AmbiguousImport;
-            found_idx = idx;
-        }
-        if (found_idx == null) {
-            for (candidates[4..candidate_count], 4..) |candidate_opt, idx| {
-                const candidate = candidate_opt.?;
-                if (!probedFileExists(probe, candidate)) continue;
-                if (found_idx != null) return error.AmbiguousImport;
-                found_idx = idx;
-            }
-        }
+        found_idx = try findOnlyCandidate(allocator, probe, candidates[0..4], 0);
+        if (found_idx == null) found_idx = try findOnlyCandidate(allocator, probe, candidates[4..candidate_count], 4);
     } else {
-        for (candidates[0..candidate_count], 0..) |candidate_opt, idx| {
-            const candidate = candidate_opt.?;
-            if (!probedFileExists(probe, candidate)) continue;
-            if (found_idx != null) return error.AmbiguousImport;
-            found_idx = idx;
-        }
+        found_idx = try findOnlyCandidate(allocator, probe, candidates[0..candidate_count], 0);
     }
 
     if (found_idx) |idx| return try allocator.dupe(u8, candidates[idx].?);
