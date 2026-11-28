@@ -2957,8 +2957,9 @@ pub fn math_log(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     return Value.numberUnitless(@log(number));
 }
 
-/// A `@for` bound: `from` alone, or `to` with `from`, which it is taken in
-/// the unit of. Each is a number and an int, as the official CLI requires.
+/// A `@for` bound: `from` alone, which has to be a number, or `to` with
+/// `from`, when `to` is a number too, `from` an int, and `to` one in
+/// `from`'s unit, as the official CLI checks them once both are evaluated.
 pub fn forBoundCheck(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     if (args.len != 1 and args.len != 2) return error.BuiltinArity;
     const bound = args[args.len - 1];
@@ -2967,24 +2968,32 @@ pub fn forBoundCheck(ctx: *BuiltinContext, args: []const Value) BuiltinError!Val
         defer ctx.allocator.free(text);
         return reportForBound("{s} is not a number.", .{text});
     }
+    if (args.len == 1) return bound;
+
+    const from = args[0];
+    const from_unit_id = from.unitId(ctx.number_pool);
+    const from_unit: []const u8 = if (from_unit_id == .none) "" else ctx.intern_pool.get(from_unit_id);
+    if (shared.fuzzyInt(from.asF64(ctx.number_pool)) == null) return reportForBound("{d}{s} is not an int.", .{ from.asF64(ctx.number_pool), from_unit });
+
     const unit_id = bound.unitId(ctx.number_pool);
-    var unit: []const u8 = if (unit_id == .none) "" else ctx.intern_pool.get(unit_id);
+    const unit: []const u8 = if (unit_id == .none) "" else ctx.intern_pool.get(unit_id);
     var value = bound.asF64(ctx.number_pool);
-    if (args.len == 2) {
-        const from_unit_id = args[0].unitId(ctx.number_pool);
-        const from_unit: []const u8 = if (from_unit_id == .none) "" else ctx.intern_pool.get(from_unit_id);
-        if (from_unit.len != 0 and unit.len != 0 and !std.mem.eql(u8, from_unit, unit)) {
-            value = units_mod.convertComparableUnitCi(value, unit, from_unit) orelse {
-                if (units_mod.familyUnitsPhrase(from_unit)) |phrase| {
-                    return reportForBound("Expected {d}{s} to have {s}.", .{ bound.asF64(ctx.number_pool), unit, phrase });
-                }
-                return reportForBound("Expected {d}{s} to have unit {s}.", .{ bound.asF64(ctx.number_pool), unit, from_unit });
-            };
-        }
-        // A unitless `to` takes `from`'s unit.
-        unit = from_unit;
+    if (from_unit.len != 0 and unit.len != 0 and !std.mem.eql(u8, from_unit, unit)) {
+        const compound = std.mem.indexOfAny(u8, unit, "*/") != null or std.mem.indexOfAny(u8, from_unit, "*/") != null;
+        const converted: ?f64 = if (compound)
+            (if (try compoundUnitFactor(ctx, unit, from_unit)) |factor| value * factor else null)
+        else
+            units_mod.convertComparableUnitCi(value, unit, from_unit);
+        value = converted orelse {
+            const text = try shared.valueToInspectionString(ctx, bound);
+            defer ctx.allocator.free(text);
+            if (std.mem.indexOfAny(u8, from_unit, "*/") != null) return reportForBound("Expected {s} to have units {s}.", .{ text, from_unit });
+            if (units_mod.familyUnitsPhrase(from_unit)) |phrase| return reportForBound("Expected {s} to have {s}.", .{ text, phrase });
+            return reportForBound("Expected {s} to have unit {s}.", .{ text, from_unit });
+        };
     }
-    if (shared.fuzzyInt(value) == null) return reportForBound("{d}{s} is not an int.", .{ value, unit });
+    // A unitless `to` takes `from`'s unit.
+    if (shared.fuzzyInt(value) == null) return reportForBound("{d}{s} is not an int.", .{ value, from_unit });
     return bound;
 }
 

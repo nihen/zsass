@@ -69,7 +69,25 @@ fn eprintRepeat(ch: u8, n: usize) void {
 /// Thread-local rich messages such as `setContextMessage("1px and 1em have incompatible units.")`
 /// Save it in buffer, and `errorToUserMessage` returns this with priority. If not set
 /// Table fallback for `error tag  ->  static message`.
+/// A message too long for the buffer, such as an @error's, kept whole.
+threadlocal var long_context_message: ?[]u8 = null;
+
+fn dropLongContextMessage() void {
+    if (long_context_message) |m| std.heap.c_allocator.free(m);
+    long_context_message = null;
+}
+
 pub fn setContextMessage(msg: []const u8) void {
+    if (msg.len > error_state.context_message_buf.len) {
+        // Copied before the old one goes, which `msg` may be.
+        if (std.heap.c_allocator.dupe(u8, msg)) |copy| {
+            dropLongContextMessage();
+            long_context_message = copy;
+            error_state.context_message_len = copy.len;
+            return;
+        } else |_| {}
+    }
+    dropLongContextMessage();
     var n = @min(msg.len, error_state.context_message_buf.len);
     // A message cut short ends on a whole UTF-8 character.
     if (n < msg.len) {
@@ -80,10 +98,12 @@ pub fn setContextMessage(msg: []const u8) void {
 }
 
 pub fn clearContextMessage() void {
+    dropLongContextMessage();
     error_state.context_message_len = 0;
 }
 
 pub fn currentContextMessage() ?[]const u8 {
+    if (long_context_message) |m| return m;
     if (error_state.context_message_len == 0) return null;
     return error_state.context_message_buf[0..error_state.context_message_len];
 }
@@ -262,6 +282,7 @@ pub fn clearErrorContext() void {
     error_state.error_stack_len = 0;
     error_state.error_stack_overflow = 0;
     error_state.error_stack_snapshot_len = 0;
+    dropLongContextMessage();
     error_state.context_message_len = 0;
     error_state.reported = false;
 }
@@ -315,8 +336,7 @@ pub const ErrorTraceFrame = struct {
 
 /// Single thread-local bundle for error context / resolver stack / snapshot (avoids torn reads across fields).
 pub const ErrorState = struct {
-    // An @error message is reported through it, however long.
-    context_message_buf: [8192]u8 = @splat(0),
+    context_message_buf: [512]u8 = @splat(0),
     context_message_len: usize = 0,
     last_error_ctx: ErrorContext = .{},
     error_stack: [max_error_stack]ErrorStackFrame = @splat(.{ .path = "", .source = "", .label = "" }),

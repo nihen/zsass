@@ -12437,18 +12437,15 @@ fn checkModuleRulePlacement(ctx: *Ctx, raw: []const u32) ResolveError!void {
     var locked = false;
     for (raw) |u| {
         const n = ctx.ast.getNode(@fromBackingInt(@intCast(u)));
-        if (locked) {
-            switch (n.tag) {
-                .stmt_use => {
-                    error_format.setContextMessage("@use rules must be written before any other rules.");
-                    return error.SassError;
-                },
-                .stmt_forward => {
-                    error_format.setContextMessage("@forward rules must be written before any other rules.");
-                    return error.SassError;
-                },
-                else => {},
-            }
+        if (locked and (n.tag == .stmt_use or n.tag == .stmt_forward)) {
+            error_format.setContextMessage(if (n.tag == .stmt_use)
+                "@use rules must be written before any other rules."
+            else
+                "@forward rules must be written before any other rules.");
+            // The rule, without its `;`.
+            const ends_with_semicolon = n.span_end > n.span_start and n.span_end <= ctx.ast.source.len and ctx.ast.source[n.span_end - 1] == ';';
+            error_format.recordErrorSpanIfUnset(n.span_start, if (ends_with_semicolon) n.span_end - 1 else n.span_end, 0);
+            return error.SassError;
         }
         if (!module_directive.topLevelStmtKeepsModuleDirectiveOpen(ctx.ast, ctx.pool, n)) locked = true;
     }

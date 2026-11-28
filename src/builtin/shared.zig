@@ -519,7 +519,9 @@ pub inline fn bindNamedOrPositionalArgsStrict(
         if (name_id != .none) {
             inline for (names, 0..) |expected, idx| {
                 if (argNameMatches(ctx, name_id, expected)) {
-                    if (out[idx] == null) out[idx] = arg;
+                    // `$start-at` and `$start_at` are one name.
+                    if (out[idx] != null) return reportArity("Duplicate argument.");
+                    out[idx] = arg;
                     break;
                 }
             }

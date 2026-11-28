@@ -2825,6 +2825,7 @@ fn runEnd2EndWithBudget(
         var call_count = vm.callSites(&call_sites);
         var inner_ref = vm.innerMostChunkRef();
         var inner_name = vm.innerMostChunkName();
+        var at_call_site = false;
         if (vm.error_at_call_site and call_count > 0) {
             // An @error is reported at the call to the function or mixin
             // it is in, which the trace then leaves out.
@@ -2835,6 +2836,9 @@ fn runEnd2EndWithBudget(
             inner_ref = site.chunk;
             inner_name = site.chunk_name;
             call_count -= 1;
+            at_call_site = true;
+            // A call in code an @import brought in is placed by its origin.
+            vm.current_origin = site.origin;
         }
         const root_idx: u32 = program_ptr.root_index;
         const file_id_is_entry = (ctx.file_id == root_idx);
@@ -2847,11 +2851,22 @@ fn runEnd2EndWithBudget(
         // Reflect the function/mixin name in the inner frame label.
         // Code an @import brought in is placed in the imported file, reached
         // through each @import.
-        const imported_frames = if (ctx.has_value)
+        const imported_frames = if (ctx.has_value and !(at_call_site and vm.current_origin == .invalid))
             vm.importedErrorTrace(&error_format.error_state.error_stack_snapshot, ctx.file_id, ctx.span_start, ctx.span_end)
         else
             null;
-        if (imported_frames) |count| {
+        if (imported_frames) |found| {
+            var count = found;
+            if (at_call_site and found > 1) {
+                // The call reported in its place is named by the chunk it
+                // is in; the frame of the one it called is left out.
+                const frames = &error_format.error_state.error_stack_snapshot;
+                const caller = frames[found - 2];
+                frames[found - 2] = frames[found - 1];
+                frames[found - 2].label_buf = caller.label_buf;
+                frames[found - 2].label_len = caller.label_len;
+                count = found - 1;
+            }
             error_format.error_state.error_stack_snapshot_len = count;
             error_format.writeStackTrace(diag_alloc) catch {};
         } else if (frame_info.has_frame and (call_count > 0 or !file_id_is_entry) and
