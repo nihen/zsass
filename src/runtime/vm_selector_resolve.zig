@@ -1,4 +1,5 @@
 const std = @import("std");
+const error_format = @import("error_format.zig");
 const selector_mod = @import("../selector/selector.zig");
 const value_mod = @import("value.zig");
 const intern_pool_mod = @import("intern_pool.zig");
@@ -160,7 +161,10 @@ pub fn internDynamicSelectorValueWithMode(self: anytype, v: Value, mode: anytype
         return at_root_id;
     }
     const raw = self.intern_pool.get(raw_id);
-    if (std.mem.trim(u8, raw, " \t\r\n").len == 0) return error.SassError;
+    if (std.mem.trim(u8, raw, " \t\r\n").len == 0) {
+        error_format.setContextMessage("expected selector.");
+        return error.SassError;
+    }
     switch (mode) {
         .plain_css_preserve => {
             if (self.selector_prefix_depth > 0 and
