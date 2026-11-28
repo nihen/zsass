@@ -1096,6 +1096,9 @@ fn lookupModuleStaticOrConfigSeedValue(loader: *const ModuleResolver, module_id:
 const ResolverEvalEnv = struct {
     ctx: *Ctx,
     allow_configurable_defaults: bool = false,
+    /// A failed built-in call keeps its message: the evaluation is the
+    /// value's, not a guess the run makes again.
+    keep_failure_message: bool = false,
     /// Set when the value is evaluated only here (a module configuration):
     /// the deprecations its built-in calls raise are reported, located at
     /// each call. Otherwise the VM evaluates the expression again and
@@ -1974,6 +1977,7 @@ fn parseWithConfigEntries(ctx: *Ctx, config_extra: ExtraIndex) ResolveError![]Wi
         var env: ResolverEvalEnv = .{
             .ctx = ctx,
             .allow_configurable_defaults = true,
+            .keep_failure_message = true,
             .canonical_literals = true,
             .deprecation_opts = if (ctx.loader) |loader| loader.deprecation_opts else null,
             .direct_value = expr_idx,
