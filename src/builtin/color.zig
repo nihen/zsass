@@ -1611,7 +1611,7 @@ fn color_mixImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
     const a = tryCoerceColorArg(ctx, bound[0].?) orelse return error.BuiltinType;
     const b = tryCoerceColorArg(ctx, bound[1].?) orelse return error.BuiltinType;
     const weight = if (bound[2]) |wv| try expectNumber(ctx, wv) else 50.0;
-    if (weight < 0.0 or weight > 100.0) return error.BuiltinType;
+    if (weight < 0.0 or weight > 100.0) return reportNotWithin(ctx, "weight", bound[2].?, "0", "100", true);
 
     if (bound[3]) |method_value| {
         const parsed = try parseMixMethodValue(ctx, method_value);
@@ -3929,7 +3929,7 @@ fn color_invertImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
 
     const c = maybe_color.?;
     const weight_percent = if (weight_arg) |w| try expectNumber(ctx, w) else 100.0;
-    if (weight_percent < 0.0 or weight_percent > 100.0) return error.BuiltinType;
+    if (weight_percent < 0.0 or weight_percent > 100.0) return reportNotWithin(ctx, "weight", weight_arg.?, "0", "100", true);
     const weight = weight_percent / 100.0;
 
     const source_declared_space = declaredColorSpaceFromValue(ctx, c);
@@ -4148,13 +4148,26 @@ fn preserveLegacyRgbTargetSourceRepr(ctx: *BuiltinContext, value: Value, source_
     }
 }
 
+/// "$weight: Expected 101% to be within 0% and 100%.", with the number as
+/// it was given.
+/// The bounds take the number's unit when `bounds_take_unit` (a weight of
+/// 101 is not within 0 and 100, one of 101% not within 0% and 100%).
+fn reportNotWithin(ctx: *BuiltinContext, comptime param: []const u8, v: Value, comptime low: []const u8, comptime high: []const u8, comptime bounds_take_unit: bool) BuiltinError {
+    const unit_id = v.unitId(ctx.number_pool);
+    const unit: ?[]const u8 = if (unit_id == .none) null else ctx.intern_pool.get(unit_id);
+    const text = value_format.formatNumberWithUnit(ctx.allocator, v.asF64(ctx.number_pool), unit) catch return error.OutOfMemory;
+    defer ctx.allocator.free(text);
+    const bound_unit = if (bounds_take_unit) unit orelse "" else "";
+    return shared.reportArgumentMessage(param, "Expected {s} to be within " ++ low ++ "{s} and " ++ high ++ "{s}.", .{ text, bound_unit, bound_unit });
+}
+
 fn opacifyImpl(ctx: *BuiltinContext, args: []const Value, comptime alpha_sign: f64) BuiltinError!Value {
     try expectArity(args, 2);
     const c = try expectColorArg(ctx, args[0], "color");
     if (!colorLegacyFlagFromValue(ctx, c)) return error.BuiltinType;
     if (args[1].kind() != .number) return error.BuiltinType;
     const amount = args[1].asF64(ctx.number_pool);
-    if (std.math.isNan(amount) or amount < 0.0 or amount > 1.0) return error.BuiltinType;
+    if (std.math.isNan(amount) or amount < 0.0 or amount > 1.0) return reportNotWithin(ctx, "amount", args[1], "0", "1", false);
     if (alpha_sign > 0) {
         try emitColorFunctionDeprecation(ctx, "opacify", .opacify, c, amount);
     } else {
