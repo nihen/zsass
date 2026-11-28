@@ -7012,7 +7012,6 @@ pub const VM = struct {
     fn inspectMapEntryForMessage(self: *VM, v: Value) VMError![]const u8 {
         const text = try self.inspectForMessage(v);
         if (v.kind() != .list or !v.listComma(self.list_meta_pool.items) or v.listBracketed(self.list_meta_pool.items)) return text;
-        if (text.len > 0 and text[0] == '(') return text;
         const wrapped = try std.fmt.allocPrint(self.allocator, "({s})", .{text});
         defer self.allocator.free(wrapped);
         return self.intern_pool.get(try self.intern_pool.intern(wrapped));
@@ -12352,8 +12351,9 @@ fn normalizeUnicodeRangeDeclText(alloc: std.mem.Allocator, raw: []const u8) VMEr
 
     const ur_len = css_utils.unicodeRangeLen(trimmed);
     // The whole word, which says what of it is no range.
-    var word_end: usize = 0;
-    while (word_end < trimmed.len and (std.ascii.isAlphanumeric(trimmed[word_end]) or trimmed[word_end] == '+' or trimmed[word_end] == '-' or trimmed[word_end] == '?' or trimmed[word_end] == '_')) : (word_end += 1) {}
+    // Past `U+`, a `+` is an operation.
+    var word_end: usize = 2;
+    while (word_end < trimmed.len and (std.ascii.isAlphanumeric(trimmed[word_end]) or trimmed[word_end] == '-' or trimmed[word_end] == '?' or trimmed[word_end] == '_')) : (word_end += 1) {}
     // `U+4??-x` is the range and then text.
     if (ur_len == 0 or (ur_len < word_end and trimmed[ur_len - 1] != '?')) {
         ir_validate.validateUnicodeRange(trimmed[0..word_end]) catch return error.SassError;
