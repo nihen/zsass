@@ -14,6 +14,7 @@ const zsass_io = @import("io.zig");
 const value_mod = @import("value.zig");
 const intern_pool_mod = @import("intern_pool.zig");
 const builtin_shared = @import("../builtin/shared.zig");
+const vm_dispatch = @import("vm_dispatch.zig");
 const vm_module_load = @import("vm_module_load.zig");
 
 const Value = value_mod.Value;
@@ -219,6 +220,13 @@ pub fn runTopModuleWithSelectorPrefix(self: anytype, module_id: u32, selector_pr
     }
 }
 
+/// "$url: 1 is not a string." for meta.load-css().
+fn reportLoadCssTypeMismatch(self: anytype, comptime param: []const u8, v: value_mod.Value) error{SassError} {
+    var bctx = vm_dispatch.builtinContext(self);
+    builtin_shared.reportArgumentTypeMismatch(&bctx, param, v, "string") catch {};
+    return error.SassError;
+}
+
 fn bindMetaLoadCssArgs(self: anytype, arg_names: []const InternId, argc: usize) !LoadCssArgBinding {
     var url_index: ?usize = null;
     var with_index: ?usize = null;
@@ -292,7 +300,7 @@ fn parseLoadCssWithConfig(self: anytype, with_v: Value) !LoadCssConfig {
     var i: usize = 0;
     while (i + 1 < elems.len) : (i += 2) {
         const key_v = elems[i];
-        if (key_v.kind() != .string) return error.SassError;
+        if (key_v.kind() != .string) return reportLoadCssTypeMismatch(self, "with key", key_v);
         const key_name = self.intern_pool.get(key_v.stringIntern());
         const normalized = try cloneLoadCssConfigName(self, key_name);
         errdefer self.allocator.free(normalized);
@@ -955,6 +963,7 @@ pub fn runLoadCssModule(self: anytype, resolved_path: []const u8, config: LoadCs
         error.OutOfMemory => return error.OutOfMemory,
         error.SyntaxError => {
             lexer.printLastErrorDiagnostic("SassError");
+            lexer.noteLastErrorMessage();
             return error.SassError;
         },
     };
@@ -1050,7 +1059,7 @@ pub fn invokeMetaLoadCss(self: anytype, args: []const Value, arg_names: []const 
     const binding = try bindMetaLoadCssArgs(self, arg_names, args.len);
     if (binding.url_index >= args.len) return error.BuiltinArity;
     const url_v = args[binding.url_index];
-    if (url_v.kind() != .string) return error.BuiltinType;
+    if (url_v.kind() != .string) return reportLoadCssTypeMismatch(self, "url", url_v);
     const url = self.intern_pool.get(url_v.stringIntern());
     if (url.len == 0) return error.BuiltinArity;
 

@@ -1123,7 +1123,7 @@ fn meta_global_variable_exists(ctx: *BuiltinContext, args: []const Value, arg_na
     const params = [_][]const u8{ "name", "module" };
     const b = try shared.bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &params, 1);
     const name_v = b[0] orelse return error.SassError;
-    if (name_v.kind() != .string) return error.SassError;
+    if (name_v.kind() != .string) return reportArgumentTypeMismatch(ctx, "name", name_v, "string");
     const name = ctx.intern_pool.get(name_v.stringIntern());
 
     const vm = getVM(ctx);

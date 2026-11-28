@@ -1438,7 +1438,8 @@ fn parseMixMethodValue(ctx: *BuiltinContext, method_value: Value) BuiltinError!P
         const items = ctx.list_pool.items[method_value.listHandle()];
         if (items.len == 0 or items.len > 3) return error.BuiltinType;
         for (items, 0..) |item, i| {
-            if (!item.isString() or item.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
+            if (!item.isString()) return reportArgumentTypeMismatch(ctx, "method", item, "string");
+            if (item.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
             tokens[i] = ctx.intern_pool.get(item.stringIntern());
         }
         token_count = items.len;
@@ -1608,8 +1609,11 @@ fn color_mixImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
     if (args.len > 4) return badArity(2, args.len);
     const bound = bindNamedOrPositionalArgs(ctx, args, arg_names, &.{ "color1", "color2", "weight", "method" });
     try validateRequiredBound(&.{ "color1", "color2", "weight", "method" }, &bound, 2);
-    const a = tryCoerceColorArg(ctx, bound[0].?) orelse return error.BuiltinType;
-    const b = tryCoerceColorArg(ctx, bound[1].?) orelse return error.BuiltinType;
+    const a = tryCoerceColorArg(ctx, bound[0].?) orelse return reportArgumentTypeMismatch(ctx, "color1", bound[0].?, "color");
+    const b = tryCoerceColorArg(ctx, bound[1].?) orelse return reportArgumentTypeMismatch(ctx, "color2", bound[1].?, "color");
+    if (bound[2]) |wv| {
+        if (!wv.isNumber()) return reportArgumentTypeMismatch(ctx, "weight", wv, "number");
+    }
     const weight = if (bound[2]) |wv| try expectNumber(ctx, wv) else 50.0;
     if (weight < 0.0 or weight > 100.0) return reportNotWithin(ctx, "weight", bound[2].?, "0", "100", true);
 
@@ -1721,6 +1725,67 @@ fn formatColorFunctionAmount(ctx: *BuiltinContext, value: f64, unit: ?[]const u8
     return value_format.formatNumberWithUnit(ctx.allocator, value, unit) catch error.OutOfMemory;
 }
 
+/// `color.darken()` and the like: sass:color has no such function, and
+/// says which `color.adjust()` call to make instead.
+pub fn notInColorModule(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId, name: []const u8) BuiltinError!Value {
+    var color_arg: ?Value = null;
+    var amount_arg: ?Value = null;
+    var unknown: ?[]const u8 = null;
+    var next: usize = 0;
+    for (args, 0..) |arg, i| {
+        const name_id = if (i < arg_names.len) arg_names[i] else InternId.none;
+        if (name_id == .none) {
+            if (next == 0) color_arg = arg else if (next == 1) amount_arg = arg;
+            next += 1;
+            continue;
+        }
+        const raw = ctx.intern_pool.get(name_id);
+        const bare = if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
+        if (shared.identifierEq(bare, "color")) {
+            color_arg = arg;
+        } else if (shared.identifierEq(bare, "amount")) {
+            amount_arg = arg;
+        } else if (unknown == null) unknown = bare;
+    }
+    var buf: [160]u8 = undefined;
+    if (next > 2) {
+        error_format.setContextMessage(error_format.formatTooManyArguments(&buf, 2, next) catch return error.BuiltinArity);
+        return error.BuiltinArity;
+    }
+    const c = color_arg orelse {
+        error_format.setContextMessage("Missing argument $color.");
+        return error.BuiltinArity;
+    };
+    const amount = amount_arg orelse {
+        error_format.setContextMessage("Missing argument $amount.");
+        return error.BuiltinArity;
+    };
+    if (unknown) |u| {
+        error_format.setContextMessage(std.fmt.bufPrint(&buf, "No parameter named ${s}.", .{u}) catch return error.BuiltinArity);
+        return error.BuiltinArity;
+    }
+    const channel: []const u8 = if (std.mem.eql(u8, name, "adjust-hue"))
+        "hue"
+    else if (std.mem.eql(u8, name, "darken") or std.mem.eql(u8, name, "lighten"))
+        "lightness"
+    else if (std.mem.eql(u8, name, "saturate") or std.mem.eql(u8, name, "desaturate"))
+        "saturation"
+    else
+        "alpha";
+    const negative = std.mem.eql(u8, name, "darken") or std.mem.eql(u8, name, "desaturate") or
+        std.mem.eql(u8, name, "fade-out") or std.mem.eql(u8, name, "transparentize");
+    const color_text = shared.valueToInspectionString(ctx, c) catch return error.SassError;
+    defer ctx.allocator.free(color_text);
+    const amount_text = shared.valueToInspectionString(ctx, amount) catch return error.SassError;
+    defer ctx.allocator.free(amount_text);
+    const msg = try std.fmt.allocPrint(ctx.allocator, "The function {s}() isn't in the sass:color module.\n\nRecommendation: color.adjust({s}, ${s}: {s}{s})\n\nMore info: https://sass-lang.com/documentation/functions/color#{s}", .{
+        name, color_text, channel, if (negative) "-" else "", amount_text, name,
+    });
+    defer ctx.allocator.free(msg);
+    error_format.setContextMessage(msg);
+    return error.SassError;
+}
+
 pub fn color_lighten(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 2);
     const c = tryCoerceColorArg(ctx, args[0]) orelse return reportArgumentTypeMismatch(ctx, "color", args[0], "color");
@@ -1752,14 +1817,14 @@ pub fn color_saturate(ctx: *BuiltinContext, args: []const Value) BuiltinError!Va
         if (single.isString()) {
             const raw = shared.stripCalcArgMarker(ctx.intern_pool.get(single.stringIntern()));
             if (single.stringQuoted(ctx.string_flags_pool.items)) {
-                if (!isRawCalcString(raw)) return error.BuiltinType;
+                if (!isRawCalcString(raw)) return reportArgumentTypeMismatch(ctx, "amount", single, "number");
                 const trimmed = std.mem.trim(u8, raw, " \t\n\r");
                 const text = try ctx.allocator.print("saturate({s})", .{trimmed});
                 defer ctx.allocator.free(text);
                 const id = try internString(ctx, text);
                 return Value.string(id, false);
             }
-            if (std.mem.findScalar(u8, raw, '(') == null) return error.BuiltinType;
+            if (std.mem.findScalar(u8, raw, '(') == null) return reportArgumentTypeMismatch(ctx, "amount", single, "number");
             if (isRawCalcString(raw)) {
                 const trimmed = std.mem.trim(u8, raw, " \t\n\r");
                 const text = try ctx.allocator.print("saturate({s})", .{trimmed});
@@ -1769,7 +1834,8 @@ pub fn color_saturate(ctx: *BuiltinContext, args: []const Value) BuiltinError!Va
             }
             return serializeFallbackFunction(ctx, "saturate", args);
         }
-        return error.BuiltinType;
+        // One argument is CSS's saturate($amount).
+        return reportArgumentTypeMismatch(ctx, "amount", single, "number");
     }
     try expectArity(args, 2);
     const c = tryCoerceColorArg(ctx, args[0]) orelse return reportArgumentTypeMismatch(ctx, "color", args[0], "color");
@@ -3684,7 +3750,7 @@ fn alphaLikeImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
     const arg0 = args[0];
     if (arg0.isString()) {
         if (arg0.stringQuoted(ctx.string_flags_pool.items)) {
-            if (alphaLikeIsModule(mode)) return error.BuiltinType;
+            if (alphaLikeIsModule(mode)) return reportArgumentTypeMismatch(ctx, "color", arg0, "color");
             return serializeFilterFunction(ctx, fn_name, arg0, false);
         }
 
@@ -3693,18 +3759,18 @@ fn alphaLikeImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
             return serializeFilterFunction(ctx, "alpha", arg0, false);
         }
 
-        if (alphaLikeIsModule(mode)) return error.BuiltinType;
+        if (alphaLikeIsModule(mode)) return reportArgumentTypeMismatch(ctx, "color", arg0, "color");
         return serializeFilterFunction(ctx, fn_name, arg0, std.mem.eql(u8, fn_name, "opacity"));
     }
     if (arg0.isNumber()) {
-        if (mode == .module_alpha) return error.BuiltinType;
+        if (mode == .module_alpha) return reportArgumentTypeMismatch(ctx, "color", arg0, "color");
         return serializeFilterFunction(ctx, fn_name, arg0, false);
     }
     if (arg0.kind() == .calc_fragment or arg0.kind() == .interp_fragment) {
-        if (alphaLikeIsModule(mode)) return error.BuiltinType;
+        if (alphaLikeIsModule(mode)) return reportArgumentTypeMismatch(ctx, "color", arg0, "color");
         return serializeFilterFunction(ctx, fn_name, arg0, true);
     }
-    if (alphaLikeIsModule(mode)) return error.BuiltinType;
+    if (alphaLikeIsModule(mode)) return reportArgumentTypeMismatch(ctx, "color", arg0, "color");
     return serializeFilterFunction(ctx, fn_name, arg0, false);
 }
 
@@ -3890,7 +3956,7 @@ fn color_invertImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
 
     const maybe_color = tryCoerceColorArg(ctx, color_arg);
     if (maybe_color == null) {
-        if (weight_arg != null or space_arg != null) return error.BuiltinType;
+        if (weight_arg != null or space_arg != null) return reportArgumentTypeMismatch(ctx, "color", color_arg, "color");
         if (color_arg.isNumber() or color_arg.kind() == .calc_fragment or color_arg.kind() == .interp_fragment) {
             const css = try valueToCssString(ctx, color_arg);
             defer ctx.allocator.free(css);
@@ -3902,14 +3968,14 @@ fn color_invertImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
         if (color_arg.isString()) {
             const raw = shared.stripCalcArgMarker(ctx.intern_pool.get(color_arg.stringIntern()));
             if (color_arg.stringQuoted(ctx.string_flags_pool.items)) {
-                if (!isRawCalcString(raw)) return error.BuiltinType;
+                if (!isRawCalcString(raw)) return reportArgumentTypeMismatch(ctx, "color", color_arg, "color");
                 const trimmed = std.mem.trim(u8, raw, " \t\n\r");
                 const text = try ctx.allocator.print("invert({s})", .{trimmed});
                 defer ctx.allocator.free(text);
                 const id = try internString(ctx, text);
                 return Value.string(id, false);
             }
-            if (std.mem.findScalar(u8, raw, '(') == null) return error.BuiltinType;
+            if (std.mem.findScalar(u8, raw, '(') == null) return reportArgumentTypeMismatch(ctx, "color", color_arg, "color");
             if (isRawCalcString(raw)) {
                 const trimmed = std.mem.trim(u8, raw, " \t\n\r");
                 const text = try ctx.allocator.print("invert({s})", .{trimmed});
@@ -3924,10 +3990,13 @@ fn color_invertImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
             const id = try internString(ctx, text);
             return Value.string(id, false);
         }
-        return error.BuiltinType;
+        return reportArgumentTypeMismatch(ctx, "color", color_arg, "color");
     }
 
     const c = maybe_color.?;
+    if (weight_arg) |w| {
+        if (!w.isNumber()) return reportArgumentTypeMismatch(ctx, "weight", w, "number");
+    }
     const weight_percent = if (weight_arg) |w| try expectNumber(ctx, w) else 100.0;
     if (weight_percent < 0.0 or weight_percent > 100.0) return reportNotWithin(ctx, "weight", weight_arg.?, "0", "100", true);
     const weight = weight_percent / 100.0;
@@ -4104,15 +4173,15 @@ fn grayscaleImpl(ctx: *BuiltinContext, args: []const Value, mode: GrayscaleMode)
     const arg0 = args[0];
     if (arg0.isNumber()) return serializeFilterFunction(ctx, "grayscale", arg0, false);
     if (arg0.kind() == .calc_fragment or arg0.kind() == .interp_fragment) {
-        if (mode == .module) return error.BuiltinType;
+        if (mode == .module) return reportArgumentTypeMismatch(ctx, "color", arg0, "color");
         return serializeFilterFunction(ctx, "grayscale", arg0, true);
     }
     if (arg0.isString()) {
-        if (mode == .module) return error.BuiltinType;
-        if (arg0.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
+        if (mode == .module) return reportArgumentTypeMismatch(ctx, "color", arg0, "color");
+        if (arg0.stringQuoted(ctx.string_flags_pool.items)) return reportArgumentTypeMismatch(ctx, "color", arg0, "color");
         return serializeFilterFunction(ctx, "grayscale", arg0, false);
     }
-    return error.BuiltinType;
+    return reportArgumentTypeMismatch(ctx, "color", arg0, "color");
 }
 
 pub fn color_grayscale(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
@@ -4166,7 +4235,7 @@ fn opacifyImpl(ctx: *BuiltinContext, args: []const Value, comptime alpha_sign: f
     try expectArity(args, 2);
     const c = try expectColorArg(ctx, args[0], "color");
     if (!colorLegacyFlagFromValue(ctx, c)) return error.BuiltinType;
-    if (args[1].kind() != .number) return error.BuiltinType;
+    if (args[1].kind() != .number) return reportArgumentTypeMismatch(ctx, "amount", args[1], "number");
     const amount = args[1].asF64(ctx.number_pool);
     if (std.math.isNan(amount) or amount < 0.0 or amount > 1.0) return reportNotWithin(ctx, "amount", args[1], "0", "1", false);
     if (alpha_sign > 0) {
@@ -4661,6 +4730,18 @@ pub fn color_is_in_gamut(ctx: *BuiltinContext, args: []const Value, arg_names: [
     return if (color_mod.isInGamut(in_space)) Value.true_v else Value.false_v;
 }
 
+/// "$channel: Color black doesn't have a channel named "x"."
+fn reportNoChannelNamed(ctx: *BuiltinContext, c: Value, channel_arg: Value) BuiltinError {
+    const color_text = shared.valueToInspectionString(ctx, c) catch return error.SassError;
+    defer ctx.allocator.free(color_text);
+    const channel_text = shared.valueToInspectionString(ctx, channel_arg) catch return error.SassError;
+    defer ctx.allocator.free(channel_text);
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "$channel: Color {s} doesn't have a channel named {s}.", .{ color_text, channel_text }) catch return error.SassError;
+    error_format.setContextMessage(msg);
+    return error.SassError;
+}
+
 pub fn color_is_missing(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
     if (args.len != 2) return badArity(2, args.len);
     const bound = bindNamedOrPositionalArgs(ctx, args, arg_names, &.{ "color", "channel" });
@@ -4668,9 +4749,9 @@ pub fn color_is_missing(ctx: *BuiltinContext, args: []const Value, arg_names: []
     const color_arg = bound[0].?;
     const channel_arg = bound[1].?;
     const c = try expectColorArg(ctx, color_arg, "color");
-    if (channel_arg.kind() != .string or !channel_arg.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
+    if (channel_arg.kind() != .string or !channel_arg.stringQuoted(ctx.string_flags_pool.items)) return reportArgumentTypeMismatch(ctx, "channel", channel_arg, "string");
     const channel_name = ctx.intern_pool.get(channel_arg.stringIntern());
-    const idx = channelIndexForSpaceStrict(declaredColorSpaceFromValue(ctx, c), channel_name) orelse return error.BuiltinType;
+    const idx = channelIndexForSpaceStrict(declaredColorSpaceFromValue(ctx, c), channel_name) orelse return reportNoChannelNamed(ctx, c, channel_arg);
     const mask: ColorMissingMask = @as(ColorMissingMask, 1) << @intCast(idx);
     return if ((colorMissingMaskFromValue(ctx, c) & mask) != 0) Value.true_v else Value.false_v;
 }
@@ -4681,14 +4762,18 @@ pub fn color_is_powerless(ctx: *BuiltinContext, args: []const Value, arg_names: 
     try validateRequiredBound(&.{ "color", "channel", "space" }, &bound, 2);
     const color_arg = bound[0].?;
     const channel_arg = bound[1].?;
-    const c = tryCoerceColorArg(ctx, color_arg) orelse return error.SassError;
-    if (channel_arg.kind() != .string or !channel_arg.stringQuoted(ctx.string_flags_pool.items)) return error.SassError;
+    const c = tryCoerceColorArg(ctx, color_arg) orelse return reportArgumentTypeMismatch(ctx, "color", color_arg, "color");
+    if (channel_arg.kind() != .string or !channel_arg.stringQuoted(ctx.string_flags_pool.items)) return reportArgumentTypeMismatch(ctx, "channel", channel_arg, "string");
     const channel_name = ctx.intern_pool.get(channel_arg.stringIntern());
     const target_space = try parseOptionalSpaceValueSassError(ctx, bound[2]);
 
     const source = localChannelColor(ctx, c);
     const in_space = normalizeChannelColor(if (target_space) |sp| color_mod.convert(source, sp) else source);
-    const idx = channelIndexForSpaceStrict(in_space.space, channel_name) orelse return error.SassError;
+    const idx = channelIndexForSpaceStrict(in_space.space, channel_name) orelse {
+        // In another space the official CLI names the converted color.
+        if (target_space != null) return error.SassError;
+        return reportNoChannelNamed(ctx, c, channel_arg);
+    };
     if (idx >= 3) return Value.false_v;
     const channels3 = [3]f64{ in_space.channels[0], in_space.channels[1], in_space.channels[2] };
     return if (isPowerlessInSpace(in_space.space, channels3, idx)) Value.true_v else Value.false_v;
@@ -4727,7 +4812,7 @@ pub fn color_to_gamut(ctx: *BuiltinContext, args: []const Value, arg_names: []co
     const bound = bindNamedOrPositionalArgs(ctx, args, arg_names, &.{ "color", "space", "method" });
     try validateRequiredBound(&.{ "color", "space", "method" }, &bound, 1);
     const color_arg = bound[0].?;
-    const c = tryCoerceColorArg(ctx, color_arg) orelse return error.SassError;
+    const c = tryCoerceColorArg(ctx, color_arg) orelse return reportArgumentTypeMismatch(ctx, "color", color_arg, "color");
     const source_space = declaredColorSpaceFromValue(ctx, c);
     const source = localChannelColor(ctx, c);
     const source_missing = colorMissingMaskFromValue(ctx, c);

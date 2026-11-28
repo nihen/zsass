@@ -1912,8 +1912,27 @@ fn numberTextForMessage(ctx: *BuiltinContext, v: Value) BuiltinError![]const u8 
     return out.toOwnedSlice(ctx.allocator);
 }
 
+/// "$min: "0" is not a number." as an error a caller does not reinterpret;
+/// an empty `param` leaves the parameter out.
+fn sassErrorTypeMismatch(ctx: *BuiltinContext, comptime param: []const u8, v: Value) BuiltinError {
+    const text = shared.valueToInspectionString(ctx, v) catch return error.SassError;
+    defer ctx.allocator.free(text);
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, (if (param.len == 0) "" else "$" ++ param ++ ": ") ++ "{s} is not a number.", .{text}) catch return error.SassError;
+    error_format.setContextMessage(msg);
+    return error.SassError;
+}
+
+fn atLeastOneArgument() BuiltinError {
+    error_format.setContextMessage("At least one argument must be passed.");
+    return error.SassError;
+}
+
 fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, css_name: []const u8, mode: MinMaxMode) BuiltinError!Value {
-    if (args.len == 0) return badArity(1, args.len);
+    if (args.len == 0) {
+        if (mode == .module) return atLeastOneArgument();
+        return badArity(1, args.len);
+    }
     const preserve_css = mode == .css and shouldPreserveCssMathCall(ctx, args);
 
     const values = try ctx.allocator.alloc(Value, args.len);
@@ -2734,7 +2753,7 @@ pub fn math_clamp(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
             {
                 return buildCssMathCall(ctx, "clamp", args);
             }
-            return error.SassError;
+            return sassErrorTypeMismatch(ctx, "min", min_raw);
         },
         else => return err,
     };
@@ -2745,7 +2764,7 @@ pub fn math_clamp(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
             {
                 return buildCssMathCall(ctx, "clamp", args);
             }
-            return error.SassError;
+            return sassErrorTypeMismatch(ctx, "number", number_raw);
         },
         else => return err,
     };
@@ -2756,7 +2775,7 @@ pub fn math_clamp(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
             {
                 return buildCssMathCall(ctx, "clamp", args);
             }
-            return error.SassError;
+            return sassErrorTypeMismatch(ctx, "max", max_raw);
         },
         else => return err,
     };
@@ -2907,7 +2926,7 @@ pub fn math_log(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
         error.BuiltinType => {
             if (cssMathPassthrough(ctx, number_arg)) return buildCssMathCall(ctx, "log", args);
             if (number_complex) return error.SassError;
-            return error.SassError;
+            return sassErrorTypeMismatch(ctx, "number", number_arg);
         },
         else => return err,
     };
@@ -3164,7 +3183,7 @@ pub fn math_atan2(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
 
 pub fn math_hypot(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
     ensureNoNamedArgs(args, arg_names) catch return error.SassError;
-    if (args.len == 0) return error.SassError;
+    if (args.len == 0) return atLeastOneArgument();
 
     var preserve_css = shouldPreserveCssMathCall(ctx, args);
     var sum: f64 = 0;
@@ -3182,7 +3201,8 @@ pub fn math_hypot(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
                 {
                     return buildCssMathCall(ctx, "hypot", args);
                 }
-                return error.SassError;
+                // hypot() takes its numbers as a rest argument, unnamed.
+                return sassErrorTypeMismatch(ctx, "", arg);
             },
             else => return err,
         };
