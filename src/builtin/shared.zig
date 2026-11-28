@@ -12,7 +12,7 @@ const value_inspect = @import("../runtime/value_inspect.zig");
 const color_format = @import("../color/color_format.zig");
 const error_format = @import("../runtime/error_format.zig");
 const calc_arg_marker = "\x01zsass-calc-arg:";
-const calc_interp_marker = "\x01zsass-calc-interp:";
+pub const calc_interp_marker = "\x01zsass-calc-interp:";
 const color_preserve_slash_marker = "\x01zsass-color-preserve-slash:";
 
 pub const Value = value_mod.Value;

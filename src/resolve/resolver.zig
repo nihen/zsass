@@ -508,6 +508,9 @@ const Ctx = struct {
     calc_arg_mode: bool = false,
     /// Resolving the arguments of a CSS calculation function.
     in_calculation_args: bool = false,
+    /// Inside those of one whose arguments must be a calculation, where a
+    /// value that is none fails when it is known.
+    in_strict_calculation_args: bool = false,
     /// How far `ast.source` is from the source spans refer to, inside a
     /// sub-parse: a position there plus this is one in the module's source.
     sub_source_delta: i64 = 0,
@@ -3519,6 +3522,9 @@ fn resolveExprTextTemplate(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex,
     const saved_in_calculation = ctx.in_calculation_args;
     ctx.in_calculation_args = false;
     defer ctx.in_calculation_args = saved_in_calculation;
+    const saved_in_strict_calculation = ctx.in_strict_calculation_args;
+    ctx.in_strict_calculation_args = false;
+    defer ctx.in_strict_calculation_args = saved_in_strict_calculation;
     const text_storage = try astTextNodeRawAlloc(ctx.a, ast, ctx.pool, node);
     defer ctx.a.free(text_storage);
     const text = text_storage;
@@ -3727,6 +3733,9 @@ fn resolveExprStringInterp(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span
     const saved_in_calculation = ctx.in_calculation_args;
     ctx.in_calculation_args = false;
     defer ctx.in_calculation_args = saved_in_calculation;
+    const saved_in_strict_calculation = ctx.in_strict_calculation_args;
+    ctx.in_strict_calculation_args = false;
+    defer ctx.in_strict_calculation_args = saved_in_strict_calculation;
     const off: ExtraIndex = n.payload;
     const quoted = (n.flags & 1) != 0;
     const part_count = ast.getExtraU32(off);
@@ -3823,6 +3832,12 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
     const is_calculation_call = ns_id == .none and !has_custom_function_binding and !raw_name_is_interpolated and
         lookupIdentifierIdInsensitive(&ctx.star_builtin_fns, name_slice) == null;
 
+    // The values a calculation is given are checked when they are known;
+    // min(), max(), round(), and abs() are calculations unless their
+    // arguments are not.
+    const calc_values_checked = ns_id == .none and !has_custom_function_binding and !raw_name_is_interpolated and
+        (isStrictCalculationFunctionName(name_slice) or (isCssCalculationFunctionName(name_slice) and
+            !calculationArgsHaveIssue(ast, ctx, off, arg_count)));
     // A calculation whose var() or interpolation may make up the arguments
     // it lacks is left to the browser.
     const calc_passthrough = is_calculation_call and isStrictCalculationFunctionName(name_slice) and arg_count > 0 and
@@ -3982,6 +3997,9 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
         const saved_in_calculation = ctx.in_calculation_args;
         ctx.in_calculation_args = args_in_calculation;
         defer ctx.in_calculation_args = saved_in_calculation;
+        const saved_in_strict_calculation = ctx.in_strict_calculation_args;
+        ctx.in_strict_calculation_args = args_in_calculation and calc_values_checked;
+        defer ctx.in_strict_calculation_args = saved_in_strict_calculation;
         const saved_calc_arg_allow_numberish = ctx.calc_arg_allow_numberish_ident_literals;
         ctx.calc_arg_allow_numberish_ident_literals =
             saved_calc_arg_allow_numberish or calc_arg_allow_numberish_ident_literals;
@@ -4285,11 +4303,44 @@ fn resolveExpr(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ResolveErro
     // Resolver-only diagnostics do not yet carry the module file id here, so
     // this fallback records the entry span. Runtime errors use the VM
     // current_source_span.file_id path for module-specific frames.
-    return resolveExprRecorded(ast, ctx, node, n, span) catch |err| {
+    const resolved = resolveExprRecorded(ast, ctx, node, n, span) catch |err| {
         error_format.recordErrorSpanIfUnset(span.start, span.end, 0);
         error_format.recordErrorTag(err);
         return err;
     };
+    if (ctx.in_strict_calculation_args and calcValueNeedsCheck(ast, n)) return wrapCalcValueCheck(ctx, resolved, span);
+    return resolved;
+}
+
+/// A variable's or a function's value, whose type a calculation knows only
+/// when it runs. A calculation's own calls give one.
+fn calcValueNeedsCheck(ast: *const ast_flat.Ast, n: ast_flat.AstNode) bool {
+    return switch (n.tag) {
+        .expr_variable, .expr_namespaced_var => true,
+        .expr_func_call => blk: {
+            const ns_id: InternId = @fromBackingInt(@intCast(ast.getExtraU32(n.payload + 1)));
+            if (ns_id != .none) break :blk true;
+            const text = if (n.span_end <= ast.source.len and n.span_start < n.span_end) ast.source[n.span_start..n.span_end] else "";
+            const paren = std.mem.indexOfScalar(u8, text, '(') orelse text.len;
+            const fname = text[0..paren];
+            break :blk !isCssCalculationFunctionName(fname) and !identifierEq(fname, "calc-size") and
+                !std.ascii.eqlIgnoreCase(fname, "var") and !std.ascii.eqlIgnoreCase(fname, "env") and !std.ascii.eqlIgnoreCase(fname, "attr");
+        },
+        else => false,
+    };
+}
+
+fn wrapCalcValueCheck(ctx: *Ctx, inner: ExprIndex, span: Span) ResolveError!ExprIndex {
+    const astart = try appendCallArgsWithNames(ctx.prog, ctx.a, &.{inner}, &.{.none});
+    const bidx: u32 = @intCast(ctx.prog.builtin_calls.items.len);
+    try ctx.prog.builtin_calls.append(ctx.a, .{
+        .builtin_id = builtin_mod.calc_value_check_id,
+        .arg_start = astart,
+        .arg_count = 1,
+        .span_start = span.start,
+        .span_end = span.end,
+    });
+    return try appendExpr(ctx.prog, ctx.a, .{ .kind = .builtin_call, .payload = bidx, .span = span });
 }
 
 fn resolveExprRecorded(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex, n: ast_flat.AstNode, span: Span) ResolveError!ExprIndex {
@@ -4482,6 +4533,9 @@ fn resolveExprRecorded(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex, n: 
             const saved_in_calculation = ctx.in_calculation_args;
             ctx.in_calculation_args = false;
             defer ctx.in_calculation_args = saved_in_calculation;
+            const saved_in_strict_calculation = ctx.in_strict_calculation_args;
+            ctx.in_strict_calculation_args = false;
+            defer ctx.in_strict_calculation_args = saved_in_strict_calculation;
             const inner_e = try resolveExpr(ast, ctx, inner);
             const part = [_]ExprIndex{inner_e};
             return try appendInterpExprResolved(ctx, &part, span, false);
@@ -4664,6 +4718,21 @@ const CalcIssue = enum { operation, expression, missing_operator, whitespace };
 /// another type, a unary operation, two values without an operator, and a
 /// + or - without whitespace around it.
 const CalcProblem = struct { msg: []const u8, span: Span };
+
+/// Whether min(), max(), round(), or abs() is given what is no
+/// calculation, keyword or rest arguments included, so that it is the
+/// Sass function.
+fn calculationArgsHaveIssue(ast: *const ast_flat.Ast, ctx: *Ctx, call_extra: ExtraIndex, arg_count: u32) bool {
+    const arg_nodes_start: ExtraIndex = call_extra + 3;
+    const arg_names_start: ExtraIndex = arg_nodes_start + arg_count;
+    for (0..arg_count) |i| {
+        const arg_name: InternId = @fromBackingInt(@intCast(ast.getExtraU32(arg_names_start + @as(u32, @intCast(i)))));
+        const node: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start + @as(u32, @intCast(i)))));
+        if (arg_name != .none or ast.getNode(node).tag == .expr_splat) return true;
+        if (calculationIssue(ast, ctx, node) != null) return true;
+    }
+    return false;
+}
 
 fn nodeSpan(ast: *const ast_flat.Ast, node: NodeIndex) Span {
     const n = ast.getNode(node);
@@ -11190,6 +11259,7 @@ const preamble_ctx_default_only = [_][]const u8{
     "allow_unknown_var_literal",
     "calc_arg_mode",
     "in_calculation_args",
+    "in_strict_calculation_args",
     "sub_source_delta",
     "file_source",
     "calc_arg_allow_numberish_ident_literals",

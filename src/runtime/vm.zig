@@ -8290,8 +8290,9 @@ pub const VM = struct {
         const source_interp_marked = shouldMarkCalcInterpString(self.intern_pool, source_arg);
         if (source_arg.kind() == .string) {
             if (source_arg.stringQuoted(self.string_flags_pool.items)) return error.SassError;
-            const source_raw = calc_utils.stripCalcArgMarker(self.intern_pool.get(source_arg.stringIntern()));
-            if (color_mod.lookupNamedColor(source_raw) != null) return error.SassError;
+            // A color's name written as one is a color; text such as
+            // unquote("blue") is not.
+            if (source_arg.stringNamedColorLiteral(self.string_flags_pool.items)) return error.SassError;
         }
         const raw_owned: ?[]const u8 = if (source_arg.kind() == .string) null else try self.renderCalcCallableArgText(args[0]);
         defer if (raw_owned) |owned| self.allocator.free(owned);
@@ -9583,6 +9584,8 @@ inline fn builtinSkipsSlashFreeCoercion(builtin_id: u32) bool {
         52,
         91,
         builtin_mod.global_hwb_id,
+        // A calculation's values are checked as they are.
+        builtin_mod.calc_value_check_id,
         92,
         93,
         94,

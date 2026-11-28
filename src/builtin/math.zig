@@ -504,6 +504,42 @@ fn valueLooksLikeCssMathArg(ctx: *BuiltinContext, value: Value) bool {
     return false;
 }
 
+/// Whether a calculation called by its global name is left to the browser
+/// for this argument: CSS math text, or any unquoted string.
+fn cssMathPassthrough(ctx: *BuiltinContext, value: Value) bool {
+    // A sass:math function takes numbers only.
+    if (!ctx.global_call) return false;
+    if (valueLooksLikeCssMathArg(ctx, value)) return true;
+    return isIdentifierText(ctx, value);
+}
+
+/// Unquoted text that is an identifier, as `foo` is; calculation text the
+/// arguments were written as is evaluated instead.
+fn isIdentifierText(ctx: *BuiltinContext, arg: Value) bool {
+    if (!isPlainUnquotedText(ctx, arg)) return false;
+    const raw = ctx.intern_pool.get(arg.stringIntern());
+    return raw.len > 0 and std.mem.indexOfAny(u8, raw, " \t\n+*/()") == null and !std.ascii.isDigit(raw[0]);
+}
+
+/// Whether min() or max() called by its global name is left to the browser:
+/// one of its values is unquoted text.
+fn anyCssMathPassthrough(ctx: *BuiltinContext, args: []const Value) bool {
+    if (!ctx.global_call) return false;
+    for (args) |arg| {
+        if (isIdentifierText(ctx, arg)) return true;
+    }
+    return false;
+}
+
+/// Unquoted text that is no color's name and no calculation text the
+/// arguments were resolved to (which is evaluated, not passed on).
+fn isPlainUnquotedText(ctx: *BuiltinContext, arg: Value) bool {
+    if (!arg.isString() or arg.stringQuoted(ctx.string_flags_pool.items)) return false;
+    if (arg.stringNamedColorLiteral(ctx.string_flags_pool.items)) return false;
+    const raw = ctx.intern_pool.get(arg.stringIntern());
+    return !std.mem.startsWith(u8, raw, calc_arg_marker) and !std.mem.startsWith(u8, raw, shared.calc_interp_marker);
+}
+
 fn stringLikeContainsComma(text: []const u8) bool {
     const trimmed = std.mem.trim(u8, text, " \t\n\r");
     if (trimmed.len == 0) return false;
@@ -1968,7 +2004,7 @@ fn mathAbs(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternI
 
     const number = coerceMathNumberValue(ctx, arg) catch |err| switch (err) {
         error.BuiltinType => {
-            if (!named and valueLooksLikeCssMathArg(ctx, arg)) return buildCssMathCall(ctx, "abs", args);
+            if (!named and global and cssMathPassthrough(ctx, arg)) return buildCssMathCall(ctx, "abs", args);
             return reportArgumentTypeMismatch(ctx, "number", arg, "number");
         },
         else => return err,
@@ -1993,7 +2029,7 @@ pub fn math_floor(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
     const arg = bound[0].?;
     const number = coerceMathNumberValue(ctx, arg) catch |err| switch (err) {
         error.BuiltinType => {
-            if (valueLooksLikeCssMathArg(ctx, arg)) return buildCssMathCall(ctx, "floor", args);
+            if (cssMathPassthrough(ctx, arg)) return buildCssMathCall(ctx, "floor", args);
             return reportArgumentTypeMismatch(ctx, "number", arg, "number");
         },
         else => return err,
@@ -2006,7 +2042,7 @@ pub fn math_ceil(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
     const arg = bound[0].?;
     const number = coerceMathNumberValue(ctx, arg) catch |err| switch (err) {
         error.BuiltinType => {
-            if (valueLooksLikeCssMathArg(ctx, arg)) return buildCssMathCall(ctx, "ceil", args);
+            if (cssMathPassthrough(ctx, arg)) return buildCssMathCall(ctx, "ceil", args);
             return reportArgumentTypeMismatch(ctx, "number", arg, "number");
         },
         else => return err,
@@ -2252,6 +2288,7 @@ pub fn math_round_namespaced(ctx: *BuiltinContext, args: []const Value, arg_name
 
 pub fn math_min(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
     ensureNoNamedArgs(args, arg_names) catch return error.SassError;
+    if (anyCssMathPassthrough(ctx, args)) return buildCssMathCall(ctx, "min", args);
     return minmaxVariadic(ctx, args, true, "min") catch |err| switch (err) {
         error.BuiltinArity => error.SassError,
         else => err,
@@ -2260,6 +2297,7 @@ pub fn math_min(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
 
 pub fn math_max(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
     ensureNoNamedArgs(args, arg_names) catch return error.SassError;
+    if (anyCssMathPassthrough(ctx, args)) return buildCssMathCall(ctx, "max", args);
     return minmaxVariadic(ctx, args, false, "max") catch |err| switch (err) {
         error.BuiltinArity => error.SassError,
         else => err,
@@ -2394,8 +2432,8 @@ pub fn math_exp(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
 
     const number = coerceMathNumberValue(ctx, arg) catch |err| switch (err) {
         error.BuiltinType => {
-            if (valueLooksLikeCssMathArg(ctx, arg)) return buildCssMathCall(ctx, "exp", args);
-            return error.SassError;
+            if (cssMathPassthrough(ctx, arg)) return buildCssMathCall(ctx, "exp", args);
+            return shared.reportArgumentTypeMismatch(ctx, "number", arg, "number");
         },
         else => return err,
     };
@@ -2412,7 +2450,7 @@ pub fn math_sign(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
 
     const number = coerceMathNumberValue(ctx, arg) catch |err| switch (err) {
         error.BuiltinType => {
-            if (valueLooksLikeCssMathArg(ctx, arg)) return buildCssMathCall(ctx, "sign", args);
+            if (cssMathPassthrough(ctx, arg)) return buildCssMathCall(ctx, "sign", args);
             if (complex) return error.SassError;
             return error.SassError;
         },
@@ -2776,9 +2814,9 @@ pub fn math_sqrt(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
 
     const number = coerceMathNumberValue(ctx, arg) catch |err| switch (err) {
         error.BuiltinType => {
-            if (valueLooksLikeCssMathArg(ctx, arg)) return buildCssMathCall(ctx, "sqrt", args);
+            if (cssMathPassthrough(ctx, arg)) return buildCssMathCall(ctx, "sqrt", args);
             if (complex) return error.SassError;
-            return error.SassError;
+            return shared.reportArgumentTypeMismatch(ctx, "number", arg, "number");
         },
         else => return err,
     };
@@ -2798,19 +2836,19 @@ pub fn math_pow(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
 
     const base = coerceMathNumberValue(ctx, base_arg) catch |err| switch (err) {
         error.BuiltinType => {
-            if (valueLooksLikeCssMathArg(ctx, base_arg) or valueLooksLikeCssMathArg(ctx, exponent_arg)) {
+            if (cssMathPassthrough(ctx, base_arg) or cssMathPassthrough(ctx, exponent_arg)) {
                 return buildCssMathCall(ctx, "pow", args);
             }
-            return error.SassError;
+            return shared.reportArgumentTypeMismatch(ctx, "base", base_arg, "number");
         },
         else => return err,
     };
     const exponent = coerceMathNumberValue(ctx, exponent_arg) catch |err| switch (err) {
         error.BuiltinType => {
-            if (valueLooksLikeCssMathArg(ctx, base_arg) or valueLooksLikeCssMathArg(ctx, exponent_arg)) {
+            if (cssMathPassthrough(ctx, base_arg) or cssMathPassthrough(ctx, exponent_arg)) {
                 return buildCssMathCall(ctx, "pow", args);
             }
-            return error.SassError;
+            return shared.reportArgumentTypeMismatch(ctx, "exponent", exponent_arg, "number");
         },
         else => return err,
     };
@@ -2841,7 +2879,7 @@ pub fn math_log(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     const number_complex = try valueHasComplexCalculationText(ctx, number_arg);
     const number_value = coerceMathNumberValue(ctx, number_arg) catch |err| switch (err) {
         error.BuiltinType => {
-            if (valueLooksLikeCssMathArg(ctx, number_arg)) return buildCssMathCall(ctx, "log", args);
+            if (cssMathPassthrough(ctx, number_arg)) return buildCssMathCall(ctx, "log", args);
             if (number_complex) return error.SassError;
             return error.SassError;
         },
@@ -2855,7 +2893,7 @@ pub fn math_log(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
 
         const base_value = coerceMathNumberValue(ctx, base) catch |err| switch (err) {
             error.BuiltinType => {
-                if (valueLooksLikeCssMathArg(ctx, number_arg) or valueLooksLikeCssMathArg(ctx, base)) {
+                if (cssMathPassthrough(ctx, number_arg) or cssMathPassthrough(ctx, base)) {
                     return buildCssMathCall(ctx, "log", args);
                 }
                 return error.SassError;
@@ -2867,6 +2905,30 @@ pub fn math_log(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     }
 
     return Value.numberUnitless(@log(number));
+}
+
+/// A value a calculation is given: a number, a calculation, or text; else
+/// the official CLI's error, which shows a list in parentheses.
+pub fn calcValueCheck(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
+    if (args.len != 1) return error.BuiltinArity;
+    const v = args[0];
+    switch (v.kind()) {
+        .number, .calc_fragment, .interp_fragment => return v,
+        else => {},
+    }
+    // A color's name is a color here, as written.
+    if (v.isString() and !v.stringQuoted(ctx.string_flags_pool.items) and !v.stringNamedColorLiteral(ctx.string_flags_pool.items)) return v;
+    const text = try shared.valueToInspectionString(ctx, v);
+    defer ctx.allocator.free(text);
+    const is_list = v.kind() == .list and !v.listBracketed(ctx.list_meta_pool.items) and
+        ctx.list_pool.items[v.listHandle()].len > 1 and !(text.len > 0 and text[0] == '(');
+    var buf: [512]u8 = undefined;
+    const msg = (if (is_list)
+        std.fmt.bufPrint(&buf, "Value ({s}) can't be used in a calculation.", .{text})
+    else
+        std.fmt.bufPrint(&buf, "Value {s} can't be used in a calculation.", .{text})) catch return error.SassError;
+    error_format.setContextMessage(msg);
+    return error.SassError;
 }
 
 /// For a calculation called by its global name with fewer than `min`
@@ -2920,9 +2982,9 @@ fn forwardTrig(
 
     const number = coerceMathNumberValue(ctx, arg) catch |err| switch (err) {
         error.BuiltinType => {
-            if (valueLooksLikeCssMathArg(ctx, arg)) return buildCssMathCall(ctx, name, args);
+            if (cssMathPassthrough(ctx, arg)) return buildCssMathCall(ctx, name, args);
             if (complex) return error.SassError;
-            return error.SassError;
+            return shared.reportArgumentTypeMismatch(ctx, "number", arg, "number");
         },
         else => return err,
     };
@@ -2949,9 +3011,9 @@ fn inverseTrig(
 
     const number = coerceMathNumberValue(ctx, arg) catch |err| switch (err) {
         error.BuiltinType => {
-            if (valueLooksLikeCssMathArg(ctx, arg)) return buildCssMathCall(ctx, name, args);
+            if (cssMathPassthrough(ctx, arg)) return buildCssMathCall(ctx, name, args);
             if (complex) return error.SassError;
-            return error.SassError;
+            return shared.reportArgumentTypeMismatch(ctx, "number", arg, "number");
         },
         else => return err,
     };
@@ -3019,20 +3081,20 @@ pub fn math_atan2(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
         return error.SassError;
     }
 
-    const y_calc_like = valueLooksLikeCssMathArg(ctx, y_arg);
-    const x_calc_like = valueLooksLikeCssMathArg(ctx, x_arg);
+    const y_calc_like = cssMathPassthrough(ctx, y_arg);
+    const x_calc_like = cssMathPassthrough(ctx, x_arg);
 
     const y = coerceMathNumberValue(ctx, y_arg) catch |err| switch (err) {
         error.BuiltinType => {
             if (y_calc_like or x_calc_like) return buildCssMathCall(ctx, "atan2", args);
-            return error.SassError;
+            return shared.reportArgumentTypeMismatch(ctx, "y", y_arg, "number");
         },
         else => return err,
     };
     const x = coerceMathNumberValue(ctx, x_arg) catch |err| switch (err) {
         error.BuiltinType => {
             if (y_calc_like or x_calc_like) return buildCssMathCall(ctx, "atan2", args);
-            return error.SassError;
+            return shared.reportArgumentTypeMismatch(ctx, "x", x_arg, "number");
         },
         else => return err,
     };
@@ -3175,6 +3237,8 @@ const MathTestHarness = struct {
 
     fn context(self: *MathTestHarness) BuiltinContext {
         return .{
+            // The tests call the functions as their global names do.
+            .global_call = true,
             .allocator = self.allocator,
             .intern_pool = &self.intern_pool,
             .list_pool = &self.list_pool,
