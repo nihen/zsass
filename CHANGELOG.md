@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- `@error` is reported once, as other errors are: its message, the
+  `@error` rule, and the trace; one in a function or mixin at the call
+  that ran it, as the official CLI reports it. zsass followed the message
+  with "Error: Compilation failed.". An `@include`'s span no longer takes
+  in its `;` or content block.
+- `@for` checks its bounds when the loop runs, as the official CLI does:
+  a bound that is no number or no int fails ("1.5 is not an int."), and
+  so does a `to` whose unit `from`'s cannot take. zsass looped over
+  `1.5` or `"foo"` from a variable, and rejected a literal one in a
+  function never called.
+- `@use` and `@forward` after an `@import`, a mixin, or a function are
+  rejected, as the official CLI rejects them; zsass took them. `@mixin
+  a;` and `@mixin a.b()` say they expected `{`.
+- `selector.append()` takes a suffix such as `.c` after `*` or `a|*`,
+  which zsass rejected.
+- More errors are reported as the official CLI reports them: a default
+  namespace that is no identifier, a built-in module configured, a
+  variable configured twice, a module that loads itself, an indented
+  line after `@forward`'s `show` list, a built-in function given an
+  argument twice or one it does not take, `map.merge()`, `map.set()`,
+  `list.slash()`, `math.percentage()`, `selector.append()`, and a
+  selector argument that does not parse.
 - `@use "./a"` and `@use "../a"` (and `@import`, `meta.load-css()`) are
   found when the input stylesheet is given by a relative path with no
   directory (`zsass input.scss`); zsass failed with "Can't find stylesheet
