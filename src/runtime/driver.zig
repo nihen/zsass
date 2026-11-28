@@ -403,6 +403,14 @@ fn buildVmErrorTrace(
         frame.end_line_no = end.line + 1;
         frame.end_col_no = end.col + 1;
         frame.has_span = true;
+        // A call in the file the error is in can show its line, as the
+        // excerpt of an @error in a content block does.
+        if (std.mem.eql(u8, path, inner_path)) {
+            const text = extractLineInline(inner_source, start.line);
+            const t_len = @min(text.len, frame.line_text_buf.len);
+            @memcpy(frame.line_text_buf[0..t_len], text[0..t_len]);
+            frame.line_text_len = t_len;
+        }
         snapshot[n] = frame;
         n += 1;
     }
@@ -2816,7 +2824,7 @@ fn runEnd2EndWithBudget(
         if (error_format.verboseErrorsEnabled()) {
             cliErrPrint("zsass: VM error: {}\n", .{err});
         }
-        cliErrPrint("Error: {s}\n", .{error_format.errorToUserMessageWithContext(err)});
+        cliErrPrint("Error: {s}\n", .{vm.error_message_full orelse error_format.errorToUserMessageWithContext(err)});
         // CLI-FIX-E Step 2/2c: Output source frame from span recorded by VM step.
         // file_id == root_index uses entry source, != root_index is program.modules[file_id]
         // Reload source from path + line_starts already exists in modules[file_id].
@@ -2826,9 +2834,12 @@ fn runEnd2EndWithBudget(
         var inner_ref = vm.innerMostChunkRef();
         var inner_name = vm.innerMostChunkName();
         var at_call_site = false;
+        const in_content_block = inner_ref == .content;
         if (vm.error_at_call_site and call_count > 0) {
             // An @error is reported at the call to the function or mixin
-            // it is in, which the trace then leaves out.
+            // it is in, which the trace then leaves out; one in a content
+            // block shows the @include that passed the block.
+            if (in_content_block and call_count > 1) error_format.error_state.snippet_frame_from_end = 1;
             const site = call_sites[call_count - 1];
             ctx.file_id = site.module_id;
             ctx.span_start = site.span_start;
@@ -2839,6 +2850,7 @@ fn runEnd2EndWithBudget(
             at_call_site = true;
             // A call in code an @import brought in is placed by its origin.
             vm.current_origin = site.origin;
+            vm.current_source_span.file_id = site.module_id;
         }
         const root_idx: u32 = program_ptr.root_index;
         const file_id_is_entry = (ctx.file_id == root_idx);

@@ -69,25 +69,7 @@ fn eprintRepeat(ch: u8, n: usize) void {
 /// Thread-local rich messages such as `setContextMessage("1px and 1em have incompatible units.")`
 /// Save it in buffer, and `errorToUserMessage` returns this with priority. If not set
 /// Table fallback for `error tag  ->  static message`.
-/// A message too long for the buffer, such as an @error's, kept whole.
-threadlocal var long_context_message: ?[]u8 = null;
-
-fn dropLongContextMessage() void {
-    if (long_context_message) |m| std.heap.c_allocator.free(m);
-    long_context_message = null;
-}
-
 pub fn setContextMessage(msg: []const u8) void {
-    if (msg.len > error_state.context_message_buf.len) {
-        // Copied before the old one goes, which `msg` may be.
-        if (std.heap.c_allocator.dupe(u8, msg)) |copy| {
-            dropLongContextMessage();
-            long_context_message = copy;
-            error_state.context_message_len = copy.len;
-            return;
-        } else |_| {}
-    }
-    dropLongContextMessage();
     var n = @min(msg.len, error_state.context_message_buf.len);
     // A message cut short ends on a whole UTF-8 character.
     if (n < msg.len) {
@@ -97,13 +79,15 @@ pub fn setContextMessage(msg: []const u8) void {
     error_state.context_message_len = n;
 }
 
+pub fn contextMessageCapacity() usize {
+    return error_state.context_message_buf.len;
+}
+
 pub fn clearContextMessage() void {
-    dropLongContextMessage();
     error_state.context_message_len = 0;
 }
 
 pub fn currentContextMessage() ?[]const u8 {
-    if (long_context_message) |m| return m;
     if (error_state.context_message_len == 0) return null;
     return error_state.context_message_buf[0..error_state.context_message_len];
 }
@@ -282,7 +266,7 @@ pub fn clearErrorContext() void {
     error_state.error_stack_len = 0;
     error_state.error_stack_overflow = 0;
     error_state.error_stack_snapshot_len = 0;
-    dropLongContextMessage();
+    error_state.snippet_frame_from_end = 0;
     error_state.context_message_len = 0;
     error_state.reported = false;
 }
@@ -337,6 +321,10 @@ pub const ErrorTraceFrame = struct {
 /// Single thread-local bundle for error context / resolver stack / snapshot (avoids torn reads across fields).
 pub const ErrorState = struct {
     context_message_buf: [512]u8 = @splat(0),
+    /// Which frame of the snapshot, counted from the innermost, the trace's
+    /// source excerpt shows: an @error in a content block shows the
+    /// @include that passed it.
+    snippet_frame_from_end: usize = 0,
     context_message_len: usize = 0,
     last_error_ctx: ErrorContext = .{},
     error_stack: [max_error_stack]ErrorStackFrame = @splat(.{ .path = "", .source = "", .label = "" }),
@@ -572,7 +560,8 @@ pub fn writeTraceFrames(allocator: std.mem.Allocator, frames: []const ErrorTrace
     }
 
     if (with_snippet) {
-        const inner = frames[slen - 1];
+        const from_end = if (error_state.snippet_frame_from_end < slen) error_state.snippet_frame_from_end else 0;
+        const inner = frames[slen - 1 - from_end];
         if (inner.has_span and inner.line_text_len > 0) {
             const line_text = inner.line_text_buf[0..inner.line_text_len];
             writeSourceFrameAsciiOnlyFromSnapshot(line_text, inner.line_no, inner.col_no, inner.end_line_no, inner.end_col_no);

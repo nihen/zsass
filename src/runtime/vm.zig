@@ -521,6 +521,9 @@ pub const VM = struct {
     /// An @error in a function or mixin is reported at the call that ran
     /// it, as the official CLI reports it.
     error_at_call_site: bool = false,
+    /// An @error message longer than the context buffer, whole, for the
+    /// CLI to print.
+    error_message_full: ?[]u8 = null,
     /// Optional fd for TAGD builtin-dispatch error lines (e.g. spec_runner pipe). Per-VM, not process-global.
     error_sink_fd: ?i32 = null,
     /// Stage 2 sidecar for unit-bearing numbers (NaN-box prep).
@@ -842,6 +845,7 @@ pub const VM = struct {
     }
 
     pub fn deinit(self: *VM) void {
+        if (self.error_message_full) |m| self.allocator.free(m);
         self.module_run_sites.deinit(self.allocator);
         {
             var it = self.diag_sources.iterator();
@@ -4967,6 +4971,10 @@ pub const VM = struct {
                 defer if (msg.ptr != rendered_msg.ptr) self.allocator.free(msg);
                 // Reported with the rule's span and trace, as any error is.
                 error_format.setContextMessage(msg);
+                if (msg.len > error_format.contextMessageCapacity()) {
+                    if (self.error_message_full) |m| self.allocator.free(m);
+                    self.error_message_full = try self.allocator.dupe(u8, msg);
+                }
                 self.error_at_call_site = true;
                 return error.SassError;
             },
