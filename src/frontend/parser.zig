@@ -965,7 +965,7 @@ pub const Parser = struct {
         // `% ` where the `%` has no trailing ident at all.
         {
             const trimmed = std.mem.trim(u8, sel_text, " \t\n\r");
-            if (trimmed.len == 1 and trimmed[0] == '%') return error.SyntaxError;
+            if (trimmed.len == 1 and trimmed[0] == '%') return self.failExpecting("Expected identifier.");
         }
         const sel_id = try self.intern_pool.intern(sel_text);
 
@@ -4877,8 +4877,22 @@ pub const Parser = struct {
         return self.parseIndentedBlockBodyWithAnchor(ast, header_start);
     }
 
+    /// A block the input ends in: a parenthesis left open in it, or the
+    /// block itself.
+    fn failBlockAtEnd(self: *const Parser, open_pos: usize) ParseError {
+        var depth: i32 = 0;
+        for (self.tokens[open_pos..]) |t| switch (t.tag) {
+            .lparen => depth += 1,
+            .rparen => depth -= 1,
+            else => {},
+        };
+        if (depth > 0) return self.failExpectingWeak("expected \")\".");
+        return self.failExpectingWeak("expected end of rule.");
+    }
+
     fn parseBraceBlockBody(self: *Parser, ast: *Ast) ParseError!BlockBodyResult {
         std.debug.assert(!self.isAtEnd() and self.current().tag == .lbrace);
+        const open_pos = self.pos;
         self.advance(); // skip {
 
         var children: std.ArrayListUnmanaged(NodeIndex) = .empty;
@@ -4886,13 +4900,13 @@ pub const Parser = struct {
 
         while (true) {
             self.skipTrivia();
-            if (self.isAtEnd()) return error.SyntaxError;
+            if (self.isAtEnd()) return self.failBlockAtEnd(open_pos);
             if (self.current().tag == .rbrace) break;
             while (!self.isAtEnd() and self.current().tag == .semicolon) {
                 self.advance();
                 self.skipTrivia();
             }
-            if (self.isAtEnd()) return error.SyntaxError;
+            if (self.isAtEnd()) return self.failBlockAtEnd(open_pos);
             if (self.current().tag == .rbrace) break;
 
             const stmt = try self.parseStatement(ast);

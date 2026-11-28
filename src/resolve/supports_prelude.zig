@@ -1,4 +1,5 @@
 const std = @import("std");
+const error_format = @import("../runtime/error_format.zig");
 const comment_strip = @import("../frontend/comment_strip.zig");
 const css_utils = @import("../runtime/css_utils.zig");
 const ir_validate = @import("../ir/validate.zig");
@@ -183,14 +184,24 @@ fn normalizeSupportsDeclarationAfterEval(
 
     const is_custom = prop.len >= 2 and prop[0] == '-' and prop[1] == '-';
     if (is_custom) {
-        if (val_raw.len == 0) return error.SassError;
+        if (val_raw.len == 0) {
+            error_format.setContextMessage("Expected token.");
+            return error.SassError;
+        }
         return allocator.dupe(u8, inner) catch return error.OutOfMemory;
     }
 
-    if (containsWhitespace(prop)) return error.SassError;
+    if (containsWhitespace(prop)) {
+        // `not a: b` is no declaration.
+        if (prop.len > 4 and std.ascii.eqlIgnoreCase(prop[0..4], "not ")) error_format.setContextMessage("Expected @supports condition.");
+        return error.SassError;
+    }
 
     const val = std.mem.trim(u8, val_raw, " \t\n\r");
-    if (val.len == 0) return error.SassError;
+    if (val.len == 0) {
+        error_format.setContextMessage("Expected expression.");
+        return error.SassError;
+    }
 
     return std.mem.concat(allocator, u8, &.{ prop, ": ", val }) catch
         return error.OutOfMemory;

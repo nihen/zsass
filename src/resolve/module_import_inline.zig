@@ -73,6 +73,8 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: 
         if (error_format.verboseErrorsEnabled()) {
             deps.resolverStderrPrint("zsass resolver: @import file not found url={s} from={s}\n", .{ url, ctx.module_path });
         }
+        // An ambiguous URL has said which files it could mean.
+        if (error_format.currentContextMessage() == null) error_format.setContextMessage("Can't find stylesheet to import.");
         return error.SassError;
     };
     defer ctx.a.free(resolved_path);
@@ -82,10 +84,12 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: 
             if (error_format.verboseErrorsEnabled()) {
                 deps.resolverStderrPrint("zsass resolver: @import circular url={s}\n", .{url});
             }
+            error_format.setContextMessage("This file is already being loaded.");
             return error.SassError;
         }
     }
     if (std.mem.eql(u8, ctx.module_path, resolved_path)) {
+        error_format.setContextMessage("This file is already being loaded.");
         return error.SassError;
     }
 

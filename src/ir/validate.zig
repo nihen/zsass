@@ -1058,13 +1058,12 @@ fn validateSupportsConditionListOp(t: []const u8, prev_op: u8, nested: bool) Eva
 
 /// Validate a unicode range token (U+XXXX, U+XXXX-YYYY, U+XX??).
 pub fn validateUnicodeRange(text: []const u8) EvalError!void {
-    if (text.len < 3) return EvalError.SassError;
+    if (text.len < 2) return EvalError.SassError;
     if (text[0] != 'U' and text[0] != 'u') return EvalError.SassError;
     if (text[1] != '+') return EvalError.SassError;
 
     var uri: usize = 2;
-    if (uri >= text.len) return EvalError.SassError;
-    if (!isHexDigit(text[uri]) and text[uri] != '?') return EvalError.SassError;
+    if (uri >= text.len or (!isHexDigit(text[uri]) and text[uri] != '?')) return conditionError("Expected hex digit or \"?\".");
 
     var hex_count: usize = 0;
     while (uri < text.len and isHexDigit(text[uri])) : (uri += 1) {
@@ -1087,7 +1086,7 @@ pub fn validateUnicodeRange(text: []const u8) EvalError!void {
     if (text[uri] != '-') return EvalError.SassError;
     uri += 1;
 
-    if (uri >= text.len or !isHexDigit(text[uri])) return EvalError.SassError;
+    if (uri >= text.len or !isHexDigit(text[uri])) return conditionError("Expected hex digit.");
 
     var hex2_count: usize = 0;
     while (uri < text.len and isHexDigit(text[uri])) : (uri += 1) {
@@ -1095,5 +1094,7 @@ pub fn validateUnicodeRange(text: []const u8) EvalError!void {
     }
     if (hex2_count > 6) return conditionError("Expected at most 6 digits.");
 
+    // `u+123-abc-def` goes on as an identifier would.
+    if (uri < text.len and (text[uri] == '-' or std.ascii.isAlphanumeric(text[uri]) or text[uri] == '_')) return conditionError("Expected end of identifier.");
     if (uri < text.len) return conditionError("expected \";\".");
 }

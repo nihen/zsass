@@ -1055,7 +1055,11 @@ pub const VM = struct {
                 &self.stream_chunk_extend_targets,
             ) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                else => return false,
+                // The @extend may never run; its error is the run's to report.
+                else => {
+                    error_format.clearContextMessage();
+                    return false;
+                },
             };
         }
         return true;
@@ -2215,7 +2219,10 @@ pub const VM = struct {
     fn requireDeclaredFrameSlot(self: *const VM, fr: *const Frame, slot: usize) VMError!Value {
         _ = self;
         if (slot >= fr.locals.len or slot >= fr.declared.len) return error.BadJump;
-        if (!fr.declared[slot]) return error.SassError;
+        if (!fr.declared[slot]) {
+            error_format.setContextMessage("Undefined variable.");
+            return error.SassError;
+        }
         return fr.locals[slot];
     }
 
@@ -4201,7 +4208,10 @@ pub const VM = struct {
         _ = chunk;
         switch (inst.opcode()) {
             .record_extend => {
-                if (self.selector_stack.items.len == 0) return error.SassError;
+                if (self.selector_stack.items.len == 0) {
+                    error_format.setContextMessage("@extend may only be used within style rules.");
+                    return error.SassError;
+                }
                 const extending_selector = self.selector_stack.items[self.selector_stack.items.len - 1];
                 const optional = (inst.arg_a & 0x1) != 0;
                 const dynamic_target = (inst.arg_a & 0x4) != 0;
@@ -4363,7 +4373,7 @@ pub const VM = struct {
                     }
                     vid = try internWithLeadingMarker(self.intern_pool, self.allocator, calc_interp_marker, vid);
                 }
-                vid = try normalizeUnicodeRangeDeclValue(self, vid, is_custom_property);
+                vid = try normalizeUnicodeRangeDeclValue(self, vid, is_custom_property, false);
                 if (!is_custom_property and self.intern_pool.get(vid).len == 0) return .continue_exec;
                 try self.rule_ir.appendDecl(self.allocator, @backingInt(prop_id), @backingInt(vid), self.currentSourceSpan());
                 if (!is_custom_property) {
@@ -4511,7 +4521,7 @@ pub const VM = struct {
                         }
                     }
                 }
-                vid = try normalizeUnicodeRangeDeclValue(self, vid, is_custom_property);
+                vid = try normalizeUnicodeRangeDeclValue(self, vid, is_custom_property, false);
                 // emit_decl_flag_strip_source_comments is set only for values
                 // without interpolation. Strip source comments from plain CSS
                 // literal values; preserve text produced by interpolation. Custom
@@ -4700,7 +4710,7 @@ pub const VM = struct {
                         }
                     }
                 }
-                out_id = try normalizeUnicodeRangeDeclValue(self, out_id, is_custom_property);
+                out_id = try normalizeUnicodeRangeDeclValue(self, out_id, is_custom_property, inst.opcode() == .emit_raw_decl and (inst.arg_a & opcode_mod.emit_raw_decl_flag_strip_source_comments) != 0);
                 // emit_raw_decl_flag_strip_source_comments is set only for pure
                 // literal source values. Interpolation and custom properties
                 // preserve authored bytes. Older raw-decl opcodes keep flag 0.
@@ -6998,6 +7008,35 @@ pub const VM = struct {
         return self.coerceSlashFreeValue(value);
     }
 
+    /// A map key or value as a map writes it: a comma list in parentheses.
+    /// Alone, a one-element list keeps the parentheses it has: `(1,)`.
+    fn inspectMapEntryForMessage(self: *VM, v: Value, in_map: bool) VMError![]const u8 {
+        const text = try self.inspectForMessage(v);
+        if (v.kind() != .list or !v.listComma(self.list_meta_pool.items) or v.listBracketed(self.list_meta_pool.items)) return text;
+        if (!in_map and self.list_pool.items[v.listHandle()].len == 1) return text;
+        const wrapped = try std.fmt.allocPrint(self.allocator, "({s})", .{text});
+        defer self.allocator.free(wrapped);
+        return self.intern_pool.get(try self.intern_pool.intern(wrapped));
+    }
+
+    /// "Variable keyword argument map must have string keys." with the key
+    /// and the map, as the official CLI writes them.
+    fn reportKeywordMapKey(self: *VM, key: Value, pairs: []const Value) VMError!void {
+        var text: std.ArrayListUnmanaged(u8) = .empty;
+        defer text.deinit(self.allocator);
+        const key_text = try self.inspectMapEntryForMessage(key, false);
+        try text.print(self.allocator, "Variable keyword argument map must have string keys.\n{s} is not a string in (", .{key_text});
+        var i: usize = 0;
+        while (i + 1 < pairs.len) : (i += 2) {
+            if (i > 0) try text.appendSlice(self.allocator, ", ");
+            const k = try self.inspectMapEntryForMessage(pairs[i], true);
+            const v = try self.inspectMapEntryForMessage(pairs[i + 1], true);
+            try text.print(self.allocator, "{s}: {s}", .{ k, v });
+        }
+        try text.appendSlice(self.allocator, ").");
+        error_format.setContextMessage(text.items);
+    }
+
     fn appendKeywordPairsToExpanded(
         self: *VM,
         key_values: []const Value,
@@ -7008,7 +7047,10 @@ pub const VM = struct {
         var i: usize = 0;
         while (i + 1 < key_values.len) : (i += 2) {
             const key_v = key_values[i];
-            if (key_v.kind() != .string or key_v.stringNamedColorLiteral(self.string_flags_pool.items)) return error.SassError;
+            if (key_v.kind() != .string or key_v.stringNamedColorLiteral(self.string_flags_pool.items)) {
+                try self.reportKeywordMapKey(key_v, key_values);
+                return error.SassError;
+            }
             try out_args.append(self.allocator, key_values[i + 1]);
             try out_names.append(self.allocator, key_v.stringIntern());
         }
@@ -8807,7 +8849,10 @@ pub const VM = struct {
     pub fn buildCssCallableResult(self: *VM, name_id: InternId, args: []const Value, arg_names: []const InternId) VMError!Value {
         if (arg_names.len != 0) {
             for (arg_names) |arg_name| {
-                if (arg_name != .none) return error.SassError;
+                if (arg_name != .none) {
+                    error_format.setContextMessage("Plain CSS functions don't support keyword arguments.");
+                    return error.SassError;
+                }
             }
         }
         const name = self.intern_pool.get(name_id);
@@ -12295,7 +12340,7 @@ fn valueToInternIdRaw(
     return valueToInternIdRawWithMode(pool, number_pool, alloc, list_pool, color_pool, slash_list_preserve, v, .normal);
 }
 
-fn normalizeUnicodeRangeDeclText(alloc: std.mem.Allocator, raw: []const u8) VMError!?[]const u8 {
+fn normalizeUnicodeRangeDeclText(alloc: std.mem.Allocator, raw: []const u8, literal: bool) VMError!?[]const u8 {
     var start: usize = 0;
     while (start < raw.len and (raw[start] == ' ' or raw[start] == '\t' or raw[start] == '\n' or raw[start] == '\r')) : (start += 1) {}
     if (start >= raw.len) return null;
@@ -12307,6 +12352,14 @@ fn normalizeUnicodeRangeDeclText(alloc: std.mem.Allocator, raw: []const u8) VMEr
     if (!((trimmed[0] == 'U' or trimmed[0] == 'u') and trimmed[1] == '+')) return null;
 
     const ur_len = css_utils.unicodeRangeLen(trimmed);
+    // The whole word, which says what of it is no range.
+    // Past `U+`, a `+` is an operation.
+    var word_end: usize = 2;
+    while (word_end < trimmed.len and (std.ascii.isAlphanumeric(trimmed[word_end]) or trimmed[word_end] == '-' or trimmed[word_end] == '?' or trimmed[word_end] == '_')) : (word_end += 1) {}
+    // `U+4??-x` is the range and then text.
+    if (literal and (ur_len == 0 or (ur_len < word_end and trimmed[ur_len - 1] != '?'))) {
+        ir_validate.validateUnicodeRange(trimmed[0..word_end]) catch return error.SassError;
+    }
     if (ur_len == 0) return error.SassError;
 
     const ur = trimmed[0..ur_len];
@@ -12340,10 +12393,12 @@ fn normalizeUnicodeRangeDeclText(alloc: std.mem.Allocator, raw: []const u8) VMEr
     return try out.toOwnedSlice(alloc);
 }
 
-fn normalizeUnicodeRangeDeclValue(self: *VM, vid: InternId, is_custom_property: bool) VMError!InternId {
+/// `literal`: the value is the source's text, whose unicode-range words
+/// are checked whole; interpolation's output is not.
+fn normalizeUnicodeRangeDeclValue(self: *VM, vid: InternId, is_custom_property: bool, literal: bool) VMError!InternId {
     if (is_custom_property) return vid;
     const raw = self.intern_pool.get(vid);
-    const maybe_normalized = try normalizeUnicodeRangeDeclText(self.allocator, raw);
+    const maybe_normalized = try normalizeUnicodeRangeDeclText(self.allocator, raw, literal);
     if (maybe_normalized) |normalized| {
         defer self.allocator.free(normalized);
         return self.intern_pool.intern(normalized) catch error.OutOfMemory;
