@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- The color functions name the argument that is no color ("$color: 1 is
+  not a color."), and `color.channel()` and `color.to-space()` report
+  their channel and space as the official CLI does.
+- A namespace no `@use` brought in is reported as "There is no module
+  with namespace \"other\".", in references and in the `meta` functions'
+  `$module`; a private member's error comes first.
+- `@use`/`@forward` `with` and `meta.load-css()` `$with` report a
+  variable not declared with `!default` and a module already loaded as
+  the official CLI does. A module-level variable more than one
+  `@use ... as *` provides is ambiguous when it is assigned, which zsass
+  allowed.
+- The selector functions report a value that is no selector and text
+  that ends too soon as the official CLI does.
+- Lists in error messages and `meta.inspect()` are written as the official
+  CLI writes them: once in parentheses, and a slash-separated list in a
+  comma-separated one without them.
 - A variable's or function's value in a calculation is checked as the
   official CLI checks it: "Value true can't be used in a calculation."
   for a boolean, null, quoted string, color, list, map, or function, where
