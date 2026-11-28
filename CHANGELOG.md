@@ -14,8 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pow()`, `atan2()`, or `sin()` given an identifier writes the CSS call,
   and a `sass:math` function given text fails ("$number: var(--a) is not
   a number.").
-- `clamp(0.1rem, $a + 1rem, 9rem)` is evaluated, as `min()` and `max()`
-  are.
 - `calc(a b)`, `calc(1 a)`, and `calc(var(--a) -1px)` are written as they
   are, as the official CLI does; a sign after whitespace (`a -1`) is no
   longer written as an operation.

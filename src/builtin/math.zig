@@ -2045,7 +2045,7 @@ pub fn math_floor(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
     const arg = bound[0].?;
     const number = coerceMathNumberValue(ctx, arg) catch |err| switch (err) {
         error.BuiltinType => {
-            if (cssMathPassthrough(ctx, arg)) return buildCssMathCall(ctx, "floor", args);
+            // floor() is no CSS function: text is no number to it.
             return reportArgumentTypeMismatch(ctx, "number", arg, "number");
         },
         else => return err,
@@ -2058,7 +2058,7 @@ pub fn math_ceil(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
     const arg = bound[0].?;
     const number = coerceMathNumberValue(ctx, arg) catch |err| switch (err) {
         error.BuiltinType => {
-            if (cssMathPassthrough(ctx, arg)) return buildCssMathCall(ctx, "ceil", args);
+            // ceil() is no CSS function: text is no number to it.
             return reportArgumentTypeMismatch(ctx, "number", arg, "number");
         },
         else => return err,
@@ -2304,7 +2304,11 @@ pub fn math_round_namespaced(ctx: *BuiltinContext, args: []const Value, arg_name
 
 pub fn math_min(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
     ensureNoNamedArgs(args, arg_names) catch return error.SassError;
-    if (anyCssMathPassthrough(ctx, args)) return buildCssMathCall(ctx, "min", args);
+    if (anyCssMathPassthrough(ctx, args)) {
+        // The numbers among them must still be compatible.
+        try checkCalcArgsKnownCompatible(ctx, args);
+        return buildCssMathCall(ctx, "min", args);
+    }
     return minmaxVariadic(ctx, args, true, "min") catch |err| switch (err) {
         error.BuiltinArity => error.SassError,
         error.BuiltinType => reportMinMaxNonNumber(ctx, args),
@@ -2314,7 +2318,11 @@ pub fn math_min(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
 
 pub fn math_max(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
     ensureNoNamedArgs(args, arg_names) catch return error.SassError;
-    if (anyCssMathPassthrough(ctx, args)) return buildCssMathCall(ctx, "max", args);
+    if (anyCssMathPassthrough(ctx, args)) {
+        // The numbers among them must still be compatible.
+        try checkCalcArgsKnownCompatible(ctx, args);
+        return buildCssMathCall(ctx, "max", args);
+    }
     return minmaxVariadic(ctx, args, false, "max") catch |err| switch (err) {
         error.BuiltinArity => error.SassError,
         error.BuiltinType => reportMinMaxNonNumber(ctx, args),
@@ -2708,14 +2716,9 @@ pub fn math_clamp(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
 
     const bound = bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{ "min", "number", "max" }, 3) catch return error.SassError;
 
-    // Sums written with variables come as their text, as for min() and
-    // max(): clamp(0.1rem, $a + 1rem, 9rem) is evaluated.
-    const min_bound = bound[0] orelse return error.SassError;
-    const number_bound = bound[1] orelse return error.SassError;
-    const max_bound = bound[2] orelse return error.SassError;
-    const min_raw = (try coerceSimpleAddSubNumberExpression(ctx, min_bound)) orelse min_bound;
-    const number_raw = (try coerceSimpleAddSubNumberExpression(ctx, number_bound)) orelse number_bound;
-    const max_raw = (try coerceSimpleAddSubNumberExpression(ctx, max_bound)) orelse max_bound;
+    const min_raw = bound[0] orelse return error.SassError;
+    const number_raw = bound[1] orelse return error.SassError;
+    const max_raw = bound[2] orelse return error.SassError;
     if (try valueHasComplexCalculationText(ctx, min_raw) or
         try valueHasComplexCalculationText(ctx, number_raw) or
         try valueHasComplexCalculationText(ctx, max_raw))
@@ -2938,6 +2941,15 @@ pub fn calcValueCheck(ctx: *BuiltinContext, args: []const Value) BuiltinError!Va
     switch (v.kind()) {
         .number, .calc_fragment, .interp_fragment => return v,
         else => {},
+    }
+    // `$x: 1/2` is a division of numbers kept with its slash.
+    if (v.kind() == .list and v.listSlash(ctx.list_meta_pool.items) and !v.listBracketed(ctx.list_meta_pool.items)) {
+        const items = ctx.list_pool.items[v.listHandle()];
+        var all_numbers = items.len == 2;
+        for (items) |item| {
+            if (item.kind() != .number) all_numbers = false;
+        }
+        if (all_numbers) return v;
     }
     // A color's name is a color here, as written.
     if (v.isString() and !v.stringQuoted(ctx.string_flags_pool.items) and !v.stringNamedColorLiteral(ctx.string_flags_pool.items)) return v;

@@ -3965,6 +3965,10 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
             const saved_in_calculation = ctx.in_calculation_args;
             ctx.in_calculation_args = args_in_calculation;
             defer ctx.in_calculation_args = saved_in_calculation;
+            // A rest argument is checked as the values it expands to are.
+            const saved_in_strict_calculation = ctx.in_strict_calculation_args;
+            ctx.in_strict_calculation_args = false;
+            defer ctx.in_strict_calculation_args = saved_in_strict_calculation;
             const saved_calc_arg_allow_numberish = ctx.calc_arg_allow_numberish_ident_literals;
             ctx.calc_arg_allow_numberish_ident_literals =
                 saved_calc_arg_allow_numberish or calc_arg_allow_numberish_ident_literals;
