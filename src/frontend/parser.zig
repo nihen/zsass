@@ -33,6 +33,8 @@ threadlocal var syntax_hint: ?SyntaxHint = null;
 /// Where the text being parsed starts in the file: an interpolation is
 /// parsed apart from the text around it.
 threadlocal var syntax_hint_offset: u32 = 0;
+/// A guess at what was expected that any other message replaces.
+threadlocal var weak_syntax_hint: ?[]const u8 = null;
 
 fn noteSyntaxHint(message: []const u8, rel_start: u32, rel_end: u32) void {
     const start = rel_start + syntax_hint_offset;
@@ -125,6 +127,7 @@ pub const Parser = struct {
     /// Used to keep CSS special/url-like function calls in opaque raw form
     /// so evaluator-side CSS normalization handles escapes/comments.
     in_declaration_value_context: bool = false,
+    in_supports_body: bool = false,
     /// Replacement text for the first token of the range passed to
     /// `emitUnquotedTextExprFromTokenRange`: the canonical spelling of a
     /// function name written with escapes. Null outside such a call.
@@ -165,6 +168,22 @@ pub const Parser = struct {
     /// Alternatives may be tried after a failure, so the message is used
     /// only if the whole parse fails, and the failure that got furthest
     /// wins. Returns `error.SyntaxError` for the caller to return.
+    /// A statement that started like a selector (a name or interpolation)
+    /// and ended with no `:` or block: the official CLI expected `{`.
+    fn failSelectorWithoutBlock(self: *const Parser, start_tok: Token) ParseError {
+        if (self.is_plain_css or self.in_supports_body or (start_tok.tag != .ident and start_tok.tag != .hash_lbrace)) return error.SyntaxError;
+        if (std.mem.startsWith(u8, start_tok.slice(self.source), "--")) return error.SyntaxError;
+        return self.failExpectingWeak("expected \"{\".");
+    }
+
+    /// Like `failExpecting`, for a guess that yields to any other hint: the
+    /// end of a statement read as a block-less selector.
+    fn failExpectingWeak(self: *const Parser, comptime message: []const u8) ParseError {
+        _ = self;
+        if (weak_syntax_hint == null) weak_syntax_hint = message;
+        return error.SyntaxError;
+    }
+
     fn failExpecting(self: *const Parser, comptime message: []const u8) ParseError {
         const span = self.currentTokenSpan();
         noteSyntaxHint(message, span.start, span.end);
@@ -278,7 +297,11 @@ pub const Parser = struct {
     pub fn parse(self: *Parser) ParseError!Ast {
         syntax_hint = null;
         syntax_hint_offset = 0;
+        weak_syntax_hint = null;
+        // A parse that failed before and was recovered from leaves none.
+        error_format.setFallbackMessage(null);
         defer syntax_hint = null;
+        defer weak_syntax_hint = null;
         // CLI-FIX-E Step 2b: When parse error occurs, record the span of the most recent token in thread-local.
         // Points to source_end for EOF token. If it is already set in a deep frame, it will not be overwritten.
         return self.parseUnrecorded() catch |err| {
@@ -287,6 +310,8 @@ pub const Parser = struct {
                     error_format.setContextMessage(hint.message);
                     error_format.recordErrorSpanIfUnset(hint.start, hint.end, 0);
                 }
+            } else if (weak_syntax_hint) |message| {
+                error_format.setFallbackMessage(message);
             }
             const span = self.currentTokenSpan();
             error_format.recordErrorSpanIfUnset(span.start, span.end, 0);
@@ -891,6 +916,7 @@ pub const Parser = struct {
                     self.advance();
                     continue;
                 }
+                if (stack.items.len > 0) return self.failExpectingCloser(stack.items[stack.items.len - 1]);
                 return error.SyntaxError;
             }
             if (tok.tag == .rbracket) {
@@ -900,6 +926,7 @@ pub const Parser = struct {
                     self.advance();
                     continue;
                 }
+                if (stack.items.len > 0) return self.failExpectingCloser(stack.items[stack.items.len - 1]);
                 return error.SyntaxError;
             }
             if (stack.items.len > 0) {
@@ -909,7 +936,7 @@ pub const Parser = struct {
             }
 
             if (tok.tag == .lbrace) break;
-            if (tok.tag == .eof) return error.SyntaxError;
+            if (tok.tag == .eof) return self.failExpectingWeak("expected \"{\".");
 
             if (tok.tag != .whitespace and tok.tag != .newline and tok.tag != .comment) {
                 last_significant_end = tok.span.end;
@@ -918,7 +945,7 @@ pub const Parser = struct {
         }
 
         if (self.isAtEnd() or self.current().tag != .lbrace) {
-            return error.SyntaxError;
+            return self.failExpectingWeak("expected \"{\".");
         }
         return .{ .start = start, .end = last_significant_end };
     }
@@ -1269,11 +1296,9 @@ pub const Parser = struct {
                 return error.SyntaxError;
             }
             if (tok.tag == .colon) break;
-            if (tok.tag == .semicolon or tok.tag == .rbrace or
-                tok.tag == .lbrace or tok.tag == .eof)
-            {
-                return error.SyntaxError;
-            }
+            if (tok.tag == .lbrace) return error.SyntaxError;
+            // A name with no `:` before its end is a selector with no block.
+            if (tok.tag == .semicolon or tok.tag == .rbrace or tok.tag == .eof) return self.failSelectorWithoutBlock(start_tok);
             if (tok.tag != .whitespace and tok.tag != .newline) {
                 if (tok.tag == .comment) {
                     // A block comment immediately adjacent to the property
@@ -1290,7 +1315,7 @@ pub const Parser = struct {
             }
             self.advance();
         }
-        if (self.isAtEnd() or self.current().tag != .colon) return error.SyntaxError;
+        if (self.isAtEnd() or self.current().tag != .colon) return self.failSelectorWithoutBlock(start_tok);
         const prop_end = last_significant_end;
         self.advance(); // skip :
 
@@ -3675,6 +3700,10 @@ pub const Parser = struct {
 
         var body_extra: u32 = std.math.maxInt(u32);
         var end_pos: u32 = last_significant;
+        // A @supports condition is checked later, and its error comes first.
+        const saved_in_supports_body = self.in_supports_body;
+        if (is_supports_at_rule) self.in_supports_body = true;
+        defer self.in_supports_body = saved_in_supports_body;
         if (!self.isAtEnd() and self.current().tag == .lbrace) {
             const body = try self.parseBlockBody(ast);
             body_extra = body.extra;

@@ -6165,6 +6165,7 @@ fn parseResolveCompileOnce(
         resolver.resolveWithColorPool(allocator, &ast, pool, color_pool_ptr)) catch |err| {
         if (verboseCompileErrorsEnabled()) {
             compileStderrPrint("zsass-compile phase=resolve path={s} err={}\n", .{ source_path orelse "<anon>", err });
+            if (@errorReturnTrace()) |t| std.debug.dumpErrorReturnTrace(t); // TEMP-TRACE
         }
         return err;
     };
