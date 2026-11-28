@@ -1,4 +1,5 @@
 const std = @import("std");
+const error_format = @import("../runtime/error_format.zig");
 
 const builtin_mod = @import("../builtin/mod.zig");
 const resolver_eval = @import("resolver_eval.zig");
@@ -606,6 +607,13 @@ pub fn applyConfigTarget(
     acc.explicit_value = value;
 }
 
+/// The official CLI's error for configuring a variable the module does not
+/// declare with `!default`.
+fn notDeclaredDefault() ResolveError {
+    error_format.setContextMessage("This variable was not declared with !default in the @used module.");
+    return error.SassError;
+}
+
 pub fn applyUseOrForwardConfig(
     self: *ModuleResolver,
     module_id: u32,
@@ -619,11 +627,12 @@ pub fn applyUseOrForwardConfig(
         if (lookupVoidFlagInsensitive(&ex.ambiguous_default_vars, entry.name)) return error.SassError;
         const target = lookupVarTargetGated(&ex.default_vars, entry.name, ex.default_vars_has_mixed_alias_keys) orelse
             lookupVarTargetGated(&ex.private_default_vars, entry.name, ex.private_default_vars_has_mixed_alias_keys) orelse {
-            const already_configured = lookupVarTargetGated(&ex.vars, entry.name, ex.vars_has_mixed_alias_keys) orelse return error.SassError;
+            const already_configured = lookupVarTargetGated(&ex.vars, entry.name, ex.vars_has_mixed_alias_keys) orelse
+                return notDeclaredDefault();
             if (loaderExplicitConfigValueForTarget(self, already_configured)) |existing| {
                 if (configValueEq(self, existing, entry.value)) continue;
             }
-            return error.SassError;
+            return notDeclaredDefault();
         };
         // Sass: Already loaded module cannot be reconfigured with with().
         // `known_before_count` is the number of modules that existed before this stmt was executed.
@@ -636,6 +645,7 @@ pub fn applyUseOrForwardConfig(
                     if (configValueEq(self, existing, entry.value)) continue;
                 }
             }
+            error_format.setContextMessage("This module was already loaded, so it can't be configured using \"with\".");
             return error.SassError;
         }
         try applyConfigTarget(self, target, entry.value, entry.is_default);

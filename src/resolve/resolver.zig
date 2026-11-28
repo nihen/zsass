@@ -2645,6 +2645,7 @@ fn appendExpr(prog: *ResolvedProgram, alloc: std.mem.Allocator, re: ResolvedExpr
 }
 
 const private_member_message = "Private members can't be accessed from outside their modules.";
+const ambiguous_star_var_message = "This variable is available from multiple global modules.";
 
 /// The official CLI's error for a namespace no `@use` brought in.
 fn setNoNamespaceMessage(ns: []const u8) void {
@@ -3382,6 +3383,7 @@ fn resolveExprVariable(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
         return try appendExpr(ctx.prog, ctx.a, .{ .kind = .var_ref, .payload = slot, .span = span });
     }
     if (lookupVoidFlagInsensitive(&ctx.ambiguous_star_vars, raw_name)) {
+        error_format.setContextMessage(ambiguous_star_var_message);
         return error.SassError;
     }
     if (ctx.lookupStarVar(name_id)) |cross| {
@@ -9420,6 +9422,14 @@ fn resolveVariableDeclStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtI
     const is_global = (flags_u & 2) != 0;
     const is_top_level_decl = ctx.scopes.items.len == 0 and ctx.nested_stmt_depth == 0;
     const name = ctx.pool.get(name_id);
+    // A module-level variable the module has not declared, which more than
+    // one `@use ... as *` provides, is ambiguous.
+    if (ctx.scopes.items.len == 0 and lookupGlobalSlot(ctx.prog, name) == null and
+        lookupVoidFlagInsensitive(&ctx.ambiguous_star_vars, name))
+    {
+        error_format.setContextMessage(ambiguous_star_var_message);
+        return error.SassError;
+    }
     const star_target = ctx.lookupStarVar(name_id);
     const import_default_flag = lookupBoolFlagInsensitive(&ctx.import_star_vars, name);
     const from_import_forward = import_default_flag != null;
