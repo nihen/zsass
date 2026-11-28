@@ -486,6 +486,23 @@ fn ensureNoNamedArgs(args: []const Value, arg_names: []const InternId) BuiltinEr
     }
 }
 
+fn roundStrategyMayBeVar(ctx: *BuiltinContext, value: Value) BuiltinError!bool {
+    // `var(--s) up` is a space list.
+    const space_list = value.kind() == .list and !value.listComma(ctx.list_meta_pool.items) and !value.listBracketed(ctx.list_meta_pool.items);
+    if (!space_list and !value.isString() and value.kind() != .calc_fragment and value.kind() != .interp_fragment) return false;
+    if (value.isString() and value.stringQuoted(ctx.string_flags_pool.items)) return false;
+    const text = try valueToCssString(ctx, value);
+    defer ctx.allocator.free(text);
+    const t = std.mem.trim(u8, shared.stripCalcArgMarker(text), " \t\n");
+    // As written or inside calc(): calc(attr(foo)) is attr(foo).
+    var inner = t;
+    while (std.ascii.startsWithIgnoreCase(inner, "calc(") and std.mem.endsWith(u8, inner, ")")) inner = std.mem.trim(u8, inner[5 .. inner.len - 1], " \t\n");
+    for ([_][]const u8{ "var(", "env(", "attr(" }) |prefix| {
+        if (std.ascii.startsWithIgnoreCase(inner, prefix)) return true;
+    }
+    return false;
+}
+
 fn valueLooksLikeCssMathArg(ctx: *BuiltinContext, value: Value) bool {
     if (stack_guard.overflowed()) return false;
     if (value.isString()) {
@@ -1944,7 +1961,9 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
 
     var first_unknown_unit: ?[]const u8 = null;
     var saw_multiple_unknown_units = false;
-    var saw_unitless_after_unknown_pair = false;
+    var unitless_after_unknown_pair: ?Value = null;
+    // The first number with a unit, which an error names with the other.
+    var first_with_unit: ?Value = null;
 
     for (values) |arg| {
         if (arg.kind() != .number) {
@@ -1956,6 +1975,7 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
         // Compound units are compared factor by factor below.
         if (arg_unit != null and isGeneratedUnitDescription(arg_unit.?)) continue;
         if (arg_unit) |unit| {
+            if (first_with_unit == null) first_with_unit = arg;
             if (unitCategory(unit) == .unknown) {
                 if (first_unknown_unit) |prev_unit| {
                     if (!std.mem.eql(u8, prev_unit, unit)) saw_multiple_unknown_units = true;
@@ -1963,11 +1983,54 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
                     first_unknown_unit = unit;
                 }
             }
-        } else if (saw_multiple_unknown_units) {
-            saw_unitless_after_unknown_pair = true;
+        } else if (saw_multiple_unknown_units and unitless_after_unknown_pair == null) {
+            unitless_after_unknown_pair = arg;
         }
     }
-    if (saw_unitless_after_unknown_pair) return error.SassError;
+    if (unitless_after_unknown_pair != null) {
+        if (mode == .module) {
+            // sass:math's function compares each number with the least (or
+            // greatest) so far.
+            var best = values[0];
+            for (values[1..]) |v| {
+                const bu = unitSlice(ctx, best.unitId(ctx.number_pool));
+                const vu = unitSlice(ctx, v.unitId(ctx.number_pool));
+                if (bu != null and vu != null and !std.mem.eql(u8, bu.?, vu.?)) {
+                    const converted = convertUnit(v.asF64(ctx.number_pool), vu.?, bu.?) orelse return reportIncompatibleUnits(ctx, best, v);
+                    const better = if (is_min) converted < best.asF64(ctx.number_pool) else converted > best.asF64(ctx.number_pool);
+                    if (better) best = v;
+                    continue;
+                }
+                const better = if (is_min) v.asF64(ctx.number_pool) < best.asF64(ctx.number_pool) else v.asF64(ctx.number_pool) > best.asF64(ctx.number_pool);
+                if (better) best = v;
+            }
+        }
+        // The CSS function, in order: a unit the first number's cannot be
+        // (an unknown one may be a length), or a unitless number after two
+        // unknown units.
+        const first = first_with_unit.?;
+        const first_unit = unitSlice(ctx, first.unitId(ctx.number_pool)).?;
+        var unknown_unit: ?[]const u8 = null;
+        var unknown_pair = false;
+        for (values) |v| {
+            const u = unitSlice(ctx, v.unitId(ctx.number_pool)) orelse {
+                if (unknown_pair) return reportCalcIncompatible(ctx, first, v);
+                continue;
+            };
+            if (unitCategory(u) == .unknown) {
+                if (unknown_unit) |prev| {
+                    if (!std.mem.eql(u8, prev, u)) unknown_pair = true;
+                } else unknown_unit = u;
+            }
+            if (std.mem.eql(u8, u, first_unit) or convertUnit(1.0, u, first_unit) != null) continue;
+            const a_cat = unitCategory(first_unit);
+            const b_cat = unitCategory(u);
+            const a_len = a_cat == .length or a_cat == .unknown;
+            const b_len = b_cat == .length or b_cat == .unknown;
+            if (a_len != b_len or (!a_len and a_cat != b_cat)) return reportCalcIncompatible(ctx, first, v);
+        }
+        return error.SassError;
+    }
 
     const first = values[0];
 
@@ -2121,32 +2184,20 @@ pub fn math_round(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
             }
         } else {
             std.debug.assert(args.len == 3);
-            var strategy_slot: ?usize = null;
-            var multiple_strategies = false;
-            for (args, 0..) |arg, idx| {
-                if (try parseRoundStrategyValue(ctx, arg)) |_| {
-                    if (strategy_slot != null) {
-                        multiple_strategies = true;
-                        break;
-                    }
-                    strategy_slot = idx;
-                }
-            }
-            if (multiple_strategies) return error.SassError;
-            if (strategy_slot) |sidx| {
-                strategy = (try parseRoundStrategyValue(ctx, args[sidx])).?;
+            // Of three arguments the first is the strategy.
+            if (try parseRoundStrategyValue(ctx, args[0])) |parsed| {
+                strategy = parsed;
                 has_strategy = true;
-                var remaining: [2]usize = undefined;
-                var ri: usize = 0;
-                for (0..3) |idx| {
-                    if (idx == sidx) continue;
-                    remaining[ri] = idx;
-                    ri += 1;
-                }
-                number_idx = remaining[0];
-                step_idx = remaining[1];
+                number_idx = 1;
+                step_idx = 2;
             } else {
-                if (shouldPreserveCssMathCall(ctx, args)) return buildCssMathCall(ctx, "round", args);
+                // var() there may be a strategy when the browser computes it.
+                if (try roundStrategyMayBeVar(ctx, args[0])) return buildCssMathCall(ctx, "round", args);
+                const text = try valueToCssString(ctx, args[0]);
+                defer ctx.allocator.free(text);
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "{s} must be either nearest, up, down or to-zero.", .{text}) catch return error.SassError;
+                error_format.setContextMessage(msg);
                 return error.SassError;
             }
         }
@@ -2198,6 +2249,7 @@ pub fn math_round(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
 
     if (has_strategy and step_idx == null) {
         if (valueLooksLikeCssMathArg(ctx, args[num_idx])) return buildCssMathCall(ctx, "round", args);
+        error_format.setContextMessage("If strategy is not null, step is required.");
         return error.SassError;
     }
 
@@ -2248,11 +2300,8 @@ pub fn math_round(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
         const step_unit_id = step_number.unitId(ctx.number_pool);
         const step_unit = unitSlice(ctx, step_unit_id);
 
-        if ((num_unit != null and isGeneratedUnitDescription(num_unit.?)) or
-            (step_unit != null and isGeneratedUnitDescription(step_unit.?)))
-        {
-            return error.SassError;
-        }
+        if (num_unit != null and isGeneratedUnitDescription(num_unit.?)) return reportNotCalcCompatible(ctx, number);
+        if (step_unit != null and isGeneratedUnitDescription(step_unit.?)) return reportNotCalcCompatible(ctx, step_number);
 
         if ((num_unit != null) != (step_unit != null)) return reportCalcIncompatible(ctx, number, step_number);
 
@@ -2282,11 +2331,8 @@ pub fn math_round(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
         const offset_unit_id = offset_number.unitId(ctx.number_pool);
         const offset_unit = unitSlice(ctx, offset_unit_id);
 
-        if ((num_unit != null and isGeneratedUnitDescription(num_unit.?)) or
-            (offset_unit != null and isGeneratedUnitDescription(offset_unit.?)))
-        {
-            return error.SassError;
-        }
+        if (num_unit != null and isGeneratedUnitDescription(num_unit.?)) return reportNotCalcCompatible(ctx, number);
+        if (offset_unit != null and isGeneratedUnitDescription(offset_unit.?)) return reportNotCalcCompatible(ctx, offset_number);
 
         if ((num_unit != null) != (offset_unit != null)) return reportCalcIncompatible(ctx, number, offset_number);
 
@@ -2557,11 +2603,8 @@ pub fn math_mod(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
 
     const y_unit = unitSlice(ctx, y.unitId(ctx.number_pool));
     const x_unit = unitSlice(ctx, x.unitId(ctx.number_pool));
-    if ((y_unit != null and isGeneratedUnitDescription(y_unit.?)) or
-        (x_unit != null and isGeneratedUnitDescription(x_unit.?)))
-    {
-        return error.SassError;
-    }
+    if (y_unit != null and isGeneratedUnitDescription(y_unit.?)) return reportNotCalcCompatible(ctx, y);
+    if (x_unit != null and isGeneratedUnitDescription(x_unit.?)) return reportNotCalcCompatible(ctx, x);
     if ((y_unit == null) != (x_unit == null)) return reportCalcIncompatible(ctx, y, x);
 
     if (y_unit != null and x_unit != null and !unitsCompatibleForComparable(ctx, y, x)) {
@@ -2628,11 +2671,8 @@ pub fn math_rem(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
 
     const y_unit = unitSlice(ctx, y.unitId(ctx.number_pool));
     const x_unit = unitSlice(ctx, x.unitId(ctx.number_pool));
-    if ((y_unit != null and isGeneratedUnitDescription(y_unit.?)) or
-        (x_unit != null and isGeneratedUnitDescription(x_unit.?)))
-    {
-        return error.SassError;
-    }
+    if (y_unit != null and isGeneratedUnitDescription(y_unit.?)) return reportNotCalcCompatible(ctx, y);
+    if (x_unit != null and isGeneratedUnitDescription(x_unit.?)) return reportNotCalcCompatible(ctx, x);
     if ((y_unit == null) != (x_unit == null)) return reportCalcIncompatible(ctx, y, x);
 
     if (y_unit != null and x_unit != null and !unitsCompatibleForComparable(ctx, y, x)) {
@@ -3207,11 +3247,8 @@ pub fn math_atan2(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
     const y_unit_slice = unitSlice(ctx, y_unit);
     const x_unit_slice = unitSlice(ctx, x_unit);
 
-    if ((y_unit_slice != null and isGeneratedUnitDescription(y_unit_slice.?)) or
-        (x_unit_slice != null and isGeneratedUnitDescription(x_unit_slice.?)))
-    {
-        return error.SassError;
-    }
+    if (y_unit_slice != null and isGeneratedUnitDescription(y_unit_slice.?)) return reportNotCalcCompatible(ctx, y);
+    if (x_unit_slice != null and isGeneratedUnitDescription(x_unit_slice.?)) return reportNotCalcCompatible(ctx, x);
 
     if ((y_unit_slice != null and std.ascii.eqlIgnoreCase(y_unit_slice.?, "%")) or
         (x_unit_slice != null and std.ascii.eqlIgnoreCase(x_unit_slice.?, "%")))
@@ -3261,7 +3298,7 @@ pub fn math_hypot(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
 
         const number_unit_slice = unitSlice(ctx, number.unitId(ctx.number_pool));
         if (number_unit_slice != null and isGeneratedUnitDescription(number_unit_slice.?)) {
-            return error.SassError;
+            return reportNotCalcCompatible(ctx, number);
         }
 
         if (!preserve_css and number_unit_slice != null and std.ascii.eqlIgnoreCase(number_unit_slice.?, "%")) {

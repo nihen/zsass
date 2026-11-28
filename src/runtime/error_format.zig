@@ -206,7 +206,17 @@ pub fn errorToUserMessageWithContext(err: anyerror) []const u8 {
     // Whatever error a tripped stack guard turned into, it is the cause.
     if (stack_guard.tripped()) return resource_budget.nesting_message;
     if (currentContextMessage()) |m| return m;
+    if (fallback_message) |m| return m;
     return errorToUserMessage(err);
+}
+
+/// A message for an error no layer explained, such as the parser's guess
+/// that a selector lacks its block.
+threadlocal var fallback_message: ?[]const u8 = null;
+
+/// `message` has to outlive the compile (a string literal).
+pub fn setFallbackMessage(message: ?[]const u8) void {
+    fallback_message = message;
 }
 
 /// CLI-FIX-E Step 1: Gate the debug line for each phase/VM with `ZSASS_VERBOSE_ERRORS` env var.
@@ -267,6 +277,7 @@ pub fn clearErrorContext() void {
     error_state.error_stack_overflow = 0;
     error_state.error_stack_snapshot_len = 0;
     error_state.snippet_frame_from_end = 0;
+    fallback_message = null;
     error_state.context_message_len = 0;
     error_state.reported = false;
 }
