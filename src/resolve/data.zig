@@ -347,6 +347,12 @@ pub const ResolvedProgram = struct {
         /// The name it was called by when that is a global function's,
         /// for the `global-builtin` deprecation.
         global_name: InternId = .none,
+        /// min(), max(), round(), or abs() called as a CSS calculation,
+        /// which does not warn as the global Sass function does.
+        calculation: bool = false,
+        /// One of them whose arguments are no calculation: the Sass
+        /// function, which passes no text on as CSS.
+        sass_function: bool = false,
     }) = .empty,
     cross_var_refs: std.ArrayListUnmanaged(struct { module_id: u32, slot: SlotId }) = .empty,
     /// Modules named by a literal `meta.load()` URL in this module. They are

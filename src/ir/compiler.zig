@@ -92,6 +92,8 @@ pub const Chunk = struct {
         global_replacement: u16 = 0,
         /// Called by a global name (`acos()`, not `math.acos()`).
         global_call: bool = false,
+        /// min(), max(), round(), or abs() as the Sass function.
+        sass_function: bool = false,
     };
 
     /// Slot bundle for one fused `@for` loop (for_test / for_step operand).
@@ -2644,8 +2646,9 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
             }
             const meta_idx = try addBuiltinCallMeta(ctx, c.arg_start, c.arg_count, remapLocalSlotHint(ctx, c.local_slot_hint));
             if (c.global_name != .none) {
-                ctx.cb.builtin_call_meta.items[meta_idx].global_replacement = builtin_mod.globalBuiltinRow(ctx.pool.get(c.global_name));
+                if (!c.calculation) ctx.cb.builtin_call_meta.items[meta_idx].global_replacement = builtin_mod.globalBuiltinRow(ctx.pool.get(c.global_name));
                 ctx.cb.builtin_call_meta.items[meta_idx].global_call = true;
+                ctx.cb.builtin_call_meta.items[meta_idx].sass_function = c.sass_function;
             }
             try ctx.cb.emit(.call_builtin, try checkedU16(c.builtin_id, "builtin id"), meta_idx);
         },

@@ -161,6 +161,8 @@ pub fn sassFunctionForCssMathGlobal(id: Id) Id {
 
 /// The global hwb(), which unlike color.hwb() takes only `$channels`.
 pub const global_hwb_id: Id = 191;
+/// Checks that a value a calculation is given can be used in one.
+pub const calc_value_check_id: Id = 192;
 
 pub fn resolveLegacyGlobal(name: []const u8) ?Id {
     // `scale()` is frequently used as a CSS transform function and is a Sass legacy global
@@ -861,6 +863,7 @@ pub fn dispatch(ctx: *BuiltinContext, id: Id, args: []const Value, arg_names: []
         90 => color.color_ie_hex_str(ctx, args),
         91 => color.color_hwb(ctx, args, arg_names),
         global_hwb_id => color.global_hwb(ctx, args, arg_names),
+        calc_value_check_id => math.calcValueCheck(ctx, args),
         60 => list.list_append(ctx, args, arg_names),
         61 => list.list_index(ctx, args, arg_names),
         62 => list.list_join(ctx, args, arg_names),

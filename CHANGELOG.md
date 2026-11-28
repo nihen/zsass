@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- A variable's or function's value in a calculation is checked as the
+  official CLI checks it: "Value true can't be used in a calculation."
+  for a boolean, null, quoted string, color, list, map, or function, where
+  zsass wrote `calc(1 + true)`. A global `min()`, `max()`, `abs()`,
+  `pow()`, `atan2()`, or `sin()` given an identifier writes the CSS call,
+  and a `sass:math` function given text fails ("$number: var(--a) is not
+  a number.").
+- `calc(a b)`, `calc(1 a)`, and `calc(var(--a) -1px)` are written as they
+  are, as the official CLI does; a sign after whitespace (`a -1`) is no
+  longer written as an operation.
+- `min()`, `max()`, `round()`, and `abs()` whose arguments are no
+  calculation are the Sass functions: `round(7 % 3)` is 1, and they warn
+  "Use math.round instead." as global functions.
 - A calculation's arguments are checked as the official CLI checks them,
   when the calculation is evaluated: "This operation can't be used in a
   calculation." for `%`, `==`, `and`, and the like; "This expression
