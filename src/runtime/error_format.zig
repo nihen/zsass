@@ -70,7 +70,11 @@ fn eprintRepeat(ch: u8, n: usize) void {
 /// Save it in buffer, and `errorToUserMessage` returns this with priority. If not set
 /// Table fallback for `error tag  ->  static message`.
 pub fn setContextMessage(msg: []const u8) void {
-    const n = @min(msg.len, error_state.context_message_buf.len);
+    var n = @min(msg.len, error_state.context_message_buf.len);
+    // A message cut short ends on a whole UTF-8 character.
+    if (n < msg.len) {
+        while (n > 0 and (msg[n] & 0xC0) == 0x80) n -= 1;
+    }
     @memcpy(error_state.context_message_buf[0..n], msg[0..n]);
     error_state.context_message_len = n;
 }

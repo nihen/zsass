@@ -26,6 +26,18 @@ const resource_budget = @import("../runtime/resource_budget.zig");
 const stack_guard = @import("../runtime/stack_guard.zig");
 const syntax_nesting_message = resource_budget.syntax_nesting_message;
 
+/// The furthest failure's message, kept until the parse ends; see
+/// `Parser.failExpecting`.
+const SyntaxHint = struct { message: []const u8, start: u32, end: u32 };
+threadlocal var syntax_hint: ?SyntaxHint = null;
+
+fn noteSyntaxHint(message: []const u8, start: u32, end: u32) void {
+    if (syntax_hint) |h| {
+        if (h.start > start) return;
+    }
+    syntax_hint = .{ .message = message, .start = start, .end = end };
+}
+
 const ParseError = error{ UnexpectedEof, OutOfMemory, SyntaxError, HardSyntaxError, SyntaxNestingLimit };
 
 /// Identifier tokens that leave the parser in unary-operator context when they
@@ -144,6 +156,31 @@ pub const Parser = struct {
         self.pending_statements.deinit(self.allocator);
     }
 
+    /// Note what the parser expected where it failed, as `expected ")".`.
+    /// Alternatives may be tried after a failure, so the message is used
+    /// only if the whole parse fails, and the failure that got furthest
+    /// wins. Returns `error.SyntaxError` for the caller to return.
+    fn failExpecting(self: *const Parser, comptime message: []const u8) ParseError {
+        const span = self.currentTokenSpan();
+        noteSyntaxHint(message, span.start, span.end);
+        return error.SyntaxError;
+    }
+
+    /// `expected ")".` and the like for the bracket `open` left open.
+    fn failExpectingCloser(self: *const Parser, open: u8) ParseError {
+        return switch (open) {
+            '(' => self.failExpecting("expected \")\"."),
+            '[' => self.failExpecting("expected \"]\"."),
+            else => self.failExpecting("expected \"}\"."),
+        };
+    }
+
+    /// `failExpecting` for a failure no alternative may recover from.
+    fn failExpectingHard(self: *const Parser, comptime message: []const u8) ParseError {
+        self.failExpecting(message) catch {};
+        return error.HardSyntaxError;
+    }
+
     /// Build a sub-Parser over `tokens` (typically `self.tokens[a..b]`) that
     /// inherits the contextual flags relevant for nested expression/value
     /// parsing. The interpolation-body sub-parser at the bottom of this file
@@ -234,9 +271,17 @@ pub const Parser = struct {
     /// stream, and patch the root's payload with the resulting child
     /// list once parsing is done.
     pub fn parse(self: *Parser) ParseError!Ast {
+        syntax_hint = null;
+        defer syntax_hint = null;
         // CLI-FIX-E Step 2b: When parse error occurs, record the span of the most recent token in thread-local.
         // Points to source_end for EOF token. If it is already set in a deep frame, it will not be overwritten.
         return self.parseUnrecorded() catch |err| {
+            if (syntax_hint) |hint| {
+                if (error_format.currentContextMessage() == null) {
+                    error_format.setContextMessage(hint.message);
+                    error_format.recordErrorSpanIfUnset(hint.start, hint.end, 0);
+                }
+            }
             const span = self.currentTokenSpan();
             error_format.recordErrorSpanIfUnset(span.start, span.end, 0);
             error_format.recordErrorTag(err);
@@ -315,7 +360,7 @@ pub const Parser = struct {
             .at_warn => self.parseSimpleAtRuleValue(ast, .stmt_warn),
             .at_error => self.parseSimpleAtRuleValue(ast, .stmt_error),
             .at_if => self.parseIfRule(ast),
-            .at_else => return error.SyntaxError,
+            .at_else => return self.failExpecting("This at-rule is not allowed here."),
             .at_each => self.parseEachRule(ast),
             .at_for => self.parseForRule(ast),
             .at_while => self.parseWhileRule(ast),
@@ -1782,23 +1827,23 @@ pub const Parser = struct {
                         bracket_depth -= 1;
                         val_end = tok.span.end;
                         self.advance();
-                    } else return error.SyntaxError;
+                    } else return self.failExpectingCloser(bracket_stack[bracket_depth - 1]);
                 },
                 .rparen => {
-                    if (bracket_depth == 0) return error.SyntaxError;
+                    if (bracket_depth == 0) return self.failExpecting("expected \";\".");
                     if (bracket_stack[bracket_depth - 1] == '(') {
                         bracket_depth -= 1;
                         val_end = tok.span.end;
                         self.advance();
-                    } else return error.SyntaxError;
+                    } else return self.failExpectingCloser(bracket_stack[bracket_depth - 1]);
                 },
                 .rbracket => {
-                    if (bracket_depth == 0) return error.SyntaxError;
+                    if (bracket_depth == 0) return self.failExpecting("expected \";\".");
                     if (bracket_stack[bracket_depth - 1] == '[') {
                         bracket_depth -= 1;
                         val_end = tok.span.end;
                         self.advance();
-                    } else return error.SyntaxError;
+                    } else return self.failExpectingCloser(bracket_stack[bracket_depth - 1]);
                 },
                 .lbrace, .hash_lbrace => {
                     if (bracket_depth < bracket_stack.len) {
@@ -2788,7 +2833,7 @@ pub const Parser = struct {
     /// **last** declared parameter carries a trailing `...` (Sass
     /// grammar requires splat to be last).
     fn parseParamList(self: *Parser, ast: *Ast) ParseError!ExtraIndex {
-        if (self.isAtEnd() or self.current().tag != .lparen) return error.SyntaxError;
+        if (self.isAtEnd() or self.current().tag != .lparen) return self.failExpecting("expected \"(\".");
         self.advance(); // skip (
         self.skipWhitespaceAndComments();
 
@@ -2801,8 +2846,8 @@ pub const Parser = struct {
         var has_splat = false;
 
         while (!self.isAtEnd() and self.current().tag != .rparen) {
-            if (has_splat) return error.SyntaxError;
-            if (self.current().tag != .dollar_ident) return error.SyntaxError;
+            if (has_splat) return self.failExpecting("expected \")\".");
+            if (self.current().tag != .dollar_ident) return self.failExpecting("expected \")\".");
             const var_tok = self.current();
             const var_text = var_tok.slice(self.source);
             std.debug.assert(var_text.len >= 1 and var_text[0] == '$');
@@ -2993,7 +3038,7 @@ pub const Parser = struct {
                 }
                 if (tok.tag == .eof) return error.SyntaxError;
                 if (depth == 1 and tok.tag == .comma) {
-                    if (expect_value) return error.SyntaxError;
+                    if (expect_value) return self.failExpecting("expected \")\".");
                     expect_value = true;
                     self.advance();
                     continue;
@@ -3103,7 +3148,7 @@ pub const Parser = struct {
         self.advance();
         self.skipWhitespaceAndComments();
 
-        if (self.isAtEnd() or self.current().tag != .lparen) return error.SyntaxError;
+        if (self.isAtEnd() or self.current().tag != .lparen) return self.failExpecting("expected \"(\".");
         const params_extra = try self.parseParamList(ast);
         self.skipWhitespaceAndComments();
 
@@ -3195,7 +3240,7 @@ pub const Parser = struct {
                 }
                 if (tok.tag == .eof) return error.SyntaxError;
                 if (depth == 1 and tok.tag == .comma) {
-                    if (expect_value) return error.SyntaxError;
+                    if (expect_value) return self.failExpecting("expected \")\".");
                     expect_value = true;
                     self.advance();
                     continue;
@@ -3324,7 +3369,7 @@ pub const Parser = struct {
             const allowed_glued_interp = next_idx < self.tokens.len and
                 self.tokens[next_idx].tag == .hash_lbrace and
                 self.tokens[next_idx].span.start == at_tok.span.end;
-            if (!allowed_glued_interp) return error.SyntaxError;
+            if (!allowed_glued_interp) return self.failExpecting("Expected identifier.");
         }
         // Standalone `@elseif` (outside an `@if` chain) is invalid Sass.
         // Parser-level reject so the evaluator does not try to treat it
@@ -3396,7 +3441,9 @@ pub const Parser = struct {
             if (next_tok.tag != .lbrace and next_tok.tag != .semicolon and next_tok.tag != .eof and next_tok.tag != .rbrace and
                 self.lineStartAtByte(next_tok.span.start) > header_line_start)
             {
-                return error.SyntaxError;
+                if (std.mem.eql(u8, name_text, "charset")) return self.failExpecting("Expected string.");
+                if (std.mem.eql(u8, name_text, "supports")) return self.failExpecting("expected \"(\".");
+                return self.failExpecting("Expected identifier.");
             }
         }
 
@@ -3932,7 +3979,7 @@ pub const Parser = struct {
     /// (surrounding quotes stripped).  Used by @use / @forward /
     /// @import which accept only quoted-string URLs.
     fn parseStringUrl(self: *Parser) ParseError!InternId {
-        if (self.isAtEnd() or self.current().tag != .string) return error.SyntaxError;
+        if (self.isAtEnd() or self.current().tag != .string) return self.failExpecting("Expected string.");
         const tok = self.current();
         self.advance();
 
@@ -3958,7 +4005,7 @@ pub const Parser = struct {
     ///
     /// flags bit 0: `!default`
     fn parseWithConfig(self: *Parser, ast: *Ast) ParseError!ExtraIndex {
-        if (self.isAtEnd() or self.current().tag != .lparen) return error.SyntaxError;
+        if (self.isAtEnd() or self.current().tag != .lparen) return self.failExpecting("expected \"(\".");
         self.advance();
         self.skipWhitespaceAndComments();
 
@@ -3971,16 +4018,20 @@ pub const Parser = struct {
                 self.advance();
                 break;
             }
-            if (self.current().tag != .dollar_ident) return error.SyntaxError;
+            if (self.current().tag != .dollar_ident) {
+                // A second comma is a missing ")"; anything else a missing variable.
+                if (count > 0 and self.current().tag == .comma) return self.failExpecting("expected \")\".");
+                return self.failExpecting("expected \"$\".");
+            }
 
             const name_tok = self.current();
             const name_text = name_tok.slice(self.source);
-            if (name_text.len <= 1) return error.SyntaxError;
+            if (name_text.len <= 1) return self.failExpecting("Expected identifier.");
             const name_id = try self.internVariableName(name_text[1..]);
             self.advance();
 
             self.skipWhitespaceAndComments();
-            if (self.isAtEnd() or self.current().tag != .colon) return error.SyntaxError;
+            if (self.isAtEnd() or self.current().tag != .colon) return self.failExpecting("expected \":\".");
             self.advance();
             self.skipWhitespaceAndComments();
 
@@ -4027,7 +4078,7 @@ pub const Parser = struct {
                 self.advance();
                 break;
             }
-            return error.SyntaxError;
+            return self.failExpecting("expected \")\".");
         }
 
         const extra_off = try ast.appendExtraU32(count);
@@ -4114,7 +4165,7 @@ pub const Parser = struct {
         {
             const text = self.current().slice(self.source);
             if (std.mem.eql(u8, text, "as") or std.mem.eql(u8, text, "with")) {
-                return error.SyntaxError;
+                return self.failExpecting("Nothing may be indented beneath a @use rule.");
             }
         }
 
@@ -4136,7 +4187,7 @@ pub const Parser = struct {
                 self.advance();
                 end_pos = c.span.end;
             } else {
-                return error.SyntaxError;
+                return self.failExpecting("Expected identifier.");
             }
             self.skipWhitespaceAndComments();
         }
@@ -4153,7 +4204,7 @@ pub const Parser = struct {
         }
 
         if (self.currentTokenStartsIndentedBodyAfterHeader(at_tok.span.start)) {
-            return error.SyntaxError;
+            return self.failExpecting("Nothing may be indented beneath a @use rule.");
         }
 
         if (!self.isAtEnd() and self.current().tag == .semicolon) {
@@ -4210,7 +4261,7 @@ pub const Parser = struct {
                     std.mem.eql(u8, text, "hide") or
                     std.mem.eql(u8, text, "with")))
             {
-                return error.SyntaxError;
+                return self.failExpecting("Nothing may be indented beneath a @forward rule.");
             }
 
             if (std.mem.eql(u8, text, "as")) {
@@ -4218,15 +4269,19 @@ pub const Parser = struct {
                 self.skipWhitespaceAndComments();
                 // Collect the `prefix-` portion as a raw source slice
                 // stopping at `*`.
-                if (self.isAtEnd()) return error.SyntaxError;
+                if (self.isAtEnd()) return self.failExpecting("Expected identifier.");
+                switch (self.current().tag) {
+                    .semicolon, .lbrace, .rbrace, .eof => return self.failExpecting("Expected identifier."),
+                    else => {},
+                }
                 const pref_start = self.current().span.start;
                 while (!self.isAtEnd()) {
                     const t = self.current().tag;
                     if (t == .star) break;
-                    if (t == .whitespace or t == .newline or t == .comment) break;
+                    if (t == .whitespace or t == .newline or t == .comment or t == .semicolon) break;
                     self.advance();
                 }
-                if (self.isAtEnd() or self.current().tag != .star) return error.SyntaxError;
+                if (self.isAtEnd() or self.current().tag != .star) return self.failExpecting("expected \"*\".");
                 const pref_end = self.current().span.start;
                 if (pref_end > pref_start) {
                     prefix_id = try self.internVariableName(self.source[pref_start..pref_end]);
@@ -4268,7 +4323,7 @@ pub const Parser = struct {
         }
 
         if (self.currentTokenStartsIndentedBodyAfterHeader(at_tok.span.start)) {
-            return error.SyntaxError;
+            return self.failExpecting("Nothing may be indented beneath a @forward rule.");
         }
 
         if (!self.isAtEnd() and self.current().tag == .semicolon) {
@@ -4312,7 +4367,7 @@ pub const Parser = struct {
         self.advance();
         self.skipWhitespaceAndComments();
         if (self.currentTokenStartsIndentedBodyAfterHeader(at_start)) {
-            return error.SyntaxError;
+            return self.failExpecting("Nothing may be indented beneath a @import rule.");
         }
 
         const first = try self.parseOneImportEntry(ast, at_start);
@@ -4478,7 +4533,7 @@ pub const Parser = struct {
             }
         }
         if (self.is_indented_syntax and cond_last_sig_idx == null and self.nextSignificantTokenStartsIndentedBodyAfterHeader(stmt_start)) {
-            return error.SyntaxError;
+            return self.failExpecting("Nothing may be indented beneath a @import rule.");
         }
 
         return .{
@@ -5374,7 +5429,7 @@ pub const Parser = struct {
                 switch (cur.tag) {
                     .whitespace, .comment => self.pos += 1,
                     .newline, .eof => break,
-                    else => return error.SyntaxError,
+                    else => return self.failExpecting("Unexpected text after end of comment"),
                 }
             }
 
@@ -5392,7 +5447,7 @@ pub const Parser = struct {
                     self.lineIndentAtByte(next_tok.span.start) > comment_indent and
                     prev_sig == null)
                 {
-                    return error.SyntaxError;
+                    return self.failExpecting("Unexpected text after end of comment");
                 }
             }
         }
@@ -5577,7 +5632,8 @@ pub const Parser = struct {
                 const next_line_start = self.lineStartAtByte(next_tok.span.start);
                 const next_indent = self.lineIndentAtByte(next_tok.span.start);
                 if (next_line_start > decl_line_start and next_indent > decl_indent) {
-                    return error.SyntaxError;
+                    self.pos = look;
+                    return self.failExpecting("Nothing may be indented beneath a variable declaration.");
                 }
             }
         }
@@ -6595,7 +6651,7 @@ pub const Parser = struct {
                 }
                 return error.SyntaxError;
             },
-            else => return error.SyntaxError,
+            else => return self.failExpecting("Expected expression."),
         };
         return self.parseTrailingSchema(ast, head);
     }
@@ -6887,7 +6943,7 @@ pub const Parser = struct {
 
         // `#{}` (empty interpolation) is a syntax error in Sass.
         if (!self.isAtEnd() and self.current().tag == .rbrace) {
-            return error.SyntaxError;
+            return self.failExpecting("Expected expression.");
         }
 
         const prev_interp_mode = self.in_interpolation_body;
@@ -7268,7 +7324,7 @@ pub const Parser = struct {
 
         // Otherwise: single expression wrapped in `expr_paren`.
         if (self.isAtEnd() or self.current().tag != .rparen) {
-            return error.SyntaxError;
+            return self.failExpecting("expected \")\".");
         }
         const close_end = self.current().span.end;
         self.advance();
@@ -7861,10 +7917,10 @@ pub const Parser = struct {
                     std.debug.assert(var_text.len >= 1 and var_text[0] == '$');
                     // Bare `$` (no body)  ->  "Expected identifier".
                     // Hard error: don't fall back to raw capture.
-                    if (var_text.len == 1) return error.HardSyntaxError;
+                    if (var_text.len == 1) return self.failExpectingHard("Expected identifier.");
                     // Private member access via namespace is a syntax
                     // error: `ns.$_member` (decl-time / parse-time).
-                    if (var_text.len >= 2 and var_text[1] == '_') return error.HardSyntaxError;
+                    if (var_text.len >= 2 and var_text[1] == '_') return self.failExpectingHard("Private members can't be accessed from outside their modules.");
                     const ns_id = try self.intern_pool.intern(text);
                     const name_id = try self.internVariableName(var_text[1..]);
                     self.advance(); // consume dollar_ident
@@ -7922,7 +7978,7 @@ pub const Parser = struct {
                 if (after.tag == .lparen or after.tag == .dot or
                     after.tag == .whitespace or after.tag == .newline)
                 {
-                    return error.HardSyntaxError;
+                    return self.failExpectingHard("Expected identifier.");
                 }
             }
 
@@ -8261,7 +8317,7 @@ pub const Parser = struct {
                     self.advance(); // skip =
                     self.skipWhitespaceAndComments();
                     if (self.isAtEnd() or self.current().tag == .comma or self.current().tag == .rparen) {
-                        return error.SyntaxError;
+                        return self.failExpecting("Expected expression.");
                     }
 
                     if (self.in_declaration_value_context) {
@@ -8534,7 +8590,7 @@ pub const Parser = struct {
         // Bare `$` (no identifier body, e.g. `$.member` or `$,`) is a
         // syntax error -- official Sass CLI reports "Expected identifier".
         // Hard error: must NOT fall back to raw declaration capture.
-        if (text.len == 1) return error.HardSyntaxError;
+        if (text.len == 1) return self.failExpectingHard("Expected identifier.");
         self.advance();
 
         const name_id = try self.internVariableName(text[1..]);
