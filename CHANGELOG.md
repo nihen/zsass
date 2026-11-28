@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+- `@use "./a"` and `@use "../a"` (and `@import`, `meta.load-css()`) are
+  found when the input stylesheet is given by a relative path with no
+  directory (`zsass input.scss`); zsass failed with "Can't find stylesheet
+  to import.".
+- `ns.$a: b !default` assigns another module's variable as `!default`
+  does; zsass failed to parse it. `ns.$a: b !global` is rejected as the
+  official CLI rejects it.
+- A namespace is matched exactly, as the official CLI matches it: `a_b`
+  and `a-b` are two namespaces. A module `@use`d twice under one
+  namespace fails with "There's already a module with namespace".
+- A color space name no longer takes `_` for `-` (`xyz_d50` is unknown),
+  and a `$with` key in `meta.load-css()` and `meta.load()` is the name
+  without `$`, so `("$a": b)` configures `$$a`.
+- The global HSL color functions (`darken()` and the like) take an
+  `hsl()` or `hwb()` color with a missing channel, as the official CLI
+  does, and say they take legacy colors only when given another.
+- A malformed member reference (`.a`, `a.`, `a.b` with no call, `a.-b`)
+  is rejected as the official CLI rejects it; zsass wrote some of them as
+  they were.
+- More errors are reported as the official CLI reports them:
+  `color.mix()`'s `$method`, `color.invert()` and `color.mix()` for
+  non-legacy colors, an unknown channel name in `color.adjust()` and the
+  like, `color.complement()`'s `$space`, `color.to-gamut()`'s `$method`,
+  `meta.calc-name()` and `meta.calc-args()`, `meta.call()` and
+  `meta.apply()` with no target, `content-exists()` outside a mixin, a
+  content block for a mixin that takes none, the `meta.load-css()`
+  errors, a member two global modules provide or two forwarded modules
+  define, and a built-in function given too many arguments.
+
 ## 0.5.3 (2026-11-28)
 
 ### Fixed

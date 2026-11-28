@@ -1001,14 +1001,23 @@ fn meta_accepts_content(ctx: *BuiltinContext, args: []const Value, arg_names: []
     return if (mixinv.callableAcceptsContent(ctx.callable_payload_pool)) Value.true_v else Value.false_v;
 }
 
+/// A member two `@use ... as *` modules both provide.
+fn reportAmbiguousGlobal(comptime kind: []const u8) BuiltinError {
+    error_format.setContextMessage("This " ++ kind ++ " is available from multiple global modules.");
+    return error.SassError;
+}
+
 fn meta_content_exists(ctx: *BuiltinContext, args: []const Value, _: []const InternId) BuiltinError!Value {
     try expectArity(args, 0);
     const vm = getVM(ctx);
-    switch (vm.current_chunk) {
-        .mixin => {},
-        else => return error.SassError,
+    const outside_mixin = switch (vm.current_chunk) {
+        .mixin => vm.frame_stack.items.len == 0,
+        else => true,
+    };
+    if (outside_mixin) {
+        error_format.setContextMessage("content-exists() may only be called within a mixin.");
+        return error.SassError;
     }
-    if (vm.frame_stack.items.len == 0) return error.SassError;
     const fr = vm.frame_stack.items[vm.frame_stack.items.len - 1];
     const exists = fr.content_chunk_id != std.math.maxInt(u32);
     return if (exists) Value.true_v else Value.false_v;
@@ -1051,13 +1060,12 @@ fn meta_calc_name(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
     const params = [_][]const u8{"calc"};
     const b = try shared.bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &params, 1);
     const calc_v = b[0] orelse return error.BuiltinArity;
-    if (calc_v.kind() == .number and calc_v.unitId(ctx.number_pool) != .none) {
-        const name_id = try internString(ctx, "calc");
-        return Value.string(name_id, true);
-    }
-    const raw = try calcValueText(ctx, calc_v);
+    const raw = calcValueText(ctx, calc_v) catch |err| switch (err) {
+        error.BuiltinType => return reportArgumentTypeMismatch(ctx, "calc", calc_v, "calculation"),
+        else => return err,
+    };
     defer raw.deinit(ctx.allocator);
-    const parsed = parseCalculationCall(raw.text) orelse return error.BuiltinType;
+    const parsed = parseCalculationCall(raw.text) orelse return reportArgumentTypeMismatch(ctx, "calc", calc_v, "calculation");
     const name_id = try internString(ctx, parsed.name);
     return Value.string(name_id, true);
 }
@@ -1066,16 +1074,12 @@ fn meta_calc_args(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
     const params = [_][]const u8{"calc"};
     const b = try shared.bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &params, 1);
     const calc_v = b[0] orelse return error.BuiltinArity;
-    if (calc_v.kind() == .number and calc_v.unitId(ctx.number_pool) != .none) {
-        const rendered = try shared.valueToCssString(ctx, calc_v);
-        defer ctx.allocator.free(rendered);
-        const id = try internString(ctx, rendered);
-        const item = Value.string(id, false);
-        return pushCommaList(ctx, &[_]Value{item});
-    }
-    const raw = try calcValueText(ctx, calc_v);
+    const raw = calcValueText(ctx, calc_v) catch |err| switch (err) {
+        error.BuiltinType => return reportArgumentTypeMismatch(ctx, "calc", calc_v, "calculation"),
+        else => return err,
+    };
     defer raw.deinit(ctx.allocator);
-    const parsed = parseCalculationCall(raw.text) orelse return error.BuiltinType;
+    const parsed = parseCalculationCall(raw.text) orelse return reportArgumentTypeMismatch(ctx, "calc", calc_v, "calculation");
 
     var arg_texts: std.ArrayListUnmanaged([]const u8) = .empty;
     defer arg_texts.deinit(ctx.allocator);
@@ -1108,7 +1112,7 @@ fn meta_variable_exists(ctx: *BuiltinContext, args: []const Value, arg_names: []
     const mod = &vm.program.modules[vm.current_module];
     const local_exists = moduleDeclaredVarExists(vm, vm.current_module, name);
     if (voidMapContainsIdentifier(&mod.ambiguous_star_vars, name) and !local_exists) {
-        return error.SassError;
+        return reportAmbiguousGlobal("variable");
     }
     if (local_exists) return Value.true_v;
     if (lookupIdentifierVarTarget(&mod.star_vars, name)) |target| {
@@ -1150,7 +1154,7 @@ fn meta_global_variable_exists(ctx: *BuiltinContext, args: []const Value, arg_na
     }
 
     const local_exists = moduleDeclaredVarExists(vm, vm.current_module, name);
-    if (voidMapContainsIdentifier(&current_mod.ambiguous_star_vars, name) and !local_exists) return error.SassError;
+    if (voidMapContainsIdentifier(&current_mod.ambiguous_star_vars, name) and !local_exists) return reportAmbiguousGlobal("variable");
     if (local_exists) return Value.true_v;
     if (lookupIdentifierVarTarget(&current_mod.star_vars, name)) |target| {
         if (vm.isModuleGlobalDeclared(target.value.module_id, target.value.slot)) {
@@ -1169,7 +1173,7 @@ fn resolveCurrentFunctionCallable(ctx: *BuiltinContext, name: []const u8) Builti
         return try makeUserFunctionCallable(ctx, vm.current_module, entry.value, entry.key);
     }
     if (voidMapContainsIdentifier(&mod.ambiguous_star_functions, name)) {
-        return error.SassError;
+        return reportAmbiguousGlobal("function");
     }
     if (lookupIdentifierCallable(&mod.star_functions, name)) |entry| {
         return try makeUserFunctionCallable(ctx, entry.value.module_id, entry.value.id, entry.key);
@@ -1231,7 +1235,7 @@ fn resolveCurrentMixinCallable(ctx: *BuiltinContext, name: []const u8) BuiltinEr
         return try makeUserMixinCallable(ctx, vm.current_module, entry.value, entry.key, mixinAcceptsContent(vm, vm.current_module, entry.value));
     }
     if (voidMapContainsIdentifier(&mod.ambiguous_star_mixins, name)) {
-        return error.SassError;
+        return reportAmbiguousGlobal("mixin");
     }
     if (lookupIdentifierCallable(&mod.star_mixins, name)) |entry| {
         return try makeUserMixinCallable(ctx, entry.value.module_id, entry.value.id, entry.key, mixinAcceptsContent(vm, entry.value.module_id, entry.value.id));
@@ -1286,7 +1290,10 @@ fn meta_get_function(ctx: *BuiltinContext, args: []const Value, arg_names: []con
         break :blk css_v.p64Of() != 0;
     } else false;
     const has_module_arg = b[2] != null and b[2].?.kind() != .nil;
-    if (css_mode and has_module_arg) return error.SassError;
+    if (css_mode and has_module_arg) {
+        error_format.setContextMessage("$css and $module may not both be passed at once.");
+        return error.SassError;
+    }
 
     const module_info = try findModule(ctx, b[2]);
     const module_name = if (b[2]) |module_v|

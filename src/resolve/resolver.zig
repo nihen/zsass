@@ -427,6 +427,9 @@ const Ctx = struct {
     ambiguous_star_mixins: std.StringHashMapUnmanaged(void) = .empty,
     star_functions: std.StringHashMapUnmanaged(CrossCallableTarget) = .empty,
     ambiguous_star_functions: std.StringHashMapUnmanaged(void) = .empty,
+    /// A root statement fails whenever it runs (a namespace already taken),
+    /// so the statements after it are not resolved.
+    root_halted: bool = false,
     /// True once a star-imported mixin key contains both `-` and `_`.
     /// While false, star mixin lookups can skip the rare O(map) identifierEq fallback.
     star_mixins_have_mixed_alias_keys: bool = false,
@@ -1381,7 +1384,7 @@ const lookupIdentifierIdInsensitive = name_lookup.lookupIdentifierIdInsensitive;
 const lookupIdentifierIdKeyInsensitive = name_lookup.lookupIdentifierIdKeyInsensitive;
 const lookupBoolFlagInsensitive = name_lookup.lookupBoolFlagInsensitive;
 const lookupVoidFlagInsensitive = name_lookup.lookupVoidFlagInsensitive;
-const lookupUseBindingInsensitive = name_lookup.lookupUseBindingInsensitive;
+const lookupUseBinding = name_lookup.lookupUseBinding;
 const lookupStringMapIdentifierInsensitive = name_lookup.lookupStringMapIdentifierInsensitive;
 const lookupStringMapIdentifierInsensitiveNoMixedKeys = name_lookup.lookupStringMapIdentifierInsensitiveNoMixedKeys;
 const lookupStringMapIdentifierInsensitiveGated = name_lookup.lookupStringMapIdentifierInsensitiveGated;
@@ -2188,19 +2191,19 @@ fn noteStarFunctionMapKey(ctx: *Ctx, key: []const u8) void {
     if (hasMixedIdentifierAliasChars(key)) ctx.star_functions_have_mixed_alias_keys = true;
 }
 
-fn lookupCapturedUseBindingInsensitive(
+fn lookupCapturedUseBinding(
     bindings: []const PendingUseBinding,
     name: []const u8,
 ) ?UseBinding {
     for (bindings) |entry| {
-        if (identifierEq(entry.key, name)) return entry.value;
+        if (std.mem.eql(u8, entry.key, name)) return entry.value;
     }
     return null;
 }
 
 fn lookupUseBindingInContext(ctx: *const Ctx, name: []const u8) ?UseBinding {
-    return lookupUseBindingInsensitive(&ctx.prog.use_map, name) orelse
-        lookupCapturedUseBindingInsensitive(ctx.deferred_callable_default_use_bindings, name);
+    return lookupUseBinding(&ctx.prog.use_map, name) orelse
+        lookupCapturedUseBinding(ctx.deferred_callable_default_use_bindings, name);
 }
 
 fn lookupSlotInsensitive(
@@ -2666,6 +2669,8 @@ fn isBuiltinModuleVariable(module_name: []const u8, name: []const u8) bool {
     return false;
 }
 const ambiguous_star_var_message = "This variable is available from multiple global modules.";
+const ambiguous_star_function_message = "This function is available from multiple global modules.";
+const ambiguous_star_mixin_message = "This mixin is available from multiple global modules.";
 const plain_css_interpolation_message = "Interpolation isn't allowed in plain CSS.";
 
 /// The official CLI's error for a namespace no `@use` brought in.
@@ -3227,7 +3232,7 @@ fn ensureMetaModuleLoadedForIntrospection(
         if (!identifierEq(arg_name, "module")) return;
     }
     const module_name = exprLiteralStringText(ctx, arg_exprs[0]) orelse return;
-    if (lookupUseBindingInsensitive(&ctx.prog.use_map, module_name) != null) return;
+    if (lookupUseBinding(&ctx.prog.use_map, module_name) != null) return;
     // A callable's call is checked when it runs, as the official CLI does.
     if (ctx.in_callable and !ctx.resolving_callable_default) return;
     setNoNamespaceMessage(module_name);
@@ -3334,7 +3339,10 @@ fn tryFoldMetaBuiltinExists(
             if (lookupGlobalSlot(ctx.prog, query_name)) |slot| {
                 break :blk try appendBoolLiteralExpr(ctx, hasResolvedAssignToSlot(ctx.prog, slot), span);
             }
-            if (lookupVoidFlagInsensitive(&ctx.ambiguous_star_vars, query_name)) return error.Unsupported;
+            if (lookupVoidFlagInsensitive(&ctx.ambiguous_star_vars, query_name)) {
+                error_format.setContextMessage(ambiguous_star_var_message);
+                return error.SassError;
+            }
             if (lookupConfigVarTargetInsensitive(&ctx.star_vars, query_name) != null) {
                 break :blk try appendBoolLiteralExpr(ctx, true, span);
             }
@@ -3344,7 +3352,10 @@ fn tryFoldMetaBuiltinExists(
             if (lookupIdentifierIdInsensitive(&ctx.prog.function_names, query_name) != null) {
                 break :blk try appendBoolLiteralExpr(ctx, true, span);
             }
-            if (lookupVoidFlagInsensitive(&ctx.ambiguous_star_functions, query_name)) return error.Unsupported;
+            if (lookupVoidFlagInsensitive(&ctx.ambiguous_star_functions, query_name)) {
+                error_format.setContextMessage(ambiguous_star_function_message);
+                return error.SassError;
+            }
             if (ctx.lookupStarFunction(query_name) != null or
                 lookupIdentifierIdInsensitive(&ctx.star_builtin_fns, query_name) != null or
                 builtin_mod.resolveLegacyGlobal(query_name) != null)
@@ -3357,7 +3368,10 @@ fn tryFoldMetaBuiltinExists(
             if (lookupIdentifierIdInsensitive(&ctx.prog.mixin_names, query_name) != null) {
                 break :blk try appendBoolLiteralExpr(ctx, true, span);
             }
-            if (lookupVoidFlagInsensitive(&ctx.ambiguous_star_mixins, query_name)) return error.Unsupported;
+            if (lookupVoidFlagInsensitive(&ctx.ambiguous_star_mixins, query_name)) {
+                error_format.setContextMessage(ambiguous_star_mixin_message);
+                return error.SassError;
+            }
             if (ctx.lookupStarMixin(query_name) != null) {
                 break :blk try appendBoolLiteralExpr(ctx, true, span);
             }
@@ -4255,6 +4269,7 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
         return try appendExpr(ctx.prog, ctx.a, .{ .kind = .call, .payload = cidx, .span = span });
     }
     if (lookupVoidFlagInsensitive(&ctx.ambiguous_star_functions, name_slice)) {
+        error_format.setContextMessage(ambiguous_star_function_message);
         return error.SassError;
     }
     if (ctx.lookupStarFunction(name_slice)) |target| {
@@ -9523,6 +9538,10 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
         const prop_id: InternId = @fromBackingInt(@intCast(prop_ast.payload));
         const raw_prop = ctx.pool.get(prop_id);
         if (parseNamespacedVariableAssign(raw_prop)) |namespaced| {
+            if ((n.flags & 0b1000) != 0) {
+                error_format.setContextMessage("!global isn't allowed for variables in other modules.");
+                return error.SassError;
+            }
             const binding = lookupUseBindingInContext(ctx, namespaced.ns) orelse {
                 setNoNamespaceMessage(namespaced.ns);
                 return error.UnknownVar;
@@ -9549,7 +9568,7 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
                     try ctx.prog.assign_stmts.append(ctx.a, .{
                         .slot = try encodeCrossAssignSlot(target.module_id, target.slot),
                         .value_expr = val_e,
-                        .default = false,
+                        .default = (n.flags & 0b0100) != 0,
                         .global = false,
                     });
                     try ctx.prog.stmts.append(ctx.a, .{
@@ -10246,6 +10265,7 @@ const ModuleStmtDeps = struct {
     pub const requireModuleBasePath = resolverRequireModuleBasePath;
     pub const resolveUserModule = resolverResolveUserModule;
     pub const applyUseOrForwardConfig = resolverApplyUseOrForwardConfig;
+    pub const configuresLoadedModule = module_exports.configuresLoadedModule;
     pub const collectImplicitUseConfigEntries = resolverCollectImplicitUseConfigEntries;
     pub const collectImplicitForwardConfigEntries = resolverCollectImplicitForwardConfigEntries;
     pub const applyImplicitImportConfigEntries = resolverApplyImplicitImportConfigEntries;
@@ -10694,6 +10714,7 @@ fn resolveIncludeStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex 
             }
             callee_module = local_module_id_sentinel;
         } else if (lookupVoidFlagInsensitive(&ctx.ambiguous_star_mixins, name_slice)) {
+            error_format.setContextMessage(ambiguous_star_mixin_message);
             return error.SassError;
         } else if (ctx.lookupStarMixin(name_slice)) |target| {
             mid = @intCast(target.id);
@@ -11414,7 +11435,7 @@ fn resolveRootStmtSequence(
     merge_import_forwards: bool,
 ) ResolveError!void {
     var i: usize = 0;
-    while (i < raw.len) {
+    while (i < raw.len and !ctx.root_halted) {
         const node: NodeIndex = @fromBackingInt(@intCast(raw[i]));
         const n = ctx.ast.getNode(node);
         if (n.tag != .stmt_import) {
@@ -11620,6 +11641,7 @@ const preamble_ctx_default_only = [_][]const u8{
     "slash_sim",
     "plain_css_validate_values",
     "mixin_accepts_content",
+    "root_halted",
 };
 
 const preamble_ctx_string_maps = .{
@@ -12087,6 +12109,7 @@ fn preambleBoundaryValid(
     if (ctx.calc_arg_allow_numberish_ident_literals or ctx.in_declaration_value) return false;
     if (!ctx.plain_css_validate_values) return false;
     if (ctx.mixin_accepts_content) return false;
+    if (ctx.root_halted) return false;
     if (ctx.prog.top_stmts.len != 0) return false;
     if (top_list.items.len == 0) return false;
     const last = top_list.items[top_list.items.len - 1];
@@ -13412,12 +13435,12 @@ test "top-level mixin/function declarations keep module directive head open for 
     try std.testing.expectEqual(@as(f64, 5.0), bundle.config_seeds[0].value.asF64(bundle.modules[bundle.root_index].value_number_pool));
 }
 
-test "lookupUseBindingInsensitive treats hyphen and underscore as equal" {
+test "lookupUseBinding tells hyphen and underscore apart" {
     var map: std.StringHashMapUnmanaged(UseBinding) = .empty;
     defer map.deinit(std.testing.allocator);
     try map.put(std.testing.allocator, "my_mod", .{ .user_module = 7 });
-    const got = lookupUseBindingInsensitive(&map, "my-mod") orelse return error.TestExpectedEqual;
-    try std.testing.expect(got == .user_module);
+    try std.testing.expect(lookupUseBinding(&map, "my-mod") == null);
+    const got = lookupUseBinding(&map, "my_mod") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(u32, 7), got.user_module);
 }
 

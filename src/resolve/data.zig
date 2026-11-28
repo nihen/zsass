@@ -165,6 +165,9 @@ pub const StmtKind = enum(u8) {
     debug_stmt,
     warn_stmt,
     error_stmt,
+    /// Fails at run time with a message the resolver found; payload is its
+    /// InternId.
+    static_error,
     noop,
 };
 

@@ -2289,6 +2289,14 @@ fn mapBinOpcode(op: BinOp) Opcode {
     };
 }
 
+/// Fails at run time with `message`.
+fn emitStaticError(ctx: CompileCtx, message: []const u8) CompileError!void {
+    const msg_id = try ctx.pool.intern(message);
+    const msg_idx = try ctx.cb.addConst(Value.string(msg_id, false));
+    try ctx.cb.emit(.load_const, 0, msg_idx);
+    try ctx.cb.emit(.emit_error, 1, 0);
+}
+
 fn emitForcedSassError(ctx: CompileCtx) CompileError!void {
     const nil_idx = try ctx.cb.addConst(Value.nil_v);
     try ctx.cb.emit(.load_const, 0, nil_idx);
@@ -2622,13 +2630,16 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
                 }
             }
             if (c.builtin_id == meta_call_builtin_id) {
-                const control_idx = findMetaControlArgIndex(ctx, c.arg_start, c.arg_count, "function");
-                if (control_idx) |idx| {
-                    try compileExpr(ctx, resolved.call_args.items[idx]);
-                } else {
+                const control_idx = findMetaControlArgIndex(ctx, c.arg_start, c.arg_count, "function") orelse {
+                    // The arguments are evaluated before the call fails.
+                    var ai: u32 = 0;
+                    while (ai < c.arg_count) : (ai += 1) try compileExpr(ctx, resolved.call_args.items[c.arg_start + ai]);
+                    try emitStaticError(ctx, "Missing argument $function.");
+                    // The call's value, never reached.
                     const nil_idx = try ctx.cb.addConst(Value.nil_v);
-                    try ctx.cb.emit(.load_const, 0, nil_idx);
-                }
+                    return ctx.cb.emit(.load_const, 0, nil_idx);
+                };
+                try compileExpr(ctx, resolved.call_args.items[control_idx]);
                 var forwarded: std.ArrayListUnmanaged(u32) = .empty;
                 defer forwarded.deinit(ctx.cb.alloc);
                 try appendForwardedMetaArgIndices(ctx, c.arg_start, c.arg_count, control_idx, &forwarded);
@@ -3883,12 +3894,13 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                     const meta_idx = try addBuiltinCallMeta(ctx, inc.arg_start, inc.arg_count, std.math.maxInt(u32));
                     try ctx.cb.emit(.call_indirect, 1, meta_idx);
                 } else {
-                    if (control_idx) |idx| {
-                        try compileExpr(ctx, resolved.call_args.items[idx]);
-                    } else {
-                        const nil_idx = try ctx.cb.addConst(Value.nil_v);
-                        try ctx.cb.emit(.load_const, 0, nil_idx);
-                    }
+                    const mixin_idx = control_idx orelse {
+                        // The arguments are evaluated before the include fails.
+                        var ai: u32 = 0;
+                        while (ai < inc.arg_count) : (ai += 1) try compileExpr(ctx, resolved.call_args.items[inc.arg_start + ai]);
+                        return emitStaticError(ctx, "Missing argument $mixin.");
+                    };
+                    try compileExpr(ctx, resolved.call_args.items[mixin_idx]);
                     var forwarded: std.ArrayListUnmanaged(u32) = .empty;
                     defer forwarded.deinit(ctx.cb.alloc);
                     try appendForwardedMetaArgIndices(ctx, inc.arg_start, inc.arg_count, control_idx, &forwarded);
@@ -4027,6 +4039,11 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
             try compileExpr(ctx, value_expr);
             try ctx.cb.emit(.emit_error, 0, 0);
         },
+        .static_error => {
+            const msg_idx = try ctx.cb.addConst(Value.string(@fromBackingInt(st.payload), false));
+            try ctx.cb.emit(.load_const, 0, msg_idx);
+            try ctx.cb.emit(.emit_error, 1, 0);
+        },
     }
 }
 
@@ -4088,6 +4105,7 @@ fn stmtSliceCanUseSimpleSourceOrderLowering(resolved: *const ResolvedProgram, bo
             .debug_stmt,
             .warn_stmt,
             .error_stmt,
+            .static_error,
             .module_dep,
             => {},
             .if_chain, .for_loop, .each_loop, .while_loop => return false,
@@ -4233,7 +4251,7 @@ fn compileSourceOrderedBody(
                 // is a reopen and must suppress the top-level fallback blank.
                 state.suppress_blank_on_next_parent_open = true;
             },
-            .assign_var, .noop, .extend, .debug_stmt, .warn_stmt, .error_stmt => {
+            .assign_var, .noop, .extend, .debug_stmt, .warn_stmt, .error_stmt, .static_error => {
                 try compileStmt(ctx, child_si);
             },
             .module_dep => {

@@ -222,8 +222,12 @@ pub fn runTopModuleWithSelectorPrefix(self: anytype, module_id: u32, selector_pr
 
 /// "$url: 1 is not a string." for meta.load-css().
 fn reportLoadCssTypeMismatch(self: anytype, comptime param: []const u8, v: value_mod.Value) error{SassError} {
+    return reportLoadCssTypeMismatchAs(self, param, v, "string");
+}
+
+fn reportLoadCssTypeMismatchAs(self: anytype, comptime param: []const u8, v: value_mod.Value, comptime expected: []const u8) error{SassError} {
     var bctx = vm_dispatch.builtinContext(self);
-    builtin_shared.reportArgumentTypeMismatch(&bctx, param, v, "string") catch {};
+    builtin_shared.reportArgumentTypeMismatch(&bctx, param, v, expected) catch {};
     return error.SassError;
 }
 
@@ -261,14 +265,14 @@ fn bindMetaLoadCssArgs(self: anytype, arg_names: []const InternId, argc: usize) 
     }
 
     return .{
-        .url_index = url_index orelse return error.BuiltinArity,
+        .url_index = url_index orelse return builtin_shared.reportMissingArgument("url"),
         .with_index = with_index,
     };
 }
 
 fn cloneLoadCssConfigName(self: anytype, raw_name: []const u8) ![]u8 {
-    var name = raw_name;
-    if (name.len > 0 and name[0] == '$') name = name[1..];
+    // A key is the name without `$`: `("$a": b)` names the variable `$$a`.
+    const name = raw_name;
     if (name.len == 0) return error.SassError;
     const out = try self.allocator.alloc(u8, name.len);
     for (name, 0..) |c, i| {
@@ -279,13 +283,13 @@ fn cloneLoadCssConfigName(self: anytype, raw_name: []const u8) ![]u8 {
 
 fn parseLoadCssWithConfig(self: anytype, with_v: Value) !LoadCssConfig {
     if (with_v.kind() == .nil) return .{};
-    if (with_v.kind() != .list) return error.BuiltinType;
+    if (with_v.kind() != .list) return reportLoadCssTypeMismatchAs(self, "with", with_v, "map");
     const list_handle = with_v.listHandle();
     if (list_handle >= self.list_pool.items.len) return error.BuiltinType;
     const elems = self.list_pool.items[list_handle];
     if (!with_v.listIsMap(self.list_meta_pool.items)) {
         if (elems.len == 0) return .{};
-        return error.BuiltinType;
+        return reportLoadCssTypeMismatchAs(self, "with", with_v, "map");
     }
     if (elems.len == 0) return .{};
     if (elems.len % 2 != 0) return error.SassError;
@@ -305,7 +309,13 @@ fn parseLoadCssWithConfig(self: anytype, with_v: Value) !LoadCssConfig {
         const normalized = try cloneLoadCssConfigName(self, key_name);
         errdefer self.allocator.free(normalized);
         for (out.items) |entry| {
-            if (identifierEq(entry.name, normalized)) return error.SassError;
+            if (identifierEq(entry.name, normalized)) {
+                var buf: [512]u8 = undefined;
+                if (std.fmt.bufPrint(&buf, "The variable ${s} was configured twice.", .{key_name})) |msg| {
+                    error_format.setContextMessage(msg);
+                } else |_| {}
+                return error.SassError;
+            }
         }
         out.appendAssumeCapacity(.{
             .name = normalized,
@@ -376,12 +386,17 @@ fn loadCssNameIsAmbiguous(map: *const std.StringHashMapUnmanaged(void), name: []
     return false;
 }
 
+/// `path` as written from the working directory, when that can be found.
+fn cwdRelativePath(self: anytype, path: []const u8) error{OutOfMemory}!?[]u8 {
+    const cwd = zsass_io.realPathAlloc(std.Io.Dir.cwd(), ".", self.allocator) catch return null;
+    defer self.allocator.free(cwd);
+    return try std.fs.path.relativeAlloc(self.allocator, cwd, null, cwd, path);
+}
+
 /// "_other.scss was already loaded, so it can't be configured using
 /// \"with\".", with the path as written from the working directory.
 fn reportAlreadyLoaded(self: anytype, path: []const u8) void {
-    const cwd = zsass_io.realPathAlloc(std.Io.Dir.cwd(), ".", self.allocator) catch null;
-    defer if (cwd) |c| self.allocator.free(c);
-    const shown = if (cwd) |c| std.fs.path.relativeAlloc(self.allocator, c, null, c, path) catch null else null;
+    const shown = cwdRelativePath(self, path) catch null;
     defer if (shown) |t| self.allocator.free(t);
     var buf: [1024]u8 = undefined;
     if (std.fmt.bufPrint(&buf, "{s} was already loaded, so it can't be configured using \"with\".", .{shown orelse path})) |msg| {
@@ -1054,7 +1069,10 @@ pub fn runLoadCssModule(self: anytype, resolved_path: []const u8, config: LoadCs
 const max_load_css_depth = 400;
 
 pub fn invokeMetaLoadCss(self: anytype, args: []const Value, arg_names: []const InternId) !void {
-    if (self.pending_content_chunk != content_none_sentinel) return error.BuiltinUnsupported;
+    if (self.pending_content_chunk != content_none_sentinel) {
+        error_format.setContextMessage("Mixin doesn't accept a content block.");
+        return error.SassError;
+    }
 
     const binding = try bindMetaLoadCssArgs(self, arg_names, args.len);
     if (binding.url_index >= args.len) return error.BuiltinArity;
@@ -1074,13 +1092,24 @@ pub fn invokeMetaLoadCss(self: anytype, args: []const Value, arg_names: []const 
     }
 
     if (std.mem.startsWith(u8, url, "sass:")) {
-        if (!config.isEmpty()) return error.SassError;
+        if (!config.isEmpty()) {
+            var buf: [512]u8 = undefined;
+            if (std.fmt.bufPrint(&buf, "Built-in module {s} can't be configured.", .{url})) |msg| {
+                error_format.setContextMessage(msg);
+            } else |_| {}
+            return error.SassError;
+        }
         return;
     }
 
     if (isAbsoluteOrExternalLoadCssUrl(url)) return error.SassError;
 
-    const resolved_path = (try resolveLoadCssPath(self, url)) orelse return error.SassError;
+    const had_message = error_format.currentContextMessage() != null;
+    const resolved_path = (try resolveLoadCssPath(self, url)) orelse {
+        // An ambiguous URL has said which files it could mean.
+        if (had_message or error_format.currentContextMessage() == null) error_format.setContextMessage("Can't find stylesheet to import.");
+        return error.SassError;
+    };
     defer self.allocator.free(resolved_path);
     if (!config.isEmpty() and self.isLoadCssModulePathLoaded(resolved_path)) {
         reportAlreadyLoaded(self, resolved_path);
@@ -1103,8 +1132,21 @@ pub fn invokeMetaLoadCss(self: anytype, args: []const Value, arg_names: []const 
         if (pushed_current) _ = stack.pop();
     }
 
+    // The paths may be written `input.scss` and `./input.scss`.
+    const resolved_canonical = try std.fs.path.resolve(self.allocator, &.{resolved_path});
+    defer self.allocator.free(resolved_canonical);
     for (stack.items) |p| {
-        if (std.mem.eql(u8, p, resolved_path)) return error.SassError;
+        const canonical = try std.fs.path.resolve(self.allocator, &.{p});
+        defer self.allocator.free(canonical);
+        if (std.mem.eql(u8, canonical, resolved_canonical)) {
+            const shown = try cwdRelativePath(self, resolved_canonical);
+            defer if (shown) |t| self.allocator.free(t);
+            var buf: [1024]u8 = undefined;
+            if (std.fmt.bufPrint(&buf, "Module loop: {s} is already being loaded.", .{shown orelse resolved_path})) |msg| {
+                error_format.setContextMessage(msg);
+            } else |_| {}
+            return error.SassError;
+        }
     }
     // Each nested load runs a child VM on the native stack; fail cleanly
     // before a long chain of modules overflows it.

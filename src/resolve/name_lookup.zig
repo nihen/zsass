@@ -280,9 +280,11 @@ pub fn lookupVoidFlagInsensitive(
     return containsStringMapIdentifierInsensitive(void, map, name);
 }
 
-pub fn lookupUseBindingInsensitive(
+/// A namespace is matched exactly: unlike a member name, `a_b` and `a-b`
+/// are two namespaces.
+pub fn lookupUseBinding(
     map: *const std.StringHashMapUnmanaged(UseBinding),
     name: []const u8,
 ) ?UseBinding {
-    return lookupStringMapIdentifierInsensitive(UseBinding, map, name);
+    return map.get(name);
 }

@@ -373,7 +373,8 @@ pub fn invokeCallable(
         return error.BuiltinType;
     }
     if (expect_mixin and self.pending_content_chunk != content_none_sentinel and !target_v.callableAcceptsContent(&self.callable_payload_pool)) {
-        return error.BuiltinUnsupported;
+        error_format.setContextMessage("Mixin doesn't accept a content block.");
+        return error.SassError;
     }
 
     if (target_v.callableIsCss(&self.callable_payload_pool)) {

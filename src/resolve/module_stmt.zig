@@ -38,7 +38,7 @@ const normalizePlainCssImportQuote = import_css.normalizePlainCssImportQuote;
 const isPlainCssImport = import_css.isPlainCssImport;
 const importUrlHasDynamicDollar = import_css.importUrlHasDynamicDollar;
 const stripOuterQuotes = import_css.stripOuterQuotes;
-const lookupUseBindingInsensitive = name_lookup.lookupUseBindingInsensitive;
+const lookupUseBinding = name_lookup.lookupUseBinding;
 const identifierEq = name_lookup.identifierEq;
 const defaultNamespaceForUse = names.defaultNamespaceForUse;
 const builtinModuleUrlToShortName = names.builtinModuleUrlToShortName;
@@ -72,15 +72,15 @@ pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: b
                 ctx.pool.get(namespace_id)
             else
                 mod_path;
-            if (lookupUseBindingInsensitive(&ctx.prog.use_map, ns_key)) |existing| {
+            if (lookupUseBinding(&ctx.prog.use_map, ns_key)) |existing| {
                 switch (existing) {
                     .builtin_module => |already| {
                         if (ctx.visiting_imports.items.len != 0 and std.ascii.eqlIgnoreCase(already, mod_path)) {
                             return try deps.appendNoop(ctx, span);
                         }
-                        return error.SassError;
+                        return appendNamespaceTaken(ctx, ns_key, span);
                     },
-                    .user_module => return error.SassError,
+                    .user_module => return appendNamespaceTaken(ctx, ns_key, span),
                 }
             }
             try ctx.prog.use_map.put(ctx.a, ns_key, .{ .builtin_module = mod_path });
@@ -96,6 +96,22 @@ pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: b
     if (config_entries.len > 0) loader.pending_next_config_entries = config_entries;
     defer loader.pending_next_config_entries = saved_pending_config;
     const mid = try deps.resolveUserModule(loader, module_path, url);
+    // A namespace taken is reported once the module is found, before its
+    // configuration is checked unless that configures a module already
+    // loaded. A stylesheet imported twice may @use a module again.
+    if (!as_star and ctx.visiting_imports.items.len == 0) {
+        const ns_key: []const u8 = if (namespace_id != .none)
+            ctx.pool.get(namespace_id)
+        else
+            defaultNamespaceForUse(url);
+        if (lookupUseBinding(&ctx.prog.use_map, ns_key) != null) {
+            if (config_entries.len > 0 and try deps.configuresLoadedModule(loader, mid, config_entries, known_before_count, false)) {
+                try deps.applyUseOrForwardConfig(loader, mid, config_entries, known_before_count, false);
+            }
+            // Reported when this rule runs, after the modules before it.
+            return appendNamespaceTaken(ctx, ns_key, span);
+        }
+    }
     if (config_entries.len > 0) {
         try deps.applyUseOrForwardConfig(loader, mid, config_entries, known_before_count, false);
     } else if (ctx.visiting_imports.items.len != 0) {
@@ -111,11 +127,11 @@ pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: b
             ctx.pool.get(namespace_id)
         else
             defaultNamespaceForUse(url);
-        if (lookupUseBindingInsensitive(&ctx.prog.use_map, ns_key)) |existing| {
+        if (lookupUseBinding(&ctx.prog.use_map, ns_key)) |existing| {
             switch (existing) {
-                .builtin_module => return error.SassError,
+                .builtin_module => return reportNamespaceTaken(ns_key),
                 .user_module => |existing_mid| {
-                    if (existing_mid != mid) return error.SassError;
+                    if (existing_mid != mid) return reportNamespaceTaken(ns_key);
                     if (config_entries.len != 0) return error.SassError;
                     if (ctx.visiting_imports.items.len != 0) {
                         return try appendModuleDep(ctx, mid, span, true, false);
@@ -128,6 +144,28 @@ pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: b
     }
     const rerun_each_call = ctx.visiting_imports.items.len != 0;
     return try appendModuleDep(ctx, mid, span, rerun_each_call, false);
+}
+
+fn appendNamespaceTaken(ctx: anytype, namespace: []const u8, span: Span) ResolveError!StmtIndex {
+    const msg = try std.fmt.allocPrint(ctx.a, "There's already a module with namespace \"{s}\".", .{namespace});
+    defer ctx.a.free(msg);
+    const msg_id = try ctx.pool.intern(msg);
+    ctx.root_halted = true;
+    const idx: StmtIndex = @intCast(ctx.prog.stmts.items.len);
+    try ctx.prog.stmts.append(ctx.a, .{
+        .kind = .static_error,
+        .payload = @backingInt(msg_id),
+        .span = span,
+        .origin_id = ctx.currentOrigin(),
+    });
+    return idx;
+}
+
+fn reportNamespaceTaken(namespace: []const u8) ResolveError {
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "There's already a module with namespace \"{s}\".", .{namespace}) catch return error.SassError;
+    error_format.setContextMessage(msg);
+    return error.SassError;
 }
 
 /// The name a forwarded member `forwarded` has inside the forwarded module,

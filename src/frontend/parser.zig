@@ -1188,6 +1188,19 @@ pub const Parser = struct {
         });
     }
 
+    /// `ns.$name`, a member variable of another module.
+    fn isNamespacedVariableName(text: []const u8) bool {
+        const dot = std.mem.findScalar(u8, text, '.') orelse return false;
+        if (dot == 0 or dot + 2 > text.len or text[dot + 1] != '$') return false;
+        for (text[0..dot]) |c| {
+            if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c >= 0x80)) return false;
+        }
+        for (text[dot + 2 ..]) |c| {
+            if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c >= 0x80)) return false;
+        }
+        return true;
+    }
+
     /// Parse a declaration: `property: value [!important] [;]`.
     ///
     /// The property name is captured as a raw source slice so that
@@ -1359,6 +1372,30 @@ pub const Parser = struct {
         }
 
         var end_pos: u32 = ast.getNode(value_node).span_end;
+        // `ns.$a: b !default` assigns another module's variable, which takes
+        // a variable's flags.
+        var is_default = false;
+        var is_global = false;
+        if (isNamespacedVariableName(prop_text)) {
+            while (true) {
+                self.skipWhitespaceAndComments();
+                if (self.isAtEnd() or self.current().tag != .bang) break;
+                const saved = self.pos;
+                self.advance();
+                self.skipWhitespaceAndComments();
+                if (!self.isAtEnd() and self.current().tag == .ident) {
+                    const text = self.current().slice(self.source);
+                    if (identEqlUnescaped(text, "default") or identEqlUnescaped(text, "global")) {
+                        if (identEqlUnescaped(text, "default")) is_default = true else is_global = true;
+                        end_pos = self.current().span.end;
+                        self.advance();
+                        continue;
+                    }
+                }
+                self.pos = saved;
+                break;
+            }
+        }
         self.skipWhitespaceAndComments();
         if (!self.isAtEnd() and self.current().tag == .semicolon) {
             const semi_tok = self.current();
@@ -1401,6 +1438,8 @@ pub const Parser = struct {
         var flags: u8 = 0;
         if (is_custom) flags |= 0b0000_0001;
         if (is_important) flags |= 0b0000_0010;
+        if (is_default) flags |= 0b0000_0100;
+        if (is_global) flags |= 0b0000_1000;
 
         return try ast.addNode(.{
             .tag = .stmt_declaration,
@@ -6674,17 +6713,7 @@ pub const Parser = struct {
             // return a regular SyntaxError so the existing recovery
             // (raw declaration capture / outer-expression fallback)
             // continues to work.
-            .dot => {
-                if (self.pos + 2 < self.tokens.len and
-                    self.tokens[self.pos + 1].tag == .ident and
-                    self.tokens[self.pos + 2].tag == .lparen and
-                    self.tokens[self.pos + 1].span.start == tok.span.end and
-                    self.tokens[self.pos + 2].span.start == self.tokens[self.pos + 1].span.end)
-                {
-                    return error.HardSyntaxError;
-                }
-                return error.SyntaxError;
-            },
+            .dot => return self.failExpectingHard("Expected digit."),
             else => return self.failExpecting("Expected expression."),
         };
         return self.parseTrailingSchema(ast, head);
@@ -7975,8 +8004,9 @@ pub const Parser = struct {
                 }
 
                 // ns.name ... -- sub-ident after the dot.
-                if (after.tag == .ident) {
+                if (after.tag == .ident and after.span.start == self.tokens[dot_pos].span.end) {
                     const sub_text = after.slice(self.source);
+                    if (sub_text[0] == '-' or sub_text[0] == '_') return self.failExpectingHard("Private members can't be accessed from outside their modules.");
                     self.advance(); // consume sub ident
 
                     // ns.name(   ->   namespaced function call.
@@ -7986,41 +8016,16 @@ pub const Parser = struct {
                         return try self.parseFunctionCallBody(ast, name_id, ns_id, tok.span.start);
                     }
 
-                    // Plain `ns.name` without parens.  Two cases:
-                    //   * Inside a function-call argument list (e.g.
-                    //     `url(blah.css)`) -- emit a joined
-                    //     `expr_unquoted_ident` covering the full span
-                    //     so CSS-like values keep working.
-                    //   * At top-level value position -- this is a
-                    //     malformed Sass namespace reference (official Sass CLI
-                    //     reports `expected "("`). Hard error so the
-                    //     declaration text node path does not absorb it.
-                    if (self.call_arg_depth == 0) {
-                        return error.HardSyntaxError;
-                    }
-                    const joined = self.source[tok.span.start..after.span.end];
-                    const id = try self.intern_pool.intern(joined);
-                    return try ast.addNode(.{
-                        .tag = .expr_unquoted_ident,
-                        .flags = 0,
-                        .payload = @backingInt(id),
-                        .span_start = tok.span.start,
-                        .span_end = after.span.end,
-                    });
-                }
-
-                // ns. followed by something other than ident or dollar
-                // (e.g. `ns.()`, `ns..foo`, `ns. x`) -- clearly malformed
-                // Sass member syntax.  Hard error: "Expected identifier".
-                if (after.tag == .lparen or after.tag == .dot or
-                    after.tag == .whitespace or after.tag == .newline)
-                {
-                    return self.failExpectingHard("Expected identifier.");
+                    // Plain `ns.name` without parens is a member reference
+                    // missing its call, in an argument list too (`url()`
+                    // takes its contents as text before this).
+                    return self.failExpectingHard("expected \"(\".");
                 }
             }
 
-            // Lone dot after ident with nothing consumable after --
-            // backtrack so the dot is available to the caller.
+            // `ns.` followed by anything else (`ns.()`, `ns. x`, `ns.)`,
+            // `ns.#{x}`) is malformed member syntax.
+            if (self.tokens[dot_pos].span.start == tok.span.end) return self.failExpectingHard("Expected identifier.");
             self.pos = dot_pos;
         }
 
@@ -8143,6 +8148,7 @@ pub const Parser = struct {
             std.ascii.eqlIgnoreCase(base_name, "calc") or
             std.ascii.eqlIgnoreCase(base_name, "element") or
             std.ascii.eqlIgnoreCase(base_name, "expression") or
+            std.ascii.eqlIgnoreCase(base_name, "type") or
             std.ascii.eqlIgnoreCase(base_name, "progid");
         const lowercase_name_len: usize = if (!isVendorPrefixedCssFunction(fn_name) and
             std.ascii.eqlIgnoreCase(base_name, "type"))
@@ -8182,7 +8188,15 @@ pub const Parser = struct {
         // text-template path when interpolation is present. This is required
         // for values such as `url(#{$stem}.woff2)`, where normal call-arg
         // parsing rejects the CSS filename suffix after interpolation.
-        return has_interpolation and std.ascii.eqlIgnoreCase(cssFunctionBaseName(name), "url");
+        const base = cssFunctionBaseName(name);
+        // `expression()`, `element()`, `type()`, and a vendor-prefixed
+        // `calc()` take their contents as text in SassScript too.
+        if (std.ascii.eqlIgnoreCase(base, "expression") or std.ascii.eqlIgnoreCase(base, "element")) return true;
+        // `--calc()` is a custom function, not a vendor prefix.
+        const vendor_prefixed = isVendorPrefixedCssFunction(name) and name[1] != '-';
+        if (!vendor_prefixed and std.ascii.eqlIgnoreCase(base, "type")) return true;
+        if (vendor_prefixed and std.ascii.eqlIgnoreCase(base, "calc")) return true;
+        return has_interpolation and std.ascii.eqlIgnoreCase(base, "url");
     }
 
     fn shouldTreatUrlRawPathAsOpaque(self: *Parser, name: []const u8) bool {
@@ -8191,17 +8205,26 @@ pub const Parser = struct {
         var p = self.pos;
         var paren_depth: i32 = 0;
         var saw_url_path_token = false;
+        // `url(foo.css)` is a URL; `url(math.div(1, 2))` a call.
+        var saw_dot = false;
+        var saw_nested_paren = false;
         while (p < self.tokens.len) : (p += 1) {
             const t = self.tokens[p].tag;
             switch (t) {
-                .lparen => paren_depth += 1,
+                .lparen => {
+                    paren_depth += 1;
+                    if (paren_depth > 1) saw_nested_paren = true;
+                },
                 .rparen => {
                     paren_depth -= 1;
-                    if (paren_depth == 0) return saw_url_path_token;
+                    if (paren_depth == 0) return saw_url_path_token or (saw_dot and !saw_nested_paren);
                 },
                 .dollar_ident, .hash_lbrace => return false,
                 .slash, .colon => {
                     if (paren_depth == 1) saw_url_path_token = true;
+                },
+                .dot => {
+                    if (paren_depth == 1) saw_dot = true;
                 },
                 else => {},
             }
@@ -9941,7 +9964,7 @@ test "parseIdent: ns.name without parens is a HardSyntaxError at top level" {
     try std.testing.expectError(error.HardSyntaxError, parseOneExpr(alloc, &pool, "abc.def"));
 }
 
-test "parseIdent: ns.name inside function-call arg stays joined unquoted_ident" {
+test "parseIdent: ns.name inside function-call arg needs its call" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -9949,25 +9972,12 @@ test "parseIdent: ns.name inside function-call arg stays joined unquoted_ident" 
     var pool = try InternPool.init(alloc);
     defer pool.deinit(alloc);
 
-    // Inside a call-arg list (e.g. `url(blah.css)`) the parser cannot
-    // tell if this is a Sass namespace reference or a CSS-style joined
-    // identifier, so we fall back to a joined `expr_unquoted_ident`.
-    var ctx = try parseOneExpr(alloc, &pool, "url(blah.css)");
-    defer ctx.ast.deinit();
-
-    const n = ctx.ast.getNode(ctx.node);
-    try std.testing.expectEqual(AstTag.expr_func_call, n.tag);
-    // payload = extra_off  ->  [name_id, namespace_id, arg_count, arg0, ...]
-    const extra_off = n.payload;
-    const name_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(extra_off)));
-    try std.testing.expectEqualStrings("url", pool.get(name_id));
-    const arg_count = ctx.ast.getExtraU32(extra_off + 2);
-    try std.testing.expectEqual(@as(u32, 1), arg_count);
-    const arg_idx_raw = ctx.ast.getExtraU32(extra_off + 3);
-    const arg_node = ctx.ast.getNode(@fromBackingInt(@intCast(arg_idx_raw)));
-    try std.testing.expectEqual(AstTag.expr_unquoted_ident, arg_node.tag);
-    const arg_id: InternId = @fromBackingInt(@intCast(arg_node.payload));
-    try std.testing.expectEqualStrings("blah.css", pool.get(arg_id));
+    // A member reference is no CSS identifier in an argument list either;
+    // `url()` with its contents as text does not reach the expression
+    // parser.
+    try std.testing.expectError(error.HardSyntaxError, parseOneExpr(alloc, &pool, "f(blah.css)"));
+    try std.testing.expectError(error.HardSyntaxError, parseOneExpr(alloc, &pool, "f(blah.)"));
+    try std.testing.expectError(error.HardSyntaxError, parseOneExpr(alloc, &pool, ".blah"));
 }
 
 test "parseFuncCall: unterminated \u{2014} no closing paren \u{2192} SyntaxError" {
