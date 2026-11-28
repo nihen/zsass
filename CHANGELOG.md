@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- More errors are reported as the official CLI reports them: an `@extend`
+  outside a style rule or of a compound or complex selector, a keyword
+  argument map with a key that is no string, a plain CSS function given
+  keyword arguments, an unknown at-rule in a function or nested property,
+  an `@import` not found or loop, an unterminated string, comment, or
+  block, a bare `%`, a malformed unicode range, and a malformed
+  `@supports` declaration.
 - zsass printed an internal "zsass-emit phase=writeTo err=..." line before
   some errors; it is shown only with verbose errors.
 - `round()` of three arguments takes its strategy first only, as the
