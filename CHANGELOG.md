@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- `meta.inspect()` and the "Function not found" error escape a control
+  character in a quoted string as CSS output does (`"a\a b"`), and
+  `meta.load()` of a URL two files match lists them.
 - `@use`/`@forward` after other rules, setting a built-in module's
   variable, a content block for a mixin that takes none,
   `meta.get-function()` of a name not found, and a duplicate map key are

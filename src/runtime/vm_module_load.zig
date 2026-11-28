@@ -348,6 +348,7 @@ pub fn invokeMetaLoad(self: anytype, ctx: anytype, args: []const Value, arg_name
 
     if (self.current_module >= self.program.modules.len) return error.SassError;
     const from_path = self.program.modules[self.current_module].module_path;
+    const had_message = error_format.currentContextMessage() != null;
     const maybe_resolved: ?[]const u8 = if (from_path.len == 0) null else try resolver_mod.resolveUserModulePath(
         self.allocator,
         from_path,
@@ -359,7 +360,8 @@ pub fn invokeMetaLoad(self: anytype, ctx: anytype, args: []const Value, arg_name
         },
     );
     const resolved_raw = maybe_resolved orelse {
-        setMessage("Can't find stylesheet to import.", .{});
+        // An ambiguous URL has said which files it could mean.
+        if (had_message or error_format.currentContextMessage() == null) setMessage("Can't find stylesheet to import.", .{});
         return error.SassError;
     };
     defer self.allocator.free(resolved_raw);
