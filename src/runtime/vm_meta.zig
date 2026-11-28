@@ -566,6 +566,11 @@ fn findModule(ctx: *BuiltinContext, module_name_v: ?Value) BuiltinError!ModuleId
             .user_module => |id| .{ .user = id },
         };
     }
+    // Named in the official CLI's words, for the caller that fails on it.
+    var buf: [256]u8 = undefined;
+    if (std.fmt.bufPrint(&buf, "There is no module with namespace \"{s}\".", .{name})) |msg| {
+        error_format.setContextMessage(msg);
+    } else |_| {}
     return .not_found;
 }
 
@@ -1322,7 +1327,7 @@ fn meta_function_exists(ctx: *BuiltinContext, args: []const Value, arg_names: []
                 lookupIdentifierId(&mod.exported_builtin_fns, name) != null;
         },
         .builtin => |bname| try builtinFunctionExistsCompat(ctx, bname, name),
-        .not_found => return error.BuiltinUnsupported,
+        .not_found => return error.SassError,
     };
     return if (exists) Value.true_v else Value.false_v;
 }
@@ -1345,7 +1350,7 @@ fn meta_mixin_exists(ctx: *BuiltinContext, args: []const Value, arg_names: []con
             break :blk lookupIdentifierCallable(&mod.exported_mixins, name) != null;
         },
         .builtin => |bname| builtin_mod.resolveMixin(bname, name) != null,
-        .not_found => return error.BuiltinUnsupported,
+        .not_found => return error.SassError,
     };
     return if (exists) Value.true_v else Value.false_v;
 }
@@ -1391,7 +1396,7 @@ fn meta_module_variables(ctx: *BuiltinContext, args: []const Value, arg_names: [
             }
         },
         .builtin => {},
-        .not_found => return error.BuiltinUnsupported,
+        .not_found => return error.SassError,
     }
 
     sortMapPairs(ctx, pairs.items);
@@ -1467,7 +1472,7 @@ fn meta_module_functions(ctx: *BuiltinContext, args: []const Value, arg_names: [
                 });
             }
         },
-        .not_found => return error.BuiltinUnsupported,
+        .not_found => return error.SassError,
     }
 
     sortMapPairs(ctx, pairs.items);
@@ -1531,7 +1536,7 @@ fn meta_module_mixins(ctx: *BuiltinContext, args: []const Value, arg_names: []co
                 });
             }
         },
-        .not_found => return error.BuiltinUnsupported,
+        .not_found => return error.SassError,
     }
 
     sortMapPairs(ctx, pairs.items);

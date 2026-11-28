@@ -2644,6 +2644,23 @@ fn appendExpr(prog: *ResolvedProgram, alloc: std.mem.Allocator, re: ResolvedExpr
     return idx;
 }
 
+const private_member_message = "Private members can't be accessed from outside their modules.";
+
+/// The official CLI's error for a namespace no `@use` brought in.
+fn setNoNamespaceMessage(ns: []const u8) void {
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "There is no module with namespace \"{s}\".", .{ns}) catch return;
+    error_format.setContextMessage(msg);
+}
+
+/// The same error raised when the code runs, inside a callable.
+fn appendNoNamespaceErrorExpr(ctx: *Ctx, ns: []const u8, span: Span) !ExprIndex {
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "There is no module with namespace \"{s}\".", .{ns}) catch return appendSassErrorExpr(ctx, span);
+    const msg_id = try ctx.pool.intern(msg);
+    return try appendExpr(ctx.prog, ctx.a, .{ .kind = .sass_error, .payload = @backingInt(msg_id), .span = span });
+}
+
 fn appendSassErrorExpr(ctx: *Ctx, span: Span) !ExprIndex {
     return try appendExpr(ctx.prog, ctx.a, .{
         .kind = .sass_error,
@@ -3189,7 +3206,10 @@ fn ensureMetaModuleLoadedForIntrospection(
     }
     const module_name = exprLiteralStringText(ctx, arg_exprs[0]) orelse return;
     if (lookupUseBindingInsensitive(&ctx.prog.use_map, module_name) != null) return;
-    return error.Unsupported;
+    // A callable's call is checked when it runs, as the official CLI does.
+    if (ctx.in_callable and !ctx.resolving_callable_default) return;
+    setNoNamespaceMessage(module_name);
+    return error.SassError;
 }
 
 /// Pull the module named by a literal `meta.load()` URL into the bundle so
@@ -3444,7 +3464,8 @@ fn resolveExprNamespacedVar(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, spa
     const ns = ctx.pool.get(ns_id);
     const lazy_callable_error = ctx.in_callable and !ctx.resolving_callable_default;
     const binding = lookupUseBindingInContext(ctx, ns) orelse {
-        if (lazy_callable_error) return try appendSassErrorExpr(ctx, span);
+        if (lazy_callable_error) return try appendNoNamespaceErrorExpr(ctx, ns, span);
+        setNoNamespaceMessage(ns);
         return error.UnknownVar;
     };
     switch (binding) {
@@ -4091,9 +4112,13 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
     if (ns_id != .none) {
         const ns_str = ctx.pool.get(ns_id);
         const binding = lookupUseBindingInContext(ctx, ns_str) orelse {
+            // A private member is reported as such first.
+            const private = name_slice.len > 0 and (name_slice[0] == '-' or name_slice[0] == '_');
             if (ctx.in_callable and !ctx.resolving_callable_default) {
-                return try appendSassErrorExpr(ctx, span);
+                if (private) return try appendSassErrorExpr(ctx, span);
+                return try appendNoNamespaceErrorExpr(ctx, ns_str, span);
             }
+            if (private) error_format.setContextMessage(private_member_message) else setNoNamespaceMessage(ns_str);
             return error.UnknownFunctionNsMissing;
         };
         switch (binding) {
@@ -9233,7 +9258,10 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
         const prop_id: InternId = @fromBackingInt(@intCast(prop_ast.payload));
         const raw_prop = ctx.pool.get(prop_id);
         if (parseNamespacedVariableAssign(raw_prop)) |namespaced| {
-            const binding = lookupUseBindingInContext(ctx, namespaced.ns) orelse return error.UnknownVar;
+            const binding = lookupUseBindingInContext(ctx, namespaced.ns) orelse {
+                setNoNamespaceMessage(namespaced.ns);
+                return error.UnknownVar;
+            };
             switch (binding) {
                 .builtin_module => return error.UnknownVar,
                 .user_module => |mid| {
@@ -10320,7 +10348,13 @@ fn resolveIncludeStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex 
     var mid: MixinId = undefined;
     if (namespace_id != .none) {
         const ns = ctx.pool.get(namespace_id);
-        const binding = lookupUseBindingInContext(ctx, ns) orelse return error.UnknownMixin;
+        const binding = lookupUseBindingInContext(ctx, ns) orelse {
+            // A private member is reported as such first.
+            if (name_slice.len > 0 and (name_slice[0] == '-' or name_slice[0] == '_')) {
+                error_format.setContextMessage(private_member_message);
+            } else setNoNamespaceMessage(ns);
+            return error.UnknownMixin;
+        };
         switch (binding) {
             .builtin_module => |mod_name| {
                 const bid = builtin_mod.resolveMixin(mod_name, name_slice) orelse return error.UnknownMixin;
