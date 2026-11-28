@@ -2646,6 +2646,7 @@ fn appendExpr(prog: *ResolvedProgram, alloc: std.mem.Allocator, re: ResolvedExpr
 
 const private_member_message = "Private members can't be accessed from outside their modules.";
 const ambiguous_star_var_message = "This variable is available from multiple global modules.";
+const plain_css_interpolation_message = "Interpolation isn't allowed in plain CSS.";
 
 /// The official CLI's error for a namespace no `@use` brought in.
 fn setNoNamespaceMessage(ns: []const u8) void {
@@ -9127,6 +9128,7 @@ fn resolvePlainCssDeclarationStmtFast(
     if (std.mem.indexOf(u8, raw_prop, "#{") != null or
         std.mem.indexOf(u8, raw_val, "#{") != null)
     {
+        error_format.setContextMessage(plain_css_interpolation_message);
         return error.SassError;
     }
 
@@ -9238,6 +9240,7 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
         if (std.mem.indexOf(u8, raw_prop, "#{") != null or
             std.mem.indexOf(u8, raw_val, "#{") != null)
         {
+            error_format.setContextMessage(plain_css_interpolation_message);
             return error.SassError;
         }
         const trimmed_prop = std.mem.trim(u8, raw_prop, " \t\r\n");
@@ -9895,7 +9898,10 @@ fn resolveStmtRecorded(ctx: *Ctx, n: ast_flat.AstNode, span: Span) ResolveError!
     }
     if (in_plain_css_module) {
         switch (n.tag) {
-            .stmt_variable_decl,
+            .stmt_variable_decl => {
+                error_format.setContextMessage("Sass variables aren't allowed in plain CSS.");
+                return error.SassError;
+            },
             .stmt_use,
             .stmt_forward,
             .stmt_return,
@@ -9912,13 +9918,17 @@ fn resolveStmtRecorded(ctx: *Ctx, n: ast_flat.AstNode, span: Span) ResolveError!
             .stmt_at_root,
             .stmt_content,
             .stmt_extend,
-            => return error.SassError,
+            => {
+                error_format.setContextMessage("This at-rule isn't allowed in plain CSS.");
+                return error.SassError;
+            },
             .stmt_comment => {
                 const start: usize = @min(ctx.ast.source.len, @as(usize, span.start));
                 const end: usize = @min(ctx.ast.source.len, @as(usize, span.end));
                 if (end > start) {
                     const raw = ctx.ast.source[start..end];
                     if (std.mem.startsWith(u8, std.mem.trimStart(u8, raw, " \t\r\n"), "//")) {
+                        error_format.setContextMessage("Silent comments aren't allowed in plain CSS.");
                         return error.SassError;
                     }
                 }
