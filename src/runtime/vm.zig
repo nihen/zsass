@@ -936,7 +936,7 @@ pub const VM = struct {
                 var prev_i: usize = 0;
                 while (prev_i < key_i) : (prev_i += 2) {
                     if (valueEq(self.intern_pool, &self.number_pool, &self.list_meta_pool, &self.string_flags_pool, &self.callable_payload_pool, self.allocator, self.color_pool, &self.list_pool, items[prev_i], items[key_i])) {
-                        return error.SassError;
+                        return duplicateMapKey();
                     }
                 }
             }
@@ -954,11 +954,11 @@ pub const VM = struct {
         while (key_i + 1 < items.len) : (key_i += 2) {
             const key = items[key_i];
             if (plainMapKeyBytes(self.intern_pool, key)) |raw| {
-                if (plain_seen.contains(raw)) return error.SassError;
+                if (plain_seen.contains(raw)) return duplicateMapKey();
                 try self.chargeKeyComparisons(special_seen.items.len);
                 for (special_seen.items) |prev| {
                     if (valueEq(self.intern_pool, &self.number_pool, &self.list_meta_pool, &self.string_flags_pool, &self.callable_payload_pool, self.allocator, self.color_pool, &self.list_pool, prev, key)) {
-                        return error.SassError;
+                        return duplicateMapKey();
                     }
                 }
                 try plain_seen.put(self.allocator, raw, {});
@@ -967,12 +967,16 @@ pub const VM = struct {
                 var prev_i: usize = 0;
                 while (prev_i < key_i) : (prev_i += 2) {
                     if (valueEq(self.intern_pool, &self.number_pool, &self.list_meta_pool, &self.string_flags_pool, &self.callable_payload_pool, self.allocator, self.color_pool, &self.list_pool, items[prev_i], key)) {
-                        return error.SassError;
+                        return duplicateMapKey();
                     }
                 }
                 try special_seen.append(self.allocator, key);
             }
         }
+    }
+    fn duplicateMapKey() VMError {
+        error_format.setContextMessage("Duplicate key.");
+        return error.SassError;
     }
 
     pub fn configureStreamChunkFlush(
@@ -7751,7 +7755,10 @@ pub const VM = struct {
         if (has_pending_content and switch (target) {
             .mixin => !callee.has_content,
             else => false,
-        }) return error.BuiltinUnsupported;
+        }) {
+            error_format.setContextMessage("Mixin doesn't accept a content block.");
+            return error.SassError;
+        }
         const attach_content = switch (target) {
             .mixin => has_pending_content,
             else => false,

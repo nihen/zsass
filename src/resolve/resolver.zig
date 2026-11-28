@@ -9268,7 +9268,14 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
                 return error.UnknownVar;
             };
             switch (binding) {
-                .builtin_module => return error.UnknownVar,
+                .builtin_module => |module_name| {
+                    // A module's own variable may not be set; another is
+                    // undefined.
+                    if (resolveBuiltinModuleVariableNumber(module_name, namespaced.member) != null) {
+                        error_format.setContextMessage("Cannot modify built-in variable.");
+                    }
+                    return error.UnknownVar;
+                },
                 .user_module => |mid| {
                     const loader = try requireModuleLoader(ctx);
                     const ex = try requireModuleExports(loader, mid);
