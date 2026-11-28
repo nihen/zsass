@@ -111,11 +111,44 @@ fn selectorArgStringNamed(ctx: *BuiltinContext, value: Value, comptime param: []
 fn parseSelectorArg(ctx: *BuiltinContext, text: []const u8, comptime param: []const u8) BuiltinError!SelectorList {
     return selector_mod.parse(ctx.allocator, text) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
+        const prefix = if (param.len == 0) "" else "$" ++ param ++ ": ";
         if (err == error.UnexpectedEnd) {
-            error_format.setContextMessage(if (param.len == 0) "expected more input." else "$" ++ param ++ ": expected more input.");
+            error_format.setContextMessage(prefix ++ "expected more input.");
+        } else if (hasInnerParentReference(text)) {
+            error_format.setContextMessage(prefix ++ "\"&\" may only used at the beginning of a compound selector.");
+        } else {
+            error_format.setContextMessage(prefix ++ "expected selector.");
         }
         return error.SassError;
     };
+}
+
+/// Whether a `&` in `text` follows part of a compound selector (`a&`),
+/// outside quoted strings and escapes.
+fn hasInnerParentReference(text: []const u8) bool {
+    var quote: u8 = 0;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (c == '\\') {
+            i += 1;
+            continue;
+        }
+        if (quote != 0) {
+            if (c == quote) quote = 0;
+            continue;
+        }
+        if (c == '"' or c == '\'') {
+            quote = c;
+            continue;
+        }
+        if (c != '&' or i == 0) continue;
+        switch (text[i - 1]) {
+            ' ', '\t', '\n', '\r', ',', '>', '+', '~', '(' => {},
+            else => return true,
+        }
+    }
+    return false;
 }
 
 /// "$extendee: Parent selectors aren't allowed here.", the parameter named
@@ -299,10 +332,6 @@ pub fn selector_append(ctx: *BuiltinContext, args: []const Value) BuiltinError!V
         current.deinit();
         return parentNotAllowed("");
     }
-    if (!selectorAppendBaseIsValid(&current)) {
-        current.deinit();
-        return error.SassError;
-    }
     defer current.deinit();
 
     for (args[1..]) |arg_val| {
@@ -311,7 +340,7 @@ pub fn selector_append(ctx: *BuiltinContext, args: []const Value) BuiltinError!V
         var suffix = try parseSelectorArg(ctx, suffix_str, "");
         defer suffix.deinit();
         if (selector_mod.hasParentReference(&suffix)) return parentNotAllowed("");
-        if (!selectorAppendSuffixIsValid(&suffix)) return error.SassError;
+        try checkAppendable(ctx, &current, &suffix);
         const appended = selector_mod.selectorAppend(ctx.allocator, &current, &suffix) catch return error.SassError;
         current.deinit();
         current = appended;
@@ -702,46 +731,59 @@ fn selectorToCssSingle(
     return selector_mod.toCss(allocator, &list);
 }
 
-fn selectorAppendBaseIsValid(list: *const SelectorList) bool {
-    for (list.selectors.items) |complex| {
-        if (!complexCanAcceptAppendSuffix(&complex)) return false;
-    }
-    return true;
-}
-
-fn selectorAppendSuffixIsValid(list: *const SelectorList) bool {
-    for (list.selectors.items) |complex| {
-        if (complex.components.items.len == 0) return false;
-        if (complex.components.items[0] != .compound) return false;
-
-        const first_compound = complex.components.items[0].compound;
-        if (first_compound.simple_selectors.items.len == 0) return false;
-
-        const first_simple = first_compound.simple_selectors.items[0];
-        switch (first_simple) {
-            .parent, .universal => return false,
-            .type_selector => |name| {
-                if (std.mem.findScalar(u8, name, '|') != null) return false;
-                if (std.mem.eql(u8, name, "*")) return false;
-            },
-            else => {},
+/// Whether `suffix` can be joined to each of `base`'s selectors, with the
+/// official CLI's error when not: a base ending in a combinator, a suffix
+/// starting with one or with `*` or a namespace, and a type selector
+/// joined to a selector that ends in `*` or an attribute.
+fn checkAppendable(ctx: *BuiltinContext, base: *const SelectorList, suffix: *const SelectorList) BuiltinError!void {
+    for (base.selectors.items) |*complex| {
+        const n = complex.components.items.len;
+        if (n == 0 or complex.components.items[n - 1] != .compound) {
+            const css = try selector_mod.complexSelectorToCss(ctx.allocator, complex);
+            defer ctx.allocator.free(css);
+            return reportSelectorError(ctx, "Selector \"{s}\" can't be used as a parent in a compound selector.", .{css});
         }
     }
-    return true;
+    for (suffix.selectors.items) |*complex| {
+        const first_simple: ?SimpleSelector = blk: {
+            if (complex.components.items.len == 0 or complex.components.items[0] != .compound) break :blk null;
+            const simples = complex.components.items[0].compound.simple_selectors.items;
+            break :blk if (simples.len == 0) null else simples[0];
+        };
+        const appendable = if (first_simple) |simple| switch (simple) {
+            .parent, .universal => false,
+            .type_selector => |name| std.mem.findScalar(u8, name, '|') == null and !std.mem.eql(u8, name, "*"),
+            else => true,
+        } else false;
+        if (!appendable) {
+            const suffix_css = try selector_mod.complexSelectorToCss(ctx.allocator, complex);
+            defer ctx.allocator.free(suffix_css);
+            const base_css = try selector_mod.toCss(ctx.allocator, base);
+            defer ctx.allocator.free(base_css);
+            return reportSelectorError(ctx, "Can't append {s} to {s}.", .{ suffix_css, base_css });
+        }
+        if (first_simple.? != .type_selector) continue;
+        for (base.selectors.items) |*base_complex| {
+            const compound = base_complex.components.items[base_complex.components.items.len - 1].compound;
+            const simples = compound.simple_selectors.items;
+            const takes_name = simples.len != 0 and switch (simples[simples.len - 1]) {
+                .universal, .attribute => false,
+                .type_selector => |name| !std.mem.eql(u8, name, "*") and !std.mem.endsWith(u8, name, "|*"),
+                else => true,
+            };
+            if (takes_name) continue;
+            const css = try selector_mod.complexSelectorToCss(ctx.allocator, base_complex);
+            defer ctx.allocator.free(css);
+            return reportSelectorError(ctx, "Selector \"{s}\" can't have a suffix", .{css});
+        }
+    }
 }
 
-fn complexCanAcceptAppendSuffix(complex: *const ComplexSelector) bool {
-    const idx = getLastCompoundIdxStatic(complex) orelse return false;
-    if (idx + 1 != complex.components.items.len) return false;
-    const compound = complex.components.items[idx].compound;
-    if (compound.simple_selectors.items.len == 0) return false;
-
-    const last_simple = compound.simple_selectors.items[compound.simple_selectors.items.len - 1];
-    return switch (last_simple) {
-        .universal => false,
-        .type_selector => |name| !std.mem.eql(u8, name, "*") and !std.mem.endsWith(u8, name, "|*"),
-        else => true,
-    };
+fn reportSelectorError(ctx: *BuiltinContext, comptime fmt: []const u8, args: anytype) BuiltinError {
+    const msg = std.fmt.allocPrint(ctx.allocator, fmt, args) catch return error.OutOfMemory;
+    defer ctx.allocator.free(msg);
+    error_format.setContextMessage(msg);
+    return error.SassError;
 }
 
 fn getLastCompoundIdxStatic(complex: *const ComplexSelector) ?usize {
