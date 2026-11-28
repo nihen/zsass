@@ -163,6 +163,8 @@ pub fn sassFunctionForCssMathGlobal(id: Id) Id {
 pub const global_hwb_id: Id = 191;
 /// Checks that a value a calculation is given can be used in one.
 pub const calc_value_check_id: Id = 192;
+/// Checks a `@for` bound: one argument is `from`, two are `from` and `to`.
+pub const for_bound_check_id: Id = 202;
 /// sass:color's stand-ins for the global color functions it lacks, which
 /// take their arguments and then say so: 193 through 201.
 pub const not_in_color_module_first_id: Id = 193;
@@ -877,6 +879,7 @@ pub fn dispatch(ctx: *BuiltinContext, id: Id, args: []const Value, arg_names: []
         91 => color.color_hwb(ctx, args, arg_names),
         global_hwb_id => color.global_hwb(ctx, args, arg_names),
         calc_value_check_id => math.calcValueCheck(ctx, args),
+        for_bound_check_id => math.forBoundCheck(ctx, args),
         193...201 => color.notInColorModule(ctx, args, arg_names, not_in_color_module_names[id - not_in_color_module_first_id]),
         60 => list.list_append(ctx, args, arg_names),
         61 => list.list_index(ctx, args, arg_names),

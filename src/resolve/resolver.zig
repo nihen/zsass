@@ -4411,6 +4411,20 @@ fn calcValueNeedsCheck(ast: *const ast_flat.Ast, n: ast_flat.AstNode) bool {
     };
 }
 
+fn wrapForBoundCheck(ctx: *Ctx, args: []const ExprIndex, span: Span) ResolveError!ExprIndex {
+    const arg_names = [_]InternId{ .none, .none };
+    const astart = try appendCallArgsWithNames(ctx.prog, ctx.a, args, arg_names[0..args.len]);
+    const bidx: u32 = @intCast(ctx.prog.builtin_calls.items.len);
+    try ctx.prog.builtin_calls.append(ctx.a, .{
+        .builtin_id = builtin_mod.for_bound_check_id,
+        .arg_start = astart,
+        .arg_count = @intCast(args.len),
+        .span_start = span.start,
+        .span_end = span.end,
+    });
+    return try appendExpr(ctx.prog, ctx.a, .{ .kind = .builtin_call, .payload = bidx, .span = span });
+}
+
 fn wrapCalcValueCheck(ctx: *Ctx, inner: ExprIndex, span: Span) ResolveError!ExprIndex {
     const astart = try appendCallArgsWithNames(ctx.prog, ctx.a, &.{inner}, &.{.none});
     const bidx: u32 = @intCast(ctx.prog.builtin_calls.items.len);
@@ -5237,12 +5251,6 @@ fn resolveCalcArgBinaryInterp(
     return try appendInterpExprResolved(ctx, &parts, span, false);
 }
 
-fn numberIsIntegral(v: f64) bool {
-    if (!std.math.isFinite(v)) return false;
-    const rounded = @round(v);
-    return std.math.approxEqAbs(f64, v, rounded, 1e-9);
-}
-
 fn comparableUnitInfo(unit: []const u8) ?struct { family: enum { length, angle, time, frequency, resolution }, factor: f64 } {
     // Length
     if (std.mem.eql(u8, unit, "px")) return .{ .family = .length, .factor = 1.0 };
@@ -5272,22 +5280,6 @@ fn comparableUnitInfo(unit: []const u8) ?struct { family: enum { length, angle, 
     if (std.mem.eql(u8, unit, "dpi")) return .{ .family = .resolution, .factor = 1.0 / 96.0 };
     if (std.mem.eql(u8, unit, "dpcm")) return .{ .family = .resolution, .factor = 2.54 / 96.0 };
     return null;
-}
-
-fn validateStaticForBounds(ctx: *Ctx, from_n: NodeIndex, to_n: NodeIndex) ResolveError!void {
-    const from = extractStaticNumberInfo(ctx.ast, from_n) orelse return;
-    const to = extractStaticNumberInfo(ctx.ast, to_n) orelse return;
-
-    if (!numberIsIntegral(from.value) or !numberIsIntegral(to.value)) {
-        return error.Unsupported;
-    }
-
-    if (from.unit_id == .none or to.unit_id == .none or from.unit_id == to.unit_id) return;
-    const from_info = comparableUnitInfo(ctx.pool.get(from.unit_id)) orelse return error.Unsupported;
-    const to_info = comparableUnitInfo(ctx.pool.get(to.unit_id)) orelse return error.Unsupported;
-    if (from_info.family != to_info.family) return error.Unsupported;
-    const to_in_from = to.value * to_info.factor / from_info.factor;
-    if (!numberIsIntegral(to_in_from)) return error.Unsupported;
 }
 
 fn isSlashListExpr(prog: *const ResolvedProgram, expr: ExprIndex) bool {
@@ -10012,7 +10004,6 @@ fn resolveForStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
     const to_n: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off + 2)));
     const body_ex = ctx.ast.getExtraU32(off + 3);
     const through = (n.flags & 1) == 0;
-    try validateStaticForBounds(ctx, from_n, to_n);
     try ctx.pushScope(ctx.a);
     errdefer ctx.popScope(ctx.a);
     ctx.currentScopeFlags().is_flow_control = true;
@@ -10024,8 +10015,11 @@ fn resolveForStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
     const cursor_slot = try ctx.declareLocal(try ctx.pool.intern("__zsass_for_cursor"));
     const to_slot = try ctx.declareLocal(try ctx.pool.intern("__zsass_for_to"));
     const step_slot = try ctx.declareLocal(try ctx.pool.intern("__zsass_for_step"));
-    const fe = try resolveExpr(ctx.ast, ctx, from_n);
-    const te = try resolveExpr(ctx.ast, ctx, to_n);
+    // The bounds are checked as the loop starts: `to` with `from`, which
+    // is in the cursor by then.
+    const fe = try wrapForBoundCheck(ctx, &.{try resolveExpr(ctx.ast, ctx, from_n)}, span);
+    const from_ref = try appendExpr(ctx.prog, ctx.a, .{ .kind = .var_ref, .payload = cursor_slot, .span = span });
+    const te = try wrapForBoundCheck(ctx, &.{ from_ref, try resolveExpr(ctx.ast, ctx, to_n) }, span);
     const body = try resolveStmtListInFlowControl(ctx, body_ex);
     const raw_for_body = readChildList(ctx.ast, body_ex);
     var fb_start = body.start;
