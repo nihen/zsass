@@ -184,6 +184,9 @@ fn evalLiteralColor(env: anytype, prog: anytype, payload: u32) Error!Value {
 fn evalBinary(env: anytype, prog: anytype, payload: u32, expr_idx: anytype) Error!Value {
     const b = prog.binary_exprs.items[payload];
     const lhs = try eval(env, prog, b.lhs);
+    // `or` and `and` evaluate their right side only when it decides.
+    if (b.op == .or_op and lhs.isTruthy()) return Value.true_v;
+    if (b.op == .and_op and !lhs.isTruthy()) return Value.false_v;
     const rhs = try eval(env, prog, b.rhs);
     return switch (b.op) {
         .add => try addValues(env, lhs, rhs),
@@ -417,8 +420,6 @@ fn evalBuiltinCall(env: anytype, prog: anytype, payload: u32) Error!Value {
             if (call.span_start != std.math.maxInt(u32)) error_format.recordErrorSpan(call.span_start, call.span_end, 0);
             return error.SassError;
         }
-        // Not evaluated here; the run reports its error, if it is reached.
-        error_format.clearContextMessage();
         return error.NonStaticExpr;
     };
 

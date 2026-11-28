@@ -8301,6 +8301,16 @@ fn resolveCssIfValueExpr(ctx: *Ctx, text: []const u8, span: Span) ResolveError!E
 /// official CLI writes it when parsing: with positional arguments, the CSS
 /// `if()` that replaces it (`if(sass(c): a; else: b)`, without the `else`
 /// when it is `null`).
+const legacy_if_missing_condition = "Missing argument $condition.";
+const legacy_if_missing_if_true = "Missing argument $if-true.";
+
+/// An `if()` default argument whose arguments are missing fails when it is
+/// used; a fatal deprecation it raised stays.
+fn clearLegacyIfArgumentMessage() void {
+    const msg = error_format.currentContextMessage() orelse return;
+    if (std.mem.eql(u8, msg, legacy_if_missing_condition) or std.mem.eql(u8, msg, legacy_if_missing_if_true)) error_format.clearContextMessage();
+}
+
 fn warnLegacyIfFunction(ast: *const ast_flat.Ast, ctx: *Ctx, call_extra: ExtraIndex, arg_count: u32, span: Span) ResolveError!void {
     const loader = ctx.loader orelse return;
     const opts = loader.deprecation_opts orelse return;
@@ -8469,11 +8479,11 @@ fn resolveLegacyIfBuiltinExpr(
     }
 
     if (condition_expr == null) {
-        error_format.setContextMessage("Missing argument $condition.");
+        error_format.setContextMessage(legacy_if_missing_condition);
         return error.SassError;
     }
     if (if_true_expr == null) {
-        error_format.setContextMessage("Missing argument $if-true.");
+        error_format.setContextMessage(legacy_if_missing_if_true);
         return error.SassError;
     }
 
@@ -11038,7 +11048,7 @@ fn resolvePendingCallableDefaults(ctx: *Ctx) ResolveError!void {
                 ) catch |err| switch (err) {
                     // A default that fails is reported when it is used.
                     error.SassError, error.UnknownVar => blk: {
-                        error_format.clearContextMessage();
+                        clearLegacyIfArgumentMessage();
                         break :blk null;
                     },
                     else => return err,
@@ -11060,7 +11070,7 @@ fn resolvePendingCallableDefaults(ctx: *Ctx) ResolveError!void {
                 ) catch |err| switch (err) {
                     // A default that fails is reported when it is used.
                     error.SassError, error.UnknownVar => blk: {
-                        error_format.clearContextMessage();
+                        clearLegacyIfArgumentMessage();
                         break :blk null;
                     },
                     else => return err,
