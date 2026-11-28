@@ -623,6 +623,25 @@ fn notDeclaredDefault() ResolveError {
     return error.SassError;
 }
 
+/// Whether `entries` first name a `!default` variable of a module loaded
+/// before this rule, which `applyUseOrForwardConfig` reports as already
+/// loaded.
+pub fn configuresLoadedModule(
+    self: *ModuleResolver,
+    module_id: u32,
+    entries: []const WithConfigEntry,
+    known_before_count: u32,
+) ResolveError!bool {
+    const ex = try requireModuleExports(self, module_id);
+    for (entries) |entry| {
+        const target = lookupVarTargetGated(&ex.default_vars, entry.name, ex.default_vars_has_mixed_alias_keys) orelse
+            lookupVarTargetGated(&ex.private_default_vars, entry.name, ex.private_default_vars_has_mixed_alias_keys) orelse
+            return false;
+        if (target.module_id < known_before_count and target.module_id >= self.entry_records_baseline) return true;
+    }
+    return false;
+}
+
 pub fn applyUseOrForwardConfig(
     self: *ModuleResolver,
     module_id: u32,

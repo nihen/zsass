@@ -10262,6 +10262,7 @@ const ModuleStmtDeps = struct {
     pub const requireModuleBasePath = resolverRequireModuleBasePath;
     pub const resolveUserModule = resolverResolveUserModule;
     pub const applyUseOrForwardConfig = resolverApplyUseOrForwardConfig;
+    pub const configuresLoadedModule = module_exports.configuresLoadedModule;
     pub const collectImplicitUseConfigEntries = resolverCollectImplicitUseConfigEntries;
     pub const collectImplicitForwardConfigEntries = resolverCollectImplicitForwardConfigEntries;
     pub const applyImplicitImportConfigEntries = resolverApplyImplicitImportConfigEntries;

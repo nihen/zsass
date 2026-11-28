@@ -2631,6 +2631,9 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
             }
             if (c.builtin_id == meta_call_builtin_id) {
                 const control_idx = findMetaControlArgIndex(ctx, c.arg_start, c.arg_count, "function") orelse {
+                    // The arguments are evaluated before the call fails.
+                    var ai: u32 = 0;
+                    while (ai < c.arg_count) : (ai += 1) try compileExpr(ctx, resolved.call_args.items[c.arg_start + ai]);
                     try emitStaticError(ctx, "Missing argument $function.");
                     // The call's value, never reached.
                     const nil_idx = try ctx.cb.addConst(Value.nil_v);
@@ -3891,7 +3894,12 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                     const meta_idx = try addBuiltinCallMeta(ctx, inc.arg_start, inc.arg_count, std.math.maxInt(u32));
                     try ctx.cb.emit(.call_indirect, 1, meta_idx);
                 } else {
-                    const mixin_idx = control_idx orelse return emitStaticError(ctx, "Missing argument $mixin.");
+                    const mixin_idx = control_idx orelse {
+                        // The arguments are evaluated before the include fails.
+                        var ai: u32 = 0;
+                        while (ai < inc.arg_count) : (ai += 1) try compileExpr(ctx, resolved.call_args.items[inc.arg_start + ai]);
+                        return emitStaticError(ctx, "Missing argument $mixin.");
+                    };
                     try compileExpr(ctx, resolved.call_args.items[mixin_idx]);
                     var forwarded: std.ArrayListUnmanaged(u32) = .empty;
                     defer forwarded.deinit(ctx.cb.alloc);

@@ -88,16 +88,6 @@ pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: b
         return try deps.appendNoop(ctx, span);
     }
 
-    // The namespace is taken before the module loads or is configured; a
-    // stylesheet imported twice may @use a module again.
-    if (!as_star and ctx.visiting_imports.items.len == 0) {
-        const ns_key: []const u8 = if (namespace_id != .none)
-            ctx.pool.get(namespace_id)
-        else
-            defaultNamespaceForUse(url);
-        if (lookupUseBinding(&ctx.prog.use_map, ns_key) != null) return reportNamespaceTaken(ns_key);
-    }
-
     const loader = try deps.requireModuleLoader(ctx);
     const module_path = try deps.requireModuleBasePath(ctx);
     const known_before_count: u32 = @intCast(loader.records_ptr.items.len);
@@ -106,6 +96,21 @@ pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: b
     if (config_entries.len > 0) loader.pending_next_config_entries = config_entries;
     defer loader.pending_next_config_entries = saved_pending_config;
     const mid = try deps.resolveUserModule(loader, module_path, url);
+    // A namespace taken is reported once the module is found, before its
+    // configuration is checked unless that configures a module already
+    // loaded. A stylesheet imported twice may @use a module again.
+    if (!as_star and ctx.visiting_imports.items.len == 0) {
+        const ns_key: []const u8 = if (namespace_id != .none)
+            ctx.pool.get(namespace_id)
+        else
+            defaultNamespaceForUse(url);
+        if (lookupUseBinding(&ctx.prog.use_map, ns_key) != null) {
+            if (config_entries.len > 0 and try deps.configuresLoadedModule(loader, mid, config_entries, known_before_count)) {
+                try deps.applyUseOrForwardConfig(loader, mid, config_entries, known_before_count, false);
+            }
+            return reportNamespaceTaken(ns_key);
+        }
+    }
     if (config_entries.len > 0) {
         try deps.applyUseOrForwardConfig(loader, mid, config_entries, known_before_count, false);
     } else if (ctx.visiting_imports.items.len != 0) {

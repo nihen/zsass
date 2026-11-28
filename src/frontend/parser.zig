@@ -8187,7 +8187,11 @@ pub const Parser = struct {
         // text-template path when interpolation is present. This is required
         // for values such as `url(#{$stem}.woff2)`, where normal call-arg
         // parsing rejects the CSS filename suffix after interpolation.
-        return has_interpolation and std.ascii.eqlIgnoreCase(cssFunctionBaseName(name), "url");
+        const base = cssFunctionBaseName(name);
+        // `expression()` and `element()` are special functions, whose
+        // contents are text, in SassScript too.
+        if (std.ascii.eqlIgnoreCase(base, "expression") or std.ascii.eqlIgnoreCase(base, "element")) return true;
+        return has_interpolation and std.ascii.eqlIgnoreCase(base, "url");
     }
 
     fn shouldTreatUrlRawPathAsOpaque(self: *Parser, name: []const u8) bool {
@@ -8196,17 +8200,26 @@ pub const Parser = struct {
         var p = self.pos;
         var paren_depth: i32 = 0;
         var saw_url_path_token = false;
+        // `url(foo.css)` is a URL; `url(math.div(1, 2))` a call.
+        var saw_dot = false;
+        var saw_nested_paren = false;
         while (p < self.tokens.len) : (p += 1) {
             const t = self.tokens[p].tag;
             switch (t) {
-                .lparen => paren_depth += 1,
+                .lparen => {
+                    paren_depth += 1;
+                    if (paren_depth > 1) saw_nested_paren = true;
+                },
                 .rparen => {
                     paren_depth -= 1;
-                    if (paren_depth == 0) return saw_url_path_token;
+                    if (paren_depth == 0) return saw_url_path_token or (saw_dot and !saw_nested_paren);
                 },
                 .dollar_ident, .hash_lbrace => return false,
                 .slash, .colon => {
                     if (paren_depth == 1) saw_url_path_token = true;
+                },
+                .dot => {
+                    if (paren_depth == 1) saw_dot = true;
                 },
                 else => {},
             }
