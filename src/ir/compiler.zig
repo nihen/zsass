@@ -4039,6 +4039,11 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
             try compileExpr(ctx, value_expr);
             try ctx.cb.emit(.emit_error, 0, 0);
         },
+        .static_error => {
+            const msg_idx = try ctx.cb.addConst(Value.string(@fromBackingInt(st.payload), false));
+            try ctx.cb.emit(.load_const, 0, msg_idx);
+            try ctx.cb.emit(.emit_error, 1, 0);
+        },
     }
 }
 
@@ -4100,6 +4105,7 @@ fn stmtSliceCanUseSimpleSourceOrderLowering(resolved: *const ResolvedProgram, bo
             .debug_stmt,
             .warn_stmt,
             .error_stmt,
+            .static_error,
             .module_dep,
             => {},
             .if_chain, .for_loop, .each_loop, .while_loop => return false,
@@ -4245,7 +4251,7 @@ fn compileSourceOrderedBody(
                 // is a reopen and must suppress the top-level fallback blank.
                 state.suppress_blank_on_next_parent_open = true;
             },
-            .assign_var, .noop, .extend, .debug_stmt, .warn_stmt, .error_stmt => {
+            .assign_var, .noop, .extend, .debug_stmt, .warn_stmt, .error_stmt, .static_error => {
                 try compileStmt(ctx, child_si);
             },
             .module_dep => {

@@ -8188,9 +8188,12 @@ pub const Parser = struct {
         // for values such as `url(#{$stem}.woff2)`, where normal call-arg
         // parsing rejects the CSS filename suffix after interpolation.
         const base = cssFunctionBaseName(name);
-        // `expression()` and `element()` are special functions, whose
-        // contents are text, in SassScript too.
+        // `expression()`, `element()`, `type()`, and a vendor-prefixed
+        // `calc()` take their contents as text in SassScript too.
         if (std.ascii.eqlIgnoreCase(base, "expression") or std.ascii.eqlIgnoreCase(base, "element")) return true;
+        const vendor_prefixed = isVendorPrefixedCssFunction(name);
+        if (!vendor_prefixed and std.ascii.eqlIgnoreCase(base, "type")) return true;
+        if (vendor_prefixed and std.ascii.eqlIgnoreCase(base, "calc")) return true;
         return has_interpolation and std.ascii.eqlIgnoreCase(base, "url");
     }
 

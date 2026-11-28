@@ -78,9 +78,9 @@ pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: b
                         if (ctx.visiting_imports.items.len != 0 and std.ascii.eqlIgnoreCase(already, mod_path)) {
                             return try deps.appendNoop(ctx, span);
                         }
-                        return reportNamespaceTaken(ns_key);
+                        return appendNamespaceTaken(ctx, ns_key, span);
                     },
-                    .user_module => return reportNamespaceTaken(ns_key),
+                    .user_module => return appendNamespaceTaken(ctx, ns_key, span),
                 }
             }
             try ctx.prog.use_map.put(ctx.a, ns_key, .{ .builtin_module = mod_path });
@@ -105,10 +105,11 @@ pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: b
         else
             defaultNamespaceForUse(url);
         if (lookupUseBinding(&ctx.prog.use_map, ns_key) != null) {
-            if (config_entries.len > 0 and try deps.configuresLoadedModule(loader, mid, config_entries, known_before_count)) {
+            if (config_entries.len > 0 and try deps.configuresLoadedModule(loader, mid, config_entries, known_before_count, false)) {
                 try deps.applyUseOrForwardConfig(loader, mid, config_entries, known_before_count, false);
             }
-            return reportNamespaceTaken(ns_key);
+            // Reported when this rule runs, after the modules before it.
+            return appendNamespaceTaken(ctx, ns_key, span);
         }
     }
     if (config_entries.len > 0) {
@@ -143,6 +144,20 @@ pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: b
     }
     const rerun_each_call = ctx.visiting_imports.items.len != 0;
     return try appendModuleDep(ctx, mid, span, rerun_each_call, false);
+}
+
+fn appendNamespaceTaken(ctx: anytype, namespace: []const u8, span: Span) ResolveError!StmtIndex {
+    const msg = try std.fmt.allocPrint(ctx.a, "There's already a module with namespace \"{s}\".", .{namespace});
+    defer ctx.a.free(msg);
+    const msg_id = try ctx.pool.intern(msg);
+    const idx: StmtIndex = @intCast(ctx.prog.stmts.items.len);
+    try ctx.prog.stmts.append(ctx.a, .{
+        .kind = .static_error,
+        .payload = @backingInt(msg_id),
+        .span = span,
+        .origin_id = ctx.currentOrigin(),
+    });
+    return idx;
 }
 
 fn reportNamespaceTaken(namespace: []const u8) ResolveError {

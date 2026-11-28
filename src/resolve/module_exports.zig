@@ -623,21 +623,29 @@ fn notDeclaredDefault() ResolveError {
     return error.SassError;
 }
 
-/// Whether `entries` first name a `!default` variable of a module loaded
-/// before this rule, which `applyUseOrForwardConfig` reports as already
-/// loaded.
+/// Whether `entries` name a `!default` variable of a module loaded before
+/// this rule, which `applyUseOrForwardConfig` reports as already loaded
+/// before any variable it does not know.
 pub fn configuresLoadedModule(
     self: *ModuleResolver,
     module_id: u32,
     entries: []const WithConfigEntry,
     known_before_count: u32,
+    allow_same_already_configured: bool,
 ) ResolveError!bool {
     const ex = try requireModuleExports(self, module_id);
     for (entries) |entry| {
         const target = lookupVarTargetGated(&ex.default_vars, entry.name, ex.default_vars_has_mixed_alias_keys) orelse
             lookupVarTargetGated(&ex.private_default_vars, entry.name, ex.private_default_vars_has_mixed_alias_keys) orelse
-            return false;
-        if (target.module_id < known_before_count and target.module_id >= self.entry_records_baseline) return true;
+            continue;
+        if (target.module_id < known_before_count and target.module_id >= self.entry_records_baseline) {
+            if (allow_same_already_configured) {
+                if (loaderExplicitConfigValueForTarget(self, target)) |existing| {
+                    if (configValueEq(self, existing, entry.value)) continue;
+                }
+            }
+            return true;
+        }
     }
     return false;
 }
@@ -650,6 +658,10 @@ pub fn applyUseOrForwardConfig(
     allow_same_already_configured: bool,
 ) ResolveError!void {
     if (entries.len == 0) return;
+    if (try configuresLoadedModule(self, module_id, entries, known_before_count, allow_same_already_configured)) {
+        error_format.setContextMessage("This module was already loaded, so it can't be configured using \"with\".");
+        return error.SassError;
+    }
     const ex = try requireModuleExports(self, module_id);
     for (entries) |entry| {
         if (lookupVoidFlagInsensitive(&ex.ambiguous_default_vars, entry.name)) return error.SassError;
