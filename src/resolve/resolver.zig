@@ -7004,16 +7004,23 @@ fn tokenizeCssIfCondition(alloc: std.mem.Allocator, text: []const u8) ResolveErr
     return tokens;
 }
 
+/// Note the official CLI's message for a malformed CSS `if()` condition,
+/// unless a check nested deeper noted one, and fail.
+fn cssIfFail(comptime message: []const u8) bool {
+    if (error_format.currentContextMessage() == null) error_format.setContextMessage(message);
+    return false;
+}
+
 fn validateCssIfClauseText(alloc: std.mem.Allocator, text: []const u8) ResolveError!bool {
     const trimmed = std.mem.trim(u8, text, " \t\r\n");
-    if (trimmed.len == 0) return false;
-    if (std.ascii.eqlIgnoreCase(trimmed, "else")) return false;
+    if (trimmed.len == 0) return cssIfFail("Expected identifier.");
+    if (std.ascii.eqlIgnoreCase(trimmed, "else")) return cssIfFail("expected \"(\".");
 
     if (trimmed[0] == '(') {
         if (findMatchingParenSimple(trimmed, 0)) |end_idx| {
             if (end_idx == trimmed.len - 1) {
                 const inner = std.mem.trim(u8, trimmed[1..end_idx], " \t\r\n");
-                if (inner.len == 0) return false;
+                if (inner.len == 0) return cssIfFail("Expected identifier.");
                 return try validateCssIfCondition(alloc, inner);
             }
         }
@@ -7050,8 +7057,9 @@ fn validateCssIfClauseText(alloc: std.mem.Allocator, text: []const u8) ResolveEr
                     }
                     break :blk @as(u8, 0);
                 };
-                if (prev == 0 or (!isCssIfIdentChar(prev) and prev != '#' and prev != '}')) {
-                    return false;
+                if (prev == 0) return false;
+                if (!isCssIfIdentChar(prev) and prev != '#' and prev != '}') {
+                    return cssIfFail("expected \":\".");
                 }
             }
             depth += 1;
@@ -7063,7 +7071,16 @@ fn validateCssIfClauseText(alloc: std.mem.Allocator, text: []const u8) ResolveEr
         }
         if (depth == 0 and c == ',') return false;
     }
+    // Two conditions with no operator between them run together only
+    // through an arbitrary substitution.
+    if (hasTopLevelWhitespace(trimmed) and !runsTogetherInCssIf(trimmed)) return cssIfFail("expected \":\".");
     return true;
+}
+
+/// Text whose conditions may run together: an arbitrary substitution or
+/// an interpolation in it.
+fn runsTogetherInCssIf(text: []const u8) bool {
+    return hasTopLevelArbitrarySubstitution(text) or std.mem.indexOf(u8, text, "#{") != null;
 }
 
 fn hasTopLevelWhitespace(text: []const u8) bool {
@@ -7167,24 +7184,96 @@ fn hasTopLevelArbitrarySubstitution(text: []const u8) bool {
     return false;
 }
 
+/// An `and(`, `not(`, or `or(` in a CSS `if()` condition, which needs
+/// whitespace before the parenthesis: the keyword as written, and the
+/// operators before it.
+const GluedCssIfKeyword = struct { word: []const u8, after_clause: bool, prev_op: ?CssIfTokenKind };
+
+fn gluedCssIfKeyword(text: []const u8) ?GluedCssIfKeyword {
+    var depth: i32 = 0;
+    var in_string: u8 = 0;
+    var after_clause = false;
+    var prev_op: ?CssIfTokenKind = null;
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        if (in_string != 0) {
+            if (c == '\\' and i + 1 < text.len) i += 1 else if (c == in_string) in_string = 0;
+            i += 1;
+            continue;
+        }
+        switch (c) {
+            '"', '\'' => in_string = c,
+            '(' => depth += 1,
+            ')' => {
+                if (depth > 0) depth -= 1;
+                if (depth == 0) after_clause = true;
+            },
+            else => {},
+        }
+        if (depth == 0 and std.ascii.isAlphabetic(c) and (i == 0 or !isCssIfIdentChar(text[i - 1]))) {
+            var end = i + 1;
+            while (end < text.len and isCssIfIdentChar(text[end])) : (end += 1) {}
+            if (cssIfKeywordKind(text[i..end])) |kind| {
+                if (kind != .op_else and end < text.len and text[end] == '(') {
+                    return .{ .word = text[i..end], .after_clause = after_clause, .prev_op = prev_op };
+                }
+                if (kind == .op_and or kind == .op_or) prev_op = kind;
+                after_clause = kind == .op_else;
+            } else after_clause = true;
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    return null;
+}
+
+fn reportGluedCssIfKeyword(text: []const u8) void {
+    if (error_format.currentContextMessage() != null) return;
+    const glued = gluedCssIfKeyword(text) orelse return;
+    // After a condition the official CLI names "and" for either operator,
+    // and an `or(` after an `and` is a missing ":"; with an arbitrary
+    // substitution in the condition, or after `not`, it names the keyword.
+    if (glued.after_clause and !hasTopLevelArbitrarySubstitution(text)) {
+        if (glued.prev_op == .op_and and cssIfKeywordKind(glued.word) == .op_or) {
+            error_format.setContextMessage("expected \":\".");
+            return;
+        }
+        error_format.setContextMessage("Whitespace is required between \"and\" and \"(\"");
+        return;
+    }
+    var buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "Whitespace is required between \"{s}\" and \"(\"", .{glued.word}) catch return;
+    error_format.setContextMessage(msg);
+}
+
 fn validateCssIfCondition(alloc: std.mem.Allocator, text: []const u8) ResolveError!bool {
     if (containsSassCondition(text) and hasTopLevelArbitrarySubstitution(text)) {
-        return false;
+        return cssIfFail("if() conditions with arbitrary substitutions may not contain sass() expressions.");
     }
 
-    var tokens = (try tokenizeCssIfCondition(alloc, text)) orelse return false;
+    var tokens = (try tokenizeCssIfCondition(alloc, text)) orelse {
+        reportGluedCssIfKeyword(text);
+        return false;
+    };
     defer tokens.deinit(alloc);
     if (tokens.items.len == 0) return false;
 
     if (tokens.items.len == 1) {
-        if (tokens.items[0].kind != .clause) return false;
+        if (tokens.items[0].kind != .clause) return cssIfFail("expected \"(\".");
         return try validateCssIfClauseText(alloc, tokens.items[0].text);
     }
 
     if (tokens.items[0].kind == .op_not) {
-        if (tokens.items.len != 2 or tokens.items[1].kind != .clause) return false;
+        if (tokens.items[1].kind != .clause) return cssIfFail("expected \"(\".");
+        if (tokens.items.len != 2) {
+            if (!(try validateCssIfClauseText(alloc, tokens.items[1].text))) return false;
+            return cssIfFail("expected \":\".");
+        }
         if (!(try validateCssIfClauseText(alloc, tokens.items[1].text))) return false;
-        return !hasTopLevelWhitespace(tokens.items[1].text);
+        if (hasTopLevelWhitespace(tokens.items[1].text)) return cssIfFail("expected \":\".");
+        return true;
     }
 
     if (tokens.items[0].kind != .clause) return false;
@@ -7193,14 +7282,19 @@ fn validateCssIfCondition(alloc: std.mem.Allocator, text: []const u8) ResolveErr
     while (idx < tokens.items.len) : (idx += 1) {
         const tok = tokens.items[idx];
         if ((idx & 1) == 0) {
-            if (tok.kind != .clause) return false;
+            if (tok.kind != .clause) return cssIfFail("expected \"(\".");
             if (!(try validateCssIfClauseText(alloc, tok.text))) return false;
         } else {
-            if (tok.kind != .op_and and tok.kind != .op_or) return false;
+            if (tok.kind != .op_and and tok.kind != .op_or) {
+                // With an arbitrary substitution the clauses run together,
+                // and the keyword stands where a condition should.
+                if (runsTogetherInCssIf(text)) return cssIfFail("expected \"(\".");
+                return cssIfFail("expected \":\".");
+            }
             if (expected_op == null) {
                 expected_op = tok.kind;
             } else if (expected_op.? != tok.kind) {
-                return false;
+                return cssIfFail("expected \":\".");
             }
         }
     }
@@ -7230,7 +7324,7 @@ fn validateCssIfArguments(alloc: std.mem.Allocator, args: []const u8) ResolveErr
         }
         break;
     }
-    if (trailing_semis > 1) return false;
+    if (trailing_semis > 1) return cssIfFail("Expected identifier.");
     if (trailing_semis == 1) {
         trimmed = std.mem.trim(u8, trimmed[0..end_idx], " \t\r\n");
         if (trimmed.len == 0) return false;
@@ -7265,13 +7359,13 @@ fn validateCssIfArguments(alloc: std.mem.Allocator, args: []const u8) ResolveErr
             if (depth > 0) depth -= 1;
             continue;
         }
-        if (depth == 0 and c == ',') return false;
+        if (depth == 0 and c == ',') return cssIfFail("expected \")\".");
         if (depth == 0 and c == ';') {
             const seg = std.mem.trim(u8, trimmed[start_idx..i], " \t\r\n");
             if (seg.len == 0) {
                 saw_empty = true;
             } else {
-                if (saw_empty) return false;
+                if (saw_empty) return cssIfFail("Expected identifier.");
                 const clause = parseCssIfClause(seg);
                 if (clause.is_else) {
                     saw_else = true;
@@ -7289,7 +7383,7 @@ fn validateCssIfArguments(alloc: std.mem.Allocator, args: []const u8) ResolveErr
     if (last.len == 0) {
         return !saw_empty and saw_clause;
     }
-    if (saw_empty) return false;
+    if (saw_empty) return cssIfFail("Expected identifier.");
 
     const clause = parseCssIfClause(last);
     if (clause.is_else) {
