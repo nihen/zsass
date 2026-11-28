@@ -1028,6 +1028,13 @@ pub fn runLoadCssModule(self: anytype, resolved_path: []const u8, config: LoadCs
 
     var child_vm = try self.initLoadCssChildVM(&child_program, is_plain_css_source, parent_selector != null);
     defer child_vm.deinit();
+    // A long @error message the module raised is the parent's to print.
+    defer if (child_vm.error_message_full) |m| {
+        if (self.allocator.dupe(u8, m)) |copy| {
+            if (self.error_message_full) |old| self.allocator.free(old);
+            self.error_message_full = copy;
+        } else |_| {}
+    };
     defer self.deprecation_opts.takeWarningState(&child_vm.deprecation_opts);
     // A warning in the module shows its source and, below it, the trace
     // that reached `meta.load-css()`.

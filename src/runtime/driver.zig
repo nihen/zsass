@@ -438,6 +438,34 @@ fn buildVmErrorTrace(
     return true;
 }
 
+/// The excerpt frame of a trace, when it is a call in another file than
+/// the error (an @error in a content block an @include there passed), gets
+/// that file's line.
+fn fillSnippetFrameSource(
+    allocator: std.mem.Allocator,
+    program_ptr: *compiler_mod.Program,
+    entry_source: []const u8,
+    entry_path: []const u8,
+    call_sites: []const vm_mod.VM.CallSite,
+) void {
+    const from_end = error_format.error_state.snippet_frame_from_end;
+    const len = error_format.error_state.error_stack_snapshot_len;
+    // Each call has its frame, then the error's.
+    if (from_end == 0 or len != call_sites.len + 1 or from_end >= len) return;
+    const idx = len - 1 - from_end;
+    const frame = &error_format.error_state.error_stack_snapshot[idx];
+    if (frame.line_text_len != 0) return;
+    const site = call_sites[idx];
+    const site_ctx: error_format.ErrorContext = .{ .has_value = true, .file_id = site.module_id, .span_start = site.span_start, .span_end = site.span_end };
+    const info = resolveFrameInfoEx(allocator, program_ptr, site_ctx, entry_source, entry_path, site.module_id == program_ptr.root_index);
+    defer if (info.source_owned) |src| allocator.free(src);
+    const src = info.source orelse return;
+    const text = extractLineInline(src, frame.line_no - 1);
+    const t_len = @min(text.len, frame.line_text_buf.len);
+    @memcpy(frame.line_text_buf[0..t_len], text[0..t_len]);
+    frame.line_text_len = t_len;
+}
+
 /// A trace line's name: `f()` for a function and `m()` for a mixin, as Sass
 /// writes them.
 fn formatCallLabel(ref: vm_mod.ChunkRef, name: []const u8, buf: []u8) []const u8 {
@@ -2839,7 +2867,14 @@ fn runEnd2EndWithBudget(
             // An @error is reported at the call to the function or mixin
             // it is in, which the trace then leaves out; one in a content
             // block shows the @include that passed the block.
-            if (in_content_block and call_count > 1) error_format.error_state.snippet_frame_from_end = 1;
+            if (in_content_block and call_count > 1) {
+                // Past each @content that forwarded the block, to the call
+                // of the mixin that ran it.
+                var from_end: usize = 1;
+                var i = call_count - 1;
+                while (i > 0 and call_sites[i].chunk == .content) : (i -= 1) from_end += 1;
+                if (from_end < call_count) error_format.error_state.snippet_frame_from_end = from_end;
+            }
             const site = call_sites[call_count - 1];
             ctx.file_id = site.module_id;
             ctx.span_start = site.span_start;
@@ -2884,6 +2919,7 @@ fn runEnd2EndWithBudget(
         } else if (frame_info.has_frame and (call_count > 0 or !file_id_is_entry) and
             buildVmErrorTrace(program_ptr, frame_info.source.?, frame_info.path, ctx.span_start, ctx.span_end, module_path, call_sites[0..call_count], inner_ref, inner_name))
         {
+            fillSnippetFrameSource(diag_alloc, program_ptr, source, module_path, call_sites[0..call_count]);
             error_format.writeStackTrace(diag_alloc) catch {
                 error_format.writeSourceFrame(frame_info.source.?, frame_info.line_starts.?, ctx.span_start, ctx.span_end, frame_info.path);
             };
