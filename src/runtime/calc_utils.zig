@@ -1122,6 +1122,13 @@ fn normalizeCalcOperatorSpacing(allocator: std.mem.Allocator, expr: []const u8) 
                 break;
             }
             if (c == '*' or c == '/') is_binary = true;
+            // A sign after whitespace and before a value is that value's,
+            // as in `a -1`: the text is written as it is.
+            if ((c == '+' or c == '-') and i > 0 and std.ascii.isWhitespace(expr[i - 1]) and
+                i + 1 < expr.len and !std.ascii.isWhitespace(expr[i + 1]))
+            {
+                is_binary = false;
+            }
             if (is_binary) {
                 var peek = i + 1;
                 while (peek < expr.len and std.ascii.isWhitespace(expr[peek])) peek += 1;

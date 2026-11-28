@@ -4233,7 +4233,11 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
             .span = span,
         });
     } else {
-        if (if (calc_passthrough) null else globalBuiltinForCall(ast, name_slice, off, arg_count)) |bid| {
+        // min(), max(), round(), and abs() are the Sass functions when their
+        // arguments are no calculation; they warn as such.
+        const sass_fallback = is_calculation_call and isCssCalculationFunctionName(name_slice) and
+            !isStrictCalculationFunctionName(name_slice) and calculationArgsHaveIssue(ast, ctx, off, arg_count);
+        if (if (calc_passthrough) null else globalBuiltinForCall(name_slice, sass_fallback)) |bid| {
             if (try tryFoldMetaBuiltinExists(ctx, bid, arg_buf.items, arg_name_buf.items, span)) |folded| {
                 return folded;
             }
@@ -4253,7 +4257,12 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
                 .prebound_accepts_content = prebound.accepts_content,
                 .prebound_capture_callers_locals = prebound.captures_callers_locals,
                 .prebound_name = prebound.name,
+                // abs() with a rest argument is no calculation, so text it
+                // is given is not passed on as CSS.
                 .global_name = try ctx.pool.intern(name_slice),
+                .calculation = is_calculation_call and isCssCalculationFunctionName(name_slice) and
+                    !isStrictCalculationFunctionName(name_slice) and !sass_fallback,
+                .sass_function = sass_fallback,
             });
             return try appendExpr(ctx.prog, ctx.a, .{
                 .kind = .builtin_call,
@@ -4790,16 +4799,10 @@ fn isCalcMathOperand(ast: *const ast_flat.Ast, n: ast_flat.AstNode) bool {
     };
 }
 
-/// The built-in a global call resolves to. round() with a rest argument is
-/// no calculation, so it is the Sass function, which takes one argument.
-fn globalBuiltinForCall(ast: *const ast_flat.Ast, name: []const u8, call_extra: ExtraIndex, arg_count: u32) ?builtin_mod.Id {
-    if (identifierEq(name, "round")) {
-        const arg_nodes_start: ExtraIndex = call_extra + 3;
-        for (0..arg_count) |i| {
-            const node: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start + @as(u32, @intCast(i)))));
-            if (ast.getNode(node).tag == .expr_splat) return builtin_mod.resolve("math", "round");
-        }
-    }
+/// The built-in a global call resolves to. round() whose arguments are no
+/// calculation is the Sass function, which takes one argument.
+fn globalBuiltinForCall(name: []const u8, sass_fallback: bool) ?builtin_mod.Id {
+    if (identifierEq(name, "round") and sass_fallback) return builtin_mod.resolve("math", "round");
     return builtin_mod.resolveLegacyGlobal(name);
 }
 

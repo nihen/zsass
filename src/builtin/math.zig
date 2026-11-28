@@ -521,6 +521,22 @@ fn isIdentifierText(ctx: *BuiltinContext, arg: Value) bool {
     return raw.len > 0 and std.mem.indexOfAny(u8, raw, " \t\n+*/()") == null and !std.ascii.isDigit(raw[0]);
 }
 
+/// The global min() or max() given a value that is no number: the Sass
+/// function names none of its parameters ("\"a\" is not a number.").
+fn reportMinMaxNonNumber(ctx: *BuiltinContext, args: []const Value) BuiltinError {
+    if (error_format.currentContextMessage() != null) return error.BuiltinType;
+    for (args) |arg| {
+        if (arg.kind() == .number) continue;
+        const text = shared.valueToInspectionString(ctx, arg) catch return error.BuiltinType;
+        defer ctx.allocator.free(text);
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{s} is not a number.", .{text}) catch return error.BuiltinType;
+        error_format.setContextMessage(msg);
+        break;
+    }
+    return error.BuiltinType;
+}
+
 /// Whether min() or max() called by its global name is left to the browser:
 /// one of its values is unquoted text.
 fn anyCssMathPassthrough(ctx: *BuiltinContext, args: []const Value) bool {
@@ -2291,6 +2307,7 @@ pub fn math_min(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     if (anyCssMathPassthrough(ctx, args)) return buildCssMathCall(ctx, "min", args);
     return minmaxVariadic(ctx, args, true, "min") catch |err| switch (err) {
         error.BuiltinArity => error.SassError,
+        error.BuiltinType => reportMinMaxNonNumber(ctx, args),
         else => err,
     };
 }
@@ -2300,6 +2317,7 @@ pub fn math_max(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     if (anyCssMathPassthrough(ctx, args)) return buildCssMathCall(ctx, "max", args);
     return minmaxVariadic(ctx, args, false, "max") catch |err| switch (err) {
         error.BuiltinArity => error.SassError,
+        error.BuiltinType => reportMinMaxNonNumber(ctx, args),
         else => err,
     };
 }

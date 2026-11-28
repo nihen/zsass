@@ -10,6 +10,7 @@ pub const Row = struct {
 
 // zig fmt: off
 pub const rows = [_]Row{
+    .{ .name = "abs", .replacement = "math.abs" },
     .{ .name = "adjust-color", .replacement = "color.adjust" },
     .{ .name = "adjust-hue", .replacement = "color.adjust" },
     .{ .name = "alpha", .replacement = "color.alpha" },
@@ -50,6 +51,8 @@ pub const rows = [_]Row{
     .{ .name = "map-merge", .replacement = "map.merge" },
     .{ .name = "map-remove", .replacement = "map.remove" },
     .{ .name = "map-values", .replacement = "map.values" },
+    .{ .name = "max", .replacement = "math.max" },
+    .{ .name = "min", .replacement = "math.min" },
     .{ .name = "mix", .replacement = "color.mix" },
     .{ .name = "mixin-exists", .replacement = "meta.mixin-exists" },
     .{ .name = "nth", .replacement = "list.nth" },
@@ -59,6 +62,7 @@ pub const rows = [_]Row{
     .{ .name = "quote", .replacement = "string.quote" },
     .{ .name = "random", .replacement = "math.random" },
     .{ .name = "red", .replacement = "color.red" },
+    .{ .name = "round", .replacement = "math.round" },
     .{ .name = "saturate", .replacement = "color.adjust" },
     .{ .name = "saturation", .replacement = "color.saturation" },
     .{ .name = "scale-color", .replacement = "color.scale" },

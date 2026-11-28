@@ -4167,7 +4167,7 @@ pub const VM = struct {
         self.current_builtin_call_name = if (meta.global_replacement != 0) builtin_mod.globalBuiltinName(meta.global_replacement) else "";
         defer self.current_builtin_call_name = saved_call_name;
         const saved_global_call = self.current_builtin_global_call;
-        self.current_builtin_global_call = meta.global_call;
+        self.current_builtin_global_call = meta.global_call and !meta.sass_function;
         defer self.current_builtin_global_call = saved_global_call;
         const prev_slot_hint = self.current_builtin_local_slot_hint;
         self.current_builtin_local_slot_hint = meta.local_slot_hint;
@@ -6671,6 +6671,13 @@ pub const VM = struct {
         for (filter_names) |filter| {
             if (std.mem.eql(u8, name, filter) and (args.len == 0 or !self.isColorArgument(args[0]))) return;
         }
+        // abs() warns for a number only, and a percentage has its own
+        // deprecation instead.
+        if (std.mem.eql(u8, name, "abs")) {
+            if (args.len != 1 or args[0].kind() != .number) return;
+            const unit = args[0].unitId(&self.number_pool);
+            if (unit != .none and std.mem.eql(u8, self.intern_pool.get(unit), "%")) return;
+        }
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "Global built-in functions are deprecated and will be removed in Dart Sass 3.0.0.\nUse {s} instead.\n\nMore info and automated migrator: https://sass-lang.com/d/import", .{replacement}) catch return;
         const site = vm_dispatch.builtinCallSiteOf(self) orelse return;
@@ -8215,6 +8222,9 @@ pub const VM = struct {
                 if (std.mem.indexOf(u8, t, "var(") != null or std.mem.indexOf(u8, t, "env(") != null) {
                     saw_special_text = true;
                 }
+                // An identifier or a call of a function that is no
+                // calculation is text the browser reads: calc(a b).
+                if (calcTextIsOpaqueIdentifier(t)) saw_special_text = true;
                 const head = t[0];
                 const tail = t[t.len - 1];
                 if (head == '+' or head == '-' or head == '*' or head == '/' or
@@ -8227,6 +8237,25 @@ pub const VM = struct {
             }
         }
         return saw_special_text;
+    }
+
+    fn calcTextIsOpaqueIdentifier(t: []const u8) bool {
+        const start: usize = if (t[0] == '-' and t.len > 1) 1 else 0;
+        if (!std.ascii.isAlphabetic(t[start]) and t[start] != '_') return false;
+        const constants = [_][]const u8{ "pi", "e", "infinity", "-infinity", "nan" };
+        for (constants) |c| {
+            if (std.ascii.eqlIgnoreCase(t, c)) return false;
+        }
+        if (color_mod.lookupNamedColor(t) != null) return false;
+        // A calculation function's own call is a calculation.
+        const name_end = std.mem.indexOfScalar(u8, t, '(') orelse t.len;
+        const math_fns = [_][]const u8{ "calc", "min", "max", "clamp", "round", "abs", "sign", "sqrt", "pow", "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "mod", "rem", "exp", "log", "hypot" };
+        if (name_end < t.len) {
+            for (math_fns) |f| {
+                if (std.ascii.eqlIgnoreCase(t[0..name_end], f)) return false;
+            }
+        }
+        return true;
     }
 
     fn renderCalcCallableArgText(self: *VM, arg: Value) VMError![]const u8 {
@@ -8303,7 +8332,9 @@ pub const VM = struct {
         const trimmed = std.mem.trim(u8, raw, " \t\r\n");
         if (trimmed.len == 0) return error.SassError;
         if (self.hasTopLevelCommaInCalcText(trimmed)) return error.SassError;
-        if (calc_utils.calcHasBadWhitespace(trimmed)) return error.SassError;
+        // Text the browser reads keeps its signs as written: calc(a -1).
+        const opaque_list = self.calcSpaceListNeedsPassthrough(source_arg);
+        if (!opaque_list and calc_utils.calcHasBadWhitespace(trimmed)) return error.SassError;
         if (calcTextHasComplexNestedCalcAddend(trimmed)) return error.SassError;
         // Values substituted for variables are numbers like any other; text
         // that came from interpolation is not checked.
@@ -8317,7 +8348,7 @@ pub const VM = struct {
             source_arg.kind() == .string and
             hasOuterWrappingParensVm(trimmed) and
             std.mem.indexOfAny(u8, trimmed, "+-*/") != null;
-        const list_passthrough = self.calcSpaceListNeedsPassthrough(source_arg);
+        const list_passthrough = opaque_list;
         const needs_passthrough =
             source_interp_marked or has_special_var_call or marked_outer_parens or string_outer_parens_with_op or list_passthrough;
         if (needs_passthrough) {
@@ -8328,6 +8359,9 @@ pub const VM = struct {
             }
             var normalized = if (source_interp_marked)
                 try calc_utils.flattenNestedCalc(self.allocator, trimmed)
+            else if (list_passthrough)
+                // The values of a space-separated list are written as they are.
+                try dupeRuntimeMaybeAliased(self.allocator, trimmed)
             else
                 try self.normalizeCalcPassthroughInner(trimmed);
             var normalized_owned = !source_interp_marked or !calc_utils.sameSliceStorage(normalized, trimmed);
