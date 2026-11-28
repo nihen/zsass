@@ -1188,6 +1188,19 @@ pub const Parser = struct {
         });
     }
 
+    /// `ns.$name`, a member variable of another module.
+    fn isNamespacedVariableName(text: []const u8) bool {
+        const dot = std.mem.findScalar(u8, text, '.') orelse return false;
+        if (dot == 0 or dot + 2 > text.len or text[dot + 1] != '$') return false;
+        for (text[0..dot]) |c| {
+            if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c >= 0x80)) return false;
+        }
+        for (text[dot + 2 ..]) |c| {
+            if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c >= 0x80)) return false;
+        }
+        return true;
+    }
+
     /// Parse a declaration: `property: value [!important] [;]`.
     ///
     /// The property name is captured as a raw source slice so that
@@ -1359,6 +1372,30 @@ pub const Parser = struct {
         }
 
         var end_pos: u32 = ast.getNode(value_node).span_end;
+        // `ns.$a: b !default` assigns another module's variable, which takes
+        // a variable's flags.
+        var is_default = false;
+        var is_global = false;
+        if (isNamespacedVariableName(prop_text)) {
+            while (true) {
+                self.skipWhitespaceAndComments();
+                if (self.isAtEnd() or self.current().tag != .bang) break;
+                const saved = self.pos;
+                self.advance();
+                self.skipWhitespaceAndComments();
+                if (!self.isAtEnd() and self.current().tag == .ident) {
+                    const text = self.current().slice(self.source);
+                    if (identEqlUnescaped(text, "default") or identEqlUnescaped(text, "global")) {
+                        if (identEqlUnescaped(text, "default")) is_default = true else is_global = true;
+                        end_pos = self.current().span.end;
+                        self.advance();
+                        continue;
+                    }
+                }
+                self.pos = saved;
+                break;
+            }
+        }
         self.skipWhitespaceAndComments();
         if (!self.isAtEnd() and self.current().tag == .semicolon) {
             const semi_tok = self.current();
@@ -1401,6 +1438,8 @@ pub const Parser = struct {
         var flags: u8 = 0;
         if (is_custom) flags |= 0b0000_0001;
         if (is_important) flags |= 0b0000_0010;
+        if (is_default) flags |= 0b0000_0100;
+        if (is_global) flags |= 0b0000_1000;
 
         return try ast.addNode(.{
             .tag = .stmt_declaration,

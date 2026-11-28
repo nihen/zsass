@@ -1290,7 +1290,10 @@ fn meta_get_function(ctx: *BuiltinContext, args: []const Value, arg_names: []con
         break :blk css_v.p64Of() != 0;
     } else false;
     const has_module_arg = b[2] != null and b[2].?.kind() != .nil;
-    if (css_mode and has_module_arg) return error.SassError;
+    if (css_mode and has_module_arg) {
+        error_format.setContextMessage("$css and $module may not both be passed at once.");
+        return error.SassError;
+    }
 
     const module_info = try findModule(ctx, b[2]);
     const module_name = if (b[2]) |module_v|

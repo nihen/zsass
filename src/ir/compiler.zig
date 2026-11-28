@@ -2294,7 +2294,7 @@ fn emitStaticError(ctx: CompileCtx, message: []const u8) CompileError!void {
     const msg_id = try ctx.pool.intern(message);
     const msg_idx = try ctx.cb.addConst(Value.string(msg_id, false));
     try ctx.cb.emit(.load_const, 0, msg_idx);
-    try ctx.cb.emit(.emit_error, 0, 0);
+    try ctx.cb.emit(.emit_error, 1, 0);
 }
 
 fn emitForcedSassError(ctx: CompileCtx) CompileError!void {

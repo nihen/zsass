@@ -9535,6 +9535,10 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
         const prop_id: InternId = @fromBackingInt(@intCast(prop_ast.payload));
         const raw_prop = ctx.pool.get(prop_id);
         if (parseNamespacedVariableAssign(raw_prop)) |namespaced| {
+            if ((n.flags & 0b1000) != 0) {
+                error_format.setContextMessage("!global isn't allowed for variables in other modules.");
+                return error.SassError;
+            }
             const binding = lookupUseBindingInContext(ctx, namespaced.ns) orelse {
                 setNoNamespaceMessage(namespaced.ns);
                 return error.UnknownVar;
@@ -9561,7 +9565,7 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
                     try ctx.prog.assign_stmts.append(ctx.a, .{
                         .slot = try encodeCrossAssignSlot(target.module_id, target.slot),
                         .value_expr = val_e,
-                        .default = false,
+                        .default = (n.flags & 0b0100) != 0,
                         .global = false,
                     });
                     try ctx.prog.stmts.append(ctx.a, .{

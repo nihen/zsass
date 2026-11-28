@@ -146,7 +146,10 @@ fn bindSingleModuleArg(vm: anytype, args: []const Value, arg_names: []const Inte
 /// `meta.css($module)`: emits the CSS of `$module` (including its upstream
 /// modules) at the current position.
 pub fn invokeMetaCss(self: anytype, args: []const Value, arg_names: []const InternId) !void {
-    if (self.pending_content_chunk != content_none_sentinel) return error.BuiltinUnsupported;
+    if (self.pending_content_chunk != content_none_sentinel) {
+        error_format.setContextMessage("Mixin doesn't accept a content block.");
+        return error.SassError;
+    }
     const module_v = try bindSingleModuleArg(self, args, arg_names);
     const target: ModuleRefTarget = switch (module_v.kind()) {
         .module => resolveModuleRef(self, module_v),
@@ -205,8 +208,8 @@ fn parseLoadConfig(self: anytype, ctx: anytype, with_v: Value) builtin_shared.Bu
     while (i + 1 < items.len) : (i += 2) {
         const key = items[i];
         if (key.kind() != .string) return builtin_shared.reportArgumentTypeMismatch(ctx, "with key", key, "string");
-        var raw = self.intern_pool.get(key.stringIntern());
-        if (raw.len > 0 and raw[0] == '$') raw = raw[1..];
+        // A key is the name without `$`: `("$a": b)` names `$$a`.
+        const raw = self.intern_pool.get(key.stringIntern());
         const name = try alloc.dupe(u8, raw);
         for (name) |*c| {
             if (c.* == '_') c.* = '-';
