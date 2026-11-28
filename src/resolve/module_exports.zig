@@ -168,6 +168,14 @@ fn putExportSourceModule(
     try map.put(alloc, name, source_module_id);
 }
 
+/// `Two forwarded modules both define a variable named $a.`
+fn reportForwardConflict(comptime kind: []const u8, comptime sigil: []const u8, name: []const u8) ResolveError {
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "Two forwarded modules both define a " ++ kind ++ " named " ++ sigil ++ "{s}.", .{name}) catch return error.SassError;
+    error_format.setContextMessage(msg);
+    return error.SassError;
+}
+
 fn mergeForwardVarExport(
     alloc: std.mem.Allocator,
     out: *ModuleExports,
@@ -198,7 +206,7 @@ fn mergeForwardVarExport(
             try putExportSourceModule(alloc, &out.var_source_modules, name, source_module_id);
             return;
         }
-        return error.SassError;
+        return reportForwardConflict("variable", "$", name);
     }
     noteMixedAliasKey(&out.vars_has_mixed_alias_keys, name);
     try out.vars.put(alloc, name, target);
@@ -280,6 +288,7 @@ fn mergeForwardCallableExport(
     target: CallableTarget,
     source_module_id: u32,
     from_import: bool,
+    comptime kind: []const u8,
 ) ResolveError!void {
     if (lookupVoidFlagInsensitive(ambiguous, name)) return;
     if (lookupCallableTargetGated(map, name, map_mixed_flag.*)) |existing| {
@@ -299,7 +308,7 @@ fn mergeForwardCallableExport(
             try putExportSourceModule(alloc, source_map, name, source_module_id);
             return;
         }
-        return error.SassError;
+        return reportForwardConflict(kind, "", name);
     }
     noteMixedAliasKey(map_mixed_flag, name);
     try map.put(alloc, name, target);
@@ -495,7 +504,7 @@ pub fn buildModuleExports(
                         out.mixins.putAssumeCapacity(out_name, e.value_ptr.*);
                         out.mixin_source_modules.putAssumeCapacity(out_name, source_module_id);
                     } else {
-                        try mergeForwardCallableExport(meta_alloc, &out.mixins, &out.mixins_has_mixed_alias_keys, &out.mixin_source_modules, &out.ambiguous_mixins, loader, module_id, out_name, e.value_ptr.*, source_module_id, fr.from_import);
+                        try mergeForwardCallableExport(meta_alloc, &out.mixins, &out.mixins_has_mixed_alias_keys, &out.mixin_source_modules, &out.ambiguous_mixins, loader, module_id, out_name, e.value_ptr.*, source_module_id, fr.from_import, "mixin");
                     }
                 }
                 var afmit = dep.ambiguous_mixins.iterator();
@@ -521,7 +530,7 @@ pub fn buildModuleExports(
                         out.functions.putAssumeCapacity(out_name, e.value_ptr.*);
                         out.function_source_modules.putAssumeCapacity(out_name, source_module_id);
                     } else {
-                        try mergeForwardCallableExport(meta_alloc, &out.functions, &out.functions_has_mixed_alias_keys, &out.function_source_modules, &out.ambiguous_functions, loader, module_id, out_name, e.value_ptr.*, source_module_id, fr.from_import);
+                        try mergeForwardCallableExport(meta_alloc, &out.functions, &out.functions_has_mixed_alias_keys, &out.function_source_modules, &out.ambiguous_functions, loader, module_id, out_name, e.value_ptr.*, source_module_id, fr.from_import, "function");
                     }
                 }
                 var affit = dep.ambiguous_functions.iterator();

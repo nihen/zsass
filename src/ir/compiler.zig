@@ -2289,6 +2289,14 @@ fn mapBinOpcode(op: BinOp) Opcode {
     };
 }
 
+/// Fails at run time with `message`.
+fn emitStaticError(ctx: CompileCtx, message: []const u8) CompileError!void {
+    const msg_id = try ctx.pool.intern(message);
+    const msg_idx = try ctx.cb.addConst(Value.string(msg_id, false));
+    try ctx.cb.emit(.load_const, 0, msg_idx);
+    try ctx.cb.emit(.emit_error, 0, 0);
+}
+
 fn emitForcedSassError(ctx: CompileCtx) CompileError!void {
     const nil_idx = try ctx.cb.addConst(Value.nil_v);
     try ctx.cb.emit(.load_const, 0, nil_idx);
@@ -2622,13 +2630,13 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
                 }
             }
             if (c.builtin_id == meta_call_builtin_id) {
-                const control_idx = findMetaControlArgIndex(ctx, c.arg_start, c.arg_count, "function");
-                if (control_idx) |idx| {
-                    try compileExpr(ctx, resolved.call_args.items[idx]);
-                } else {
+                const control_idx = findMetaControlArgIndex(ctx, c.arg_start, c.arg_count, "function") orelse {
+                    try emitStaticError(ctx, "Missing argument $function.");
+                    // The call's value, never reached.
                     const nil_idx = try ctx.cb.addConst(Value.nil_v);
-                    try ctx.cb.emit(.load_const, 0, nil_idx);
-                }
+                    return ctx.cb.emit(.load_const, 0, nil_idx);
+                };
+                try compileExpr(ctx, resolved.call_args.items[control_idx]);
                 var forwarded: std.ArrayListUnmanaged(u32) = .empty;
                 defer forwarded.deinit(ctx.cb.alloc);
                 try appendForwardedMetaArgIndices(ctx, c.arg_start, c.arg_count, control_idx, &forwarded);
@@ -3883,12 +3891,8 @@ fn compileStmt(ctx: CompileCtx, si: StmtIndex) CompileError!void {
                     const meta_idx = try addBuiltinCallMeta(ctx, inc.arg_start, inc.arg_count, std.math.maxInt(u32));
                     try ctx.cb.emit(.call_indirect, 1, meta_idx);
                 } else {
-                    if (control_idx) |idx| {
-                        try compileExpr(ctx, resolved.call_args.items[idx]);
-                    } else {
-                        const nil_idx = try ctx.cb.addConst(Value.nil_v);
-                        try ctx.cb.emit(.load_const, 0, nil_idx);
-                    }
+                    const mixin_idx = control_idx orelse return emitStaticError(ctx, "Missing argument $mixin.");
+                    try compileExpr(ctx, resolved.call_args.items[mixin_idx]);
                     var forwarded: std.ArrayListUnmanaged(u32) = .empty;
                     defer forwarded.deinit(ctx.cb.alloc);
                     try appendForwardedMetaArgIndices(ctx, inc.arg_start, inc.arg_count, control_idx, &forwarded);

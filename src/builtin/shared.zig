@@ -519,7 +519,13 @@ pub inline fn bindNamedOrPositionalArgsStrict(
         }
 
         while (positional < names.len and out[positional] != null) : (positional += 1) {}
-        if (positional >= names.len) return error.BuiltinArity;
+        if (positional >= names.len) {
+            var given: usize = 0;
+            for (0..args.len) |j| {
+                if (j >= arg_names.len or arg_names[j] == .none) given += 1;
+            }
+            return badArity(names.len, given);
+        }
         out[positional] = arg;
         positional += 1;
     }
