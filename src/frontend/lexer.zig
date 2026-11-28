@@ -139,6 +139,7 @@ pub const Lexer = struct {
         const detail = self.last_error_detail orelse return;
         switch (detail.reason) {
             .trailing_dot_number => error_format.setContextMessage("Expected digit."),
+            .unterminated_block_comment => error_format.setContextMessage("expected more input."),
             // A quoted string that a newline ends.
             .unterminated_string => {
                 // Interpolation in it is reported by the expression it holds.
