@@ -190,6 +190,13 @@ pub fn resolveImportUrl(
     return resolveUrlImpl(allocator, url, from_path, load_paths, true, opts);
 }
 
+/// The directory `path` is in. A relative path with no directory is in the
+/// working directory: `std.fs.path.resolve()` leaves `./a` from a relative
+/// stylesheet path as `a`.
+fn parentDir(path: []const u8) []const u8 {
+    return std.fs.path.dirname(path) orelse if (std.fs.path.isAbsolute(path)) "/" else ".";
+}
+
 fn tryOverlayExplicitRelative(
     allocator: std.mem.Allocator,
     probe: *file_access_mod.Probe,
@@ -211,7 +218,7 @@ fn tryOverlayExplicitRelative(
             const overlay_abs = try std.fs.path.resolve(allocator, &.{ overlay_base, url });
             defer allocator.free(overlay_abs);
 
-            const abs_base = std.fs.path.dirname(overlay_abs) orelse "/";
+            const abs_base = parentDir(overlay_abs);
             const abs_file = std.fs.path.basename(overlay_abs);
             if (is_import) {
                 inline for ([_]CandidateKind{ .import_non_index, .normal_non_index, .import_index, .normal_index }) |kind| {
@@ -238,7 +245,7 @@ fn trySyntheticExplicitRelative(
         const synthetic_abs = std.fs.path.resolve(allocator, &.{ lp, url }) catch continue;
         defer allocator.free(synthetic_abs);
 
-        const abs_base = std.fs.path.dirname(synthetic_abs) orelse "/";
+        const abs_base = parentDir(synthetic_abs);
         const abs_file = std.fs.path.basename(synthetic_abs);
         if (is_import) {
             inline for ([_]CandidateKind{ .import_non_index, .normal_non_index, .import_index, .normal_index }) |kind| {
@@ -337,7 +344,7 @@ fn resolveUrlProbed(
     if (std.fs.path.isAbsolute(url)) {
         const abs = try std.fs.path.resolve(allocator, &.{url});
         defer allocator.free(abs);
-        const abs_base = std.fs.path.dirname(abs) orelse "/";
+        const abs_base = parentDir(abs);
         const abs_file = std.fs.path.basename(abs);
         if (is_import) {
             inline for ([_]CandidateKind{ .import_non_index, .normal_non_index, .import_index, .normal_index }) |kind| {
@@ -384,7 +391,7 @@ fn resolveUrlProbed(
     // For explicit relative paths that have been normalized to an absolute path,
     // split into directory and filename for candidate lookup.
     if (is_explicit_relative and nurl_alloc != null) {
-        const abs_base = std.fs.path.dirname(nurl) orelse "/";
+        const abs_base = parentDir(nurl);
         const abs_file = std.fs.path.basename(nurl);
         if (is_import) {
             inline for ([_]CandidateKind{ .import_non_index, .normal_non_index, .import_index, .normal_index }) |kind| {
@@ -1475,4 +1482,10 @@ test "resolveUrl: load-path bare urls prefer Sass partials over CSS fallbacks" {
     defer result.?.deinit();
 
     try expectPathEndsWith(allocator, result.?.path, &.{ "fixtures", "_rate_standing.scss" });
+}
+
+test "parentDir keeps a relative path in the working directory" {
+    try std.testing.expectEqualStrings(".", parentDir("a"));
+    try std.testing.expectEqualStrings("sub", parentDir("sub/a"));
+    try std.testing.expectEqualStrings("/", parentDir("/a"));
 }
