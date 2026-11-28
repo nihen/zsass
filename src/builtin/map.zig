@@ -1,6 +1,7 @@
 //! sass:map builtins.
 const std = @import("std");
 const stack_guard = @import("../runtime/stack_guard.zig");
+const error_format = @import("../runtime/error_format.zig");
 const shared = @import("shared.zig");
 const value_mod = @import("../runtime/value.zig");
 const intern_pool_mod = @import("../runtime/intern_pool.zig");
@@ -558,8 +559,15 @@ pub fn map_has_key(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value
     return if (lookupValueHandled(ctx, cur_handle, cur, args[args.len - 1]) != null) Value.true_v else Value.false_v;
 }
 
+/// map.merge() and map.set() take the keys and the value as `$args...`.
+fn reportArgsLack(comptime what: []const u8) BuiltinError {
+    error_format.setContextMessage("Expected $args to contain a " ++ what ++ ".");
+    return error.BuiltinArity;
+}
+
 pub fn map_merge(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
-    if (args.len < 2) return badArity(2, args.len);
+    if (args.len == 0) return shared.reportMissingArgument("map1");
+    if (args.len == 1) return reportArgsLack("key");
 
     if (args.len == 2) {
         const first = try expectMapArg(ctx, "map1", args[0]);
@@ -591,11 +599,19 @@ pub fn map_remove(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
         const name_id: InternId = if (arg_idx < arg_names.len) arg_names[arg_idx] else .none;
         if (name_id != .none) {
             if (argNameMatches(ctx, name_id, "key")) {
-                if (saw_positional) return error.BuiltinArity;
+                if (saw_positional) {
+                    error_format.setContextMessage("Argument $key was passed both by position and by name.");
+                    return error.BuiltinArity;
+                }
                 try keys_to_remove.append(ctx.allocator, arg);
             } else if (argNameMatches(ctx, name_id, "map")) {
+                error_format.setContextMessage("Argument $map was passed both by position and by name.");
                 return error.BuiltinArity;
             } else {
+                const raw = ctx.intern_pool.get(name_id);
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "No parameter named ${s}.", .{if (raw.len > 0 and raw[0] == '$') raw[1..] else raw}) catch return error.BuiltinArity;
+                error_format.setContextMessage(msg);
                 return error.BuiltinArity;
             }
         } else {
@@ -658,7 +674,9 @@ pub fn map_deep_remove(ctx: *BuiltinContext, args: []const Value) BuiltinError!V
 }
 
 pub fn map_set(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    if (args.len < 3) return badArity(3, args.len);
+    if (args.len == 0) return shared.reportMissingArgument("map");
+    if (args.len == 1) return reportArgsLack("key");
+    if (args.len == 2) return reportArgsLack("value");
 
     if (args.len == 3) {
         const bound = try bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{ "map", "key", "value" }, 3);

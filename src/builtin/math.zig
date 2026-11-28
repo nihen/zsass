@@ -2431,7 +2431,11 @@ pub fn math_div(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
 pub fn math_percentage(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 1);
     if (args[0].kind() != .number) return reportArgumentTypeMismatch(ctx, "number", args[0], "number");
-    if (args[0].unitId(ctx.number_pool) != .none) return error.BuiltinType;
+    if (args[0].unitId(ctx.number_pool) != .none) {
+        const text = try shared.valueToInspectionString(ctx, args[0]);
+        defer ctx.allocator.free(text);
+        return shared.reportArgumentMessage("number", "Expected {s} to have no units.", .{text});
+    }
     const n = args[0].asF64(ctx.number_pool);
     const pct = try internString(ctx, "%");
     return try Value.number(n * 100.0, pct, ctx.number_pool, ctx.allocator);

@@ -153,6 +153,9 @@ pub fn dispatchBuiltinArgs(self: anytype, builtin_id: u32, args: []const Value, 
         // explain.
         if ((e == error.BuiltinArity or e == error.SassError) and unnamed) {
             builtin_mod.reportSignatureMismatch(self.intern_pool, builtin_id, args.len, arg_names);
+        } else if (e == error.BuiltinArity) {
+            // A count that left out the names: the full signature's error.
+            _ = builtin_mod.reportFullSignatureMismatch(self.intern_pool, builtin_id, args.len, arg_names);
         }
         return reportBuiltinDispatchFailure(self, builtin_id, e);
     };

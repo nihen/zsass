@@ -292,6 +292,7 @@ fn resolveCaseSensitive(module: []const u8, name: []const u8) ?Id {
 pub fn reportSignatureMismatch(pool: anytype, id: Id, args_len: usize, arg_names: []const InternId) void {
     if (hasSpreadArgument(arg_names)) return;
     const row = signatureFor(id) orelse return;
+    if (fullSignatureMismatch(pool, row, args_len, arg_names)) return;
     if (overloadsFor(row)) |overloads| {
         var buf_o: [160]u8 = undefined;
         const msg = overloadMismatch(pool, overloads, args_len, arg_names, &buf_o) orelse return;
@@ -322,6 +323,32 @@ pub fn reportSignatureMismatch(pool: anytype, id: Id, args_len: usize, arg_names
         error_format.setContextMessage(msg);
         return;
     }
+}
+
+/// For a function every parameter of which is required, the signature
+/// names them all, so an argument named for none is reported as the
+/// official CLI reports it, with the rest in its order. True when it set
+/// the message.
+fn fullSignatureMismatch(pool: anytype, row: *const signatures.Row, args_len: usize, arg_names: []const InternId) bool {
+    if (row.max < 0 or row.required.len != @as(usize, @intCast(row.max)) or overloadsFor(row) != null) return false;
+    var positional: usize = 0;
+    var named: usize = 0;
+    for (0..args_len) |i| {
+        if (i >= arg_names.len or arg_names[i] == .none) positional += 1 else named += 1;
+    }
+    const o: Overload = .{ .params = row.required, .required = row.required.len };
+    var buf: [256]u8 = undefined;
+    const msg = bindError(pool, o, positional, named, arg_names, &buf) orelse return false;
+    error_format.setContextMessage(msg);
+    return true;
+}
+
+/// Whether a built-in's arguments fail to bind to it, when its signature
+/// names every parameter; the message is then set.
+pub fn reportFullSignatureMismatch(pool: anytype, id: Id, args_len: usize, arg_names: []const InternId) bool {
+    if (hasSpreadArgument(arg_names)) return false;
+    const row = signatureFor(id) orelse return false;
+    return fullSignatureMismatch(pool, row, args_len, arg_names);
 }
 
 /// 1 + the row of `global_builtins.rows` for the global function `name`,

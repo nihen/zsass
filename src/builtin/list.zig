@@ -433,7 +433,14 @@ pub fn list_set_nth(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
 }
 
 pub fn list_slash(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
-    if (args.len < 2) return badArity(2, args.len);
+    var positional: usize = 0;
+    for (0..args.len) |i| {
+        if (i >= arg_names.len or arg_names[i] == .none) positional += 1;
+    }
+    if (positional < 2) {
+        error_format.setContextMessage("At least two elements are required.");
+        return error.BuiltinArity;
+    }
     const named_len = @min(arg_names.len, args.len);
     for (arg_names[0..named_len]) |name_id| {
         if (name_id != .none) return error.BuiltinArity;

@@ -501,33 +501,32 @@ pub inline fn bindNamedOrPositionalArgsStrict(
     comptime std.debug.assert(required_count <= names.len);
     var out: [names.len]?Value = @splat(null);
     var positional: usize = 0;
+    for (0..args.len) |i| {
+        if (i >= arg_names.len or arg_names[i] == .none) positional += 1;
+    }
+    // The official CLI's order: an argument passed both ways, too many
+    // positional ones, a missing one, then names it does not take.
+    inline for (names, 0..) |expected, idx| {
+        if (idx < positional and namedArgumentIndex(ctx, arg_names, expected) != null) {
+            return reportArity("Argument $" ++ expected ++ " was passed both by position and by name.");
+        }
+    }
+    if (positional > names.len) return badArity(names.len, positional);
 
+    var next_positional: usize = 0;
     for (args, 0..) |arg, i| {
         const name_id: InternId = if (i < arg_names.len) arg_names[i] else .none;
         if (name_id != .none) {
-            var matched = false;
             inline for (names, 0..) |expected, idx| {
                 if (argNameMatches(ctx, name_id, expected)) {
-                    if (out[idx] != null) return error.BuiltinArity;
-                    out[idx] = arg;
-                    matched = true;
+                    if (out[idx] == null) out[idx] = arg;
                     break;
                 }
             }
-            if (!matched) return error.BuiltinArity;
             continue;
         }
-
-        while (positional < names.len and out[positional] != null) : (positional += 1) {}
-        if (positional >= names.len) {
-            var given: usize = 0;
-            for (0..args.len) |j| {
-                if (j >= arg_names.len or arg_names[j] == .none) given += 1;
-            }
-            return badArity(names.len, given);
-        }
-        out[positional] = arg;
-        positional += 1;
+        out[next_positional] = arg;
+        next_positional += 1;
     }
 
     inline for (0..required_count) |i| {
@@ -535,7 +534,48 @@ pub inline fn bindNamedOrPositionalArgsStrict(
             return reportMissingArgument(names[i]);
         }
     }
+    try reportUnknownArgumentNames(ctx, arg_names, names);
     return out;
+}
+
+fn namedArgumentIndex(ctx: *BuiltinContext, arg_names: []const InternId, expected: []const u8) ?usize {
+    for (arg_names, 0..) |name_id, i| {
+        if (name_id != .none and argNameMatches(ctx, name_id, expected)) return i;
+    }
+    return null;
+}
+
+fn reportArity(comptime msg: []const u8) BuiltinError {
+    error_format.setContextMessage(msg);
+    return error.BuiltinArity;
+}
+
+/// `No parameter named $a.`, or `No parameters named $a, $b or $c.`
+fn reportUnknownArgumentNames(ctx: *BuiltinContext, arg_names: []const InternId, comptime names: []const []const u8) BuiltinError!void {
+    var unknown: [8][]const u8 = undefined;
+    var n_unknown: usize = 0;
+    for (arg_names) |name_id| {
+        if (name_id == .none) continue;
+        var known = false;
+        inline for (names) |expected| {
+            if (argNameMatches(ctx, name_id, expected)) known = true;
+        }
+        if (known or n_unknown == unknown.len) continue;
+        const raw = ctx.intern_pool.get(name_id);
+        unknown[n_unknown] = if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
+        n_unknown += 1;
+    }
+    if (n_unknown == 0) return;
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    w.writeAll(if (n_unknown == 1) "No parameter named " else "No parameters named ") catch return error.BuiltinArity;
+    for (unknown[0..n_unknown], 0..) |u, i| {
+        if (i > 0) w.writeAll(if (i == n_unknown - 1) " or " else ", ") catch return error.BuiltinArity;
+        w.print("${s}", .{u}) catch return error.BuiltinArity;
+    }
+    w.writeAll(".") catch return error.BuiltinArity;
+    error_format.setContextMessage(w.buffered());
+    return error.BuiltinArity;
 }
 
 pub fn identifierEq(raw: []const u8, expected: []const u8) bool {
