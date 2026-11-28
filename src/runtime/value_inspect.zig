@@ -185,9 +185,10 @@ fn formatMapListValue(ctx: *const Context, items: []const Value) std.mem.Allocat
 
         const key_raw = items[i];
         const val_raw = items[i + 1];
-        const key = try formatValueForArgMismatch(ctx, key_raw);
+        // Keys and values are written as meta.inspect() writes them.
+        const key = try formatInspectItem(ctx, key_raw);
         defer ctx.allocator.free(key);
-        const val = try formatValueForArgMismatch(ctx, val_raw);
+        const val = try formatInspectItem(ctx, val_raw);
         defer ctx.allocator.free(val);
 
         const wrap_key = value_mod.inspectMapListNeedsParens(ctx.list_pool.items, key_raw, .key);

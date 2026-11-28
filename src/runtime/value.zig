@@ -759,6 +759,8 @@ pub fn inspectNestedListNeedsParens(
 ) bool {
     const view = inspectLogicalListView(list_pool, item) orelse return false;
     if (view.bracketed) return false;
+    // A map has its own parentheses.
+    if (view.is_map and view.items.len % 2 == 0) return false;
     if (view.items.len < 2) return false;
     // A slash-separated list in a comma-separated one reads as one value.
     if (view.separator == .slash) return parent_separator != .comma;
