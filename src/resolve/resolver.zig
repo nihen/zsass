@@ -2645,6 +2645,16 @@ fn appendExpr(prog: *ResolvedProgram, alloc: std.mem.Allocator, re: ResolvedExpr
 }
 
 const private_member_message = "Private members can't be accessed from outside their modules.";
+
+/// A variable a built-in module exposes: sass:math's constants.
+fn isBuiltinModuleVariable(module_name: []const u8, name: []const u8) bool {
+    if (!identifierEq(module_name, "math")) return false;
+    const exposed = [_][]const u8{ "e", "pi", "epsilon", "max-safe-integer", "min-safe-integer", "max-number", "min-number" };
+    for (exposed) |n| {
+        if (identifierEq(name, n)) return true;
+    }
+    return false;
+}
 const ambiguous_star_var_message = "This variable is available from multiple global modules.";
 const plain_css_interpolation_message = "Interpolation isn't allowed in plain CSS.";
 
@@ -3241,14 +3251,19 @@ fn noteMetaLoadTarget(
     const loader = ctx.loader orelse return;
     if (ctx.module_path.len == 0) return;
 
-    // A refused URL is reported where `meta.load-css()` runs.
+    // A refused or ambiguous URL is reported where `meta.load-css()` runs;
+    // looking it up here leaves no message behind.
+    const had_message = error_format.currentContextMessage() != null;
     const resolved_raw = (resolveUserModulePath(ctx.a, ctx.module_path, url, loader.load_paths, .{
         .pkg_importer_enabled = loader.pkg_importer_enabled,
         .file_access = resource_budget.ResourceBudget.fileAccess(loader.budget),
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.FileImportDenied => return,
-    }) orelse return;
+    }) orelse {
+        if (!had_message) error_format.clearContextMessage();
+        return;
+    };
     defer ctx.a.free(resolved_raw);
     const canonical = try std.fs.path.resolve(ctx.a, &.{resolved_raw});
     defer ctx.a.free(canonical);
@@ -9268,7 +9283,14 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
                 return error.UnknownVar;
             };
             switch (binding) {
-                .builtin_module => return error.UnknownVar,
+                .builtin_module => |module_name| {
+                    // A module's own variable may not be set; another is
+                    // undefined.
+                    if (isBuiltinModuleVariable(module_name, namespaced.member)) {
+                        error_format.setContextMessage("Cannot modify built-in variable.");
+                    }
+                    return error.UnknownVar;
+                },
                 .user_module => |mid| {
                     const loader = try requireModuleLoader(ctx);
                     const ex = try requireModuleExports(loader, mid);

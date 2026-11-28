@@ -118,6 +118,13 @@ fn parseSelectorArg(ctx: *BuiltinContext, text: []const u8, comptime param: []co
     };
 }
 
+/// "$extendee: Parent selectors aren't allowed here.", the parameter named
+/// unless it is selector.append()'s.
+fn parentNotAllowed(comptime param: []const u8) BuiltinError {
+    error_format.setContextMessage((if (param.len == 0) "" else "$" ++ param ++ ": ") ++ "Parent selectors aren't allowed here.");
+    return error.BuiltinType;
+}
+
 fn selectorArgString(ctx: *BuiltinContext, value: Value) BuiltinError![]u8 {
     const text = try selectorValueToString(ctx, value, 0);
     if (std.mem.indexOf(u8, text, "/*") == null and std.mem.indexOf(u8, text, "//") == null) return text;
@@ -216,7 +223,7 @@ pub fn selector_parse(ctx: *BuiltinContext, args: []const Value, arg_names: []co
 
     var parsed = try parseSelectorArg(ctx, selector_str, "selector");
     defer parsed.deinit();
-    if (selector_mod.hasParentReference(&parsed)) return error.BuiltinType;
+    if (selector_mod.hasParentReference(&parsed)) return parentNotAllowed("selector");
     return selectorListToValue(ctx, &parsed);
 }
 
@@ -229,6 +236,7 @@ pub fn selector_nest(ctx: *BuiltinContext, args: []const Value) BuiltinError!Val
     if (selector_mod.hasParentReference(&current)) {
         if (hasParentSuffix(first_str)) {
             current.deinit();
+            error_format.setContextMessage("A top-level selector may not contain a parent selector with a suffix.");
             return error.SassError;
         }
     }
@@ -260,7 +268,11 @@ pub fn selector_append(ctx: *BuiltinContext, args: []const Value) BuiltinError!V
     const first_str = try selectorArgStringNamed(ctx, args[0], "");
     defer ctx.allocator.free(first_str);
     var current = try parseSelectorArg(ctx, first_str, "");
-    if (selector_mod.hasParentReference(&current) or !selectorAppendBaseIsValid(&current)) {
+    if (selector_mod.hasParentReference(&current)) {
+        current.deinit();
+        return parentNotAllowed("");
+    }
+    if (!selectorAppendBaseIsValid(&current)) {
         current.deinit();
         return error.SassError;
     }
@@ -271,9 +283,8 @@ pub fn selector_append(ctx: *BuiltinContext, args: []const Value) BuiltinError!V
         defer ctx.allocator.free(suffix_str);
         var suffix = try parseSelectorArg(ctx, suffix_str, "");
         defer suffix.deinit();
-        if (selector_mod.hasParentReference(&suffix) or !selectorAppendSuffixIsValid(&suffix)) {
-            return error.SassError;
-        }
+        if (selector_mod.hasParentReference(&suffix)) return parentNotAllowed("");
+        if (!selectorAppendSuffixIsValid(&suffix)) return error.SassError;
         const appended = selector_mod.selectorAppend(ctx.allocator, &current, &suffix) catch return error.SassError;
         current.deinit();
         current = appended;
@@ -311,11 +322,11 @@ pub fn selector_unify(ctx: *BuiltinContext, args: []const Value, arg_names: []co
 
     var sel1 = try parseSelectorArg(ctx, sel1_str, "selector1");
     defer sel1.deinit();
-    if (selector_mod.hasParentReference(&sel1)) return error.BuiltinType;
+    if (selector_mod.hasParentReference(&sel1)) return parentNotAllowed("selector1");
 
     var sel2 = try parseSelectorArg(ctx, sel2_str, "selector2");
     defer sel2.deinit();
-    if (selector_mod.hasParentReference(&sel2)) return error.BuiltinType;
+    if (selector_mod.hasParentReference(&sel2)) return parentNotAllowed("selector2");
 
     var result = SelectorList.init(ctx.allocator);
     errdefer result.deinit();
@@ -357,11 +368,11 @@ pub fn selector_is_super(ctx: *BuiltinContext, args: []const Value, arg_names: [
 
     var super_sel = try parseSelectorArg(ctx, super_str, "super");
     defer super_sel.deinit();
-    if (selector_mod.hasParentReference(&super_sel)) return error.SassError;
+    if (selector_mod.hasParentReference(&super_sel)) return parentNotAllowed("super");
 
     var sub_sel = try parseSelectorArg(ctx, sub_str, "sub");
     defer sub_sel.deinit();
-    if (selector_mod.hasParentReference(&sub_sel)) return error.SassError;
+    if (selector_mod.hasParentReference(&sub_sel)) return parentNotAllowed("sub");
 
     return boolValue(selector_mod.isSuperSelector(&super_sel, &sub_sel));
 }
@@ -474,18 +485,18 @@ fn selectorExtendCore(
 ) BuiltinError!Value {
     var sel = try parseSelectorArg(ctx, sel_str, "selector");
     defer sel.deinit();
-    if (selectorListHasShallowParentSelector(&sel)) return error.BuiltinType;
+    if (selectorListHasShallowParentSelector(&sel)) return parentNotAllowed("selector");
 
     var extendee = try parseSelectorArg(ctx, extendee_str, "extendee");
     defer extendee.deinit();
     for (extendee.selectors.items) |extendee_complex| {
+        if (complexHasShallowParentSelector(&extendee_complex)) return parentNotAllowed("extendee");
         if (compoundCountInComplex(&extendee_complex) > 1) return error.BuiltinType;
-        if (complexHasShallowParentSelector(&extendee_complex)) return error.BuiltinType;
     }
 
     var extender = try parseSelectorArg(ctx, extender_str, "extender");
     defer extender.deinit();
-    if (selectorListHasShallowParentSelector(&extender)) return error.BuiltinType;
+    if (selectorListHasShallowParentSelector(&extender)) return parentNotAllowed("extender");
 
     if (selectorExtendSuppressedForBogusCombinators(&sel, &extender)) {
         return selectorListToValue(ctx, &sel);
@@ -562,18 +573,18 @@ fn selectorReplaceCore(
 ) BuiltinError!Value {
     var sel = try parseSelectorArg(ctx, sel_str, "selector");
     defer sel.deinit();
-    if (selectorListHasShallowParentSelector(&sel)) return error.SassError;
+    if (selectorListHasShallowParentSelector(&sel)) return parentNotAllowed("selector");
 
     var original = try parseSelectorArg(ctx, original_str, "original");
     defer original.deinit();
     for (original.selectors.items) |original_complex| {
+        if (complexHasShallowParentSelector(&original_complex)) return parentNotAllowed("original");
         if (compoundCountInComplex(&original_complex) > 1) return error.SassError;
-        if (complexHasShallowParentSelector(&original_complex)) return error.SassError;
     }
 
     var replacement = try parseSelectorArg(ctx, replacement_str, "replacement");
     defer replacement.deinit();
-    if (selectorListHasShallowParentSelector(&replacement)) return error.SassError;
+    if (selectorListHasShallowParentSelector(&replacement)) return parentNotAllowed("replacement");
 
     // The whole list at once: what one selector turns into can be dropped
     // for another selector of the list that covers it.

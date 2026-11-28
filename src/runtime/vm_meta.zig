@@ -1292,7 +1292,7 @@ fn meta_get_function(ctx: *BuiltinContext, args: []const Value, arg_names: []con
     else
         null;
     if (css_mode) return makeCssFunctionCallable(ctx, name);
-    return (try resolveSpecificFunctionCallable(ctx, module_info, module_name, name)) orelse error.SassError;
+    return (try resolveSpecificFunctionCallable(ctx, module_info, module_name, name)) orelse reportCallableNotFound(ctx, "Function", name_v);
 }
 
 fn meta_get_mixin(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
@@ -1307,7 +1307,20 @@ fn meta_get_mixin(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
         if (module_v.kind() == .string) ctx.intern_pool.get(module_v.stringIntern()) else null
     else
         null;
-    return (try resolveSpecificMixinCallable(ctx, module_info, module_name, name)) orelse error.SassError;
+    return (try resolveSpecificMixinCallable(ctx, module_info, module_name, name)) orelse reportCallableNotFound(ctx, "Mixin", name_v);
+}
+
+/// 'Function not found: "nope"', as the official CLI writes it.
+/// The name is written as meta.inspect() writes the string given.
+fn reportCallableNotFound(ctx: *BuiltinContext, comptime kind: []const u8, name_v: Value) BuiltinError {
+    if (error_format.currentContextMessage() != null) return error.SassError;
+    const text = valueToInspectCssString(ctx, name_v) catch return error.SassError;
+    defer ctx.allocator.free(text);
+    var buf: [512]u8 = undefined;
+    if (std.fmt.bufPrint(&buf, kind ++ " not found: {s}", .{text})) |msg| {
+        error_format.setContextMessage(msg);
+    } else |_| {}
+    return error.SassError;
 }
 
 fn meta_function_exists(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {

@@ -46,7 +46,10 @@ const isPlainCssStylesheetPath = path_resolution.isPlainCssStylesheetPath;
 const setCurrentErrorFrameSpan = resolve_error_stack.setCurrentFrameSpan;
 
 pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: bool, comptime deps: anytype) ResolveError!StmtIndex {
-    if (is_top_level_stmt and ctx.module_directive_locked) return error.SassError;
+    if (is_top_level_stmt and ctx.module_directive_locked) {
+        error_format.setContextMessage("@use rules must be written before any other rules.");
+        return error.SassError;
+    }
     const off: ExtraIndex = n.payload;
     const url_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
     const namespace_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off + 1)));
@@ -182,7 +185,10 @@ fn forwardedInitialConfig(
 }
 
 pub fn resolveForwardStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: bool, comptime deps: anytype) ResolveError!StmtIndex {
-    if (is_top_level_stmt and ctx.module_directive_locked) return error.SassError;
+    if (is_top_level_stmt and ctx.module_directive_locked) {
+        error_format.setContextMessage("@forward rules must be written before any other rules.");
+        return error.SassError;
+    }
     const off: ExtraIndex = n.payload;
     const url_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
     const prefix_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off + 1)));

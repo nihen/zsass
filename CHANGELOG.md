@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- `@use`/`@forward` after other rules, setting a built-in module's
+  variable, a content block for a mixin that takes none,
+  `meta.get-function()` of a name not found, and a duplicate map key are
+  reported as the official CLI reports them.
+- The selector functions report `&` they may not take ("$extendee: Parent
+  selectors aren't allowed here."), and an ambiguous import lists the
+  files it could mean.
 - A mixin or function declared where it may not be, `@return` outside a
   function, a reserved function name, a declaration outside a style
   rule, and a required `@extend` that extends nothing are reported as
