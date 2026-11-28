@@ -1968,6 +1968,7 @@ fn parseWithConfigEntries(ctx: *Ctx, config_extra: ExtraIndex) ResolveError![]Wi
 
         const expr_idx = resolveExpr(ctx.ast, ctx, expr_node) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.UnknownVar => return error.UnknownVar,
             else => return error.SassError,
         };
         var env: ResolverEvalEnv = .{
@@ -1983,7 +1984,10 @@ fn parseWithConfigEntries(ctx: *Ctx, config_extra: ExtraIndex) ResolveError![]Wi
         };
         const name = ctx.pool.get(name_id);
         for (out.items) |existing| {
-            if (identifierEq(existing.name, name)) return error.SassError;
+            if (identifierEq(existing.name, name)) {
+                error_format.setContextMessage("The same variable may only be configured once.");
+                return error.SassError;
+            }
         }
         try out.append(ctx.a, .{
             .name = name,
@@ -4411,6 +4415,20 @@ fn calcValueNeedsCheck(ast: *const ast_flat.Ast, n: ast_flat.AstNode) bool {
     };
 }
 
+fn wrapForBoundCheck(ctx: *Ctx, args: []const ExprIndex, span: Span) ResolveError!ExprIndex {
+    const arg_names = [_]InternId{ .none, .none };
+    const astart = try appendCallArgsWithNames(ctx.prog, ctx.a, args, arg_names[0..args.len]);
+    const bidx: u32 = @intCast(ctx.prog.builtin_calls.items.len);
+    try ctx.prog.builtin_calls.append(ctx.a, .{
+        .builtin_id = builtin_mod.for_bound_check_id,
+        .arg_start = astart,
+        .arg_count = @intCast(args.len),
+        .span_start = span.start,
+        .span_end = span.end,
+    });
+    return try appendExpr(ctx.prog, ctx.a, .{ .kind = .builtin_call, .payload = bidx, .span = span });
+}
+
 fn wrapCalcValueCheck(ctx: *Ctx, inner: ExprIndex, span: Span) ResolveError!ExprIndex {
     const astart = try appendCallArgsWithNames(ctx.prog, ctx.a, &.{inner}, &.{.none});
     const bidx: u32 = @intCast(ctx.prog.builtin_calls.items.len);
@@ -5237,12 +5255,6 @@ fn resolveCalcArgBinaryInterp(
     return try appendInterpExprResolved(ctx, &parts, span, false);
 }
 
-fn numberIsIntegral(v: f64) bool {
-    if (!std.math.isFinite(v)) return false;
-    const rounded = @round(v);
-    return std.math.approxEqAbs(f64, v, rounded, 1e-9);
-}
-
 fn comparableUnitInfo(unit: []const u8) ?struct { family: enum { length, angle, time, frequency, resolution }, factor: f64 } {
     // Length
     if (std.mem.eql(u8, unit, "px")) return .{ .family = .length, .factor = 1.0 };
@@ -5272,22 +5284,6 @@ fn comparableUnitInfo(unit: []const u8) ?struct { family: enum { length, angle, 
     if (std.mem.eql(u8, unit, "dpi")) return .{ .family = .resolution, .factor = 1.0 / 96.0 };
     if (std.mem.eql(u8, unit, "dpcm")) return .{ .family = .resolution, .factor = 2.54 / 96.0 };
     return null;
-}
-
-fn validateStaticForBounds(ctx: *Ctx, from_n: NodeIndex, to_n: NodeIndex) ResolveError!void {
-    const from = extractStaticNumberInfo(ctx.ast, from_n) orelse return;
-    const to = extractStaticNumberInfo(ctx.ast, to_n) orelse return;
-
-    if (!numberIsIntegral(from.value) or !numberIsIntegral(to.value)) {
-        return error.Unsupported;
-    }
-
-    if (from.unit_id == .none or to.unit_id == .none or from.unit_id == to.unit_id) return;
-    const from_info = comparableUnitInfo(ctx.pool.get(from.unit_id)) orelse return error.Unsupported;
-    const to_info = comparableUnitInfo(ctx.pool.get(to.unit_id)) orelse return error.Unsupported;
-    if (from_info.family != to_info.family) return error.Unsupported;
-    const to_in_from = to.value * to_info.factor / from_info.factor;
-    if (!numberIsIntegral(to_in_from)) return error.Unsupported;
 }
 
 fn isSlashListExpr(prog: *const ResolvedProgram, expr: ExprIndex) bool {
@@ -10012,7 +10008,6 @@ fn resolveForStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
     const to_n: NodeIndex = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off + 2)));
     const body_ex = ctx.ast.getExtraU32(off + 3);
     const through = (n.flags & 1) == 0;
-    try validateStaticForBounds(ctx, from_n, to_n);
     try ctx.pushScope(ctx.a);
     errdefer ctx.popScope(ctx.a);
     ctx.currentScopeFlags().is_flow_control = true;
@@ -10024,8 +10019,11 @@ fn resolveForStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
     const cursor_slot = try ctx.declareLocal(try ctx.pool.intern("__zsass_for_cursor"));
     const to_slot = try ctx.declareLocal(try ctx.pool.intern("__zsass_for_to"));
     const step_slot = try ctx.declareLocal(try ctx.pool.intern("__zsass_for_step"));
-    const fe = try resolveExpr(ctx.ast, ctx, from_n);
-    const te = try resolveExpr(ctx.ast, ctx, to_n);
+    // The bounds are checked as the loop starts: `to` with `from`, which
+    // is in the cursor by then.
+    const fe = try wrapForBoundCheck(ctx, &.{try resolveExpr(ctx.ast, ctx, from_n)}, span);
+    const from_ref = try appendExpr(ctx.prog, ctx.a, .{ .kind = .var_ref, .payload = cursor_slot, .span = span });
+    const te = try wrapForBoundCheck(ctx, &.{ from_ref, try resolveExpr(ctx.ast, ctx, to_n) }, span);
     const body = try resolveStmtListInFlowControl(ctx, body_ex);
     const raw_for_body = readChildList(ctx.ast, body_ex);
     var fb_start = body.start;
@@ -12406,6 +12404,7 @@ fn resolveSingleAst(
     ctx.next_mixin_id = @intCast(ctx.prog.mixin_names.count());
     ctx.next_function_id = @intCast(ctx.prog.function_names.count());
     try predeclareTopLevelCallables(&ctx, raw);
+    try checkModuleRulePlacement(&ctx, raw);
     var top_list: std.ArrayListUnmanaged(StmtIndex) = .empty;
     defer top_list.deinit(a2);
     const rest = try resolvePreambleCheckpointPrefix(&ctx, mr, raw, &top_list);
@@ -12429,6 +12428,27 @@ fn resolveSingleAst(
         .prog = prog,
         .forward_rules = forward_rules,
     };
+}
+
+/// `@use` and `@forward` come before other rules. The official CLI finds a
+/// late one when it parses, before any `@import` above it loads.
+fn checkModuleRulePlacement(ctx: *Ctx, raw: []const u32) ResolveError!void {
+    if (isPlainCssStylesheetPath(ctx.module_path)) return;
+    var locked = false;
+    for (raw) |u| {
+        const n = ctx.ast.getNode(@fromBackingInt(@intCast(u)));
+        if (locked and (n.tag == .stmt_use or n.tag == .stmt_forward)) {
+            error_format.setContextMessage(if (n.tag == .stmt_use)
+                "@use rules must be written before any other rules."
+            else
+                "@forward rules must be written before any other rules.");
+            // The rule, without its `;`.
+            const ends_with_semicolon = n.span_end > n.span_start and n.span_end <= ctx.ast.source.len and ctx.ast.source[n.span_end - 1] == ';';
+            error_format.recordErrorSpanIfUnset(n.span_start, if (ends_with_semicolon) n.span_end - 1 else n.span_end, 0);
+            return error.SassError;
+        }
+        if (!module_directive.topLevelStmtKeepsModuleDirectiveOpen(ctx.ast, ctx.pool, n)) locked = true;
+    }
 }
 
 fn patchLocalModuleRefs(prog: *ResolvedProgram, module_id: u32) void {
@@ -13353,7 +13373,7 @@ test "@charset keeps module directive head open for later @use with config" {
     try std.testing.expectEqual(@as(f64, 3.0), bundle.config_seeds[0].value.asF64(bundle.modules[bundle.root_index].value_number_pool));
 }
 
-test "@import keeps module directive head open for later @use with config" {
+test "@use after @import is rejected" {
     const allocator = std.testing.allocator;
 
     var tmp_dir = std.testing.tmpDir(.{});
@@ -13370,15 +13390,10 @@ test "@import keeps module directive head open for later @use with config" {
     const entry_path = try std.fs.path.join(allocator, &.{ tmp_path, "entry.scss" });
     defer allocator.free(entry_path);
 
-    var bundle = try parseAndResolveWithPath(allocator,
+    try std.testing.expectError(error.SassError, parseAndResolveWithPath(allocator,
         \\@import "plain.css";
         \\@use "theme" with ($spacing: 4px);
-    , entry_path);
-    defer bundle.deinit();
-
-    try std.testing.expectEqual(@as(usize, 1), bundle.config_seeds.len);
-    try std.testing.expectEqual(@as(value_mod.ValueKind, .number), bundle.config_seeds[0].value.kind());
-    try std.testing.expectEqual(@as(f64, 4.0), bundle.config_seeds[0].value.asF64(bundle.modules[bundle.root_index].value_number_pool));
+    , entry_path));
 }
 
 test "legacy variable-exists in imported top-level if folds false before resolving branch body" {
@@ -13407,7 +13422,7 @@ test "legacy variable-exists in imported top-level if folds false before resolvi
     try std.testing.expect(bundle.modules.len >= 1);
 }
 
-test "top-level mixin/function declarations keep module directive head open for @use with config" {
+test "@use after a mixin or function declaration is rejected" {
     const allocator = std.testing.allocator;
 
     var tmp_dir = std.testing.tmpDir(.{});
@@ -13423,16 +13438,14 @@ test "top-level mixin/function declarations keep module directive head open for 
     const entry_path = try std.fs.path.join(allocator, &.{ tmp_path, "entry.scss" });
     defer allocator.free(entry_path);
 
-    var bundle = try parseAndResolveWithPath(allocator,
+    try std.testing.expectError(error.SassError, parseAndResolveWithPath(allocator,
         \\@mixin noop() {}
+        \\@use "theme" with ($spacing: 5px);
+    , entry_path));
+    try std.testing.expectError(error.SassError, parseAndResolveWithPath(allocator,
         \\@function noop() { @return null; }
         \\@use "theme" with ($spacing: 5px);
-    , entry_path);
-    defer bundle.deinit();
-
-    try std.testing.expectEqual(@as(usize, 1), bundle.config_seeds.len);
-    try std.testing.expectEqual(@as(value_mod.ValueKind, .number), bundle.config_seeds[0].value.kind());
-    try std.testing.expectEqual(@as(f64, 5.0), bundle.config_seeds[0].value.asF64(bundle.modules[bundle.root_index].value_number_pool));
+    , entry_path));
 }
 
 test "lookupUseBinding tells hyphen and underscore apart" {

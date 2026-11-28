@@ -359,7 +359,6 @@ fn resolveFrameInfoEx(
 /// stylesheet. False when a frame cannot be placed; the caller then draws
 /// the single frame.
 fn buildVmErrorTrace(
-    vm: *vm_mod.VM,
     program_ptr: *compiler_mod.Program,
     inner_source: []const u8,
     inner_path: []const u8,
@@ -367,6 +366,8 @@ fn buildVmErrorTrace(
     span_end: u32,
     entry_path: []const u8,
     call_sites: []const vm_mod.VM.CallSite,
+    inner_ref: vm_mod.ChunkRef,
+    inner_name: []const u8,
 ) bool {
     const snapshot = &error_format.error_state.error_stack_snapshot;
     if (snapshot.len < 3) return false;
@@ -402,6 +403,14 @@ fn buildVmErrorTrace(
         frame.end_line_no = end.line + 1;
         frame.end_col_no = end.col + 1;
         frame.has_span = true;
+        // A call in the file the error is in can show its line, as the
+        // excerpt of an @error in a content block does.
+        if (std.mem.eql(u8, path, inner_path)) {
+            const text = extractLineInline(inner_source, start.line);
+            const t_len = @min(text.len, frame.line_text_buf.len);
+            @memcpy(frame.line_text_buf[0..t_len], text[0..t_len]);
+            frame.line_text_len = t_len;
+        }
         snapshot[n] = frame;
         n += 1;
     }
@@ -410,7 +419,7 @@ fn buildVmErrorTrace(
     const ip_len = @min(inner_path.len, inner.path_buf.len);
     @memcpy(inner.path_buf[0..ip_len], inner_path[0..ip_len]);
     inner.path_len = ip_len;
-    const inner_label = formatCallLabel(vm.innerMostChunkRef(), vm.innerMostChunkName(), &inner.label_buf);
+    const inner_label = formatCallLabel(inner_ref, inner_name, &inner.label_buf);
     inner.label_len = inner_label.len;
     const ip = computeLineColInline(inner_source, span_start);
     const iep = computeLineColInline(inner_source, span_end);
@@ -427,6 +436,34 @@ fn buildVmErrorTrace(
     n += 1;
     error_format.error_state.error_stack_snapshot_len = n;
     return true;
+}
+
+/// The excerpt frame of a trace, when it is a call in another file than
+/// the error (an @error in a content block an @include there passed), gets
+/// that file's line.
+fn fillSnippetFrameSource(
+    allocator: std.mem.Allocator,
+    program_ptr: *compiler_mod.Program,
+    entry_source: []const u8,
+    entry_path: []const u8,
+    call_sites: []const vm_mod.VM.CallSite,
+) void {
+    const from_end = error_format.error_state.snippet_frame_from_end;
+    const len = error_format.error_state.error_stack_snapshot_len;
+    // Each call has its frame, then the error's.
+    if (from_end == 0 or len != call_sites.len + 1 or from_end >= len) return;
+    const idx = len - 1 - from_end;
+    const frame = &error_format.error_state.error_stack_snapshot[idx];
+    if (frame.line_text_len != 0) return;
+    const site = call_sites[idx];
+    const site_ctx: error_format.ErrorContext = .{ .has_value = true, .file_id = site.module_id, .span_start = site.span_start, .span_end = site.span_end };
+    const info = resolveFrameInfoEx(allocator, program_ptr, site_ctx, entry_source, entry_path, site.module_id == program_ptr.root_index);
+    defer if (info.source_owned) |src| allocator.free(src);
+    const src = info.source orelse return;
+    const text = extractLineInline(src, frame.line_no - 1);
+    const t_len = @min(text.len, frame.line_text_buf.len);
+    @memcpy(frame.line_text_buf[0..t_len], text[0..t_len]);
+    frame.line_text_len = t_len;
 }
 
 /// A trace line's name: `f()` for a function and `m()` for a mixin, as Sass
@@ -2815,11 +2852,41 @@ fn runEnd2EndWithBudget(
         if (error_format.verboseErrorsEnabled()) {
             cliErrPrint("zsass: VM error: {}\n", .{err});
         }
-        cliErrPrint("Error: {s}\n", .{error_format.errorToUserMessageWithContext(err)});
+        cliErrPrint("Error: {s}\n", .{vm.error_message_full orelse error_format.errorToUserMessageWithContext(err)});
         // CLI-FIX-E Step 2/2c: Output source frame from span recorded by VM step.
         // file_id == root_index uses entry source, != root_index is program.modules[file_id]
         // Reload source from path + line_starts already exists in modules[file_id].
-        const ctx = error_format.error_state.last_error_ctx;
+        var ctx = error_format.error_state.last_error_ctx;
+        var call_sites: [error_format.max_error_stack]vm_mod.VM.CallSite = undefined;
+        var call_count = vm.callSites(&call_sites);
+        var inner_ref = vm.innerMostChunkRef();
+        var inner_name = vm.innerMostChunkName();
+        var at_call_site = false;
+        const in_content_block = inner_ref == .content;
+        if (vm.error_at_call_site and call_count > 0) {
+            // An @error is reported at the call to the function or mixin
+            // it is in, which the trace then leaves out; one in a content
+            // block shows the @include that passed the block.
+            if (in_content_block and call_count > 1) {
+                // Past each @content that forwarded the block, to the call
+                // of the mixin that ran it.
+                var from_end: usize = 1;
+                var i = call_count - 1;
+                while (i > 0 and call_sites[i].chunk == .content) : (i -= 1) from_end += 1;
+                if (from_end < call_count) error_format.error_state.snippet_frame_from_end = from_end;
+            }
+            const site = call_sites[call_count - 1];
+            ctx.file_id = site.module_id;
+            ctx.span_start = site.span_start;
+            ctx.span_end = site.span_end;
+            inner_ref = site.chunk;
+            inner_name = site.chunk_name;
+            call_count -= 1;
+            at_call_site = true;
+            // A call in code an @import brought in is placed by its origin.
+            vm.current_origin = site.origin;
+            vm.current_source_span.file_id = site.module_id;
+        }
         const root_idx: u32 = program_ptr.root_index;
         const file_id_is_entry = (ctx.file_id == root_idx);
         const frame_info = resolveFrameInfoEx(diag_alloc, program_ptr, ctx, source, module_path, file_id_is_entry);
@@ -2829,20 +2896,30 @@ fn runEnd2EndWithBudget(
         // Rendered with (`{imported} l:c {fn-name}()\n {entry} l:c root stylesheet`).
         // Take exact callsite span of entry in outermostCallerInfo() of VM and innerMostChunkName()
         // Reflect the function/mixin name in the inner frame label.
-        var call_sites: [error_format.max_error_stack]vm_mod.VM.CallSite = undefined;
-        const call_count = vm.callSites(&call_sites);
         // Code an @import brought in is placed in the imported file, reached
         // through each @import.
-        const imported_frames = if (ctx.has_value)
+        const imported_frames = if (ctx.has_value and !(at_call_site and vm.current_origin == .invalid))
             vm.importedErrorTrace(&error_format.error_state.error_stack_snapshot, ctx.file_id, ctx.span_start, ctx.span_end)
         else
             null;
-        if (imported_frames) |count| {
+        if (imported_frames) |found| {
+            var count = found;
+            if (at_call_site and found > 1) {
+                // The call reported in its place is named by the chunk it
+                // is in; the frame of the one it called is left out.
+                const frames = &error_format.error_state.error_stack_snapshot;
+                const caller = frames[found - 2];
+                frames[found - 2] = frames[found - 1];
+                frames[found - 2].label_buf = caller.label_buf;
+                frames[found - 2].label_len = caller.label_len;
+                count = found - 1;
+            }
             error_format.error_state.error_stack_snapshot_len = count;
             error_format.writeStackTrace(diag_alloc) catch {};
         } else if (frame_info.has_frame and (call_count > 0 or !file_id_is_entry) and
-            buildVmErrorTrace(&vm, program_ptr, frame_info.source.?, frame_info.path, ctx.span_start, ctx.span_end, module_path, call_sites[0..call_count]))
+            buildVmErrorTrace(program_ptr, frame_info.source.?, frame_info.path, ctx.span_start, ctx.span_end, module_path, call_sites[0..call_count], inner_ref, inner_name))
         {
+            fillSnippetFrameSource(diag_alloc, program_ptr, source, module_path, call_sites[0..call_count]);
             error_format.writeStackTrace(diag_alloc) catch {
                 error_format.writeSourceFrame(frame_info.source.?, frame_info.line_starts.?, ctx.span_start, ctx.span_end, frame_info.path);
             };

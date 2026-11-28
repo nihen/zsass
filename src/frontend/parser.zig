@@ -2980,6 +2980,9 @@ pub const Parser = struct {
             params_extra = try self.parseParamList(ast);
             self.skipWhitespaceAndComments();
         }
+        if (!self.is_indented_syntax and (self.isAtEnd() or self.current().tag != .lbrace)) {
+            return self.failExpecting("expected \"{\".");
+        }
 
         const body = try self.parseBlockBody(ast);
 
@@ -3119,6 +3122,7 @@ pub const Parser = struct {
 
         var body_extra: u32 = std.math.maxInt(u32);
         var end_pos: u32 = self.tokens[self.pos - 1].span.end;
+        const header_end = self.lastSignificantTokenEnd();
         if (!self.isAtEnd() and self.current().tag == .lbrace) {
             const body = try self.parseBlockBody(ast);
             body_extra = body.extra;
@@ -3141,13 +3145,29 @@ pub const Parser = struct {
         _ = try ast.appendExtraU32(using_extra);
         _ = try ast.appendExtraU32(body_extra);
 
+        // The span is the call, which errors point at: the name and its
+        // arguments, without a content block or `;`.
         return try ast.addNode(.{
             .tag = .stmt_include_rule,
             .flags = 0,
             .payload = outer_off,
             .span_start = plus_tok.span.start,
-            .span_end = end_pos,
+            .span_end = header_end,
         });
+    }
+
+    /// Where the last token before the current one that is no whitespace or
+    /// comment ends.
+    fn lastSignificantTokenEnd(self: *const Parser) u32 {
+        var p = self.pos;
+        while (p > 0) {
+            p -= 1;
+            switch (self.tokens[p].tag) {
+                .whitespace, .newline, .comment => continue,
+                else => return self.tokens[p].span.end,
+            }
+        }
+        return 0;
     }
 
     /// Parse `@function name(params) { body }`.  A parameter list is
@@ -3329,6 +3349,7 @@ pub const Parser = struct {
         // `directives/mixin/whitespace.hrx::include/after_using/sass`).
         var body_extra: u32 = std.math.maxInt(u32);
         var end_pos: u32 = self.tokens[self.pos - 1].span.end;
+        const header_end = self.lastSignificantTokenEnd();
         if (!self.isAtEnd() and self.current().tag == .lbrace) {
             const body = try self.parseBlockBody(ast);
             body_extra = body.extra;
@@ -3366,12 +3387,14 @@ pub const Parser = struct {
         _ = try ast.appendExtraU32(using_extra);
         _ = try ast.appendExtraU32(body_extra);
 
+        // The span is the call, which errors point at: the name and its
+        // arguments, without a content block or `;`.
         return try ast.addNode(.{
             .tag = .stmt_include_rule,
             .flags = 0,
             .payload = outer_off,
             .span_start = at_tok.span.start,
-            .span_end = end_pos,
+            .span_end = header_end,
         });
     }
 
@@ -4191,7 +4214,8 @@ pub const Parser = struct {
                 if (self.is_indented_syntax and
                     self.lineStartAtByte(self.current().span.start) > item_line_start)
                 {
-                    return error.SyntaxError;
+                    // Only @forward has show and hide clauses.
+                    return self.failExpecting("Nothing may be indented beneath a @forward rule.");
                 }
                 self.advance();
                 self.skipWhitespaceAndComments();
@@ -5766,7 +5790,9 @@ pub const Parser = struct {
         var end_pos: u32 = ast.getNode(value_node).span_end;
         self.skipWhitespaceAndComments();
         if (!self.isAtEnd() and self.current().tag == .semicolon) {
-            end_pos = self.current().span.end;
+            // An @error's span, which its message points at, ends before
+            // the `;`.
+            if (tag != .stmt_error) end_pos = self.current().span.end;
             self.advance();
         }
 

@@ -79,6 +79,10 @@ pub fn setContextMessage(msg: []const u8) void {
     error_state.context_message_len = n;
 }
 
+pub fn contextMessageCapacity() usize {
+    return error_state.context_message_buf.len;
+}
+
 pub fn clearContextMessage() void {
     error_state.context_message_len = 0;
 }
@@ -262,6 +266,7 @@ pub fn clearErrorContext() void {
     error_state.error_stack_len = 0;
     error_state.error_stack_overflow = 0;
     error_state.error_stack_snapshot_len = 0;
+    error_state.snippet_frame_from_end = 0;
     error_state.context_message_len = 0;
     error_state.reported = false;
 }
@@ -316,6 +321,10 @@ pub const ErrorTraceFrame = struct {
 /// Single thread-local bundle for error context / resolver stack / snapshot (avoids torn reads across fields).
 pub const ErrorState = struct {
     context_message_buf: [512]u8 = @splat(0),
+    /// Which frame of the snapshot, counted from the innermost, the trace's
+    /// source excerpt shows: an @error in a content block shows the
+    /// @include that passed it.
+    snippet_frame_from_end: usize = 0,
     context_message_len: usize = 0,
     last_error_ctx: ErrorContext = .{},
     error_stack: [max_error_stack]ErrorStackFrame = @splat(.{ .path = "", .source = "", .label = "" }),
@@ -551,7 +560,8 @@ pub fn writeTraceFrames(allocator: std.mem.Allocator, frames: []const ErrorTrace
     }
 
     if (with_snippet) {
-        const inner = frames[slen - 1];
+        const from_end = if (error_state.snippet_frame_from_end < slen) error_state.snippet_frame_from_end else 0;
+        const inner = frames[slen - 1 - from_end];
         if (inner.has_span and inner.line_text_len > 0) {
             const line_text = inner.line_text_buf[0..inner.line_text_len];
             writeSourceFrameAsciiOnlyFromSnapshot(line_text, inner.line_no, inner.col_no, inner.end_line_no, inner.end_col_no);

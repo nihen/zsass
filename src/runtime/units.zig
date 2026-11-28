@@ -57,6 +57,20 @@ fn comparableUnitInfoCi(unit: []const u8) ?ComparableUnitInfo {
     return null;
 }
 
+/// What a number of `unit`'s family must have, as the official CLI says it
+/// (`a length unit (in, cm, pc, mm, q, pt, px)`); null for a unit of no
+/// family.
+pub fn familyUnitsPhrase(unit: []const u8) ?[]const u8 {
+    const info = comparableUnitInfoCi(unit) orelse return null;
+    return switch (info.family) {
+        .length => "a length unit (in, cm, pc, mm, q, pt, px)",
+        .angle => "an angle unit (deg, grad, rad, turn)",
+        .time => "a time unit (s, ms)",
+        .frequency => "a frequency unit (Hz, kHz)",
+        .resolution => "a pixel density unit (dpi, dpcm, dppx)",
+    };
+}
+
 /// Lookup that also reports the canonical unit string.
 pub fn canonicalComparableFactorCi(unit: []const u8) ?CanonicalComparableFactor {
     const info = comparableUnitInfoCi(unit) orelse return null;

@@ -3,6 +3,7 @@ const std = @import("std");
 const stack_guard = @import("../runtime/stack_guard.zig");
 const shared = @import("shared.zig");
 const error_format = @import("../runtime/error_format.zig");
+const units_mod = @import("../runtime/units.zig");
 const float_int = @import("../runtime/float_int.zig");
 const calc_utils = @import("../runtime/calc_utils.zig");
 const value_format = @import("../runtime/value_format.zig");
@@ -2430,7 +2431,11 @@ pub fn math_div(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
 pub fn math_percentage(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 1);
     if (args[0].kind() != .number) return reportArgumentTypeMismatch(ctx, "number", args[0], "number");
-    if (args[0].unitId(ctx.number_pool) != .none) return error.BuiltinType;
+    if (args[0].unitId(ctx.number_pool) != .none) {
+        const text = try shared.valueToInspectionString(ctx, args[0]);
+        defer ctx.allocator.free(text);
+        return shared.reportArgumentMessage("number", "Expected {s} to have no units.", .{text});
+    }
     const n = args[0].asF64(ctx.number_pool);
     const pct = try internString(ctx, "%");
     return try Value.number(n * 100.0, pct, ctx.number_pool, ctx.allocator);
@@ -2950,6 +2955,53 @@ pub fn math_log(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
     }
 
     return Value.numberUnitless(@log(number));
+}
+
+/// A `@for` bound: `from` alone, which has to be a number, or `to` with
+/// `from`, when `to` is a number too, `from` an int, and `to` one in
+/// `from`'s unit, as the official CLI checks them once both are evaluated.
+pub fn forBoundCheck(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
+    if (args.len != 1 and args.len != 2) return error.BuiltinArity;
+    const bound = args[args.len - 1];
+    if (bound.kind() != .number) {
+        const text = try shared.valueToInspectionString(ctx, bound);
+        defer ctx.allocator.free(text);
+        return reportForBound("{s} is not a number.", .{text});
+    }
+    if (args.len == 1) return bound;
+
+    const from = args[0];
+    const from_unit_id = from.unitId(ctx.number_pool);
+    const from_unit: []const u8 = if (from_unit_id == .none) "" else ctx.intern_pool.get(from_unit_id);
+    if (shared.fuzzyInt(from.asF64(ctx.number_pool)) == null) return reportForBound("{d}{s} is not an int.", .{ from.asF64(ctx.number_pool), from_unit });
+
+    const unit_id = bound.unitId(ctx.number_pool);
+    const unit: []const u8 = if (unit_id == .none) "" else ctx.intern_pool.get(unit_id);
+    var value = bound.asF64(ctx.number_pool);
+    if (from_unit.len != 0 and unit.len != 0 and !std.mem.eql(u8, from_unit, unit)) {
+        const compound = std.mem.indexOfAny(u8, unit, "*/") != null or std.mem.indexOfAny(u8, from_unit, "*/") != null;
+        const converted: ?f64 = if (compound)
+            (if (try compoundUnitFactor(ctx, unit, from_unit)) |factor| value * factor else null)
+        else
+            units_mod.convertComparableUnitCi(value, unit, from_unit);
+        value = converted orelse {
+            const text = try shared.valueToInspectionString(ctx, bound);
+            defer ctx.allocator.free(text);
+            if (std.mem.indexOfAny(u8, from_unit, "*/") != null) return reportForBound("Expected {s} to have units {s}.", .{ text, from_unit });
+            if (units_mod.familyUnitsPhrase(from_unit)) |phrase| return reportForBound("Expected {s} to have {s}.", .{ text, phrase });
+            return reportForBound("Expected {s} to have unit {s}.", .{ text, from_unit });
+        };
+    }
+    // A unitless `to` takes `from`'s unit.
+    if (shared.fuzzyInt(value) == null) return reportForBound("{d}{s} is not an int.", .{ value, from_unit });
+    return bound;
+}
+
+fn reportForBound(comptime fmt: []const u8, args: anytype) BuiltinError {
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return error.SassError;
+    error_format.setContextMessage(msg);
+    return error.SassError;
 }
 
 /// A value a calculation is given: a number, a calculation, or text; else
