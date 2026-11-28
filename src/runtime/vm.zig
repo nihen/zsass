@@ -4329,8 +4329,7 @@ pub const VM = struct {
                 }
                 try self.reopenRecentNestedRuleForDeclaration();
                 try self.ensureCurrentRuleOpenForDeclaration();
-                if (self.open_block_depth == 0 or (self.load_css_strict_top_level and self.open_rule_depth == 0)) return error.SassError;
-                if (self.mediaQueryActive() and self.open_rule_depth == 0 and !self.declarationAtRuleActive()) return error.SassError;
+                try self.ensureDeclarationInStyleRule();
                 const input_prop_name = self.intern_pool.get(@fromBackingInt(@intCast(prop)));
                 if (self.prop_namespace_stack.items.len > 0 and std.mem.startsWith(u8, input_prop_name, "--")) {
                     return error.SassError;
@@ -4374,8 +4373,7 @@ pub const VM = struct {
                 }
                 try self.reopenRecentNestedRuleForDeclaration();
                 try self.ensureCurrentRuleOpenForDeclaration();
-                if (self.open_block_depth == 0 or (self.load_css_strict_top_level and self.open_rule_depth == 0)) return error.SassError;
-                if (self.mediaQueryActive() and self.open_rule_depth == 0 and !self.declarationAtRuleActive()) return error.SassError;
+                try self.ensureDeclarationInStyleRule();
                 const input_prop_name = self.intern_pool.get(@fromBackingInt(@intCast(prop)));
                 if (self.prop_namespace_stack.items.len > 0 and std.mem.startsWith(u8, input_prop_name, "--")) {
                     return error.SassError;
@@ -4561,8 +4559,7 @@ pub const VM = struct {
                 const val = try self.maybeResolveParentSelectorValue(try self.pop());
                 try self.reopenRecentNestedRuleForDeclaration();
                 try self.ensureCurrentRuleOpenForDeclaration();
-                if (self.open_block_depth == 0 or (self.load_css_strict_top_level and self.open_rule_depth == 0)) return error.SassError;
-                if (self.mediaQueryActive() and self.open_rule_depth == 0 and !self.declarationAtRuleActive()) return error.SassError;
+                try self.ensureDeclarationInStyleRule();
                 const input_prop_name = self.intern_pool.get(@fromBackingInt(@intCast(prop)));
                 if (self.prop_namespace_stack.items.len > 0 and std.mem.startsWith(u8, input_prop_name, "--")) {
                     return error.SassError;
@@ -5048,8 +5045,7 @@ pub const VM = struct {
                     &self.slash_list_preserve,
                     val,
                 );
-                if (self.open_block_depth == 0 or (self.load_css_strict_top_level and self.open_rule_depth == 0)) return error.SassError;
-                if (self.mediaQueryActive() and self.open_rule_depth == 0 and !self.declarationAtRuleActive()) return error.SassError;
+                try self.ensureDeclarationInStyleRule();
                 const prop_id = try self.applyPropertyNamespace(@fromBackingInt(@intCast(prop)));
                 const raw_fragment = self.intern_pool.get(raw_id);
                 const unmarked_fragment = try calc_utils.stripCalcInterpolationPreserveMarkers(self.allocator, raw_fragment);
@@ -6685,6 +6681,30 @@ pub const VM = struct {
         deprecation_mod.builtin_call_site = site;
         defer deprecation_mod.builtin_call_site = saved_site;
         try deprecation_mod.emitDeprecation(&self.deprecation_opts, .global_builtin, msg, "", 0, 0);
+    }
+
+    /// A declaration outside a style rule (at the top level, or in an at-rule
+    /// that is no place for one) is the official CLI's error.
+    fn ensureDeclarationInStyleRule(self: *VM) VMError!void {
+        if (self.open_block_depth == 0 or (self.load_css_strict_top_level and self.open_rule_depth == 0) or
+            (self.mediaQueryActive() and self.open_rule_depth == 0 and !self.declarationAtRuleActive()))
+        {
+            // Written there, it reads as a selector missing its block. The
+            // indented syntax reads its indentation first, which is not
+            // checked here.
+            if (self.innerMostChunkRef() == .top) {
+                const fid: usize = self.diagnosticModuleIndex();
+                if (fid < self.program.modules.len and std.ascii.endsWithIgnoreCase(self.program.modules[fid].module_path, ".sass")) {
+                    return error.SassError;
+                }
+                error_format.setContextMessage("expected \"{\".");
+                const end = self.current_source_span.end;
+                error_format.recordErrorSpan(end, end + 1, self.current_source_span.file_id);
+                return error.SassError;
+            }
+            error_format.setContextMessage("Declarations may only be used within style rules.");
+            return error.SassError;
+        }
     }
 
     fn isColorArgument(self: *const VM, v: Value) bool {

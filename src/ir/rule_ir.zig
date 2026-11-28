@@ -4886,6 +4886,7 @@ pub const RuleIR = struct {
                             edge.target_module,
                         },
                     );
+                    reportExtendTargetNotFound(intern_pool.get(edge.target_selector));
                     return error.SassError;
                 }
                 continue;
@@ -4922,9 +4923,19 @@ pub const RuleIR = struct {
                         },
                     );
                 }
+                reportExtendTargetNotFound(intern_pool.get(entry.key_ptr.*.target_selector));
                 return error.SassError;
             }
         }
+    }
+
+    /// The official CLI's error for a required @extend that extends nothing.
+    fn reportExtendTargetNotFound(target: []const u8) void {
+        var buf: [512]u8 = undefined;
+        const shown = std.mem.trim(u8, target, " \t\r\n");
+        if (std.fmt.bufPrint(&buf, "The target selector was not found.\nUse \"@extend {s} !optional\" to avoid this error.", .{shown})) |msg| {
+            error_format.setContextMessage(msg);
+        } else |_| {}
     }
 
     fn isHexDigit(ch: u8) bool {
