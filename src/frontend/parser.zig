@@ -1450,6 +1450,8 @@ pub const Parser = struct {
                         self.pos += 1;
                         continue;
                     }
+                    // An unterminated comment there wants more input.
+                    if (t == .invalid and std.mem.startsWith(u8, tok.slice(self.source), "/*")) return self.failExpecting("expected more input.");
                     return self.failExpecting("multiple statements on one line are not supported in the indented syntax.");
                 }
             }

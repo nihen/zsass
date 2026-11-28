@@ -10668,7 +10668,14 @@ fn resolveIncludeStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex 
     defer if (unescaped_name.ptr != raw_name_slice.ptr) ctx.a.free(unescaped_name);
     const name_slice = unescaped_name;
     if (isDoubleDashIdentifier(name_slice)) {
-        error_format.setContextMessage("Sass @mixin names beginning with -- are forbidden for forward-compatibility with plain CSS mixins.");
+        // `ns.--a` is a private member.
+        // One no mixin is named (`__a` is) is undefined.
+        error_format.setContextMessage(if (namespace_id != .none)
+            "Private members can't be accessed from outside their modules."
+        else if (lookupIdentifierIdInsensitive(&ctx.prog.mixin_names, name_slice) != null)
+            "Sass @mixin names beginning with -- are forbidden for forward-compatibility with plain CSS mixins."
+        else
+            "Undefined mixin.");
         return error.SassError;
     }
     var callee_module = local_module_id_sentinel;
@@ -11029,7 +11036,11 @@ fn resolvePendingCallableDefaults(ctx: *Ctx) ResolveError!void {
                     mixin.param_slots,
                     pending.param_index,
                 ) catch |err| switch (err) {
-                    error.SassError, error.UnknownVar => null,
+                    // A default that fails is reported when it is used.
+                    error.SassError, error.UnknownVar => blk: {
+                        error_format.clearContextMessage();
+                        break :blk null;
+                    },
                     else => return err,
                 };
                 mixin.defaults[param_idx] = de;
@@ -11047,7 +11058,11 @@ fn resolvePendingCallableDefaults(ctx: *Ctx) ResolveError!void {
                     func.param_slots,
                     pending.param_index,
                 ) catch |err| switch (err) {
-                    error.SassError, error.UnknownVar => null,
+                    // A default that fails is reported when it is used.
+                    error.SassError, error.UnknownVar => blk: {
+                        error_format.clearContextMessage();
+                        break :blk null;
+                    },
                     else => return err,
                 };
                 func.defaults[param_idx] = de;

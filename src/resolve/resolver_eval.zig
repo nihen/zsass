@@ -417,6 +417,8 @@ fn evalBuiltinCall(env: anytype, prog: anytype, payload: u32) Error!Value {
             if (call.span_start != std.math.maxInt(u32)) error_format.recordErrorSpan(call.span_start, call.span_end, 0);
             return error.SassError;
         }
+        // Not evaluated here; the run reports its error, if it is reached.
+        error_format.clearContextMessage();
         return error.NonStaticExpr;
     };
 
