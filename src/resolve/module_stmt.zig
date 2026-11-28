@@ -45,7 +45,11 @@ const builtinModuleUrlToShortName = names.builtinModuleUrlToShortName;
 const isPlainCssStylesheetPath = path_resolution.isPlainCssStylesheetPath;
 const setCurrentErrorFrameSpan = resolve_error_stack.setCurrentFrameSpan;
 
-pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: bool, comptime deps: anytype) ResolveError!StmtIndex {
+pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: bool, is_file_root_stmt: bool, comptime deps: anytype) ResolveError!StmtIndex {
+    if (!is_file_root_stmt) {
+        error_format.setContextMessage("This at-rule is not allowed here.");
+        return error.SassError;
+    }
     if (is_top_level_stmt and ctx.module_directive_locked) {
         error_format.setContextMessage("@use rules must be written before any other rules.");
         return error.SassError;
@@ -184,7 +188,11 @@ fn forwardedInitialConfig(
     return try out.toOwnedSlice(ctx.a);
 }
 
-pub fn resolveForwardStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: bool, comptime deps: anytype) ResolveError!StmtIndex {
+pub fn resolveForwardStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: bool, is_file_root_stmt: bool, comptime deps: anytype) ResolveError!StmtIndex {
+    if (!is_file_root_stmt) {
+        error_format.setContextMessage("This at-rule is not allowed here.");
+        return error.SassError;
+    }
     if (is_top_level_stmt and ctx.module_directive_locked) {
         error_format.setContextMessage("@forward rules must be written before any other rules.");
         return error.SassError;
@@ -331,7 +339,10 @@ pub fn resolveImportStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: an
     }
     const css_only = in_plain_css_module or has_conds or url_has_dynamic or isPlainCssImport(url_raw, url_inner);
     if (!css_only) {
-        if (ctx.flow_control_depth > 0 or ctx.in_callable) return error.SassError;
+        if (ctx.flow_control_depth > 0 or ctx.in_callable) {
+            error_format.setContextMessage("This at-rule is not allowed here.");
+            return error.SassError;
+        }
         // dart's stack trace points the parent frame at the import URL
         // (`{parent} l:c root stylesheet` with c = quote start), not the
         // statement head. Pass the url node span alongside the stmt span.

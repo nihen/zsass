@@ -479,6 +479,10 @@ const Ctx = struct {
     /// Body depth such as `stmt_style_rule` / `stmt_at_rule` / `stmt_at_root`.
     /// top-level `!default` Used for collection judgment.
     nested_stmt_depth: u32 = 0,
+    /// `scopes.items.len` and `nested_stmt_depth` at the top level of the
+    /// file being resolved, which an @import nested in a rule raises.
+    file_root_scopes: usize = 0,
+    file_root_nested_depth: u32 = 0,
     /// enclosing style-rule depth (common to plain-CSS / Sass).
     style_rule_depth: u32 = 0,
     /// enclosing plain-CSS style-rule depth.
@@ -2642,6 +2646,12 @@ fn appendExpr(prog: *ResolvedProgram, alloc: std.mem.Allocator, re: ResolvedExpr
     const idx: ExprIndex = @intCast(prog.exprs.items.len);
     try prog.exprs.append(alloc, re);
     return idx;
+}
+
+/// A statement at the top level of its own file, though that file may be
+/// imported into a rule.
+fn isFileRootStmt(ctx: *const Ctx) bool {
+    return ctx.scopes.items.len == ctx.file_root_scopes and ctx.nested_stmt_depth == ctx.file_root_nested_depth;
 }
 
 const private_member_message = "Private members can't be accessed from outside their modules.";
@@ -9980,8 +9990,8 @@ fn resolveStmtRecorded(ctx: *Ctx, n: ast_flat.AstNode, span: Span) ResolveError!
             try resolveFunctionDecl(ctx, n, span);
             return try appendNoop(ctx, span);
         },
-        .stmt_use => return try module_stmt.resolveUseStmt(ctx, n, span, is_top_level_stmt, ModuleStmtDeps),
-        .stmt_forward => return try module_stmt.resolveForwardStmt(ctx, n, span, is_top_level_stmt, ModuleStmtDeps),
+        .stmt_use => return try module_stmt.resolveUseStmt(ctx, n, span, is_top_level_stmt, isFileRootStmt(ctx), ModuleStmtDeps),
+        .stmt_forward => return try module_stmt.resolveForwardStmt(ctx, n, span, is_top_level_stmt, isFileRootStmt(ctx), ModuleStmtDeps),
         .stmt_at_root => return try resolveAtRootStmt(ctx, n, span),
         .stmt_content => return try resolveContentStmt(ctx, n, span),
         .stmt_extend => return try resolveExtendStmt(ctx, n, span),
@@ -11358,6 +11368,8 @@ const preamble_ctx_default_only = [_][]const u8{
     "while_body_depth",
     "callable_decl_context",
     "nested_stmt_depth",
+    "file_root_scopes",
+    "file_root_nested_depth",
     "style_rule_depth",
     "plain_css_style_rule_depth",
     "property_namespace_depth",
