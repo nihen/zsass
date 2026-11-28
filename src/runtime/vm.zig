@@ -6685,6 +6685,13 @@ pub const VM = struct {
 
     /// A declaration outside a style rule (at the top level, or in an at-rule
     /// that is no place for one) is the official CLI's error.
+    fn atRootInsideStyleRule(self: *const VM) bool {
+        for (self.at_root_saved_selector_frames.items) |frame| {
+            if (frame.selectors.len > 0) return true;
+        }
+        return false;
+    }
+
     fn ensureDeclarationInStyleRule(self: *VM) VMError!void {
         if (self.open_block_depth == 0 or (self.load_css_strict_top_level and self.open_rule_depth == 0) or
             (self.mediaQueryActive() and self.open_rule_depth == 0 and !self.declarationAtRuleActive()))
@@ -6692,10 +6699,9 @@ pub const VM = struct {
             // Written there, it reads as a selector missing its block. The
             // indented syntax reads its indentation first, which is not
             // checked here.
-            // Inside @at-root it is written in a style rule all the same.
-            if (self.innerMostChunkRef() == .top and self.at_root_bubble_stack.items.len == 0 and
-                self.at_root_saved_selector_frames.items.len == 0)
-            {
+            // Inside an @at-root in a style rule it is written in that rule
+            // all the same.
+            if (self.innerMostChunkRef() == .top and !self.atRootInsideStyleRule()) {
                 const fid: usize = self.diagnosticModuleIndex();
                 if (fid < self.program.modules.len and std.ascii.endsWithIgnoreCase(self.program.modules[fid].module_path, ".sass")) {
                     return error.SassError;

@@ -166,7 +166,12 @@ fn endsHexEscape(s: []const u8, end: usize) bool {
     var i = end;
     var digits: usize = 0;
     while (i > 0 and digits < 6 and std.ascii.isHex(s[i - 1])) : (i -= 1) digits += 1;
-    return digits > 0 and i > 0 and s[i - 1] == '\\';
+    if (digits == 0) return false;
+    // An odd run of backslashes starts an escape; an even one is escaped
+    // backslashes.
+    var slashes: usize = 0;
+    while (i > 0 and s[i - 1] == '\\') : (i -= 1) slashes += 1;
+    return slashes % 2 == 1;
 }
 
 pub fn validatePlainCssValue(val: []const u8) EvalError!void {
