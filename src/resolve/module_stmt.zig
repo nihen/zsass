@@ -1,4 +1,5 @@
 const std = @import("std");
+const error_format = @import("../runtime/error_format.zig");
 
 const builtin_mod = @import("../builtin/mod.zig");
 const ast_flat = @import("../frontend/ast_flat.zig");
@@ -307,6 +308,7 @@ pub fn resolveImportStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: an
     const in_plain_css_module = isPlainCssStylesheetPath(ctx.module_path);
     if (in_plain_css_module) {
         if (url_has_dynamic) {
+            error_format.setContextMessage("Interpolation isn't allowed in plain CSS.");
             return error.SassError;
         }
         const stmt_start: usize = @min(ctx.ast.source.len, @as(usize, span.start));

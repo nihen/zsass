@@ -1,4 +1,5 @@
 const std = @import("std");
+const error_format = @import("../runtime/error_format.zig");
 
 const ast_flat = @import("../frontend/ast_flat.zig");
 const data = @import("data.zig");
@@ -66,7 +67,7 @@ pub fn resolveAtRuleStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: an
         atRuleNameHasInterpolation(ctx.ast.source, span);
     var dynamic_at_rule_name_expr: ?ExprIndex = null;
     const in_plain_css_module = isPlainCssStylesheetPath(ctx.module_path);
-    if (in_plain_css_module and has_interpolated_name) return error.SassError;
+    if (in_plain_css_module and has_interpolated_name) return plainCssInterpolation();
     if (has_interpolated_name and std.mem.indexOf(u8, interpolated_at_rule_name, "#{") != null) {
         deps.validateAtRuleNameInterpolation(interpolated_at_rule_name) catch return error.SassError;
         if (deps.resolveInterpolatedTextExpr(ctx, interpolated_at_rule_name, span, false) catch null) |name_expr| {
@@ -113,7 +114,7 @@ pub fn resolveAtRuleStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: an
             }
         }
         if (in_plain_css_module and std.mem.indexOf(u8, raw_prelude, "#{") != null) {
-            return error.SassError;
+            return plainCssInterpolation();
         }
 
         if ((is_media_at_rule or is_supports_at_rule) and std.mem.indexOf(u8, raw_prelude, "#{") != null) {
@@ -415,4 +416,9 @@ pub fn resolveAtRootStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: an
         .origin_id = ctx.currentOrigin(),
     });
     return idx;
+}
+
+fn plainCssInterpolation() error{SassError} {
+    error_format.setContextMessage("Interpolation isn't allowed in plain CSS.");
+    return error.SassError;
 }

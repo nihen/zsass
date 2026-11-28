@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- A mixin or function declared where it may not be, `@return` outside a
+  function, a reserved function name, a declaration outside a style
+  rule, and a required `@extend` that extends nothing are reported as
+  the official CLI reports them.
+- An amount or weight out of range says so ("$weight: Expected 101% to
+  be within 0% and 100%.").
+- A plain CSS file that uses Sass says which feature it may not use
+  ("Sass variables aren't allowed in plain CSS." and the like), and
+  `a (b)` in one is rejected as the official CLI rejects it.
 - The color functions name the argument that is no color ("$color: 1 is
   not a color."), and `color.channel()` and `color.to-space()` report
   their channel and space as the official CLI does.

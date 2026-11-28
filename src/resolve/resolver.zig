@@ -2646,6 +2646,7 @@ fn appendExpr(prog: *ResolvedProgram, alloc: std.mem.Allocator, re: ResolvedExpr
 
 const private_member_message = "Private members can't be accessed from outside their modules.";
 const ambiguous_star_var_message = "This variable is available from multiple global modules.";
+const plain_css_interpolation_message = "Interpolation isn't allowed in plain CSS.";
 
 /// The official CLI's error for a namespace no `@use` brought in.
 fn setNoNamespaceMessage(ns: []const u8) void {
@@ -9127,6 +9128,7 @@ fn resolvePlainCssDeclarationStmtFast(
     if (std.mem.indexOf(u8, raw_prop, "#{") != null or
         std.mem.indexOf(u8, raw_val, "#{") != null)
     {
+        error_format.setContextMessage(plain_css_interpolation_message);
         return error.SassError;
     }
 
@@ -9238,6 +9240,7 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
         if (std.mem.indexOf(u8, raw_prop, "#{") != null or
             std.mem.indexOf(u8, raw_val, "#{") != null)
         {
+            error_format.setContextMessage(plain_css_interpolation_message);
             return error.SassError;
         }
         const trimmed_prop = std.mem.trim(u8, raw_prop, " \t\r\n");
@@ -9562,7 +9565,10 @@ fn resolveVariableDeclStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtI
 }
 
 fn resolveReturnStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex {
-    if (ctx.callable_decl_context != .function) return error.Unsupported;
+    if (ctx.callable_decl_context != .function) {
+        error_format.setContextMessage(not_allowed_here_message);
+        return error.Unsupported;
+    }
     const val_n: NodeIndex = @fromBackingInt(@intCast(n.payload));
     const val_e = try resolveExpr(ctx.ast, ctx, val_n);
     const idx: StmtIndex = @intCast(ctx.prog.stmts.items.len);
@@ -9892,7 +9898,10 @@ fn resolveStmtRecorded(ctx: *Ctx, n: ast_flat.AstNode, span: Span) ResolveError!
     }
     if (in_plain_css_module) {
         switch (n.tag) {
-            .stmt_variable_decl,
+            .stmt_variable_decl => {
+                error_format.setContextMessage("Sass variables aren't allowed in plain CSS.");
+                return error.SassError;
+            },
             .stmt_use,
             .stmt_forward,
             .stmt_return,
@@ -9909,13 +9918,17 @@ fn resolveStmtRecorded(ctx: *Ctx, n: ast_flat.AstNode, span: Span) ResolveError!
             .stmt_at_root,
             .stmt_content,
             .stmt_extend,
-            => return error.SassError,
+            => {
+                error_format.setContextMessage("This at-rule isn't allowed in plain CSS.");
+                return error.SassError;
+            },
             .stmt_comment => {
                 const start: usize = @min(ctx.ast.source.len, @as(usize, span.start));
                 const end: usize = @min(ctx.ast.source.len, @as(usize, span.end));
                 if (end > start) {
                     const raw = ctx.ast.source[start..end];
                     if (std.mem.startsWith(u8, std.mem.trimStart(u8, raw, " \t\r\n"), "//")) {
+                        error_format.setContextMessage("Silent comments aren't allowed in plain CSS.");
                         return error.SassError;
                     }
                 }
@@ -10809,8 +10822,22 @@ fn ensureFunctionsLen(ctx: *Ctx, need_len: usize) !void {
     }
 }
 
+const not_allowed_here_message = "This at-rule is not allowed here.";
+
+/// The official CLI's error for a mixin or function declared where it may
+/// not be: in a function, in a mixin, or in a control directive.
+fn misplacedCallableDecl(ctx: *const Ctx, comptime plural: []const u8, comptime kind: []const u8) ResolveError {
+    const msg = switch (ctx.callable_decl_context) {
+        .function => not_allowed_here_message,
+        .mixin => "Mixins may not contain " ++ kind ++ " declarations.",
+        else => if (ctx.in_callable) not_allowed_here_message else plural ++ " may not be declared in control directives.",
+    };
+    error_format.setContextMessage(msg);
+    return error.Unsupported;
+}
+
 fn resolveMixinDecl(ctx: *Ctx, n: AstNode, span: Span) !void {
-    if (ctx.flow_control_depth > 0 or ctx.in_callable) return error.Unsupported;
+    if (ctx.flow_control_depth > 0 or ctx.in_callable) return misplacedCallableDecl(ctx, "Mixins", "mixin");
     const off: ExtraIndex = n.payload;
     const name_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
     const params_ex = ctx.ast.getExtraU32(off + 1);
@@ -10923,7 +10950,7 @@ fn resolveMixinDecl(ctx: *Ctx, n: AstNode, span: Span) !void {
 }
 
 fn resolveFunctionDecl(ctx: *Ctx, n: AstNode, span: Span) !void {
-    if (ctx.flow_control_depth > 0 or ctx.in_callable) return error.Unsupported;
+    if (ctx.flow_control_depth > 0 or ctx.in_callable) return misplacedCallableDecl(ctx, "Functions", "function");
     const off: ExtraIndex = n.payload;
     const name_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(off)));
     const params_ex = ctx.ast.getExtraU32(off + 1);
@@ -10932,7 +10959,10 @@ fn resolveFunctionDecl(ctx: *Ctx, n: AstNode, span: Span) !void {
     const raw_name = ctx.pool.get(name_id);
     const unescaped_name = try css_utils.unescapeSassIdentifier(ctx.a, raw_name);
     defer if (unescaped_name.ptr != raw_name.ptr) ctx.a.free(unescaped_name);
-    if (isReservedFunctionName(unescaped_name)) return error.Unsupported;
+    if (isReservedFunctionName(unescaped_name)) {
+        error_format.setContextMessage("Invalid function name.");
+        return error.Unsupported;
+    }
     const name_str = unescaped_name;
     ctx.markScopeRestoreDirty();
     try ctx.recordMapMut(ctx.a, .seen_function_decls, name_str);

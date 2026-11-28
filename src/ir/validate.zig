@@ -1,6 +1,7 @@
 /// CSS validation functions for plain-CSS passthrough, media queries,
 /// @supports, and unicode ranges.
 const std = @import("std");
+const error_format = @import("../runtime/error_format.zig");
 const stack_guard = @import("../runtime/stack_guard.zig");
 const css_utils = @import("../runtime/css_utils.zig");
 
@@ -126,13 +127,60 @@ fn isSassOnlyFunction(name: []const u8) bool {
 /// - sass() conditions inside CSS if()
 /// - Parentheses used as Sass lists (not function calls)
 /// - Sass binary operators (y + z, y * z, y == z, etc.)
+/// The official CLI's error for Sass written in plain CSS.
+fn plainCssError(comptime msg: []const u8) EvalError {
+    error_format.setContextMessage(msg);
+    return EvalError.SassError;
+}
+
+/// Parentheses that are no function call's: the official CLI reads `()`
+/// as a missing expression and `(a: b)` as a missing `)`.
+fn plainCssParenthesesError(s: []const u8, open: usize) EvalError {
+    const close = scanMatchingParen(s, open + 1);
+    const inner = std.mem.trim(u8, s[open + 1 .. @max(open + 1, close -| 1)], " \t\r\n");
+    if (inner.len == 0) return plainCssError("Expected expression.");
+    var depth: u32 = 0;
+    var quote: u8 = 0;
+    var i: usize = 0;
+    while (i < inner.len) : (i += 1) {
+        const c = inner[i];
+        if (quote != 0) {
+            if (c == '\\') i += 1 else if (c == quote) quote = 0;
+            continue;
+        }
+        switch (c) {
+            '"', '\'' => quote = c,
+            '\\' => i += 1,
+            '(', '[' => depth += 1,
+            ')', ']' => depth -|= 1,
+            ':', ',' => if (depth == 0) return plainCssError("expected \")\"."),
+            else => {},
+        }
+    }
+    return plainCssError("Parentheses aren't allowed in plain CSS.");
+}
+
+/// Whether the text before `end` is a hex escape (`\` and 1-6 hex digits),
+/// which a following space ends.
+fn endsHexEscape(s: []const u8, end: usize) bool {
+    var i = end;
+    var digits: usize = 0;
+    while (i > 0 and digits < 6 and std.ascii.isHex(s[i - 1])) : (i -= 1) digits += 1;
+    if (digits == 0) return false;
+    // An odd run of backslashes starts an escape; an even one is escaped
+    // backslashes.
+    var slashes: usize = 0;
+    while (i > 0 and s[i - 1] == '\\') : (i -= 1) slashes += 1;
+    return slashes % 2 == 1;
+}
+
 pub fn validatePlainCssValue(val: []const u8) EvalError!void {
     const s = std.mem.trim(u8, val, " \t\n\r");
     if (s.len == 0) return;
 
     // Parent selector & in value
     if (std.mem.findScalar(u8, s, '&') != null) {
-        return EvalError.SassError;
+        return plainCssError("The parent selector isn't allowed in plain CSS.");
     }
 
     // Sass spread operator: "..."
@@ -160,6 +208,12 @@ pub fn validatePlainCssValue(val: []const u8) EvalError!void {
             si += 1;
             continue;
         }
+        // A comment is skipped, parentheses and all.
+        if (c == '/' and si + 1 < s.len and s[si + 1] == '*') {
+            const close = std.mem.indexOfPos(u8, s, si + 2, "*/") orelse s.len;
+            si = @min(s.len, close + 2);
+            continue;
+        }
 
         // Check parentheses BEFORE incrementing depth so we can inspect the function name.
         if (c == '(') {
@@ -170,16 +224,19 @@ pub fn validatePlainCssValue(val: []const u8) EvalError!void {
                 var fs = fe;
                 while (fs > 0 and isIdentChar(s[fs - 1])) : (fs -= 1) {}
                 if (fs > 0 and s[fs - 1] == '.') {
-                    return EvalError.SassError;
+                    return plainCssError("Module namespaces aren't allowed in plain CSS.");
                 }
             }
             if (paren_depth == 0) {
                 // Top-level parens must be a function call
-                if (si == 0) {
-                    return EvalError.SassError;
-                }
+                if (si == 0) return plainCssParenthesesError(s, si);
                 var func_end = si;
                 while (func_end > 0 and (s[func_end - 1] == ' ' or s[func_end - 1] == '\t')) : (func_end -= 1) {}
+                // A function's name is written right before its parenthesis;
+                // the space that ends a hex escape (`\6c `) is the name's.
+                if (func_end != si and !(func_end + 1 == si and endsHexEscape(s, func_end))) {
+                    return plainCssParenthesesError(s, si);
+                }
                 var func_start = func_end;
                 while (func_start > 0 and isIdentChar(s[func_start - 1])) : (func_start -= 1) {}
                 const func_name = s[func_start..func_end];
@@ -187,11 +244,11 @@ pub fn validatePlainCssValue(val: []const u8) EvalError!void {
                 if (prev_nonws == 0 or
                     (!isIdentChar(prev_nonws) and prev_nonws != ')'))
                 {
-                    return EvalError.SassError;
+                    return plainCssParenthesesError(s, si);
                 }
                 // Sass-only function names are not allowed in plain CSS
                 if (isSassOnlyFunction(func_name)) {
-                    return EvalError.SassError;
+                    return plainCssError("This function isn't allowed in plain CSS.");
                 }
                 if (std.ascii.eqlIgnoreCase(func_name, "var")) {
                     const args_end = scanMatchingParen(s, si + 1);
@@ -223,7 +280,7 @@ pub fn validatePlainCssValue(val: []const u8) EvalError!void {
                         }
                     }
                     if (has_colon_depth0 and containsSassCondition(if_args)) {
-                        return EvalError.SassError;
+                        return plainCssError("sass() conditions aren't allowed in plain CSS");
                     }
                 }
                 // Math functions with empty args are invalid in plain CSS
@@ -248,7 +305,7 @@ pub fn validatePlainCssValue(val: []const u8) EvalError!void {
         }
 
         if (c == '$') {
-            return EvalError.SassError;
+            return plainCssError("Sass variables aren't allowed in plain CSS.");
         }
 
         // Only check operators at top level (paren_depth == 0)
@@ -259,25 +316,25 @@ pub fn validatePlainCssValue(val: []const u8) EvalError!void {
                 const prev = s[si - 1];
                 const next = s[si + 1];
                 if ((prev == ' ' or prev == '\t') and (next == ' ' or next == '\t')) {
-                    return EvalError.SassError;
+                    return plainCssError("Operators aren't allowed in plain CSS.");
                 }
             }
             if ((c == '<' or c == '>') and si > 0) {
                 const prev = s[si - 1];
                 if (prev == ' ' or prev == '\t') {
-                    return EvalError.SassError;
+                    return plainCssError("Operators aren't allowed in plain CSS.");
                 }
             }
             if (c == '=' and si > 0 and si + 1 < s.len) {
                 const prev = s[si - 1];
                 const next = s[si + 1];
                 if (next == '=' and (prev == ' ' or prev == '\t')) {
-                    return EvalError.SassError;
+                    return plainCssError("Operators aren't allowed in plain CSS.");
                 }
                 if (si >= 1 and prev == '!' and si >= 2) {
                     const pprev = s[si - 2];
                     if (pprev == ' ' or pprev == '\t') {
-                        return EvalError.SassError;
+                        return plainCssError("Operators aren't allowed in plain CSS.");
                     }
                 }
             }
@@ -380,7 +437,7 @@ pub fn validatePlainCssSelector(sel: []const u8, is_top_level: bool) EvalError!v
 
     // Interpolation is not allowed in plain CSS selectors.
     if (std.mem.find(u8, s, "#{") != null) {
-        return EvalError.SassError;
+        return plainCssError("Interpolation isn't allowed in plain CSS.");
     }
 
     // Placeholder selectors (%foo) are not allowed in plain CSS.
@@ -391,11 +448,11 @@ pub fn validatePlainCssSelector(sel: []const u8, is_top_level: bool) EvalError!v
         while (part_end < s.len and s[part_end] != ',') : (part_end += 1) {}
         const part = std.mem.trim(u8, s[part_start..part_end], " \t\n\r");
         if (part.len > 0 and part[0] == '%') {
-            return EvalError.SassError;
+            return plainCssError("Placeholder selectors aren't allowed in plain CSS.");
         }
         // Leading combinator at top level only: selector starts with >, ~, +
         if (is_top_level and part.len > 0 and (part[0] == '>' or part[0] == '~' or part[0] == '+')) {
-            return EvalError.SassError;
+            return plainCssError("Top-level leading combinators aren't allowed in plain CSS.");
         }
         part_start = part_end + 1;
     }
@@ -411,12 +468,12 @@ pub fn validatePlainCssSelector(sel: []const u8, is_top_level: bool) EvalError!v
             if (s[ci] == ':') {
                 //Colon at end  ->  nested property
                 if (ci + 1 >= s.len) {
-                    return EvalError.SassError;
+                    return plainCssError("Nested declarations aren't allowed in plain CSS.");
                 }
                 // Colon followed by space or another colon (::pseudo-element is ok,
                 // but `: ` is a nested property indicator)
                 if (s[ci + 1] == ' ' or s[ci + 1] == '\t') {
-                    return EvalError.SassError;
+                    return plainCssError("Nested declarations aren't allowed in plain CSS.");
                 }
             }
             ci += 1;
@@ -457,7 +514,7 @@ pub fn validatePlainCssSelector(sel: []const u8, is_top_level: bool) EvalError!v
                 s[si] != ':' and s[si] != '.' and s[si] != '#' and
                 s[si] != '[' and s[si] != '>' and s[si] != '~' and s[si] != '+')
             {
-                return EvalError.SassError;
+                return plainCssError("Parent selectors can't have suffixes in plain CSS.");
             }
             continue;
         }
