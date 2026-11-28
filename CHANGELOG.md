@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- More errors are reported as the official CLI reports them: `if()` with
+  missing arguments, `selector.simple-selectors(null)`, `@extend &`, a
+  declaration in a `@function`, `@include` of a `--` name, a `{` block
+  in the indented syntax, and two statements on one line of it.
 - More errors are reported as the official CLI reports them: an `@extend`
   outside a style rule or of a compound or complex selector, a keyword
   argument map with a key that is no string, a plain CSS function given
