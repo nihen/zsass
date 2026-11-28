@@ -1425,69 +1425,78 @@ fn powerlessChannelMask(color: color_mod.Color) ColorMissingMask {
     };
 }
 
+/// The list `$method` was, as its errors show it.
+fn mixMethodListText(ctx: *BuiltinContext, method_value: Value) BuiltinError![]const u8 {
+    return shared.valueToInspectionString(ctx, method_value);
+}
+
+/// One word of `$method`. The official CLI names no argument when the
+/// hue interpolation method is quoted.
+fn mixMethodToken(ctx: *BuiltinContext, item: Value, comptime prefixed: bool) BuiltinError![]const u8 {
+    // A color name is a color, not a string.
+    if (!item.isString() or tryCoerceColorArg(ctx, item) != null) return reportArgumentTypeMismatch(ctx, "method", item, "string");
+    const raw = ctx.intern_pool.get(item.stringIntern());
+    if (item.stringQuoted(ctx.string_flags_pool.items)) {
+        if (prefixed) return shared.reportArgumentMessage("method", "Expected \"{s}\" to be an unquoted string.", .{raw});
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Expected \"{s}\" to be an unquoted string.", .{raw}) catch return error.BuiltinType;
+        error_format.setContextMessage(msg);
+        return error.BuiltinType;
+    }
+    return raw;
+}
+
 fn parseMixMethodValue(ctx: *BuiltinContext, method_value: Value) BuiltinError!ParsedMixMethod {
-    var tokens: [3][]const u8 = undefined;
-    var token_count: usize = 0;
-
-    if (method_value.isString()) {
-        if (method_value.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
-        tokens[0] = ctx.intern_pool.get(method_value.stringIntern());
-        token_count = 1;
-    } else if (method_value.kind() == .list) {
-        if (method_value.listBracketed(ctx.list_meta_pool.items) or method_value.listComma(ctx.list_meta_pool.items) or method_value.listSlash(ctx.list_meta_pool.items)) return error.BuiltinType;
-        const items = ctx.list_pool.items[method_value.listHandle()];
-        if (items.len == 0 or items.len > 3) return error.BuiltinType;
-        for (items, 0..) |item, i| {
-            if (!item.isString()) return reportArgumentTypeMismatch(ctx, "method", item, "string");
-            if (item.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
-            tokens[i] = ctx.intern_pool.get(item.stringIntern());
+    var single: [1]Value = .{method_value};
+    var items: []const Value = &single;
+    if (method_value.kind() == .list) {
+        const meta = ctx.list_meta_pool.items;
+        if (method_value.listIsMap(meta)) {
+            const text = try mixMethodListText(ctx, method_value);
+            defer ctx.allocator.free(text);
+            return shared.reportArgumentMessage("method", "Expected a space-separated list, was {s}", .{text});
         }
-        token_count = items.len;
-    } else {
-        return error.BuiltinType;
-    }
-
-    if (token_count == 0) return error.BuiltinType;
-
-    var total_bytes: usize = 0;
-    for (0..token_count) |i| {
-        const raw = tokens[i];
-        if (raw.len == 0) return error.BuiltinType;
-        total_bytes += raw.len;
-    }
-
-    const normalized_storage = try ctx.allocator.alloc(u8, total_bytes);
-    defer ctx.allocator.free(normalized_storage);
-
-    var normalized: [3][]u8 = undefined;
-    var cursor: usize = 0;
-    for (0..token_count) |i| {
-        const raw = tokens[i];
-        const next = cursor + raw.len;
-        const slot = normalized_storage[cursor..next];
-        for (raw, 0..) |ch, j| {
-            const lower = std.ascii.toLower(ch);
-            slot[j] = if (lower == '_') '-' else lower;
+        if (method_value.listBracketed(meta)) {
+            const text = try mixMethodListText(ctx, method_value);
+            defer ctx.allocator.free(text);
+            return shared.reportArgumentMessage("method", "Expected an unbracketed list, was {s}", .{text});
         }
-        normalized[i] = slot;
-        cursor = next;
+        items = ctx.list_pool.items[method_value.listHandle()];
+        if (items.len == 0) return shared.reportArgumentMessage("method", "Expected a color interpolation method, got an empty list.", .{});
+        if (method_value.listComma(meta) or method_value.listSlash(meta)) {
+            const text = try mixMethodListText(ctx, method_value);
+            defer ctx.allocator.free(text);
+            return shared.reportArgumentMessage("method", "Expected a space-separated list, was {s}", .{text});
+        }
     }
 
-    const space = parseColorSpaceName(normalized[0]) orelse return error.BuiltinType;
+    const space_name = try mixMethodToken(ctx, items[0], true);
+    const space = parseColorSpaceName(space_name) orelse
+        return shared.reportArgumentMessage("method", "Unknown color space \"{s}\".", .{space_name});
     var parsed = ParsedMixMethod{ .space = space };
-    if (token_count == 1) return parsed;
-    if (token_count != 3 or !space.isPolar() or !std.mem.eql(u8, normalized[2], "hue")) return error.BuiltinType;
+    if (items.len == 1) return parsed;
 
-    parsed.hue = if (std.mem.eql(u8, normalized[1], "shorter"))
-        .shorter
-    else if (std.mem.eql(u8, normalized[1], "longer"))
-        .longer
-    else if (std.mem.eql(u8, normalized[1], "increasing"))
-        .increasing
-    else if (std.mem.eql(u8, normalized[1], "decreasing"))
-        .decreasing
-    else
-        return error.BuiltinType;
+    const hue_name = try mixMethodToken(ctx, items[1], false);
+    const hue_names = [_]struct { []const u8, MixHueMethod }{
+        .{ "shorter", .shorter },
+        .{ "longer", .longer },
+        .{ "increasing", .increasing },
+        .{ "decreasing", .decreasing },
+    };
+    const hue_entry = for (hue_names) |entry| {
+        if (std.ascii.eqlIgnoreCase(hue_name, entry[0])) break entry;
+    } else return shared.reportArgumentMessage("method", "Unknown hue interpolation method {s}.", .{hue_name});
+    parsed.hue = hue_entry[1];
+
+    const list_text = try mixMethodListText(ctx, method_value);
+    defer ctx.allocator.free(list_text);
+    if (items.len == 2) return shared.reportArgumentMessage("method", "Expected unquoted string \"hue\" after {s}.", .{list_text});
+    const hue_word = try mixMethodToken(ctx, items[2], true);
+    if (!std.ascii.eqlIgnoreCase(hue_word, "hue"))
+        return shared.reportArgumentMessage("method", "Expected unquoted string \"hue\" at the end of {s}, was {s}.", .{ list_text, hue_word });
+    if (items.len > 3) return shared.reportArgumentMessage("method", "Expected nothing after \"hue\" in {s}.", .{list_text});
+    if (!space.isPolar())
+        return shared.reportArgumentMessage("method", "Hue interpolation method \"HueInterpolationMethod.{s} hue\" may not be set for rectangular color space {s}.", .{ hue_entry[0], colorSpaceArgName(space) });
     return parsed;
 }
 
@@ -1614,15 +1623,18 @@ fn color_mixImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
     if (bound[2]) |wv| {
         if (!wv.isNumber()) return reportArgumentTypeMismatch(ctx, "weight", wv, "number");
     }
+    var method: ?ParsedMixMethod = null;
+    if (bound[3]) |method_value| {
+        if (method_value.kind() != .nil) method = try parseMixMethodValue(ctx, method_value);
+    }
+    if (method == null) {
+        if (!colorLegacyCompatFlagFromValue(ctx, a)) return reportNeedsSpaceOrMethod(ctx, "color1", a, "color.mix", "$method");
+        if (!colorLegacyCompatFlagFromValue(ctx, b)) return reportNeedsSpaceOrMethod(ctx, "color2", b, "color.mix", "$method");
+    }
     const weight = if (bound[2]) |wv| try expectNumber(ctx, wv) else 50.0;
     if (weight < 0.0 or weight > 100.0) return reportNotWithin(ctx, "weight", bound[2].?, "0", "100", true);
 
-    if (bound[3]) |method_value| {
-        const parsed = try parseMixMethodValue(ctx, method_value);
-        return mixModernColors(ctx, a, b, weight, parsed);
-    }
-
-    if (!colorLegacyFlagFromValue(ctx, a) or !colorLegacyFlagFromValue(ctx, b)) return error.BuiltinType;
+    if (method) |parsed| return mixModernColors(ctx, a, b, weight, parsed);
     return mixLegacyColors(ctx, a, b, weight);
 }
 
@@ -1630,8 +1642,26 @@ pub fn color_mix(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
     return color_mixImpl(ctx, args, arg_names) catch |err| normalizeColorUserError(err);
 }
 
+/// `$color: To use color.invert() with non-legacy color lab(...), you must
+/// provide a $space.`
+fn reportNeedsSpaceOrMethod(ctx: *BuiltinContext, comptime param: []const u8, c: Value, comptime function: []const u8, comptime needed: []const u8) BuiltinError {
+    const text = try shared.valueToInspectionString(ctx, c);
+    defer ctx.allocator.free(text);
+    return shared.reportArgumentMessage(param, "To use " ++ function ++ "() with non-legacy color {s}, you must provide a " ++ needed ++ ".", .{text});
+}
+
+/// The global color functions that work in HSL take legacy colors only.
+fn requireLegacyColor(ctx: *BuiltinContext, c: Value, default_name: []const u8) BuiltinError!void {
+    if (colorLegacyCompatFlagFromValue(ctx, c)) return;
+    const name = if (ctx.call_name.len != 0) ctx.call_name else default_name;
+    var buf: [192]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}() is only supported for legacy colors. Please use color.adjust() instead with an explicit $space argument.", .{name}) catch return error.BuiltinType;
+    error_format.setContextMessage(msg);
+    return error.BuiltinType;
+}
+
 fn hslAdjustedColor(ctx: *BuiltinContext, c: Value, dh: f64, ds: f64, dl: f64) BuiltinError!Value {
-    if (!colorLegacyFlagFromValue(ctx, c)) return error.BuiltinType;
+    if (!colorLegacyCompatFlagFromValue(ctx, c)) return error.BuiltinType;
     var hsl = colorToHsl(ctx, c);
     hsl[0] = @mod(hsl[0] + dh, 360.0);
     if (hsl[0] < 0) hsl[0] += 360.0;
@@ -1639,7 +1669,7 @@ fn hslAdjustedColor(ctx: *BuiltinContext, c: Value, dh: f64, ds: f64, dl: f64) B
     hsl[2] = std.math.clamp(hsl[2] + dl, 0.0, 100.0);
     const source_entry = colorEntryOf(ctx, c);
     const alpha = std.math.clamp(source_entry.channels[3], 0.0, 1.0);
-    if ((source_entry.space == .hsl or source_entry.space == .hwb) and source_entry.missing == 0) {
+    if (source_entry.space == .hsl or source_entry.space == .hwb) {
         return colorValueFromDeclaredColor(
             ctx,
             color_mod.Color.init(hsl[0], hsl[1], hsl[2], alpha, .hsl),
@@ -1798,6 +1828,8 @@ pub fn notInColorModule(ctx: *BuiltinContext, args: []const Value, arg_names: []
 pub fn color_lighten(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 2);
     const c = tryCoerceColorArg(ctx, args[0]) orelse return reportArgumentTypeMismatch(ctx, "color", args[0], "color");
+    if (args[1].kind() != .number) return reportArgumentTypeMismatch(ctx, "amount", args[1], "number");
+    try requireLegacyColor(ctx, c, "lighten");
     const amt = parseLegacyPercentAmount(ctx, args[1]) catch |err| switch (err) {
         error.BuiltinType => return reportArgumentTypeMismatch(ctx, "amount", args[1], "number"),
         else => return err,
@@ -1809,6 +1841,8 @@ pub fn color_lighten(ctx: *BuiltinContext, args: []const Value) BuiltinError!Val
 pub fn color_darken(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 2);
     const c = tryCoerceColorArg(ctx, args[0]) orelse return reportArgumentTypeMismatch(ctx, "color", args[0], "color");
+    if (args[1].kind() != .number) return reportArgumentTypeMismatch(ctx, "amount", args[1], "number");
+    try requireLegacyColor(ctx, c, "darken");
     const amt = parseLegacyPercentAmount(ctx, args[1]) catch |err| switch (err) {
         error.BuiltinType => return reportArgumentTypeMismatch(ctx, "amount", args[1], "number"),
         else => return err,
@@ -1848,6 +1882,8 @@ pub fn color_saturate(ctx: *BuiltinContext, args: []const Value) BuiltinError!Va
     }
     try expectArity(args, 2);
     const c = tryCoerceColorArg(ctx, args[0]) orelse return reportArgumentTypeMismatch(ctx, "color", args[0], "color");
+    if (args[1].kind() != .number) return reportArgumentTypeMismatch(ctx, "amount", args[1], "number");
+    try requireLegacyColor(ctx, c, "saturate");
     const amt = parseLegacyPercentAmount(ctx, args[1]) catch |err| switch (err) {
         error.BuiltinType => return reportArgumentTypeMismatch(ctx, "amount", args[1], "number"),
         else => return err,
@@ -1859,6 +1895,8 @@ pub fn color_saturate(ctx: *BuiltinContext, args: []const Value) BuiltinError!Va
 pub fn color_desaturate(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 2);
     const c = tryCoerceColorArg(ctx, args[0]) orelse return reportArgumentTypeMismatch(ctx, "color", args[0], "color");
+    if (args[1].kind() != .number) return reportArgumentTypeMismatch(ctx, "amount", args[1], "number");
+    try requireLegacyColor(ctx, c, "desaturate");
     const amt = parseLegacyPercentAmount(ctx, args[1]) catch |err| switch (err) {
         error.BuiltinType => return reportArgumentTypeMismatch(ctx, "amount", args[1], "number"),
         else => return err,
@@ -1873,6 +1911,7 @@ pub fn color_adjust_hue(ctx: *BuiltinContext, args: []const Value) BuiltinError!
     const parsed_delta = parseLegacyHueOrMissing(ctx, args[1]) orelse return reportArgumentTypeMismatch(ctx, "degrees", args[1], "number");
     if (parsed_delta.missing) return reportArgumentTypeMismatch(ctx, "degrees", args[1], "number");
     const delta = parsed_delta.value;
+    try requireLegacyColor(ctx, c, "adjust-hue");
     try emitColorFunctionDeprecation(ctx, "adjust-hue", .adjust_hue, c, delta);
     return hslAdjustedColor(ctx, c, delta, 0.0, 0.0);
 }
@@ -1927,6 +1966,10 @@ const ParsedColorOpArgs = struct {
     has_rgb_channel: bool = false,
     has_hsl_channel: bool = false,
     has_hwb_channel: bool = false,
+    /// The first argument named for no channel, and how many channel
+    /// arguments came before it.
+    unknown_name: InternId = .none,
+    unknown_pos: usize = 0,
 
     fn deinit(self: *ParsedColorOpArgs, allocator: std.mem.Allocator) void {
         allocator.free(self.entries);
@@ -2076,7 +2119,13 @@ fn parseColorOpArgs(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
             continue;
         }
 
-        const key = parseColorOpChannel(ctx, name_id) orelse return error.BuiltinType;
+        const key = parseColorOpChannel(ctx, name_id) orelse {
+            if (out.unknown_name == .none) {
+                out.unknown_name = name_id;
+                out.unknown_pos = entries.items.len;
+            }
+            continue;
+        };
         for (entries.items) |existing| {
             if (existing.key == key) return error.BuiltinType;
         }
@@ -2141,6 +2190,18 @@ fn legacyChannelFamily(key: ColorOpChannel) LegacyChannelFamily {
 fn reportNoSuchChannel(key: ColorOpChannel, space_name: []const u8) BuiltinError {
     var buf: [128]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "${s}: Color space {s} doesn't have a channel with this name.", .{ colorOpChannelParamLabel(key), space_name }) catch return colorOpSemanticError();
+    error_format.setContextMessage(msg);
+    return colorOpSemanticError();
+}
+
+/// `$ambience: Color space rgb doesn't have a channel with this name.`
+fn reportNoChannelNamedArg(ctx: *BuiltinContext, name_id: InternId, space_name: []const u8) BuiltinError {
+    var name_buf: [96]u8 = undefined;
+    const raw = ctx.intern_pool.get(name_id);
+    const n = @min(raw.len, name_buf.len);
+    for (raw[0..n], 0..) |ch, j| name_buf[j] = if (ch == '_') '-' else ch;
+    var buf: [192]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "${s}: Color space {s} doesn't have a channel with this name.", .{ name_buf[0..n], space_name }) catch return colorOpSemanticError();
     error_format.setContextMessage(msg);
     return colorOpSemanticError();
 }
@@ -2502,6 +2563,21 @@ fn applyColorOperation(
         source_legacy and
         source_declared_space == .hsl;
 
+    const default_space = defaultWorkingSpace(ctx, c, parsed.first_channel);
+    const implicit_space = if (parsed.has_hwb_channel and source_legacy) color_mod.ColorSpace.hwb else default_space;
+    const working_space = if (parsed.has_space_arg) (parsed.space orelse implicit_space) else implicit_space;
+    const legacy_rgb_channels = working_space == .srgb and
+        (parsed.legacy_rgb_channels or (parsed.space == null and source_legacy));
+
+    // Every channel is named for one of the space's before any is set.
+    const working_space_name = if (legacy_rgb_channels) "rgb" else colorSpaceArgName(working_space);
+    for (0..parsed.entries.len + 1) |i| {
+        if (parsed.unknown_name != .none and parsed.unknown_pos == i) return reportNoChannelNamedArg(ctx, parsed.unknown_name, working_space_name);
+        if (i == parsed.entries.len) break;
+        const entry = parsed.entries[i];
+        if (colorOpChannelIndex(working_space, entry.key) == null) return reportNoSuchChannel(entry.key, working_space_name);
+    }
+
     if (parsed.entries.len == 0) {
         if (!parsed.has_space_arg) return c;
         const explicit_space = parsed.space orelse return c;
@@ -2530,12 +2606,6 @@ fn applyColorOperation(
         }
         return colorValueFromDeclaredColor(ctx, output_color, source_declared_space, output_missing, source_legacy);
     }
-
-    const default_space = defaultWorkingSpace(ctx, c, parsed.first_channel);
-    const implicit_space = if (parsed.has_hwb_channel and source_legacy) color_mod.ColorSpace.hwb else default_space;
-    const working_space = if (parsed.has_space_arg) (parsed.space orelse implicit_space) else implicit_space;
-    const legacy_rgb_channels = working_space == .srgb and
-        (parsed.legacy_rgb_channels or (parsed.space == null and source_legacy));
 
     const working = color_mod.convert(localChannelColor(ctx, c), working_space);
     var projected_channels = [3]f64{ working.channels[0], working.channels[1], working.channels[2] };
@@ -3045,8 +3115,7 @@ pub fn color_color(ctx: *BuiltinContext, args: []const Value, arg_names: []const
 fn colorSpaceNameEq(name: []const u8, canonical: []const u8) bool {
     if (name.len != canonical.len) return false;
     for (name, canonical) |actual, expected| {
-        const normalized = if (actual == '_') '-' else actual;
-        if (std.ascii.toLower(normalized) != std.ascii.toLower(expected)) return false;
+        if (std.ascii.toLower(actual) != std.ascii.toLower(expected)) return false;
     }
     return true;
 }
@@ -3750,6 +3819,12 @@ fn alphaLikeImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []const I
     if (std.mem.eql(u8, fn_name, "alpha") and isAlphaFilterPositionalArgSet(ctx, args, arg_names)) {
         return serializeAlphaFilterPositionalArgs(ctx, args);
     }
+    if (mode == .module_alpha and args.len != 1) {
+        // color.alpha() takes its arguments as a list, so the official CLI
+        // counts any number of them as one.
+        error_format.setContextMessage(if (args.len == 0) "() isn't a valid CSS value." else "Only 1 argument allowed, but 1 were passed.");
+        return error.BuiltinArity;
+    }
     try expectArity(args, 1);
     if (tryCoerceColorArg(ctx, args[0])) |c| {
         if (!colorLegacyFlagFromValue(ctx, c)) return reportLegacyColorAlphaBuiltin(ctx);
@@ -3873,12 +3948,16 @@ fn color_complementImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []
     const c = try expectColorArg(ctx, color_arg, "color");
     const explicit_space = try parseOptionalSpaceArgValue(ctx, bound[1]);
     if (explicit_space) |space_arg| {
-        if (!space_arg.space.isPolar()) return error.BuiltinType;
+        if (!space_arg.space.isPolar()) {
+            const name = if (space_arg.legacy_rgb_alias) "rgb" else colorSpaceArgName(space_arg.space);
+            return shared.reportArgumentMessage("space", "Color space {s} doesn't have a hue channel.", .{name});
+        }
         return complementInSpace(ctx, c, space_arg.space);
     }
     const source_declared_space = declaredColorSpaceFromValue(ctx, c);
     const source_missing = colorMissingMaskFromValue(ctx, c);
-    if (!colorLegacyCompatFlagFromValue(ctx, c)) return error.BuiltinType;
+    // A non-legacy color takes its space from $space, which is null.
+    if (!colorLegacyCompatFlagFromValue(ctx, c)) return shared.reportArgumentMessage("space", "null is not a string.", .{});
     if (source_declared_space != .srgb or source_missing != 0) {
         return complementInSpace(ctx, c, .hsl);
     }
@@ -3965,7 +4044,18 @@ fn color_invertImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
 
     const maybe_color = tryCoerceColorArg(ctx, color_arg);
     if (maybe_color == null) {
-        if (weight_arg != null or space_arg != null) return reportArgumentTypeMismatch(ctx, "color", color_arg, "color");
+        if (weight_arg != null or space_arg != null) {
+            // A number is CSS's invert(), which takes one argument; a
+            // $space alone is dropped.
+            const css_amount = color_arg.isNumber() or color_arg.kind() == .calc_fragment or color_arg.kind() == .interp_fragment or
+                (color_arg.isString() and !color_arg.stringQuoted(ctx.string_flags_pool.items) and
+                    isRawCalcString(shared.stripCalcArgMarker(ctx.intern_pool.get(color_arg.stringIntern()))));
+            if (!css_amount) return reportArgumentTypeMismatch(ctx, "color", color_arg, "color");
+            if (weight_arg != null) {
+                error_format.setContextMessage("Only one argument may be passed to the plain-CSS invert() function.");
+                return error.BuiltinType;
+            }
+        }
         if (color_arg.isNumber() or color_arg.kind() == .calc_fragment or color_arg.kind() == .interp_fragment) {
             const css = try valueToCssString(ctx, color_arg);
             defer ctx.allocator.free(css);
@@ -4006,16 +4096,16 @@ fn color_invertImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []cons
     if (weight_arg) |w| {
         if (!w.isNumber()) return reportArgumentTypeMismatch(ctx, "weight", w, "number");
     }
-    const weight_percent = if (weight_arg) |w| try expectNumber(ctx, w) else 100.0;
-    if (weight_percent < 0.0 or weight_percent > 100.0) return reportNotWithin(ctx, "weight", weight_arg.?, "0", "100", true);
-    const weight = weight_percent / 100.0;
-
     const source_declared_space = declaredColorSpaceFromValue(ctx, c);
     const source_missing = colorMissingMaskFromValue(ctx, c);
     const source_legacy = colorLegacyCompatFlagFromValue(ctx, c);
     const explicit_space = try parseOptionalSpaceArgValue(ctx, space_arg);
 
-    if (explicit_space == null and !source_legacy) return error.BuiltinType;
+    if (explicit_space == null and !source_legacy) return reportNeedsSpaceOrMethod(ctx, "color", c, "color.invert", "$space");
+
+    const weight_percent = if (weight_arg) |w| try expectNumber(ctx, w) else 100.0;
+    if (weight_percent < 0.0 or weight_percent > 100.0) return reportNotWithin(ctx, "weight", weight_arg.?, "0", "100", true);
+    const weight = weight_percent / 100.0;
 
     const working_space = if (explicit_space) |sp| sp.space else source_declared_space;
     const working = color_mod.convert(localChannelColor(ctx, c), working_space);
@@ -4243,8 +4333,8 @@ fn reportNotWithin(ctx: *BuiltinContext, comptime param: []const u8, v: Value, c
 fn opacifyImpl(ctx: *BuiltinContext, args: []const Value, comptime alpha_sign: f64) BuiltinError!Value {
     try expectArity(args, 2);
     const c = try expectColorArg(ctx, args[0], "color");
-    if (!colorLegacyFlagFromValue(ctx, c)) return error.BuiltinType;
     if (args[1].kind() != .number) return reportArgumentTypeMismatch(ctx, "amount", args[1], "number");
+    try requireLegacyColor(ctx, c, if (alpha_sign > 0) "opacify" else "transparentize");
     const amount = args[1].asF64(ctx.number_pool);
     if (std.math.isNan(amount) or amount < 0.0 or amount > 1.0) return reportNotWithin(ctx, "amount", args[1], "0", "1", false);
     if (alpha_sign > 0) {
@@ -4254,7 +4344,7 @@ fn opacifyImpl(ctx: *BuiltinContext, args: []const Value, comptime alpha_sign: f
     }
     const source_entry = colorEntryOf(ctx, c);
     const alpha = std.math.clamp(source_entry.channels[3] + alpha_sign * amount, 0.0, 1.0);
-    if ((source_entry.space == .hsl or source_entry.space == .hwb) and source_entry.missing == 0) {
+    if (source_entry.space == .hsl or source_entry.space == .hwb) {
         const hsl = colorToHsl(ctx, c);
         return pushColorEntry(ctx, .{
             .channels = .{ hsl[0], hsl[1], hsl[2], alpha },
@@ -4433,24 +4523,6 @@ fn parseRequiredSpaceArgValue(ctx: *BuiltinContext, value: Value) BuiltinError!P
     return parseSpaceArgNamed(ctx, value, "space");
 }
 
-fn parseMethodValue(ctx: *BuiltinContext, maybe_value: ?Value) BuiltinError![]const u8 {
-    const value = maybe_value orelse return error.BuiltinType;
-    if (value.kind() != .string) return error.BuiltinType;
-    if (value.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
-    const raw = ctx.intern_pool.get(value.stringIntern());
-    if (raw.len == 0 or raw.len > 32) return error.BuiltinType;
-    var lowered_buf: [32]u8 = undefined;
-    for (raw, 0..) |ch, i| {
-        lowered_buf[i] = if (ch == '_') '-' else std.ascii.toLower(ch);
-    }
-    const lowered = lowered_buf[0..raw.len];
-    if (std.mem.eql(u8, lowered, "clip") or std.mem.eql(u8, lowered, "local-minde")) {
-        const id = try internString(ctx, lowered);
-        return ctx.intern_pool.get(id);
-    }
-    return error.BuiltinType;
-}
-
 fn parseOptionalSpaceValueSassError(ctx: *BuiltinContext, maybe_value: ?Value) BuiltinError!?color_mod.ColorSpace {
     return parseOptionalSpaceValue(ctx, maybe_value) catch |err| switch (err) {
         error.BuiltinType => error.SassError,
@@ -4459,12 +4531,23 @@ fn parseOptionalSpaceValueSassError(ctx: *BuiltinContext, maybe_value: ?Value) B
 }
 
 fn parseMethodValueForToGamut(ctx: *BuiltinContext, maybe_value: ?Value) BuiltinError![]const u8 {
-    const value = maybe_value orelse return error.SassError;
-    if (value.kind() == .nil) return error.SassError;
-    return parseMethodValue(ctx, value) catch |err| switch (err) {
-        error.BuiltinType => error.SassError,
-        else => err,
-    };
+    const value = maybe_value orelse return reportToGamutNeedsMethod();
+    if (value.kind() == .nil) return reportToGamutNeedsMethod();
+    // A color name is a color, not a string.
+    if (!value.isString() or tryCoerceColorArg(ctx, value) != null) return reportArgumentTypeMismatch(ctx, "method", value, "string");
+    const raw = ctx.intern_pool.get(value.stringIntern());
+    if (value.stringQuoted(ctx.string_flags_pool.items)) return shared.reportArgumentMessage("method", "Expected \"{s}\" to be an unquoted string.", .{raw});
+    if (std.mem.eql(u8, raw, "clip")) return "clip";
+    if (std.mem.eql(u8, raw, "local-minde")) return "local-minde";
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "Unknown gamut map method \"{s}\".", .{raw}) catch return error.SassError;
+    error_format.setContextMessage(msg);
+    return error.SassError;
+}
+
+fn reportToGamutNeedsMethod() BuiltinError {
+    error_format.setContextMessage("$method: color.to-gamut() requires a $method argument for forwards-compatibility with changes in the CSS spec. Suggestion:\n\n$method: local-minde");
+    return error.SassError;
 }
 
 fn isAngleUnit(unit: []const u8) bool {
