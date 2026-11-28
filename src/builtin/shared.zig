@@ -47,6 +47,9 @@ pub const BuiltinContext = struct {
     /// The global name the function was called by, when it was called by
     /// one (`fade-in`, not `opacify`), for its deprecation's wording.
     call_name: []const u8 = "",
+    /// Whether it was called by a global name rather than a module's, which
+    /// some errors are worded after.
+    global_call: bool = false,
     allocator: std.mem.Allocator,
     intern_pool: *InternPool,
     list_pool: *std.ArrayListUnmanaged([]Value),

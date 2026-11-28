@@ -90,6 +90,8 @@ pub const Chunk = struct {
         /// 1 + the row in `global_builtins.rows` when it is called by a
         /// global name that warns; 0 otherwise.
         global_replacement: u16 = 0,
+        /// Called by a global name (`acos()`, not `math.acos()`).
+        global_call: bool = false,
     };
 
     /// Slot bundle for one fused `@for` loop (for_test / for_step operand).
@@ -2493,7 +2495,14 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
             try ctx.cb.emit(.load_const, 0, idx);
         },
         .sass_error => {
-            try emitForcedSassError(ctx);
+            if (ex.payload != 0) {
+                // The error a calculation's arguments make when it runs.
+                const msg_idx = try ctx.cb.addConst(Value.string(@fromBackingInt(ex.payload), false));
+                try ctx.cb.emit(.load_const, 0, msg_idx);
+                try ctx.cb.emit(.emit_error, 1, 0);
+            } else {
+                try emitForcedSassError(ctx);
+            }
         },
         .var_ref => {
             try ctx.cb.emit(.load_local, 0, remapLocalSlot(ctx, ex.payload));
@@ -2636,6 +2645,7 @@ fn compileExpr(ctx: CompileCtx, e: ExprIndex) CompileError!void {
             const meta_idx = try addBuiltinCallMeta(ctx, c.arg_start, c.arg_count, remapLocalSlotHint(ctx, c.local_slot_hint));
             if (c.global_name != .none) {
                 ctx.cb.builtin_call_meta.items[meta_idx].global_replacement = builtin_mod.globalBuiltinRow(ctx.pool.get(c.global_name));
+                ctx.cb.builtin_call_meta.items[meta_idx].global_call = true;
             }
             try ctx.cb.emit(.call_builtin, try checkedU16(c.builtin_id, "builtin id"), meta_idx);
         },

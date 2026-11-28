@@ -81,6 +81,63 @@ fn formatDegenerateWithUnit(
     return alloc.print("calc({s})", .{keyword});
 }
 
+/// A number whose unit has several factors (`px*px`, `px/em`, `px^-1`,
+/// `px*px/(s*em)`) as Sass inspects it: `calc(2px * 1px)`,
+/// `calc(0.5 / 1px)`, with the number written in full. Null for a unit of
+/// one factor.
+pub fn formatCompoundUnitNumber(alloc: std.mem.Allocator, value: f64, unit: []const u8) std.mem.Allocator.Error!?[]u8 {
+    var numerators: [16][]const u8 = undefined;
+    var denominators: [16][]const u8 = undefined;
+    var n_num: usize = 0;
+    var n_den: usize = 0;
+    var num_text: []const u8 = unit;
+    var den_text: []const u8 = "";
+    if (std.mem.endsWith(u8, unit, "^-1")) {
+        num_text = "";
+        den_text = unit[0 .. unit.len - 3];
+    } else if (std.mem.indexOfScalar(u8, unit, '/')) |slash| {
+        num_text = unit[0..slash];
+        den_text = unit[slash + 1 ..];
+    } else if (std.mem.indexOfScalar(u8, unit, '*') == null) {
+        return null;
+    }
+    if (den_text.len >= 2 and den_text[0] == '(' and den_text[den_text.len - 1] == ')') den_text = den_text[1 .. den_text.len - 1];
+    if (num_text.len > 0) {
+        var it = std.mem.splitScalar(u8, num_text, '*');
+        while (it.next()) |factor| {
+            if (factor.len == 0 or n_num == numerators.len) return null;
+            numerators[n_num] = factor;
+            n_num += 1;
+        }
+    }
+    if (den_text.len > 0) {
+        var it = std.mem.splitScalar(u8, den_text, '*');
+        while (it.next()) |factor| {
+            if (factor.len == 0 or n_den == denominators.len) return null;
+            denominators[n_den] = factor;
+            n_den += 1;
+        }
+    }
+    if (n_num + n_den < 2 and !(n_num == 0 and n_den == 1)) return null;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, "calc(");
+    // A number that is no finite one is a keyword, which takes no unit.
+    const finite = std.math.isFinite(value);
+    if (std.math.isNan(value)) {
+        try out.appendSlice(alloc, "NaN");
+    } else if (std.math.isInf(value)) {
+        try out.appendSlice(alloc, if (value < 0) "-infinity" else "infinity");
+    } else {
+        try out.print(alloc, "{d}", .{value});
+    }
+    if (finite and n_num > 0) try out.appendSlice(alloc, numerators[0]);
+    for (numerators[if (finite) @min(n_num, 1) else 0..n_num]) |factor| try out.print(alloc, " * 1{s}", .{factor});
+    for (denominators[0..n_den]) |factor| try out.print(alloc, " / 1{s}", .{factor});
+    try out.append(alloc, ')');
+    return try out.toOwnedSlice(alloc);
+}
+
 /// Return value comes from `alloc`, caller is `alloc.free`.
 pub fn formatNumberCore(alloc: std.mem.Allocator, v: f64) std.mem.Allocator.Error![]u8 {
     perf.note(.format_number);

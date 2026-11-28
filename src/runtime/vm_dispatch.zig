@@ -88,6 +88,7 @@ fn builtinPreservesSlashLists(builtin_id: u32) bool {
 pub fn builtinContext(self: anytype) builtin_mod.BuiltinContext {
     return .{
         .call_name = self.current_builtin_call_name,
+        .global_call = self.current_builtin_global_call,
         .allocator = self.allocator,
         .intern_pool = self.intern_pool,
         .list_pool = &self.list_pool,

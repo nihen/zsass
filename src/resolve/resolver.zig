@@ -3819,11 +3819,49 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
     const has_custom_function_binding = ns_id == .none and
         (lookupIdentifierIdInsensitive(&ctx.prog.function_names, name_slice) != null or
             ctx.lookupStarFunction(name_slice) != null);
+    // A module's function brought in by `@use ... as *` is no calculation.
+    const is_calculation_call = ns_id == .none and !has_custom_function_binding and !raw_name_is_interpolated and
+        lookupIdentifierIdInsensitive(&ctx.star_builtin_fns, name_slice) == null;
+
+    // A calculation whose var() or interpolation may make up the arguments
+    // it lacks is left to the browser.
+    const calc_passthrough = is_calculation_call and isStrictCalculationFunctionName(name_slice) and arg_count > 0 and
+        arg_count < calculationArity(name_slice).min and calculationArgsMayExpand(ast, off, arg_count);
+    // What is no calculation fails when it is evaluated, as in the
+    // official CLI: not in a function that is never called.
+    if (is_calculation_call) {
+        var arity_buf: [128]u8 = undefined;
+        const problem: ?CalcProblem = if (isStrictCalculationFunctionName(name_slice))
+            calculationArgsProblem(ast, ctx, name_slice, off, arg_count, &arity_buf)
+        else if (identifierEq(name_slice, "round") or identifierEq(name_slice, "abs")) blk: {
+            // These fall back to the Sass functions, but not for a count of
+            // arguments neither takes.
+            // A rest argument is counted once it is expanded.
+            const max: u32 = if (identifierEq(name_slice, "round")) 3 else 1;
+            if (arg_count == 0 or (arg_count > max and !calculationArgsHaveSplat(ast, off, arg_count))) {
+                break :blk .{ .msg = calculationArityMessage(&arity_buf, arg_count, 1, max), .span = span };
+            }
+            break :blk null;
+        } else null;
+        if (problem) |p| {
+            const msg_id = try ctx.pool.intern(p.msg);
+            return try appendExpr(ctx.prog, ctx.a, .{ .kind = .sass_error, .payload = @backingInt(msg_id), .span = p.span });
+        }
+    }
 
     if (ns_id == .none and !has_custom_function_binding and span.start <= span.end and span.end <= ast.source.len and identifierEq(name_slice, "calc")) {
         const raw_calc_call = ast.source[span.start..span.end];
         if (std.mem.indexOfScalar(u8, raw_calc_call, '$') == null) {
-            try validateRawCalcCallSyntax(ctx, raw_calc_call);
+            validateRawCalcCallSyntax(ctx, raw_calc_call) catch |err| switch (err) {
+                error.SassError => {
+                    // An error it can name fails when the calculation runs.
+                    const msg = error_format.currentContextMessage() orelse return err;
+                    const msg_id = try ctx.pool.intern(msg);
+                    error_format.clearContextMessage();
+                    return try appendExpr(ctx.prog, ctx.a, .{ .kind = .sass_error, .payload = @backingInt(msg_id), .span = span });
+                },
+                else => return err,
+            };
         }
     }
 
@@ -4177,7 +4215,7 @@ fn resolveExprFuncCall(ast: *const ast_flat.Ast, ctx: *Ctx, n: AstNode, span: Sp
             .span = span,
         });
     } else {
-        if (builtin_mod.resolveLegacyGlobal(name_slice)) |bid| {
+        if (if (calc_passthrough) null else globalBuiltinForCall(ast, name_slice, off, arg_count)) |bid| {
             if (try tryFoldMetaBuiltinExists(ctx, bid, arg_buf.items, arg_name_buf.items, span)) |folded| {
                 return folded;
             }
@@ -4604,6 +4642,314 @@ fn isCssCalculationFunctionName(name: []const u8) bool {
         if (identifierEq(name, candidate)) return true;
     }
     return false;
+}
+
+/// The calculation functions whose arguments must be a calculation; min(),
+/// max(), round(), and abs() fall back to the Sass functions instead.
+fn isStrictCalculationFunctionName(name: []const u8) bool {
+    const strict_names = [_][]const u8{
+        "calc", "clamp", "hypot", "sign", "sqrt", "pow", "sin", "cos",       "tan", "asin",
+        "acos", "atan",  "atan2", "mod",  "rem",  "exp", "log", "calc-size",
+    };
+    for (strict_names) |candidate| {
+        if (identifierEq(name, candidate)) return true;
+    }
+    return false;
+}
+
+const CalcIssue = enum { operation, expression, missing_operator, whitespace };
+
+/// The official CLI rejects, as it parses them, a calculation's arguments
+/// that are no calculation: an operator other than + - * /, a value of
+/// another type, a unary operation, two values without an operator, and a
+/// + or - without whitespace around it.
+const CalcProblem = struct { msg: []const u8, span: Span };
+
+fn nodeSpan(ast: *const ast_flat.Ast, node: NodeIndex) Span {
+    const n = ast.getNode(node);
+    return .{ .start = n.span_start, .end = n.span_end };
+}
+
+/// What makes a calculation's arguments no calculation, if anything.
+fn calculationArgsProblem(ast: *const ast_flat.Ast, ctx: *Ctx, name: []const u8, call_extra: ExtraIndex, arg_count: u32, buf: []u8) ?CalcProblem {
+    const arg_nodes_start: ExtraIndex = call_extra + 3;
+    const arg_names_start: ExtraIndex = arg_nodes_start + arg_count;
+    for (0..arg_count) |i| {
+        const arg_name: InternId = @fromBackingInt(@intCast(ast.getExtraU32(arg_names_start + @as(u32, @intCast(i)))));
+        const node: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start + @as(u32, @intCast(i)))));
+        if (arg_name != .none) return .{ .msg = "Keyword arguments can't be used with calculations.", .span = nodeSpan(ast, node) };
+        if (ast.getNode(node).tag == .expr_splat) return .{ .msg = "Rest arguments can't be used with calculations.", .span = nodeSpan(ast, node) };
+    }
+    // Too many arguments are reported before what they are; too few after.
+    const arity = calculationArity(name);
+    if (arg_count > arity.max) {
+        return .{ .msg = calculationArityMessage(buf, arg_count, arity.min, arity.max), .span = nodeSpan(ast, @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start)))) };
+    }
+    for (0..arg_count) |i| {
+        const node: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start + @as(u32, @intCast(i)))));
+        if (calculationIssue(ast, ctx, node)) |found| {
+            const msg = switch (found.issue) {
+                .operation => "This operation can't be used in a calculation.",
+                .expression => "This expression can't be used in a calculation.",
+                .missing_operator => "Missing math operator.",
+                .whitespace => "\"+\" and \"-\" must be surrounded by whitespace in calculations.",
+            };
+            return .{ .msg = msg, .span = nodeSpan(ast, found.node) };
+        }
+    }
+    // A var() or interpolation may stand for several arguments, and too
+    // few are checked once a variable's or function's value is known.
+    const too_few = arg_count < arity.min and (arg_count == 0 or !calculationArgsMayExpand(ast, call_extra, arg_count) and !calculationArgsDeferred(ast, call_extra, arg_count));
+    if (too_few) {
+        const first: Span = if (arg_count > 0) nodeSpan(ast, @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start)))) else .{ .start = 0, .end = 0 };
+        return .{ .msg = calculationArityMessage(buf, arg_count, arity.min, arity.max), .span = first };
+    }
+    return null;
+}
+
+const CalcIssueAt = struct { issue: CalcIssue, node: NodeIndex };
+
+/// A number, parenthesized calculation, or calculation call: what two of
+/// side by side lack an operator between.
+fn isCalcMathOperand(ast: *const ast_flat.Ast, n: ast_flat.AstNode) bool {
+    return switch (n.tag) {
+        .expr_number_literal, .expr_number_immediate, .expr_binary_op, .expr_slash_expr => true,
+        // Parentheses are what they hold: (var(--y)) is text.
+        .expr_paren => isCalcMathOperand(ast, ast.getNode(@fromBackingInt(@intCast(n.payload)))),
+        .expr_func_call => isCalculationCallNode(ast, n),
+        else => false,
+    };
+}
+
+/// The built-in a global call resolves to. round() with a rest argument is
+/// no calculation, so it is the Sass function, which takes one argument.
+fn globalBuiltinForCall(ast: *const ast_flat.Ast, name: []const u8, call_extra: ExtraIndex, arg_count: u32) ?builtin_mod.Id {
+    if (identifierEq(name, "round")) {
+        const arg_nodes_start: ExtraIndex = call_extra + 3;
+        for (0..arg_count) |i| {
+            const node: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start + @as(u32, @intCast(i)))));
+            if (ast.getNode(node).tag == .expr_splat) return builtin_mod.resolve("math", "round");
+        }
+    }
+    return builtin_mod.resolveLegacyGlobal(name);
+}
+
+/// How many arguments a calculation function takes.
+fn calculationArity(name: []const u8) struct { min: u32, max: u32 } {
+    if (identifierEq(name, "clamp")) return .{ .min = 3, .max = 3 };
+    if (identifierEq(name, "atan2") or identifierEq(name, "pow") or identifierEq(name, "mod") or identifierEq(name, "rem")) return .{ .min = 2, .max = 2 };
+    if (identifierEq(name, "log") or identifierEq(name, "calc-size")) return .{ .min = 1, .max = 2 };
+    if (identifierEq(name, "hypot")) return .{ .min = 1, .max = std.math.maxInt(u32) };
+    return .{ .min = 1, .max = 1 };
+}
+
+/// The official CLI's error for a calculation called with a count of
+/// arguments it does not take.
+fn calculationArityMessage(buf: []u8, arg_count: u32, min: u32, max: u32) []const u8 {
+    if (arg_count == 0) return "Missing argument.";
+    if (arg_count < min) return std.fmt.bufPrint(buf, "{d} arguments required, but only {d} {s} passed.", .{ min, arg_count, if (arg_count == 1) "was" else "were" }) catch "Missing argument.";
+    return std.fmt.bufPrint(buf, "Only {d} argument{s} allowed, but {d} were passed.", .{ max, if (max == 1) "" else "s", arg_count }) catch "Missing argument.";
+}
+
+/// Whether an argument's value is only known when it runs: a variable or a
+/// call of a function that is no calculation.
+fn calculationArgsDeferred(ast: *const ast_flat.Ast, call_extra: ExtraIndex, arg_count: u32) bool {
+    const arg_nodes_start: ExtraIndex = call_extra + 3;
+    for (0..arg_count) |i| {
+        const node: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start + @as(u32, @intCast(i)))));
+        if (calcArgDeferred(ast, node)) return true;
+    }
+    return false;
+}
+
+fn calcArgDeferred(ast: *const ast_flat.Ast, node: NodeIndex) bool {
+    const n = ast.getNode(node);
+    return switch (n.tag) {
+        .expr_variable, .expr_namespaced_var => true,
+        .expr_paren => calcArgDeferred(ast, @fromBackingInt(@intCast(n.payload))),
+        .expr_func_call => !isCalculationCallNode(ast, n),
+        else => false,
+    };
+}
+
+fn nodeText(ast: *const ast_flat.Ast, n: ast_flat.AstNode) []const u8 {
+    return if (n.span_end <= ast.source.len and n.span_start < n.span_end) ast.source[n.span_start..n.span_end] else "";
+}
+
+fn isCalculationCallNode(ast: *const ast_flat.Ast, n: ast_flat.AstNode) bool {
+    const text = nodeText(ast, n);
+    const fname = text[0 .. std.mem.indexOfScalar(u8, text, '(') orelse text.len];
+    return isCssCalculationFunctionName(fname) or identifierEq(fname, "calc-size");
+}
+
+fn calculationArgsHaveSplat(ast: *const ast_flat.Ast, call_extra: ExtraIndex, arg_count: u32) bool {
+    const arg_nodes_start: ExtraIndex = call_extra + 3;
+    for (0..arg_count) |i| {
+        const node: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start + @as(u32, @intCast(i)))));
+        if (ast.getNode(node).tag == .expr_splat) return true;
+    }
+    return false;
+}
+
+/// Whether an argument may stand for several, so that too few are no
+/// error: var(), env(), attr(), an unquoted interpolation, or an
+/// identifier the browser reads, alone or in parentheses or a space list.
+fn calculationArgsMayExpand(ast: *const ast_flat.Ast, call_extra: ExtraIndex, arg_count: u32) bool {
+    const arg_nodes_start: ExtraIndex = call_extra + 3;
+    for (0..arg_count) |i| {
+        const node: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(arg_nodes_start + @as(u32, @intCast(i)))));
+        if (calcArgMayExpand(ast, node)) return true;
+    }
+    return false;
+}
+
+fn calcArgMayExpand(ast: *const ast_flat.Ast, node: NodeIndex) bool {
+    const n = ast.getNode(node);
+    switch (n.tag) {
+        .expr_interp => return true,
+        .expr_string_interp => return (n.flags & 1) == 0,
+        .expr_unquoted_ident => {
+            const text = nodeText(ast, n);
+            // Named colors and the calculation constants are values.
+            const constants = [_][]const u8{ "pi", "e", "infinity", "-infinity", "nan" };
+            for (constants) |c| {
+                if (std.ascii.eqlIgnoreCase(text, c)) return false;
+            }
+            return color_mod.lookupNamedColor(text) == null;
+        },
+        .expr_func_call => {
+            const text = nodeText(ast, n);
+            return std.ascii.startsWithIgnoreCase(text, "var(") or std.ascii.startsWithIgnoreCase(text, "env(") or
+                std.ascii.startsWithIgnoreCase(text, "attr(");
+        },
+        .expr_unary_op => {
+            // `-#{...}` is an identifier; `+#{...}` is not.
+            const operand = ast.getNode(@fromBackingInt(@intCast(ast.getExtraU32(n.payload))));
+            const op: ast_flat.UnaryOp = @fromBackingInt(@intCast(@as(u8, @truncate(ast.getExtraU32(n.payload + 1)))));
+            return op == .negate and operand.tag == .expr_interp and operand.span_start == n.span_start + 1;
+        },
+        .expr_paren => return calcArgMayExpand(ast, @fromBackingInt(@intCast(n.payload))),
+        .expr_space_list => {
+            const off: ExtraIndex = n.payload;
+            const count = ast.getExtraU32(off);
+            for (0..count) |i| {
+                if (calcArgMayExpand(ast, @fromBackingInt(@intCast(ast.getExtraU32(off + 1 + @as(u32, @intCast(i))))))) return true;
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
+fn calculationIssue(ast: *const ast_flat.Ast, ctx: *Ctx, node: NodeIndex) ?CalcIssueAt {
+    if (node == .none) return null;
+    const n = ast.getNode(node);
+    const source = ast.source;
+    switch (n.tag) {
+        .expr_binary_op => {
+            const off: ExtraIndex = n.payload;
+            const lhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const rhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
+            const op: ast_flat.BinOp = @fromBackingInt(@intCast(@as(u8, @truncate(ast.getExtraU32(off + 2)))));
+            switch (op) {
+                .add, .sub, .mul, .div => {},
+                else => return .{ .issue = .operation, .node = node },
+            }
+            if (calculationIssue(ast, ctx, lhs)) |found| return found;
+            if (op == .add or op == .sub) {
+                // The operator is the first + or - after the left operand
+                // (the right one's span may start at it).
+                // Comments are skipped to find it, and count as whitespace
+                // around it.
+                const op_char: u8 = if (op == .add) '+' else '-';
+                var pos: usize = ast.getNode(lhs).span_end;
+                while (pos < source.len) {
+                    if (std.ascii.isWhitespace(source[pos])) {
+                        pos += 1;
+                    } else if (std.mem.startsWith(u8, source[pos..], "/*")) {
+                        const close = std.mem.indexOfPos(u8, source, pos + 2, "*/") orelse break;
+                        pos = close + 2;
+                    } else if (std.mem.startsWith(u8, source[pos..], "//")) {
+                        pos = std.mem.indexOfScalarPos(u8, source, pos, '\n') orelse source.len;
+                    } else break;
+                }
+                if (pos + 1 < source.len and source[pos] == op_char) {
+                    const before = pos > 0 and (std.ascii.isWhitespace(source[pos - 1]) or
+                        (pos >= 2 and source[pos - 2] == '*' and source[pos - 1] == '/'));
+                    const rest = source[pos + 1 ..];
+                    const after = std.ascii.isWhitespace(rest[0]) or std.mem.startsWith(u8, rest, "/*") or std.mem.startsWith(u8, rest, "//");
+                    if (!before or !after) return .{ .issue = .whitespace, .node = node };
+                }
+            }
+            return calculationIssue(ast, ctx, rhs);
+        },
+        .expr_slash_expr => {
+            const off: ExtraIndex = n.payload;
+            const lhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const rhs: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1)));
+            if (calculationIssue(ast, ctx, lhs)) |found| return found;
+            return calculationIssue(ast, ctx, rhs);
+        },
+        .expr_unary_op => {
+            const off: ExtraIndex = n.payload;
+            const operand: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off)));
+            const op: ast_flat.UnaryOp = @fromBackingInt(@intCast(@as(u8, @truncate(ast.getExtraU32(off + 1)))));
+            const o = ast.getNode(operand);
+            // `+1px` and `-1px` are signed numbers, and `-#{$x}` is an
+            // identifier.
+            const adjacent = o.span_start == n.span_start + 1;
+            const signed = adjacent and (((op == .negate or op == .positive) and
+                (o.tag == .expr_number_literal or o.tag == .expr_number_immediate)) or
+                (op == .negate and o.tag == .expr_interp));
+            if (signed) return null;
+            return .{ .issue = .expression, .node = node };
+        },
+        .expr_paren => {
+            const inner: NodeIndex = @fromBackingInt(@intCast(n.payload));
+            return calculationIssue(ast, ctx, inner);
+        },
+        .expr_space_list => {
+            // Each value is checked; two numbers side by side lack an
+            // operator. Text the browser reads (an identifier, var(),
+            // interpolation) may stand between them, and a variable's
+            // value is checked when it is known.
+            const off: ExtraIndex = n.payload;
+            const count = ast.getExtraU32(off);
+            for (0..count) |i| {
+                const child: NodeIndex = @fromBackingInt(@intCast(ast.getExtraU32(off + 1 + @as(u32, @intCast(i)))));
+                const c = ast.getNode(child);
+                if (i > 0) {
+                    const prev = ast.getNode(@fromBackingInt(@intCast(ast.getExtraU32(off + @as(u32, @intCast(i))))));
+                    // A signed number after a number or a variable is a +
+                    // or - written without whitespace after it.
+                    const signed = (c.tag == .expr_number_literal or c.tag == .expr_number_immediate) and
+                        c.span_start < source.len and (source[c.span_start] == '-' or source[c.span_start] == '+');
+                    const math_prev = switch (prev.tag) {
+                        .expr_number_literal, .expr_number_immediate, .expr_variable, .expr_namespaced_var, .expr_paren => true,
+                        else => false,
+                    };
+                    if (signed and math_prev) return .{ .issue = .whitespace, .node = child };
+                    if (isCalcMathOperand(ast, prev) and isCalcMathOperand(ast, c)) return .{ .issue = .missing_operator, .node = node };
+                }
+                if (calculationIssue(ast, ctx, child)) |found| return found;
+            }
+            return null;
+        },
+        .expr_comma_list, .expr_bracketed_list, .expr_map_literal, .expr_bool_true, .expr_bool_false, .expr_null, .expr_color_hex => {
+            return .{ .issue = .expression, .node = node };
+        },
+        .expr_string_literal, .expr_string_interp => {
+            if ((n.flags & 1) != 0) return .{ .issue = .expression, .node = node };
+            return null;
+        },
+        .expr_unquoted_ident => {
+            if (color_mod.lookupNamedColor(ctx.pool.get(@fromBackingInt(@intCast(n.payload)))) != null) {
+                return .{ .issue = .expression, .node = node };
+            }
+            return null;
+        },
+        else => return null,
+    }
 }
 
 fn isCssMathLegacyCalcFunctionName(name: []const u8) bool {
@@ -6905,6 +7251,18 @@ fn calcHasModuloOperatorResolver(expr: []const u8) bool {
     var i: usize = 0;
     while (i < expr.len) : (i += 1) {
         const c = expr[i];
+        // Interpolated Sass is not part of the calculation.
+        if (in_string == 0 and c == '#' and i + 1 < expr.len and expr[i + 1] == '{') {
+            var braces: usize = 0;
+            while (i < expr.len) : (i += 1) {
+                if (expr[i] == '{') braces += 1;
+                if (expr[i] == '}') {
+                    braces -= 1;
+                    if (braces == 0) break;
+                }
+            }
+            continue;
+        }
         if (in_string != 0) {
             if (c == '\\' and i + 1 < expr.len) {
                 i += 1;
@@ -6953,8 +7311,10 @@ fn validateRawCalcCallSyntax(ctx: *Ctx, raw_text: []const u8) ResolveError!void 
     const inner = trimmed[lparen + 1 .. rparen];
     if (std.mem.trim(u8, inner, " \t\r\n").len == 0) return error.SassError;
     if (calcTextHasTopLevelComma(inner)) return error.SassError;
-    if (calc_utils.calcHasBadWhitespace(inner)) return error.SassError;
-    if (calcHasModuloOperatorResolver(inner)) return error.SassError;
+    if (calcHasModuloOperatorResolver(inner)) {
+        error_format.setContextMessage("This operation can't be used in a calculation.");
+        return error.SassError;
+    }
 
     // Expressions containing variables/interpolation are evaluated on the runtime side.
     // Their terms are not numbers yet: `calc(#{2} * 1px + 1s)` is valid CSS.

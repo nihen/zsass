@@ -2400,7 +2400,7 @@ pub fn math_exp(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
         else => return err,
     };
 
-    if (number.unitId(ctx.number_pool) != .none) return error.SassError;
+    if (number.unitId(ctx.number_pool) != .none) return reportUnitMismatch(ctx, number, "number", false, "to have no units");
     return Value.numberUnitless(canonicalizeSignedZero(@exp(number.asF64(ctx.number_pool))));
 }
 
@@ -2435,6 +2435,7 @@ pub fn math_sign(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
 }
 
 pub fn math_mod(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    if (try shortCalculationCall(ctx, "mod", args, arg_names, 2)) |css| return css;
     if (args.len != 2) return error.SassError;
     const bound = bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{ "y", "x" }, 2) catch return error.SassError;
     const y_arg = bound[0] orelse return error.SassError;
@@ -2505,6 +2506,7 @@ pub fn math_mod(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
 }
 
 pub fn math_rem(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    if (try shortCalculationCall(ctx, "rem", args, arg_names, 2)) |css| return css;
     if (args.len != 2) return error.SassError;
     const bound = bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{ "y", "x" }, 2) catch return error.SassError;
     const y_arg = bound[0] orelse return error.SassError;
@@ -2628,6 +2630,7 @@ pub fn math_random(ctx: *BuiltinContext, args: []const Value, arg_names: []const
 }
 
 pub fn math_clamp(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    if (try shortCalculationCall(ctx, "clamp", args, arg_names, 3)) |css| return css;
     var has_named = false;
     const named_len = @min(args.len, arg_names.len);
     for (arg_names[0..named_len]) |name_id| {
@@ -2780,11 +2783,12 @@ pub fn math_sqrt(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
         else => return err,
     };
 
-    if (number.unitId(ctx.number_pool) != .none) return error.SassError;
+    if (number.unitId(ctx.number_pool) != .none) return reportUnitMismatch(ctx, number, "number", false, "to have no units");
     return Value.numberUnitless(@sqrt(number.asF64(ctx.number_pool)));
 }
 
 pub fn math_pow(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    if (try shortCalculationCall(ctx, "pow", args, arg_names, 2)) |css| return css;
     const bound = try bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{ "base", "exponent" }, 2);
     const base_arg = bound[0].?;
     const exponent_arg = bound[1].?;
@@ -2811,7 +2815,8 @@ pub fn math_pow(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
         else => return err,
     };
 
-    if (base.unitId(ctx.number_pool) != .none or exponent.unitId(ctx.number_pool) != .none) return error.SassError;
+    if (base.unitId(ctx.number_pool) != .none) return reportUnitMismatch(ctx, base, "base", false, "to have no units");
+    if (exponent.unitId(ctx.number_pool) != .none) return reportUnitMismatch(ctx, exponent, "exponent", false, "to have no units");
 
     const base_v = base.asF64(ctx.number_pool);
     const exp_v = exponent.asF64(ctx.number_pool);
@@ -2842,7 +2847,7 @@ pub fn math_log(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
         },
         else => return err,
     };
-    if (number_value.unitId(ctx.number_pool) != .none) return error.SassError;
+    if (number_value.unitId(ctx.number_pool) != .none) return reportUnitMismatch(ctx, number_value, "number", false, "to have no units");
     const number = number_value.asF64(ctx.number_pool);
 
     if (base_arg) |base| {
@@ -2857,11 +2862,49 @@ pub fn math_log(ctx: *BuiltinContext, args: []const Value, arg_names: []const In
             },
             else => return err,
         };
-        if (base_value.unitId(ctx.number_pool) != .none) return error.SassError;
+        if (base_value.unitId(ctx.number_pool) != .none) return reportUnitMismatch(ctx, base_value, "base", false, "to have no units");
         return Value.numberUnitless(@log(number) / @log(base_value.asF64(ctx.number_pool)));
     }
 
     return Value.numberUnitless(@log(number));
+}
+
+/// For a calculation called by its global name with fewer than `min`
+/// arguments: the CSS call when one is text the browser may read as more,
+/// else the official CLI's error. Null when there are enough, or for a
+/// sass:math call.
+fn shortCalculationCall(ctx: *BuiltinContext, comptime name: []const u8, args: []const Value, arg_names: []const InternId, min: usize) BuiltinError!?Value {
+    if (args.len >= min or args.len == 0 or !ctx.global_call) return null;
+    for (arg_names) |arg_name| {
+        if (arg_name != .none) return null;
+    }
+    for (args) |arg| {
+        if (arg.isString() and !arg.stringQuoted(ctx.string_flags_pool.items)) return try buildCssMathCall(ctx, name, args);
+    }
+    var buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{d} arguments required, but only {d} {s} passed.", .{ min, args.len, if (args.len == 1) "was" else "were" }) catch return error.SassError;
+    error_format.setContextMessage(msg);
+    return error.SassError;
+}
+
+/// "Expected 1px to have no units.", naming the parameter unless the
+/// function was called by its global name (`always_named` names it then
+/// too), as the official CLI writes it. The number is written in full.
+fn reportUnitMismatch(ctx: *BuiltinContext, number: Value, param: []const u8, always_named: bool, expectation: []const u8) BuiltinError {
+    const unit = unitSlice(ctx, number.unitId(ctx.number_pool)) orelse return error.SassError;
+    // A unit of several factors is written as a calculation.
+    const compound = value_format.formatCompoundUnitNumber(ctx.allocator, number.asF64(ctx.number_pool), unit) catch return error.OutOfMemory;
+    defer if (compound) |text| ctx.allocator.free(text);
+    var num_buf: [128]u8 = undefined;
+    const shown = compound orelse (std.fmt.bufPrint(&num_buf, "{d}{s}", .{ number.asF64(ctx.number_pool), unit }) catch return error.SassError);
+    var buf: [256]u8 = undefined;
+    const prefix_name = !ctx.global_call or always_named;
+    const msg = if (prefix_name)
+        std.fmt.bufPrint(&buf, "${s}: Expected {s} {s}.", .{ param, shown, expectation })
+    else
+        std.fmt.bufPrint(&buf, "Expected {s} {s}.", .{ shown, expectation });
+    error_format.setContextMessage(msg catch return error.SassError);
+    return error.SassError;
 }
 
 fn forwardTrig(
@@ -2885,7 +2928,7 @@ fn forwardTrig(
     };
     if (number.unitId(ctx.number_pool) != .none) {
         const unit = unitSlice(ctx, number.unitId(ctx.number_pool)).?;
-        if (unitCategory(unit) != .angle) return error.SassError;
+        if (unitCategory(unit) != .angle) return reportUnitMismatch(ctx, number, "number", true, "to have an angle unit (deg, grad, rad, turn)");
     }
     const radians = convertAngleToRadians(number.asF64(ctx.number_pool), unitSlice(ctx, number.unitId(ctx.number_pool)));
     var result = op(radians);
@@ -2912,7 +2955,7 @@ fn inverseTrig(
         },
         else => return err,
     };
-    if (number.unitId(ctx.number_pool) != .none) return error.SassError;
+    if (number.unitId(ctx.number_pool) != .none) return reportUnitMismatch(ctx, number, "number", false, "to have no units");
     const value = op(number.asF64(ctx.number_pool)) * 180.0 / std.math.pi;
     return numberToDeg(ctx, value);
 }
@@ -2961,6 +3004,7 @@ pub fn math_atan(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
 }
 
 pub fn math_atan2(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
+    if (try shortCalculationCall(ctx, "atan2", args, arg_names, 2)) |css| return css;
     if (args.len != 2) return error.SassError;
     const bound = bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{ "y", "x" }, 2) catch return error.SassError;
     const y_arg = bound[0] orelse return error.SassError;

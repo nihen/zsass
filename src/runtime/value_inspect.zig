@@ -48,6 +48,9 @@ fn formatNumberValue(ctx: *const Context, value: Value) std.mem.Allocator.Error!
     std.debug.assert(value.kind() == .number);
     const unit_id = value.unitId(ctx.number_pool);
     const unit = if (unit_id == .none) null else ctx.intern_pool.get(unit_id);
+    if (unit) |u| {
+        if (try value_format.formatCompoundUnitNumber(ctx.allocator, value.asF64(ctx.number_pool), u)) |text| return text;
+    }
     return value_format.formatNumberWithUnit(ctx.allocator, value.asF64(ctx.number_pool), unit) catch error.OutOfMemory;
 }
 
