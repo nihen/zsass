@@ -139,6 +139,14 @@ pub const Lexer = struct {
         const detail = self.last_error_detail orelse return;
         switch (detail.reason) {
             .trailing_dot_number => error_format.setContextMessage("Expected digit."),
+            // A quoted string that a newline ends.
+            .unterminated_string => {
+                // Interpolation in it is reported by the expression it holds.
+                const end = @min(self.source.len, @as(usize, detail.span.end));
+                if (std.mem.indexOf(u8, self.source[@min(end, detail.span.start)..end], "#{") != null) return;
+                const quote = if (detail.span.start < self.source.len) self.source[detail.span.start] else '"';
+                error_format.setContextMessage(if (quote == '\'') "Expected '." else "Expected \".");
+            },
             else => {},
         }
     }

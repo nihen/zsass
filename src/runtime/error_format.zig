@@ -206,8 +206,12 @@ pub fn errorToUserMessageWithContext(err: anyerror) []const u8 {
     // Whatever error a tripped stack guard turned into, it is the cause.
     if (stack_guard.tripped()) return resource_budget.nesting_message;
     if (currentContextMessage()) |m| return m;
-    if (fallback_message) |m| return m;
-    return errorToUserMessage(err);
+    const by_tag = errorToUserMessage(err);
+    // The guess only stands in for the generic syntax error.
+    if (fallback_message) |m| {
+        if (std.mem.eql(u8, by_tag, "Invalid CSS syntax.")) return m;
+    }
+    return by_tag;
 }
 
 /// A message for an error no layer explained, such as the parser's guess
