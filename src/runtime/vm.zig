@@ -12337,6 +12337,12 @@ fn normalizeUnicodeRangeDeclText(alloc: std.mem.Allocator, raw: []const u8) VMEr
     if (!((trimmed[0] == 'U' or trimmed[0] == 'u') and trimmed[1] == '+')) return null;
 
     const ur_len = css_utils.unicodeRangeLen(trimmed);
+    // The whole word, which says what of it is no range.
+    const word_end = std.mem.indexOfAny(u8, trimmed, " \t\n\r,") orelse trimmed.len;
+    // `U+4??-x` is the range and then text.
+    if (ur_len == 0 or (ur_len < word_end and trimmed[ur_len - 1] != '?')) {
+        ir_validate.validateUnicodeRange(trimmed[0..word_end]) catch return error.SassError;
+    }
     if (ur_len == 0) return error.SassError;
 
     const ur = trimmed[0..ur_len];
