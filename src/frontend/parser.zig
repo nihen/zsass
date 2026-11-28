@@ -2980,6 +2980,9 @@ pub const Parser = struct {
             params_extra = try self.parseParamList(ast);
             self.skipWhitespaceAndComments();
         }
+        if (!self.is_indented_syntax and (self.isAtEnd() or self.current().tag != .lbrace)) {
+            return self.failExpecting("expected \"{\".");
+        }
 
         const body = try self.parseBlockBody(ast);
 
@@ -4191,7 +4194,8 @@ pub const Parser = struct {
                 if (self.is_indented_syntax and
                     self.lineStartAtByte(self.current().span.start) > item_line_start)
                 {
-                    return error.SyntaxError;
+                    // Only @forward has show and hide clauses.
+                    return self.failExpecting("Nothing may be indented beneath a @forward rule.");
                 }
                 self.advance();
                 self.skipWhitespaceAndComments();

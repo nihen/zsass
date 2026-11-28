@@ -63,7 +63,7 @@ pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: b
     const url = ctx.pool.get(url_id);
     const as_star = (n.flags & 1) != 0;
     if (builtinModuleUrlToShortName(url)) |mod_path| {
-        if (has_config) return error.SassError;
+        if (has_config) return reportBuiltinConfigured();
         if (as_star) {
             ctx.markScopeRestoreDirty();
             try builtin_mod.addModuleToStarMap(mod_path, &ctx.star_builtin_fns, ctx.a);
@@ -88,6 +88,20 @@ pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: b
         return try deps.appendNoop(ctx, span);
     }
 
+    if (!as_star and namespace_id == .none) {
+        // A URL's scheme is not part of its namespace (`pkg:a` is `a`).
+        const path_part = if (std.mem.indexOfScalar(u8, url, ':')) |colon|
+            (if (std.mem.indexOfScalar(u8, url[0..colon], '/') == null) url[colon + 1 ..] else url)
+        else
+            url;
+        const default_ns = defaultNamespaceForUse(path_part);
+        if (!isSassIdentifier(default_ns)) {
+            var buf: [512]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "The default namespace \"{s}\" is not a valid Sass identifier.", .{default_ns}) catch return error.SassError;
+            error_format.setContextMessage(msg);
+            return error.SassError;
+        }
+    }
     const loader = try deps.requireModuleLoader(ctx);
     const module_path = try deps.requireModuleBasePath(ctx);
     const known_before_count: u32 = @intCast(loader.records_ptr.items.len);
@@ -95,7 +109,7 @@ pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: b
     const saved_pending_config = loader.pending_next_config_entries;
     if (config_entries.len > 0) loader.pending_next_config_entries = config_entries;
     defer loader.pending_next_config_entries = saved_pending_config;
-    const mid = try deps.resolveUserModule(loader, module_path, url);
+    const mid = deps.resolveUserModule(loader, module_path, url) catch |err| return noteModuleLoop(err);
     // A namespace taken is reported once the module is found, before its
     // configuration is checked unless that configures a module already
     // loaded. A stylesheet imported twice may @use a module again.
@@ -144,6 +158,40 @@ pub fn resolveUseStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stmt: b
     }
     const rerun_each_call = ctx.visiting_imports.items.len != 0;
     return try appendModuleDep(ctx, mid, span, rerun_each_call, false);
+}
+
+/// A module that `@use`s or `@forward`s one being loaded is a loop; an
+/// `@import` says so in its own words.
+fn noteModuleLoop(err: ResolveError) ResolveError {
+    if (err == error.UsermoduleCircular) error_format.setContextMessage("Module loop: this module is already being loaded.");
+    return err;
+}
+
+/// A namespace is an identifier: `a`, `-a`, `_a`, but not `1a` or `a b`.
+fn isSassIdentifier(text: []const u8) bool {
+    if (text.len == 0) return false;
+    var i: usize = 0;
+    if (text[0] == '-') {
+        i = 1;
+        if (i >= text.len) return false;
+        if (text[i] == '-') {
+            i += 1;
+        } else if (!isNameStart(text[i])) return false;
+    } else if (!isNameStart(text[0])) return false;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (!(isNameStart(c) or std.ascii.isDigit(c) or c == '-')) return false;
+    }
+    return true;
+}
+
+fn isNameStart(c: u8) bool {
+    return std.ascii.isAlphabetic(c) or c == '_' or c >= 0x80;
+}
+
+fn reportBuiltinConfigured() ResolveError {
+    error_format.setContextMessage("Built-in modules can't be configured.");
+    return error.SassError;
 }
 
 fn appendNamespaceTaken(ctx: anytype, namespace: []const u8, span: Span) ResolveError!StmtIndex {
@@ -246,7 +294,7 @@ pub fn resolveForwardStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stm
     const url = ctx.pool.get(url_id);
     const builtin_short = builtinModuleUrlToShortName(url);
     if (has_config and builtin_short != null) {
-        return error.SassError;
+        return reportBuiltinConfigured();
     }
     const prefix: ?[]const u8 = if (prefix_id == .none) null else ctx.pool.get(prefix_id);
     const show = try parseForwardNameList(ctx.a, ctx.ast, ctx.pool, show_ex);
@@ -270,7 +318,7 @@ pub fn resolveForwardStmt(ctx: anytype, n: AstNode, span: Span, is_top_level_stm
     const forward_initial_entries = try forwardedInitialConfig(ctx, config_entries, prefix, show, hide);
     if (forward_initial_entries.len > 0) loader.pending_next_config_entries = forward_initial_entries;
     defer loader.pending_next_config_entries = saved_pending_config;
-    const mid = try deps.resolveUserModule(loader, module_path, url);
+    const mid = deps.resolveUserModule(loader, module_path, url) catch |err| return noteModuleLoop(err);
     if (config_entries.len > 0) {
         try deps.applyUseOrForwardConfig(loader, mid, config_entries, known_before_count, false);
         if (ctx.visiting_imports.items.len != 0) {

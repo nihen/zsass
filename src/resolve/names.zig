@@ -7,6 +7,8 @@ const ResolvedProgram = data.ResolvedProgram;
 pub const identifierEqSass = name_lookup.identifierEq;
 
 pub fn defaultNamespaceForUse(url: []const u8) []const u8 {
+    // `dir/` ends with an empty component; basename() would take `dir`.
+    if (std.mem.endsWith(u8, url, "/")) return "";
     const base0 = std.fs.path.basename(url);
     var base = base0;
     if (std.mem.endsWith(u8, base, ".scss")) base = base[0 .. base.len - ".scss".len];

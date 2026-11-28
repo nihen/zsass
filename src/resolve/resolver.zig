@@ -1968,6 +1968,7 @@ fn parseWithConfigEntries(ctx: *Ctx, config_extra: ExtraIndex) ResolveError![]Wi
 
         const expr_idx = resolveExpr(ctx.ast, ctx, expr_node) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.UnknownVar => return error.UnknownVar,
             else => return error.SassError,
         };
         var env: ResolverEvalEnv = .{
@@ -1983,7 +1984,10 @@ fn parseWithConfigEntries(ctx: *Ctx, config_extra: ExtraIndex) ResolveError![]Wi
         };
         const name = ctx.pool.get(name_id);
         for (out.items) |existing| {
-            if (identifierEq(existing.name, name)) return error.SassError;
+            if (identifierEq(existing.name, name)) {
+                error_format.setContextMessage("The same variable may only be configured once.");
+                return error.SassError;
+            }
         }
         try out.append(ctx.a, .{
             .name = name,
@@ -12400,6 +12404,7 @@ fn resolveSingleAst(
     ctx.next_mixin_id = @intCast(ctx.prog.mixin_names.count());
     ctx.next_function_id = @intCast(ctx.prog.function_names.count());
     try predeclareTopLevelCallables(&ctx, raw);
+    try checkModuleRulePlacement(&ctx, raw);
     var top_list: std.ArrayListUnmanaged(StmtIndex) = .empty;
     defer top_list.deinit(a2);
     const rest = try resolvePreambleCheckpointPrefix(&ctx, mr, raw, &top_list);
@@ -12423,6 +12428,30 @@ fn resolveSingleAst(
         .prog = prog,
         .forward_rules = forward_rules,
     };
+}
+
+/// `@use` and `@forward` come before other rules. The official CLI finds a
+/// late one when it parses, before any `@import` above it loads.
+fn checkModuleRulePlacement(ctx: *Ctx, raw: []const u32) ResolveError!void {
+    if (isPlainCssStylesheetPath(ctx.module_path)) return;
+    var locked = false;
+    for (raw) |u| {
+        const n = ctx.ast.getNode(@fromBackingInt(@intCast(u)));
+        if (locked) {
+            switch (n.tag) {
+                .stmt_use => {
+                    error_format.setContextMessage("@use rules must be written before any other rules.");
+                    return error.SassError;
+                },
+                .stmt_forward => {
+                    error_format.setContextMessage("@forward rules must be written before any other rules.");
+                    return error.SassError;
+                },
+                else => {},
+            }
+        }
+        if (!module_directive.topLevelStmtKeepsModuleDirectiveOpen(ctx.ast, ctx.pool, n)) locked = true;
+    }
 }
 
 fn patchLocalModuleRefs(prog: *ResolvedProgram, module_id: u32) void {
@@ -13347,7 +13376,7 @@ test "@charset keeps module directive head open for later @use with config" {
     try std.testing.expectEqual(@as(f64, 3.0), bundle.config_seeds[0].value.asF64(bundle.modules[bundle.root_index].value_number_pool));
 }
 
-test "@import keeps module directive head open for later @use with config" {
+test "@use after @import is rejected" {
     const allocator = std.testing.allocator;
 
     var tmp_dir = std.testing.tmpDir(.{});
@@ -13364,15 +13393,10 @@ test "@import keeps module directive head open for later @use with config" {
     const entry_path = try std.fs.path.join(allocator, &.{ tmp_path, "entry.scss" });
     defer allocator.free(entry_path);
 
-    var bundle = try parseAndResolveWithPath(allocator,
+    try std.testing.expectError(error.SassError, parseAndResolveWithPath(allocator,
         \\@import "plain.css";
         \\@use "theme" with ($spacing: 4px);
-    , entry_path);
-    defer bundle.deinit();
-
-    try std.testing.expectEqual(@as(usize, 1), bundle.config_seeds.len);
-    try std.testing.expectEqual(@as(value_mod.ValueKind, .number), bundle.config_seeds[0].value.kind());
-    try std.testing.expectEqual(@as(f64, 4.0), bundle.config_seeds[0].value.asF64(bundle.modules[bundle.root_index].value_number_pool));
+    , entry_path));
 }
 
 test "legacy variable-exists in imported top-level if folds false before resolving branch body" {
@@ -13401,7 +13425,7 @@ test "legacy variable-exists in imported top-level if folds false before resolvi
     try std.testing.expect(bundle.modules.len >= 1);
 }
 
-test "top-level mixin/function declarations keep module directive head open for @use with config" {
+test "@use after a mixin or function declaration is rejected" {
     const allocator = std.testing.allocator;
 
     var tmp_dir = std.testing.tmpDir(.{});
@@ -13417,16 +13441,14 @@ test "top-level mixin/function declarations keep module directive head open for 
     const entry_path = try std.fs.path.join(allocator, &.{ tmp_path, "entry.scss" });
     defer allocator.free(entry_path);
 
-    var bundle = try parseAndResolveWithPath(allocator,
+    try std.testing.expectError(error.SassError, parseAndResolveWithPath(allocator,
         \\@mixin noop() {}
+        \\@use "theme" with ($spacing: 5px);
+    , entry_path));
+    try std.testing.expectError(error.SassError, parseAndResolveWithPath(allocator,
         \\@function noop() { @return null; }
         \\@use "theme" with ($spacing: 5px);
-    , entry_path);
-    defer bundle.deinit();
-
-    try std.testing.expectEqual(@as(usize, 1), bundle.config_seeds.len);
-    try std.testing.expectEqual(@as(value_mod.ValueKind, .number), bundle.config_seeds[0].value.kind());
-    try std.testing.expectEqual(@as(f64, 5.0), bundle.config_seeds[0].value.asF64(bundle.modules[bundle.root_index].value_number_pool));
+    , entry_path));
 }
 
 test "lookupUseBinding tells hyphen and underscore apart" {
