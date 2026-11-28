@@ -1,4 +1,5 @@
 const std = @import("std");
+const error_format = @import("../runtime/error_format.zig");
 const zsass_io = @import("../runtime/io.zig");
 const token_mod = @import("../frontend/token.zig");
 const Token = token_mod.Token;
@@ -130,6 +131,16 @@ pub const Lexer = struct {
             }
         }
         return self.tokens.items;
+    }
+
+    /// The official CLI's message for the error that stopped a whole
+    /// stylesheet's tokenizing, where it has one.
+    pub fn noteLastErrorMessage(self: *const Lexer) void {
+        const detail = self.last_error_detail orelse return;
+        switch (detail.reason) {
+            .trailing_dot_number => error_format.setContextMessage("Expected digit."),
+            else => {},
+        }
     }
 
     pub fn printLastErrorDiagnostic(self: *const Lexer, err_name: []const u8) void {

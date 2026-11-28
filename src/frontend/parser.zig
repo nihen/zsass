@@ -3188,7 +3188,7 @@ pub const Parser = struct {
         self.advance();
         self.skipWhitespaceAndComments();
 
-        if (self.isAtEnd() or self.current().tag != .ident) return error.SyntaxError;
+        if (self.isAtEnd() or self.current().tag != .ident) return self.failExpecting("Expected identifier.");
         const first_tok = self.current();
         const first_text = first_tok.slice(self.source);
         self.advance();
@@ -3199,7 +3199,7 @@ pub const Parser = struct {
         // Namespaced: `ns.name`
         if (!self.isAtEnd() and self.current().tag == .dot) {
             self.advance();
-            if (self.isAtEnd() or self.current().tag != .ident) return error.SyntaxError;
+            if (self.isAtEnd() or self.current().tag != .ident) return self.failExpecting("Expected identifier.");
             const sub_text = self.current().slice(self.source);
             self.advance();
             namespace_id = try self.intern_pool.intern(first_text);
@@ -4010,7 +4010,18 @@ pub const Parser = struct {
     ///   ...]`
     ///
     /// flags bit 0: `!default`
-    fn parseWithConfig(self: *Parser, ast: *Ast) ParseError!ExtraIndex {
+    /// In SCSS a @use or @forward rule ends with `;` after its clauses.
+    fn expectModuleRuleEnd(self: *Parser) ParseError!void {
+        if (self.is_indented_syntax or self.isAtEnd()) return;
+        switch (self.current().tag) {
+            .semicolon, .rbrace, .eof => {},
+            else => return self.failExpectingHard("expected \";\"."),
+        }
+    }
+
+    /// `allow_default`: @forward's configuration may say `!default`, and
+    /// @use's may not.
+    fn parseWithConfig(self: *Parser, ast: *Ast, allow_default: bool) ParseError!ExtraIndex {
         if (self.isAtEnd() or self.current().tag != .lparen) return self.failExpecting("expected \"(\".");
         self.advance();
         self.skipWhitespaceAndComments();
@@ -4021,6 +4032,7 @@ pub const Parser = struct {
 
         while (!self.isAtEnd()) {
             if (self.current().tag == .rparen) {
+                if (count == 0) return self.failExpecting("expected \"$\".");
                 self.advance();
                 break;
             }
@@ -4056,6 +4068,10 @@ pub const Parser = struct {
                 }
                 const flag_text = self.current().slice(self.source);
                 if (identEqlUnescaped(flag_text, "default")) {
+                    if (!allow_default) {
+                        self.pos = saved;
+                        return self.failExpecting("expected \")\".");
+                    }
                     flags |= 0b0000_0001;
                     self.advance();
                     continue;
@@ -4099,6 +4115,8 @@ pub const Parser = struct {
     /// leading `$` so the resolver can distinguish them from
     /// function/mixin names.  Returns an `ExtraIndex` pointing at a
     /// `[count, id_0, ..., id_{N-1}]` block.
+    const show_hide_member_message = "Expected variable, mixin, or function name";
+
     fn parseShowHideList(self: *Parser, ast: *Ast) ParseError!ExtraIndex {
         var ids: std.ArrayListUnmanaged(InternId) = .empty;
         defer ids.deinit(self.allocator);
@@ -4122,11 +4140,12 @@ pub const Parser = struct {
                     defer self.allocator.free(full);
                     break :blk try self.intern_pool.intern(full);
                 };
+                if (member.len == 0) return self.failExpectingHard(show_hide_member_message);
                 try ids.append(self.allocator, id);
                 item_line_start = self.lineStartAtByte(tok.span.start);
                 self.advance();
             } else {
-                break;
+                return self.failExpectingHard(show_hide_member_message);
             }
             self.skipWhitespaceAndComments();
             if (!self.isAtEnd() and self.current().tag == .comma) {
@@ -4204,7 +4223,7 @@ pub const Parser = struct {
         {
             self.advance();
             self.skipWhitespaceAndComments();
-            config_extra = try self.parseWithConfig(ast);
+            config_extra = try self.parseWithConfig(ast, false);
             end_pos = self.tokens[self.pos - 1].span.end;
             self.skipWhitespaceAndComments();
         }
@@ -4212,6 +4231,7 @@ pub const Parser = struct {
         if (self.currentTokenStartsIndentedBodyAfterHeader(at_tok.span.start)) {
             return self.failExpecting("Nothing may be indented beneath a @use rule.");
         }
+        try self.expectModuleRuleEnd();
 
         if (!self.isAtEnd() and self.current().tag == .semicolon) {
             end_pos = self.current().span.end;
@@ -4258,9 +4278,16 @@ pub const Parser = struct {
         var hide_extra: u32 = std.math.maxInt(u32);
         var config_extra: u32 = std.math.maxInt(u32);
 
+        // `as`, then `show` or `hide`, then `with`, each at most once.
+        var clause_stage: u8 = 0;
         clauses: while (!self.isAtEnd()) {
             if (self.current().tag != .ident) break :clauses;
             const text = self.current().slice(self.source);
+            const stage: u8 = if (std.mem.eql(u8, text, "as")) 1 else if (std.mem.eql(u8, text, "show") or std.mem.eql(u8, text, "hide")) 2 else if (std.mem.eql(u8, text, "with")) 3 else 0;
+            if (stage != 0 and stage <= clause_stage and !self.currentTokenStartsIndentedBodyAfterHeader(at_tok.span.start)) {
+                return self.failExpectingHard("expected \";\".");
+            }
+            if (stage != 0) clause_stage = stage;
             if (self.currentTokenStartsIndentedBodyAfterHeader(at_tok.span.start) and
                 (std.mem.eql(u8, text, "as") or
                     std.mem.eql(u8, text, "show") or
@@ -4277,7 +4304,7 @@ pub const Parser = struct {
                 // stopping at `*`.
                 if (self.isAtEnd()) return self.failExpecting("Expected identifier.");
                 switch (self.current().tag) {
-                    .semicolon, .lbrace, .rbrace, .eof => return self.failExpecting("Expected identifier."),
+                    .semicolon, .lbrace, .rbrace, .eof, .star, .number, .minus => return self.failExpectingHard("Expected identifier."),
                     else => {},
                 }
                 const pref_start = self.current().span.start;
@@ -4319,7 +4346,7 @@ pub const Parser = struct {
             if (std.mem.eql(u8, text, "with")) {
                 self.advance();
                 self.skipWhitespaceAndComments();
-                config_extra = try self.parseWithConfig(ast);
+                config_extra = try self.parseWithConfig(ast, true);
                 end_pos = self.tokens[self.pos - 1].span.end;
                 self.skipWhitespaceAndComments();
                 continue :clauses;
@@ -4331,6 +4358,7 @@ pub const Parser = struct {
         if (self.currentTokenStartsIndentedBodyAfterHeader(at_tok.span.start)) {
             return self.failExpecting("Nothing may be indented beneath a @forward rule.");
         }
+        try self.expectModuleRuleEnd();
 
         if (!self.isAtEnd() and self.current().tag == .semicolon) {
             end_pos = self.current().span.end;

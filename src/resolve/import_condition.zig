@@ -1,4 +1,5 @@
 const std = @import("std");
+const error_format = @import("../runtime/error_format.zig");
 const supports_prelude = @import("supports_prelude.zig");
 const prelude = @import("prelude.zig");
 const css_utils = @import("../runtime/css_utils.zig");
@@ -444,8 +445,8 @@ pub fn validateImportConditionText(cond: []const u8) !void {
         if (after_comma.len == 0) return error.SassError;
         if (after_comma[0] == '"' or after_comma[0] == '\'') return error.SassError;
         if (std.ascii.startsWithIgnoreCase(after_comma, "url(")) return error.SassError;
-        if (startsWithImportFunctionCall(after_comma, "supports")) return error.SassError;
-        if (startsWithAnyImportFunctionCall(after_comma)) return error.SassError;
+        if (startsWithImportFunctionCall(after_comma, "supports")) return missingImportEnd();
+        if (startsWithAnyImportFunctionCall(after_comma)) return missingImportEnd();
     }
 
     const first = firstNonWhitespaceIndex(trimmed, 0) orelse return;
@@ -456,9 +457,16 @@ pub fn validateImportConditionText(cond: []const u8) !void {
     if (tail.len == 0 or tail[0] == ',') return;
     if (startsWithImportLogicKeyword(tail)) return;
     if (tail[0] == '(' or tail[0] == ')') return;
-    if (startsWithImportFunctionCall(tail, "supports")) return error.SassError;
-    if (startsWithAnyImportFunctionCall(tail)) return error.SassError;
-    if (startsWithImportIdentifier(tail)) return error.SassError;
+    if (startsWithImportFunctionCall(tail, "supports")) return missingImportEnd();
+    if (startsWithAnyImportFunctionCall(tail)) return missingImportEnd();
+    if (startsWithImportIdentifier(tail)) return missingImportEnd();
+}
+
+/// Conditions in the wrong order: the official CLI reads the rule as
+/// ending before them.
+fn missingImportEnd() error{SassError} {
+    error_format.setContextMessage("expected \";\".");
+    return error.SassError;
 }
 
 pub fn importConditionStartsOnNewLine(raw: []const u8) bool {

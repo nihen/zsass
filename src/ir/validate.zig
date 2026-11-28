@@ -1075,7 +1075,7 @@ pub fn validateUnicodeRange(text: []const u8) EvalError!void {
         q_count += 1;
     }
     const total_first = hex_count + q_count;
-    if (total_first > 6) return EvalError.SassError;
+    if (total_first > 6) return conditionError("Expected at most 6 digits.");
     if (total_first == 0) return EvalError.SassError;
 
     if (uri >= text.len) return;
@@ -1093,7 +1093,7 @@ pub fn validateUnicodeRange(text: []const u8) EvalError!void {
     while (uri < text.len and isHexDigit(text[uri])) : (uri += 1) {
         hex2_count += 1;
     }
-    if (hex2_count > 6) return EvalError.SassError;
+    if (hex2_count > 6) return conditionError("Expected at most 6 digits.");
 
-    if (uri < text.len) return EvalError.SassError;
+    if (uri < text.len) return conditionError("expected \";\".");
 }
