@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- zsass printed an internal "zsass-emit phase=writeTo err=..." line before
+  some errors; it is shown only with verbose errors.
+- `round()` of three arguments takes its strategy first only, as the
+  official CLI does; zsass took one in any place.
+- More errors are reported as the official CLI reports them: a number with
+  a compound unit in a calculation, `min()`/`max()` of incompatible
+  numbers, `round()`'s strategy and step, two values with no operator in
+  `calc()`, a selector with no block (`expected "{".`), an interpolated
+  selector that does not parse, an empty `@extend`, an unclosed parameter
+  list, a `@supports` with no condition, a nested custom property, and a
+  `@mixin` named with `--`.
 - `@error` is reported once, as other errors are: its message, the
   `@error` rule, and the trace; one in a function or mixin at the call
   that ran it, as the official CLI reports it. zsass followed the message
