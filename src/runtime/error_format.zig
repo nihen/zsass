@@ -315,7 +315,8 @@ pub const ErrorTraceFrame = struct {
 
 /// Single thread-local bundle for error context / resolver stack / snapshot (avoids torn reads across fields).
 pub const ErrorState = struct {
-    context_message_buf: [512]u8 = @splat(0),
+    // An @error message is reported through it, however long.
+    context_message_buf: [8192]u8 = @splat(0),
     context_message_len: usize = 0,
     last_error_ctx: ErrorContext = .{},
     error_stack: [max_error_stack]ErrorStackFrame = @splat(.{ .path = "", .source = "", .label = "" }),

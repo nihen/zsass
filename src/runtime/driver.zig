@@ -359,7 +359,6 @@ fn resolveFrameInfoEx(
 /// stylesheet. False when a frame cannot be placed; the caller then draws
 /// the single frame.
 fn buildVmErrorTrace(
-    vm: *vm_mod.VM,
     program_ptr: *compiler_mod.Program,
     inner_source: []const u8,
     inner_path: []const u8,
@@ -367,6 +366,8 @@ fn buildVmErrorTrace(
     span_end: u32,
     entry_path: []const u8,
     call_sites: []const vm_mod.VM.CallSite,
+    inner_ref: vm_mod.ChunkRef,
+    inner_name: []const u8,
 ) bool {
     const snapshot = &error_format.error_state.error_stack_snapshot;
     if (snapshot.len < 3) return false;
@@ -410,7 +411,7 @@ fn buildVmErrorTrace(
     const ip_len = @min(inner_path.len, inner.path_buf.len);
     @memcpy(inner.path_buf[0..ip_len], inner_path[0..ip_len]);
     inner.path_len = ip_len;
-    const inner_label = formatCallLabel(vm.innerMostChunkRef(), vm.innerMostChunkName(), &inner.label_buf);
+    const inner_label = formatCallLabel(inner_ref, inner_name, &inner.label_buf);
     inner.label_len = inner_label.len;
     const ip = computeLineColInline(inner_source, span_start);
     const iep = computeLineColInline(inner_source, span_end);
@@ -2819,7 +2820,22 @@ fn runEnd2EndWithBudget(
         // CLI-FIX-E Step 2/2c: Output source frame from span recorded by VM step.
         // file_id == root_index uses entry source, != root_index is program.modules[file_id]
         // Reload source from path + line_starts already exists in modules[file_id].
-        const ctx = error_format.error_state.last_error_ctx;
+        var ctx = error_format.error_state.last_error_ctx;
+        var call_sites: [error_format.max_error_stack]vm_mod.VM.CallSite = undefined;
+        var call_count = vm.callSites(&call_sites);
+        var inner_ref = vm.innerMostChunkRef();
+        var inner_name = vm.innerMostChunkName();
+        if (vm.error_at_call_site and call_count > 0) {
+            // An @error is reported at the call to the function or mixin
+            // it is in, which the trace then leaves out.
+            const site = call_sites[call_count - 1];
+            ctx.file_id = site.module_id;
+            ctx.span_start = site.span_start;
+            ctx.span_end = site.span_end;
+            inner_ref = site.chunk;
+            inner_name = site.chunk_name;
+            call_count -= 1;
+        }
         const root_idx: u32 = program_ptr.root_index;
         const file_id_is_entry = (ctx.file_id == root_idx);
         const frame_info = resolveFrameInfoEx(diag_alloc, program_ptr, ctx, source, module_path, file_id_is_entry);
@@ -2829,8 +2845,6 @@ fn runEnd2EndWithBudget(
         // Rendered with (`{imported} l:c {fn-name}()\n {entry} l:c root stylesheet`).
         // Take exact callsite span of entry in outermostCallerInfo() of VM and innerMostChunkName()
         // Reflect the function/mixin name in the inner frame label.
-        var call_sites: [error_format.max_error_stack]vm_mod.VM.CallSite = undefined;
-        const call_count = vm.callSites(&call_sites);
         // Code an @import brought in is placed in the imported file, reached
         // through each @import.
         const imported_frames = if (ctx.has_value)
@@ -2841,7 +2855,7 @@ fn runEnd2EndWithBudget(
             error_format.error_state.error_stack_snapshot_len = count;
             error_format.writeStackTrace(diag_alloc) catch {};
         } else if (frame_info.has_frame and (call_count > 0 or !file_id_is_entry) and
-            buildVmErrorTrace(&vm, program_ptr, frame_info.source.?, frame_info.path, ctx.span_start, ctx.span_end, module_path, call_sites[0..call_count]))
+            buildVmErrorTrace(program_ptr, frame_info.source.?, frame_info.path, ctx.span_start, ctx.span_end, module_path, call_sites[0..call_count], inner_ref, inner_name))
         {
             error_format.writeStackTrace(diag_alloc) catch {
                 error_format.writeSourceFrame(frame_info.source.?, frame_info.line_starts.?, ctx.span_start, ctx.span_end, frame_info.path);

@@ -518,6 +518,9 @@ pub const VM = struct {
     /// Suppress direct VM diagnostics for tests that intentionally exercise
     /// user-facing failures. CLI/API callers keep the default false.
     suppress_diagnostics: bool = builtin.is_test,
+    /// An @error in a function or mixin is reported at the call that ran
+    /// it, as the official CLI reports it.
+    error_at_call_site: bool = false,
     /// Optional fd for TAGD builtin-dispatch error lines (e.g. spec_runner pipe). Per-VM, not process-global.
     error_sink_fd: ?i32 = null,
     /// Stage 2 sidecar for unit-bearing numbers (NaN-box prep).
@@ -4962,7 +4965,9 @@ pub const VM = struct {
                 const rendered_msg = try self.valueToDiagnosticMessage(val, true);
                 const msg = try css_utils.escapePrivateUseCodePoints(self.allocator, rendered_msg);
                 defer if (msg.ptr != rendered_msg.ptr) self.allocator.free(msg);
-                if (!self.suppress_diagnostics) vmStderrPrint("Error: {s}\n", .{msg});
+                // Reported with the rule's span and trace, as any error is.
+                error_format.setContextMessage(msg);
+                self.error_at_call_site = true;
                 return error.SassError;
             },
             .emit_debug => {
