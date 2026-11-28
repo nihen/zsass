@@ -9424,8 +9424,10 @@ fn resolveVariableDeclStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtI
     const name = ctx.pool.get(name_id);
     // A module-level variable the module has not declared, which more than
     // one `@use ... as *` provides, is ambiguous.
+    // A variable an @import forwards is that one, not ambiguous.
     if (ctx.scopes.items.len == 0 and lookupGlobalSlot(ctx.prog, name) == null and
-        lookupVoidFlagInsensitive(&ctx.ambiguous_star_vars, name))
+        lookupVoidFlagInsensitive(&ctx.ambiguous_star_vars, name) and
+        lookupBoolFlagInsensitive(&ctx.import_star_vars, name) == null)
     {
         error_format.setContextMessage(ambiguous_star_var_message);
         return error.SassError;

@@ -102,11 +102,15 @@ fn formatListValue(ctx: *const Context, value: Value) std.mem.Allocator.Error![]
     // A list is shown as meta.inspect() writes it, in parentheses unless
     // it has its own.
     const inner = try formatListInspect(ctx, value);
-    if (inner.len > 0 and (inner[0] == '(' or inner[0] == '[')) {
-        const view = value_mod.inspectLogicalListView(ctx.list_pool.items, value);
-        const own = if (view) |v| v.bracketed or v.is_map or v.items.len < 2 else true;
-        if (own) return inner;
-    }
+    // Brackets, a map's parentheses, an empty list's, and those of a list
+    // of one with a trailing separator are the list's own.
+    const view = value_mod.inspectLogicalListView(ctx.list_pool.items, value);
+    const own = if (view) |v|
+        v.bracketed or (v.is_map and v.items.len % 2 == 0) or v.items.len == 0 or
+            (v.items.len == 1 and (v.separator == .comma or v.separator == .slash))
+    else
+        true;
+    if (own) return inner;
     defer ctx.allocator.free(inner);
     return std.fmt.allocPrint(ctx.allocator, "({s})", .{inner});
 }
@@ -131,7 +135,10 @@ fn formatListInspect(ctx: *const Context, value: Value) std.mem.Allocator.Error!
         try out.append(ctx.allocator, if (view.bracketed) '[' else '(');
         const inner = try formatInspectItem(ctx, items[0]);
         defer ctx.allocator.free(inner);
+        const needs_parens = value_mod.inspectNestedListNeedsParens(ctx.list_pool.items, items[0], view.separator);
+        if (needs_parens) try out.append(ctx.allocator, '(');
         try out.appendSlice(ctx.allocator, inner);
+        if (needs_parens) try out.append(ctx.allocator, ')');
         if (view.separator == .comma) {
             try out.append(ctx.allocator, ',');
         } else if (view.bracketed) {
