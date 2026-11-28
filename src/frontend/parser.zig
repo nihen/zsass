@@ -11542,15 +11542,13 @@ test "parse: @forward with show / hide clauses" {
     var pool = try InternPool.init(alloc);
     defer pool.deinit(alloc);
 
-    var result = try parseFullSource(alloc, &pool, "@forward \"utils\" show $primary, my-func hide $hidden;");
+    var result = try parseFullSource(alloc, &pool, "@forward \"utils\" show $primary, my-func;\n@forward \"other\" hide $hidden;");
     defer result.ast.deinit();
 
-    const stmt = rootChild(&result.ast, 0);
-    const n = result.ast.getNode(stmt);
-    const show_extra = result.ast.getExtraU32(n.payload + 2);
-    const hide_extra = result.ast.getExtraU32(n.payload + 3);
+    const show_node = result.ast.getNode(rootChild(&result.ast, 0));
+    const show_extra = result.ast.getExtraU32(show_node.payload + 2);
     try std.testing.expect(show_extra != std.math.maxInt(u32));
-    try std.testing.expect(hide_extra != std.math.maxInt(u32));
+    try std.testing.expectEqual(std.math.maxInt(u32), result.ast.getExtraU32(show_node.payload + 3));
 
     // show list: [count, $primary, my-func]
     try std.testing.expectEqual(@as(u32, 2), result.ast.getExtraU32(show_extra));
@@ -11560,9 +11558,22 @@ test "parse: @forward with show / hide clauses" {
     try std.testing.expectEqualStrings("my-func", pool.get(s1));
 
     // hide list: [count, $hidden]
+    const hide_node = result.ast.getNode(rootChild(&result.ast, 1));
+    const hide_extra = result.ast.getExtraU32(hide_node.payload + 3);
     try std.testing.expectEqual(@as(u32, 1), result.ast.getExtraU32(hide_extra));
     const h0: InternId = @fromBackingInt(@intCast(result.ast.getExtraU32(hide_extra + 1)));
     try std.testing.expectEqualStrings("$hidden", pool.get(h0));
+}
+
+test "parse: @forward show and hide together are rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var pool = try InternPool.init(alloc);
+    defer pool.deinit(alloc);
+
+    try std.testing.expectError(error.HardSyntaxError, parseFullSource(alloc, &pool, "@forward \"utils\" show $primary hide $hidden;"));
 }
 
 test "parse: @forward with (...) config" {

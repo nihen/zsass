@@ -185,7 +185,7 @@ fn selectorArgCssString(ctx: *BuiltinContext, value: Value) BuiltinError![]u8 {
 
 /// "Can't extend complex selector d e.": only a compound selector may be
 /// extended.
-fn cantExtendComplex(ctx: *BuiltinContext, complex: *const ComplexSelector) BuiltinError {
+fn cantExtendComplex(ctx: *BuiltinContext, complex: *const ComplexSelector, err: BuiltinError) BuiltinError {
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(ctx.allocator);
     for (complex.components.items) |comp| {
@@ -199,9 +199,9 @@ fn cantExtendComplex(ctx: *BuiltinContext, complex: *const ComplexSelector) Buil
         try text.appendSlice(ctx.allocator, part);
     }
     var buf: [512]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "Can't extend complex selector {s}.", .{text.items}) catch return error.SassError;
+    const msg = std.fmt.bufPrint(&buf, "Can't extend complex selector {s}.", .{text.items}) catch return err;
     error_format.setContextMessage(msg);
-    return error.SassError;
+    return err;
 }
 
 fn selectorListToValue(ctx: *BuiltinContext, list: *const SelectorList) BuiltinError!Value {
@@ -518,7 +518,7 @@ fn selectorExtendCore(
     defer extendee.deinit();
     for (extendee.selectors.items) |extendee_complex| {
         if (complexHasShallowParentSelector(&extendee_complex)) return parentNotAllowed("extendee");
-        if (compoundCountInComplex(&extendee_complex) > 1) return cantExtendComplex(ctx, &extendee_complex);
+        if (compoundCountInComplex(&extendee_complex) > 1) return cantExtendComplex(ctx, &extendee_complex, error.BuiltinType);
     }
 
     var extender = try parseSelectorArg(ctx, extender_str, "extender");
@@ -606,7 +606,7 @@ fn selectorReplaceCore(
     defer original.deinit();
     for (original.selectors.items) |original_complex| {
         if (complexHasShallowParentSelector(&original_complex)) return parentNotAllowed("original");
-        if (compoundCountInComplex(&original_complex) > 1) return cantExtendComplex(ctx, &original_complex);
+        if (compoundCountInComplex(&original_complex) > 1) return cantExtendComplex(ctx, &original_complex, error.SassError);
     }
 
     var replacement = try parseSelectorArg(ctx, replacement_str, "replacement");
