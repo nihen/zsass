@@ -135,6 +135,7 @@ pub fn resolveUserModule(self: *ModuleResolver, from_path: []const u8, url: []co
         error.OutOfMemory => return error.OutOfMemory,
         error.SyntaxError => {
             lexer.printLastErrorDiagnostic("UsermoduleLexFailure");
+            lexer.noteLastErrorMessage();
             return error.UsermoduleLexFailure;
         },
     };

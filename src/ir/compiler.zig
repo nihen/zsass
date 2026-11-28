@@ -6113,6 +6113,7 @@ fn parseResolveCompileOnce(
         error.OutOfMemory => return error.OutOfMemory,
         error.SyntaxError => {
             lexer.printLastErrorDiagnostic("SyntaxError");
+            lexer.noteLastErrorMessage();
             return error.SyntaxError;
         },
     };

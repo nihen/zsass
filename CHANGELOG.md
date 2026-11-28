@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- More syntax errors say what was expected, as the official CLI does:
+  malformed `@use`/`@forward` clauses (which zsass went on to load),
+  `@include .member`, a number ending with a dot, a unicode range with
+  too many digits, and an attribute modifier that is no single letter.
+- A function's or mixin's arguments are reported in the official CLI's
+  order: a missing argument before an unknown name, several unknown names
+  at once, and an argument passed both by position and by name.
+- `color.darken()` and the other global color functions `sass:color`
+  lacks say so and recommend the `color.adjust()` call to make. The
+  color, math, selector, and meta functions name the argument that has
+  the wrong type.
 - Syntax errors say what the parser expected, as the official CLI does
   (`expected ")".`, "Expected identifier.", "Expected string.", "Nothing
   may be indented beneath a @use rule.", and the like), where zsass said

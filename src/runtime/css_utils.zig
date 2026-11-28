@@ -1,6 +1,7 @@
 //! CSS text scanning/escaping helpers shared by resolver, IR, selector, and VM.
 
 const std = @import("std");
+const error_format = @import("error_format.zig");
 const expr_scan = @import("expr_scan.zig");
 
 const isDigit = expr_scan.isDigit;
@@ -294,6 +295,7 @@ fn normalizeOneAttr(allocator: std.mem.Allocator, content: []const u8) ![]const 
 
     if (modifier_text.len > 0) {
         if (modifier_text.len != 1 or !std.ascii.isAlphabetic(modifier_text[0])) {
+            error_format.setContextMessage("expected \"]\".");
             return EvalError.SassError;
         }
     }

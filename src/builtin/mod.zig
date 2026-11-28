@@ -163,6 +163,10 @@ pub fn sassFunctionForCssMathGlobal(id: Id) Id {
 pub const global_hwb_id: Id = 191;
 /// Checks that a value a calculation is given can be used in one.
 pub const calc_value_check_id: Id = 192;
+/// sass:color's stand-ins for the global color functions it lacks, which
+/// take their arguments and then say so: 193 through 201.
+pub const not_in_color_module_first_id: Id = 193;
+pub const not_in_color_module_names = [_][]const u8{ "adjust-hue", "darken", "desaturate", "fade-in", "fade-out", "lighten", "opacify", "saturate", "transparentize" };
 
 pub fn resolveLegacyGlobal(name: []const u8) ?Id {
     // `scale()` is frequently used as a CSS transform function and is a Sass legacy global
@@ -645,6 +649,15 @@ fn buildResolveTable() []const ResolveRow {
         .{ .m = "color", .n = "whiteness", .id = 83 },
         .{ .m = "color", .n = "blackness", .id = 84 },
         .{ .m = "color", .n = "complement", .id = 85 },
+        .{ .m = "color", .n = "adjust-hue", .id = 193 },
+        .{ .m = "color", .n = "darken", .id = 194 },
+        .{ .m = "color", .n = "desaturate", .id = 195 },
+        .{ .m = "color", .n = "fade-in", .id = 196 },
+        .{ .m = "color", .n = "fade-out", .id = 197 },
+        .{ .m = "color", .n = "lighten", .id = 198 },
+        .{ .m = "color", .n = "opacify", .id = 199 },
+        .{ .m = "color", .n = "saturate", .id = 200 },
+        .{ .m = "color", .n = "transparentize", .id = 201 },
         .{ .m = "color", .n = "invert", .id = 86 },
         .{ .m = "color", .n = "grayscale", .id = 87 },
         .{ .m = "color", .n = "ie-hex-str", .id = 90 },
@@ -864,6 +877,7 @@ pub fn dispatch(ctx: *BuiltinContext, id: Id, args: []const Value, arg_names: []
         91 => color.color_hwb(ctx, args, arg_names),
         global_hwb_id => color.global_hwb(ctx, args, arg_names),
         calc_value_check_id => math.calcValueCheck(ctx, args),
+        193...201 => color.notInColorModule(ctx, args, arg_names, not_in_color_module_names[id - not_in_color_module_first_id]),
         60 => list.list_append(ctx, args, arg_names),
         61 => list.list_index(ctx, args, arg_names),
         62 => list.list_join(ctx, args, arg_names),

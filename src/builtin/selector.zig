@@ -183,6 +183,27 @@ fn selectorArgCssString(ctx: *BuiltinContext, value: Value) BuiltinError![]u8 {
     return @constCast(css);
 }
 
+/// "Can't extend complex selector d e.": only a compound selector may be
+/// extended.
+fn cantExtendComplex(ctx: *BuiltinContext, complex: *const ComplexSelector, err: BuiltinError) BuiltinError {
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(ctx.allocator);
+    for (complex.components.items) |comp| {
+        const part = switch (comp) {
+            .compound => |compound| try selector_mod.compoundSelectorToCss(ctx.allocator, &compound),
+            .combinator => |comb| try ctx.allocator.dupe(u8, std.mem.trim(u8, comb.toCss(), " ")),
+        };
+        defer ctx.allocator.free(part);
+        if (part.len == 0) continue;
+        if (text.items.len > 0) try text.append(ctx.allocator, ' ');
+        try text.appendSlice(ctx.allocator, part);
+    }
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "Can't extend complex selector {s}.", .{text.items}) catch return err;
+    error_format.setContextMessage(msg);
+    return err;
+}
+
 fn selectorListToValue(ctx: *BuiltinContext, list: *const SelectorList) BuiltinError!Value {
     var outer_items: std.ArrayList(Value) = .empty;
     defer outer_items.deinit(ctx.allocator);
@@ -228,7 +249,10 @@ pub fn selector_parse(ctx: *BuiltinContext, args: []const Value, arg_names: []co
 }
 
 pub fn selector_nest(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
-    if (args.len == 0) return error.BuiltinArity;
+    if (args.len == 0) {
+        error_format.setContextMessage("$selectors: At least one selector must be passed.");
+        return error.BuiltinArity;
+    }
 
     const first_str = try selectorArgStringNamed(ctx, args[0], "");
     defer ctx.allocator.free(first_str);
@@ -263,7 +287,10 @@ pub fn selector_nest(ctx: *BuiltinContext, args: []const Value) BuiltinError!Val
 }
 
 pub fn selector_append(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
-    if (args.len == 0) return error.BuiltinArity;
+    if (args.len == 0) {
+        error_format.setContextMessage("$selectors: At least one selector must be passed.");
+        return error.BuiltinArity;
+    }
 
     const first_str = try selectorArgStringNamed(ctx, args[0], "");
     defer ctx.allocator.free(first_str);
@@ -491,7 +518,7 @@ fn selectorExtendCore(
     defer extendee.deinit();
     for (extendee.selectors.items) |extendee_complex| {
         if (complexHasShallowParentSelector(&extendee_complex)) return parentNotAllowed("extendee");
-        if (compoundCountInComplex(&extendee_complex) > 1) return error.BuiltinType;
+        if (compoundCountInComplex(&extendee_complex) > 1) return cantExtendComplex(ctx, &extendee_complex, error.BuiltinType);
     }
 
     var extender = try parseSelectorArg(ctx, extender_str, "extender");
@@ -579,7 +606,7 @@ fn selectorReplaceCore(
     defer original.deinit();
     for (original.selectors.items) |original_complex| {
         if (complexHasShallowParentSelector(&original_complex)) return parentNotAllowed("original");
-        if (compoundCountInComplex(&original_complex) > 1) return error.SassError;
+        if (compoundCountInComplex(&original_complex) > 1) return cantExtendComplex(ctx, &original_complex, error.SassError);
     }
 
     var replacement = try parseSelectorArg(ctx, replacement_str, "replacement");
