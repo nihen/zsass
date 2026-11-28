@@ -140,15 +140,33 @@ fn plainCssParenthesesError(s: []const u8, open: usize) EvalError {
     const inner = std.mem.trim(u8, s[open + 1 .. @max(open + 1, close -| 1)], " \t\r\n");
     if (inner.len == 0) return plainCssError("Expected expression.");
     var depth: u32 = 0;
-    for (inner) |c| {
+    var quote: u8 = 0;
+    var i: usize = 0;
+    while (i < inner.len) : (i += 1) {
+        const c = inner[i];
+        if (quote != 0) {
+            if (c == '\\') i += 1 else if (c == quote) quote = 0;
+            continue;
+        }
         switch (c) {
-            '(' => depth += 1,
-            ')' => depth -|= 1,
+            '"', '\'' => quote = c,
+            '\\' => i += 1,
+            '(', '[' => depth += 1,
+            ')', ']' => depth -|= 1,
             ':', ',' => if (depth == 0) return plainCssError("expected \")\"."),
             else => {},
         }
     }
     return plainCssError("Parentheses aren't allowed in plain CSS.");
+}
+
+/// Whether the text before `end` is a hex escape (`\` and 1-6 hex digits),
+/// which a following space ends.
+fn endsHexEscape(s: []const u8, end: usize) bool {
+    var i = end;
+    var digits: usize = 0;
+    while (i > 0 and digits < 6 and std.ascii.isHex(s[i - 1])) : (i -= 1) digits += 1;
+    return digits > 0 and i > 0 and s[i - 1] == '\\';
 }
 
 pub fn validatePlainCssValue(val: []const u8) EvalError!void {
@@ -185,6 +203,12 @@ pub fn validatePlainCssValue(val: []const u8) EvalError!void {
             si += 1;
             continue;
         }
+        // A comment is skipped, parentheses and all.
+        if (c == '/' and si + 1 < s.len and s[si + 1] == '*') {
+            const close = std.mem.indexOfPos(u8, s, si + 2, "*/") orelse s.len;
+            si = @min(s.len, close + 2);
+            continue;
+        }
 
         // Check parentheses BEFORE incrementing depth so we can inspect the function name.
         if (c == '(') {
@@ -203,8 +227,11 @@ pub fn validatePlainCssValue(val: []const u8) EvalError!void {
                 if (si == 0) return plainCssParenthesesError(s, si);
                 var func_end = si;
                 while (func_end > 0 and (s[func_end - 1] == ' ' or s[func_end - 1] == '\t')) : (func_end -= 1) {}
-                // A function's name is written right before its parenthesis.
-                if (func_end != si) return plainCssParenthesesError(s, si);
+                // A function's name is written right before its parenthesis;
+                // the space that ends a hex escape (`\6c `) is the name's.
+                if (func_end != si and !(func_end + 1 == si and endsHexEscape(s, func_end))) {
+                    return plainCssParenthesesError(s, si);
+                }
                 var func_start = func_end;
                 while (func_start > 0 and isIdentChar(s[func_start - 1])) : (func_start -= 1) {}
                 const func_name = s[func_start..func_end];

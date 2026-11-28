@@ -4155,7 +4155,8 @@ fn preserveLegacyRgbTargetSourceRepr(ctx: *BuiltinContext, value: Value, source_
 fn reportNotWithin(ctx: *BuiltinContext, comptime param: []const u8, v: Value, comptime low: []const u8, comptime high: []const u8, comptime bounds_take_unit: bool) BuiltinError {
     const unit_id = v.unitId(ctx.number_pool);
     const unit: ?[]const u8 = if (unit_id == .none) null else ctx.intern_pool.get(unit_id);
-    const text = value_format.formatNumberWithUnit(ctx.allocator, v.asF64(ctx.number_pool), unit) catch return error.OutOfMemory;
+    const compound = if (unit) |u| (value_format.formatCompoundUnitNumber(ctx.allocator, v.asF64(ctx.number_pool), u) catch return error.OutOfMemory) else null;
+    const text = compound orelse (value_format.formatNumberWithUnit(ctx.allocator, v.asF64(ctx.number_pool), unit) catch return error.OutOfMemory);
     defer ctx.allocator.free(text);
     const bound_unit = if (bounds_take_unit) unit orelse "" else "";
     return shared.reportArgumentMessage(param, "Expected {s} to be within " ++ low ++ "{s} and " ++ high ++ "{s}.", .{ text, bound_unit, bound_unit });

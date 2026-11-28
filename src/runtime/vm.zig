@@ -6692,7 +6692,10 @@ pub const VM = struct {
             // Written there, it reads as a selector missing its block. The
             // indented syntax reads its indentation first, which is not
             // checked here.
-            if (self.innerMostChunkRef() == .top) {
+            // Inside @at-root it is written in a style rule all the same.
+            if (self.innerMostChunkRef() == .top and self.at_root_bubble_stack.items.len == 0 and
+                self.at_root_saved_selector_frames.items.len == 0)
+            {
                 const fid: usize = self.diagnosticModuleIndex();
                 if (fid < self.program.modules.len and std.ascii.endsWithIgnoreCase(self.program.modules[fid].module_path, ".sass")) {
                     return error.SassError;
