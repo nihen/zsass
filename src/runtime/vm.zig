@@ -4373,7 +4373,7 @@ pub const VM = struct {
                     }
                     vid = try internWithLeadingMarker(self.intern_pool, self.allocator, calc_interp_marker, vid);
                 }
-                vid = try normalizeUnicodeRangeDeclValue(self, vid, is_custom_property);
+                vid = try normalizeUnicodeRangeDeclValue(self, vid, is_custom_property, false);
                 if (!is_custom_property and self.intern_pool.get(vid).len == 0) return .continue_exec;
                 try self.rule_ir.appendDecl(self.allocator, @backingInt(prop_id), @backingInt(vid), self.currentSourceSpan());
                 if (!is_custom_property) {
@@ -4521,7 +4521,7 @@ pub const VM = struct {
                         }
                     }
                 }
-                vid = try normalizeUnicodeRangeDeclValue(self, vid, is_custom_property);
+                vid = try normalizeUnicodeRangeDeclValue(self, vid, is_custom_property, false);
                 // emit_decl_flag_strip_source_comments is set only for values
                 // without interpolation. Strip source comments from plain CSS
                 // literal values; preserve text produced by interpolation. Custom
@@ -4710,7 +4710,7 @@ pub const VM = struct {
                         }
                     }
                 }
-                out_id = try normalizeUnicodeRangeDeclValue(self, out_id, is_custom_property);
+                out_id = try normalizeUnicodeRangeDeclValue(self, out_id, is_custom_property, inst.opcode() == .emit_raw_decl and (inst.arg_a & opcode_mod.emit_raw_decl_flag_strip_source_comments) != 0);
                 // emit_raw_decl_flag_strip_source_comments is set only for pure
                 // literal source values. Interpolation and custom properties
                 // preserve authored bytes. Older raw-decl opcodes keep flag 0.
@@ -7009,9 +7009,11 @@ pub const VM = struct {
     }
 
     /// A map key or value as a map writes it: a comma list in parentheses.
-    fn inspectMapEntryForMessage(self: *VM, v: Value) VMError![]const u8 {
+    /// Alone, a one-element list keeps the parentheses it has: `(1,)`.
+    fn inspectMapEntryForMessage(self: *VM, v: Value, in_map: bool) VMError![]const u8 {
         const text = try self.inspectForMessage(v);
         if (v.kind() != .list or !v.listComma(self.list_meta_pool.items) or v.listBracketed(self.list_meta_pool.items)) return text;
+        if (!in_map and self.list_pool.items[v.listHandle()].len == 1) return text;
         const wrapped = try std.fmt.allocPrint(self.allocator, "({s})", .{text});
         defer self.allocator.free(wrapped);
         return self.intern_pool.get(try self.intern_pool.intern(wrapped));
@@ -7022,13 +7024,13 @@ pub const VM = struct {
     fn reportKeywordMapKey(self: *VM, key: Value, pairs: []const Value) VMError!void {
         var text: std.ArrayListUnmanaged(u8) = .empty;
         defer text.deinit(self.allocator);
-        const key_text = try self.inspectMapEntryForMessage(key);
+        const key_text = try self.inspectMapEntryForMessage(key, false);
         try text.print(self.allocator, "Variable keyword argument map must have string keys.\n{s} is not a string in (", .{key_text});
         var i: usize = 0;
         while (i + 1 < pairs.len) : (i += 2) {
             if (i > 0) try text.appendSlice(self.allocator, ", ");
-            const k = try self.inspectMapEntryForMessage(pairs[i]);
-            const v = try self.inspectMapEntryForMessage(pairs[i + 1]);
+            const k = try self.inspectMapEntryForMessage(pairs[i], true);
+            const v = try self.inspectMapEntryForMessage(pairs[i + 1], true);
             try text.print(self.allocator, "{s}: {s}", .{ k, v });
         }
         try text.appendSlice(self.allocator, ").");
@@ -12338,7 +12340,7 @@ fn valueToInternIdRaw(
     return valueToInternIdRawWithMode(pool, number_pool, alloc, list_pool, color_pool, slash_list_preserve, v, .normal);
 }
 
-fn normalizeUnicodeRangeDeclText(alloc: std.mem.Allocator, raw: []const u8) VMError!?[]const u8 {
+fn normalizeUnicodeRangeDeclText(alloc: std.mem.Allocator, raw: []const u8, literal: bool) VMError!?[]const u8 {
     var start: usize = 0;
     while (start < raw.len and (raw[start] == ' ' or raw[start] == '\t' or raw[start] == '\n' or raw[start] == '\r')) : (start += 1) {}
     if (start >= raw.len) return null;
@@ -12355,7 +12357,7 @@ fn normalizeUnicodeRangeDeclText(alloc: std.mem.Allocator, raw: []const u8) VMEr
     var word_end: usize = 2;
     while (word_end < trimmed.len and (std.ascii.isAlphanumeric(trimmed[word_end]) or trimmed[word_end] == '-' or trimmed[word_end] == '?' or trimmed[word_end] == '_')) : (word_end += 1) {}
     // `U+4??-x` is the range and then text.
-    if (ur_len == 0 or (ur_len < word_end and trimmed[ur_len - 1] != '?')) {
+    if (literal and (ur_len == 0 or (ur_len < word_end and trimmed[ur_len - 1] != '?'))) {
         ir_validate.validateUnicodeRange(trimmed[0..word_end]) catch return error.SassError;
     }
     if (ur_len == 0) return error.SassError;
@@ -12391,10 +12393,12 @@ fn normalizeUnicodeRangeDeclText(alloc: std.mem.Allocator, raw: []const u8) VMEr
     return try out.toOwnedSlice(alloc);
 }
 
-fn normalizeUnicodeRangeDeclValue(self: *VM, vid: InternId, is_custom_property: bool) VMError!InternId {
+/// `literal`: the value is the source's text, whose unicode-range words
+/// are checked whole; interpolation's output is not.
+fn normalizeUnicodeRangeDeclValue(self: *VM, vid: InternId, is_custom_property: bool, literal: bool) VMError!InternId {
     if (is_custom_property) return vid;
     const raw = self.intern_pool.get(vid);
-    const maybe_normalized = try normalizeUnicodeRangeDeclText(self.allocator, raw);
+    const maybe_normalized = try normalizeUnicodeRangeDeclText(self.allocator, raw, literal);
     if (maybe_normalized) |normalized| {
         defer self.allocator.free(normalized);
         return self.intern_pool.intern(normalized) catch error.OutOfMemory;
