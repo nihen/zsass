@@ -1961,7 +1961,6 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
     var unitless_after_unknown_pair: ?Value = null;
     // The first number with a unit, which an error names with the other.
     var first_with_unit: ?Value = null;
-    var second_unknown: ?Value = null;
 
     for (values) |arg| {
         if (arg.kind() != .number) {
@@ -1976,10 +1975,7 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
             if (first_with_unit == null) first_with_unit = arg;
             if (unitCategory(unit) == .unknown) {
                 if (first_unknown_unit) |prev_unit| {
-                    if (!std.mem.eql(u8, prev_unit, unit) and !saw_multiple_unknown_units) {
-                        saw_multiple_unknown_units = true;
-                        second_unknown = arg;
-                    }
+                    if (!std.mem.eql(u8, prev_unit, unit)) saw_multiple_unknown_units = true;
                 } else {
                     first_unknown_unit = unit;
                 }
@@ -1991,14 +1987,23 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
     if (unitless_after_unknown_pair) |unitless| {
         // sass:math's function compares the numbers in turn; the CSS one
         // names the first number with a unit and the unitless one.
-        if (mode == .module) {
-            const first_unknown = for (values) |v| {
-                const u = unitSlice(ctx, v.unitId(ctx.number_pool));
-                if (u != null and unitCategory(u.?) == .unknown) break v;
-            } else values[0];
-            return reportIncompatibleUnits(ctx, first_unknown, second_unknown.?);
+        const first = first_with_unit.?;
+        const first_unit = unitSlice(ctx, first.unitId(ctx.number_pool)).?;
+        // The first later number whose unit `first`'s cannot take; for the
+        // CSS function two units it does not know may still match.
+        for (values) |v| {
+            const u = unitSlice(ctx, v.unitId(ctx.number_pool)) orelse continue;
+            if (std.mem.eql(u8, u, first_unit) or convertUnit(1.0, u, first_unit) != null) continue;
+            if (mode == .module) return reportIncompatibleUnits(ctx, first, v);
+            // A unit the CSS function does not know may be a length.
+            const a_cat = unitCategory(first_unit);
+            const b_cat = unitCategory(u);
+            const a_len = a_cat == .length or a_cat == .unknown;
+            const b_len = b_cat == .length or b_cat == .unknown;
+            if (a_len != b_len or (!a_len and a_cat != b_cat)) return reportCalcIncompatible(ctx, first, v);
         }
-        return reportCalcIncompatible(ctx, first_with_unit.?, unitless);
+        if (mode == .module) return reportIncompatibleUnits(ctx, first, unitless);
+        return reportCalcIncompatible(ctx, first, unitless);
     }
 
     const first = values[0];
@@ -2162,7 +2167,7 @@ pub fn math_round(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
             } else {
                 // var() there may be a strategy when the browser computes it.
                 if (try roundStrategyMayBeVar(ctx, args[0])) return buildCssMathCall(ctx, "round", args);
-                const text = try shared.valueToInspectionString(ctx, args[0]);
+                const text = try valueToCssString(ctx, args[0]);
                 defer ctx.allocator.free(text);
                 var buf: [256]u8 = undefined;
                 const msg = std.fmt.bufPrint(&buf, "{s} must be either nearest, up, down or to-zero.", .{text}) catch return error.SassError;

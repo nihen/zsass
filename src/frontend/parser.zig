@@ -1288,6 +1288,10 @@ pub const Parser = struct {
                 self.advance();
                 continue;
             }
+            if ((tok.tag == .rparen or tok.tag == .rbracket) and group_depth == 0) {
+                if (tok.tag == .rparen) return self.failExpecting("Unexpected \")\".");
+                return self.failExpecting("Unexpected \"]\".");
+            }
             if ((tok.tag == .rparen or tok.tag == .rbracket) and group_depth > 0) {
                 group_depth -= 1;
                 if (group_depth < group_stack.len) {
