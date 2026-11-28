@@ -2942,14 +2942,11 @@ pub fn calcValueCheck(ctx: *BuiltinContext, args: []const Value) BuiltinError!Va
         .number, .calc_fragment, .interp_fragment => return v,
         else => {},
     }
-    // `$x: 1/2` is a division of numbers kept with its slash.
-    if (v.kind() == .list and v.listSlash(ctx.list_meta_pool.items) and !v.listBracketed(ctx.list_meta_pool.items)) {
-        const items = ctx.list_pool.items[v.listHandle()];
-        var all_numbers = items.len == 2;
-        for (items) |item| {
-            if (item.kind() != .number) all_numbers = false;
-        }
-        if (all_numbers) return v;
+    // `$x: 1/2` is a division kept with its slash, unlike list.slash(1, 2).
+    if (v.kind() == .list and v.listSlash(ctx.list_meta_pool.items) and v.listCoerceSlash(ctx.list_meta_pool.items) and
+        !v.listFromBuiltinSlash())
+    {
+        return v;
     }
     // A color's name is a color here, as written.
     if (v.isString() and !v.stringQuoted(ctx.string_flags_pool.items) and !v.stringNamedColorLiteral(ctx.string_flags_pool.items)) return v;
