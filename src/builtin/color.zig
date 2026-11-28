@@ -1741,10 +1741,19 @@ pub fn notInColorModule(ctx: *BuiltinContext, args: []const Value, arg_names: []
         }
         const raw = ctx.intern_pool.get(name_id);
         const bare = if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
-        if (shared.identifierEq(bare, "color")) {
-            color_arg = arg;
-        } else if (shared.identifierEq(bare, "amount")) {
-            amount_arg = arg;
+        const param: ?[]const u8 = if (shared.identifierEq(bare, "color")) "color" else if (shared.identifierEq(bare, "amount")) "amount" else null;
+        if (param) |pn| {
+            const slot = if (std.mem.eql(u8, pn, "color")) &color_arg else &amount_arg;
+            if (slot.* != null) {
+                var dup_buf: [160]u8 = undefined;
+                const by_position = (std.mem.eql(u8, pn, "color") and next > 0) or (std.mem.eql(u8, pn, "amount") and next > 1);
+                error_format.setContextMessage(if (by_position)
+                    std.fmt.bufPrint(&dup_buf, "Argument ${s} was passed both by position and by name.", .{pn}) catch return error.BuiltinArity
+                else
+                    "Duplicate argument.");
+                return error.BuiltinArity;
+            }
+            slot.* = arg;
         } else if (unknown == null) unknown = bare;
     }
     var buf: [160]u8 = undefined;

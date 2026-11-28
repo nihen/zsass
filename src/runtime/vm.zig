@@ -7703,18 +7703,12 @@ pub const VM = struct {
             try rest_keywords.append(self.allocator, arg);
         }
 
-        var pi: usize = 0;
-        while (pi < fixed_argc) : (pi += 1) {
-            if (bound[pi]) continue;
-            if (callee.param_defaults.len == callee.argc) {
-                if (try self.evalParamDefault(callee.param_defaults[pi], locals)) |dv| {
-                    locals[arg_base + pi] = dv;
-                    declared[arg_base + pi] = true;
-                    continue;
-                }
-            }
-            const param_name = self.intern_pool.get(callee.param_names[pi]);
-            return setMissingNamedArgumentError(param_name);
+        // A missing argument, then a name no parameter has, before any
+        // default is evaluated.
+        for (0..fixed_argc) |mi| {
+            if (bound[mi]) continue;
+            const has_default = callee.param_defaults.len == callee.argc and callee.param_defaults[mi] != .none;
+            if (!has_default) return setMissingNamedArgumentError(self.intern_pool.get(callee.param_names[mi]));
         }
         if (unknown_count > 0) {
             const shown = @min(unknown_count, unknown_names.len);
@@ -7728,6 +7722,19 @@ pub const VM = struct {
             w.writeAll(".") catch {};
             error_format.setContextMessage(w.buffered());
             return error.BuiltinArity;
+        }
+        var pi: usize = 0;
+        while (pi < fixed_argc) : (pi += 1) {
+            if (bound[pi]) continue;
+            if (callee.param_defaults.len == callee.argc) {
+                if (try self.evalParamDefault(callee.param_defaults[pi], locals)) |dv| {
+                    locals[arg_base + pi] = dv;
+                    declared[arg_base + pi] = true;
+                    continue;
+                }
+            }
+            const param_name = self.intern_pool.get(callee.param_names[pi]);
+            return setMissingNamedArgumentError(param_name);
         }
 
         if (has_rest) {
