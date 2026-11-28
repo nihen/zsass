@@ -109,6 +109,12 @@ fn tryCoerceHexColorLiteral(ctx: *BuiltinContext, raw: []const u8) ?Value {
     };
 }
 
+/// A color argument, or the official CLI's error naming the parameter
+/// ("$color: 1 is not a color.").
+fn expectColorArg(ctx: *BuiltinContext, v: Value, comptime param: []const u8) BuiltinError!Value {
+    return tryCoerceColorArg(ctx, v) orelse shared.reportArgumentTypeMismatch(ctx, param, v, "color");
+}
+
 fn tryCoerceColorArg(ctx: *BuiltinContext, v: Value) ?Value {
     if (v.kind() == .color) return v;
     if (v.kind() != .string) return null;
@@ -3725,14 +3731,14 @@ fn hwbChannelPercent(ctx: *BuiltinContext, c: Value, idx: usize) BuiltinError!Va
 
 pub fn color_whiteness(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 1);
-    const c = tryCoerceColorArg(ctx, args[0]) orelse return error.BuiltinType;
+    const c = try expectColorArg(ctx, args[0], "color");
     if (!colorLegacyFlagFromValue(ctx, c)) return reportLegacyColorGetterBuiltin(ctx, "whiteness");
     return hwbChannelPercent(ctx, c, 1);
 }
 
 pub fn color_blackness(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 1);
-    const c = tryCoerceColorArg(ctx, args[0]) orelse return error.BuiltinType;
+    const c = try expectColorArg(ctx, args[0], "color");
     if (!colorLegacyFlagFromValue(ctx, c)) return reportLegacyColorGetterBuiltin(ctx, "blackness");
     return hwbChannelPercent(ctx, c, 2);
 }
@@ -3789,7 +3795,7 @@ fn color_complementImpl(ctx: *BuiltinContext, args: []const Value, arg_names: []
     if (args.len > 2) return badArity(1, args.len);
     const bound = try bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{ "color", "space" }, 1);
     const color_arg = bound[0].?;
-    const c = tryCoerceColorArg(ctx, color_arg) orelse return error.BuiltinType;
+    const c = try expectColorArg(ctx, color_arg, "color");
     const explicit_space = try parseOptionalSpaceArgValue(ctx, bound[1]);
     if (explicit_space) |space_arg| {
         if (!space_arg.space.isPolar()) return error.BuiltinType;
@@ -4144,7 +4150,7 @@ fn preserveLegacyRgbTargetSourceRepr(ctx: *BuiltinContext, value: Value, source_
 
 fn opacifyImpl(ctx: *BuiltinContext, args: []const Value, comptime alpha_sign: f64) BuiltinError!Value {
     try expectArity(args, 2);
-    const c = tryCoerceColorArg(ctx, args[0]) orelse return error.BuiltinType;
+    const c = try expectColorArg(ctx, args[0], "color");
     if (!colorLegacyFlagFromValue(ctx, c)) return error.BuiltinType;
     if (args[1].kind() != .number) return error.BuiltinType;
     const amount = args[1].asF64(ctx.number_pool);
@@ -4191,7 +4197,7 @@ pub fn color_transparentize(ctx: *BuiltinContext, args: []const Value) BuiltinEr
 
 pub fn color_ie_hex_str(ctx: *BuiltinContext, args: []const Value) BuiltinError!Value {
     try expectArity(args, 1);
-    const c = tryCoerceColorArg(ctx, args[0]) orelse return error.BuiltinType;
+    const c = try expectColorArg(ctx, args[0], "color");
     const rgb = colorCompatRgbBytes(ctx, c);
     const a256 = colorCompatAlphaByte(ctx, c);
     const hex = try ctx.allocator.print("#{X:0>2}{X:0>2}{X:0>2}{X:0>2}", .{
@@ -4245,8 +4251,11 @@ pub fn color_channel(ctx: *BuiltinContext, args: []const Value, arg_names: []con
 
     const c_in = color_v orelse return error.BuiltinType;
     const ch = channel_v orelse return error.BuiltinType;
-    const c = tryCoerceColorArg(ctx, c_in) orelse return error.BuiltinType;
-    if (ch.kind() != .string or !ch.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
+    const c = try expectColorArg(ctx, c_in, "color");
+    if (!ch.isString() or ch.stringNamedColorLiteral(ctx.string_flags_pool.items)) return reportArgumentTypeMismatch(ctx, "channel", ch, "string");
+    if (!ch.stringQuoted(ctx.string_flags_pool.items)) {
+        return shared.reportArgumentMessage("channel", "Expected {s} to be a quoted string.", .{ctx.intern_pool.get(ch.stringIntern())});
+    }
 
     const ch_name = ctx.intern_pool.get(ch.stringIntern());
     const known_channel_name = switch (ch_name.len) {
@@ -4264,22 +4273,33 @@ pub fn color_channel(ctx: *BuiltinContext, args: []const Value, arg_names: []con
         10 => std.mem.eql(u8, ch_name, "saturation"),
         else => false,
     };
-    if (!known_channel_name) return error.BuiltinType;
     var target_space: ?color_mod.ColorSpace = null;
     var legacy_rgb_space = false;
     if (space_v) |sv| {
-        if (sv.kind() == .nil) {
-            // keep defaults
-        } else if (sv.isString()) {
-            if (sv.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
-            const raw = shared.stripCalcArgMarker(ctx.intern_pool.get(sv.stringIntern()));
-            if (colorSpaceNameEq(raw, "rgb")) legacy_rgb_space = true;
-            target_space = parseColorSpaceName(raw) orelse return error.BuiltinType;
-        } else {
-            return error.BuiltinType;
+        if (sv.kind() != .nil) {
+            if (sv.isString() and !sv.stringQuoted(ctx.string_flags_pool.items)) {
+                const raw = shared.stripCalcArgMarker(ctx.intern_pool.get(sv.stringIntern()));
+                if (colorSpaceNameEq(raw, "rgb")) legacy_rgb_space = true;
+            }
+            target_space = (try parseSpaceArgNamed(ctx, sv, "space")).space;
         }
     }
-    return getColorChannel(ctx, c, ch_name, target_space, legacy_rgb_space);
+    if (known_channel_name) {
+        if (getColorChannel(ctx, c, ch_name, target_space, legacy_rgb_space)) |v| return v else |err| {
+            if (err != error.BuiltinType or error_format.currentContextMessage() != null) return err;
+        }
+    }
+    // The color as the space has it, as the official CLI names it.
+    var shown = c;
+    if (target_space) |space| {
+        if (space != declaredColorSpaceFromValue(ctx, c)) {
+            const converted = normalizeChannelColor(color_mod.convert(localChannelColor(ctx, c), space));
+            shown = colorValueFromDeclaredColor(ctx, converted, space, 0, false) catch c;
+        }
+    }
+    const text = try shared.valueToInspectionString(ctx, shown);
+    defer ctx.allocator.free(text);
+    return shared.reportArgumentMessage("channel", "Color {s} has no channel named {s}.", .{ text, ch_name });
 }
 
 const ParsedColorSpaceArg = struct {
@@ -4318,11 +4338,7 @@ fn parseSpaceArgNamed(ctx: *BuiltinContext, value: Value, param_name: []const u8
 }
 
 fn parseRequiredSpaceArgValue(ctx: *BuiltinContext, value: Value) BuiltinError!ParsedColorSpaceArg {
-    if (value.isString()) {
-        if (value.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
-        return parseColorSpaceArgString(ctx.intern_pool.get(value.stringIntern()));
-    }
-    return error.BuiltinType;
+    return parseSpaceArgNamed(ctx, value, "space");
 }
 
 fn parseMethodValue(ctx: *BuiltinContext, maybe_value: ?Value) BuiltinError![]const u8 {
@@ -4612,7 +4628,7 @@ pub fn color_is_legacy(ctx: *BuiltinContext, args: []const Value, arg_names: []c
     const bound = bindNamedOrPositionalArgs(ctx, args, arg_names, &.{"color"});
     try validateRequiredBound(&.{"color"}, &bound, 1);
     const color_arg = bound[0].?;
-    const c = tryCoerceColorArg(ctx, color_arg) orelse return error.BuiltinType;
+    const c = try expectColorArg(ctx, color_arg, "color");
     return if (colorLegacyFlagFromValue(ctx, c)) Value.true_v else Value.false_v;
 }
 
@@ -4621,7 +4637,7 @@ pub fn color_is_in_gamut(ctx: *BuiltinContext, args: []const Value, arg_names: [
     const bound = bindNamedOrPositionalArgs(ctx, args, arg_names, &.{ "color", "space" });
     try validateRequiredBound(&.{ "color", "space" }, &bound, 1);
     const color_arg = bound[0].?;
-    const c = tryCoerceColorArg(ctx, color_arg) orelse return error.BuiltinType;
+    const c = try expectColorArg(ctx, color_arg, "color");
     const target_space = try parseOptionalSpaceValue(ctx, bound[1]);
     const source = localChannelColor(ctx, c);
     const in_space = if (target_space) |sp|
@@ -4637,7 +4653,7 @@ pub fn color_is_missing(ctx: *BuiltinContext, args: []const Value, arg_names: []
     try validateRequiredBound(&.{ "color", "channel" }, &bound, 2);
     const color_arg = bound[0].?;
     const channel_arg = bound[1].?;
-    const c = tryCoerceColorArg(ctx, color_arg) orelse return error.BuiltinType;
+    const c = try expectColorArg(ctx, color_arg, "color");
     if (channel_arg.kind() != .string or !channel_arg.stringQuoted(ctx.string_flags_pool.items)) return error.BuiltinType;
     const channel_name = ctx.intern_pool.get(channel_arg.stringIntern());
     const idx = channelIndexForSpaceStrict(declaredColorSpaceFromValue(ctx, c), channel_name) orelse return error.BuiltinType;
@@ -4669,7 +4685,7 @@ pub fn color_space(ctx: *BuiltinContext, args: []const Value, arg_names: []const
     const bound = bindNamedOrPositionalArgs(ctx, args, arg_names, &.{"color"});
     try validateRequiredBound(&.{"color"}, &bound, 1);
     const color_arg = bound[0].?;
-    const c = tryCoerceColorArg(ctx, color_arg) orelse return error.BuiltinType;
+    const c = try expectColorArg(ctx, color_arg, "color");
     const declared = declaredColorSpaceFromValue(ctx, c);
     const name = if (declared == .srgb and !colorLegacyFlagFromValue(ctx, c))
         "srgb"
@@ -4685,8 +4701,8 @@ pub fn color_same(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
     try validateRequiredBound(&.{ "color1", "color2" }, &bound, 2);
     const left_arg = bound[0].?;
     const right_arg = bound[1].?;
-    const c1 = tryCoerceColorArg(ctx, left_arg) orelse return error.BuiltinType;
-    const c2 = tryCoerceColorArg(ctx, right_arg) orelse return error.BuiltinType;
+    const c1 = try expectColorArg(ctx, left_arg, "color1");
+    const c2 = try expectColorArg(ctx, right_arg, "color2");
     const xyz1 = color_mod.convert(colorSameComparisonColor(ctx, c1), .xyz_d65);
     const xyz2 = color_mod.convert(colorSameComparisonColor(ctx, c2), .xyz_d65);
     return if (xyz1.eql(xyz2, 1e-11)) Value.true_v else Value.false_v;
@@ -4846,6 +4862,8 @@ pub fn color_to_space(ctx: *BuiltinContext, args: []const Value, arg_names: []co
     try validateRequiredBound(&.{ "color", "space" }, &bound, 2);
     const color_arg = bound[0].?;
     const space_arg = bound[1].?;
+    // The color is checked before the space, as the official CLI does.
+    _ = try expectColorArg(ctx, color_arg, "color");
     const target_spec = try parseRequiredSpaceArgValue(ctx, space_arg);
     const target_space = target_spec.space;
 
