@@ -494,8 +494,11 @@ fn roundStrategyMayBeVar(ctx: *BuiltinContext, value: Value) BuiltinError!bool {
     const text = try valueToCssString(ctx, value);
     defer ctx.allocator.free(text);
     const t = std.mem.trim(u8, shared.stripCalcArgMarker(text), " \t\n");
+    // As written or inside calc(): calc(attr(foo)) is attr(foo).
+    var inner = t;
+    while (std.ascii.startsWithIgnoreCase(inner, "calc(") and std.mem.endsWith(u8, inner, ")")) inner = std.mem.trim(u8, inner[5 .. inner.len - 1], " \t\n");
     for ([_][]const u8{ "var(", "env(", "attr(" }) |prefix| {
-        if (std.ascii.startsWithIgnoreCase(t, prefix)) return true;
+        if (std.ascii.startsWithIgnoreCase(inner, prefix)) return true;
     }
     return false;
 }
@@ -1984,26 +1987,49 @@ fn minmaxVariadicMode(ctx: *BuiltinContext, args: []const Value, is_min: bool, c
             unitless_after_unknown_pair = arg;
         }
     }
-    if (unitless_after_unknown_pair) |unitless| {
-        // sass:math's function compares the numbers in turn; the CSS one
-        // names the first number with a unit and the unitless one.
+    if (unitless_after_unknown_pair != null) {
+        if (mode == .module) {
+            // sass:math's function compares each number with the least (or
+            // greatest) so far.
+            var best = values[0];
+            for (values[1..]) |v| {
+                const bu = unitSlice(ctx, best.unitId(ctx.number_pool));
+                const vu = unitSlice(ctx, v.unitId(ctx.number_pool));
+                if (bu != null and vu != null and !std.mem.eql(u8, bu.?, vu.?)) {
+                    const converted = convertUnit(v.asF64(ctx.number_pool), vu.?, bu.?) orelse return reportIncompatibleUnits(ctx, best, v);
+                    const better = if (is_min) converted < best.asF64(ctx.number_pool) else converted > best.asF64(ctx.number_pool);
+                    if (better) best = v;
+                    continue;
+                }
+                const better = if (is_min) v.asF64(ctx.number_pool) < best.asF64(ctx.number_pool) else v.asF64(ctx.number_pool) > best.asF64(ctx.number_pool);
+                if (better) best = v;
+            }
+        }
+        // The CSS function, in order: a unit the first number's cannot be
+        // (an unknown one may be a length), or a unitless number after two
+        // unknown units.
         const first = first_with_unit.?;
         const first_unit = unitSlice(ctx, first.unitId(ctx.number_pool)).?;
-        // The first later number whose unit `first`'s cannot take; for the
-        // CSS function two units it does not know may still match.
+        var unknown_unit: ?[]const u8 = null;
+        var unknown_pair = false;
         for (values) |v| {
-            const u = unitSlice(ctx, v.unitId(ctx.number_pool)) orelse continue;
+            const u = unitSlice(ctx, v.unitId(ctx.number_pool)) orelse {
+                if (unknown_pair) return reportCalcIncompatible(ctx, first, v);
+                continue;
+            };
+            if (unitCategory(u) == .unknown) {
+                if (unknown_unit) |prev| {
+                    if (!std.mem.eql(u8, prev, u)) unknown_pair = true;
+                } else unknown_unit = u;
+            }
             if (std.mem.eql(u8, u, first_unit) or convertUnit(1.0, u, first_unit) != null) continue;
-            if (mode == .module) return reportIncompatibleUnits(ctx, first, v);
-            // A unit the CSS function does not know may be a length.
             const a_cat = unitCategory(first_unit);
             const b_cat = unitCategory(u);
             const a_len = a_cat == .length or a_cat == .unknown;
             const b_len = b_cat == .length or b_cat == .unknown;
             if (a_len != b_len or (!a_len and a_cat != b_cat)) return reportCalcIncompatible(ctx, first, v);
         }
-        if (mode == .module) return reportIncompatibleUnits(ctx, first, unitless);
-        return reportCalcIncompatible(ctx, first, unitless);
+        return error.SassError;
     }
 
     const first = values[0];
