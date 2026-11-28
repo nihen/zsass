@@ -7081,14 +7081,67 @@ fn validateCssIfClauseText(alloc: std.mem.Allocator, text: []const u8) ResolveEr
 /// CSS custom function (`--a()`), or an interpolation in it.
 fn runsTogetherInCssIf(text: []const u8) bool {
     if (hasTopLevelArbitrarySubstitution(text) or std.mem.indexOf(u8, text, "#{") != null) return true;
+    return hasTopLevelCustomFunctionCall(text);
+}
+
+/// A call of a CSS custom function (`--a()`, `--t\65 st()`) at the top
+/// level of a condition, outside strings, comments, and parentheses.
+fn hasTopLevelCustomFunctionCall(text: []const u8) bool {
+    var depth: i32 = 0;
+    var in_string: u8 = 0;
     var i: usize = 0;
-    while (std.mem.indexOfPos(u8, text, i, "--")) |at| : (i = at + 2) {
-        if (at > 0 and isCssIfIdentChar(text[at - 1])) continue;
-        var end = at + 2;
-        while (end < text.len and isCssIfIdentChar(text[end])) : (end += 1) {}
-        if (end > at + 2 and end < text.len and text[end] == '(') return true;
+    while (i < text.len) {
+        const c = text[i];
+        if (in_string != 0) {
+            if (c == '\\' and i + 1 < text.len) i += 1 else if (c == in_string) in_string = 0;
+            i += 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '*') {
+            const close = std.mem.indexOfPos(u8, text, i + 2, "*/") orelse text.len;
+            i = @min(text.len, close + 2);
+            continue;
+        }
+        switch (c) {
+            '"', '\'' => in_string = c,
+            '(' => depth += 1,
+            ')' => {
+                if (depth > 0) depth -= 1;
+            },
+            '-' => if (depth == 0 and i + 1 < text.len and text[i + 1] == '-' and
+                (i == 0 or !isCssIfIdentChar(text[i - 1])))
+            {
+                const end = scanCssIfIdentifier(text, i + 2);
+                if (end > i + 2 and end < text.len and text[end] == '(') return true;
+                i = end;
+                continue;
+            },
+            else => {},
+        }
+        i += 1;
     }
     return false;
+}
+
+/// The end of the identifier characters and escapes from `start`.
+fn scanCssIfIdentifier(text: []const u8, start: usize) usize {
+    var i = start;
+    while (i < text.len) {
+        if (isCssIfIdentChar(text[i]) or text[i] >= 0x80) {
+            i += 1;
+            continue;
+        }
+        if (text[i] != '\\' or i + 1 >= text.len) break;
+        i += 1;
+        var n: usize = 0;
+        while (i < text.len and n < 6 and std.ascii.isHex(text[i])) : (i += 1) n += 1;
+        if (n == 0) {
+            i += 1;
+        } else if (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n')) {
+            i += 1;
+        }
+    }
+    return i;
 }
 
 /// Whitespace between two parts of a condition at the top level. A hex
