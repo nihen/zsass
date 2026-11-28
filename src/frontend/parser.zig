@@ -2608,7 +2608,7 @@ pub const Parser = struct {
             self.advance();
         }
 
-        if (last_significant_end == start) return error.SyntaxError;
+        if (last_significant_end == start) return self.failExpectingHard("expected selector.");
 
         const sel_text = self.source[start..last_significant_end];
         const sel_id = try self.intern_pool.intern(sel_text);
@@ -2944,7 +2944,7 @@ pub const Parser = struct {
             break;
         }
 
-        if (self.isAtEnd() or self.current().tag != .rparen) return error.SyntaxError;
+        if (self.isAtEnd() or self.current().tag != .rparen) return self.failExpecting("expected \")\".");
         self.advance(); // skip )
 
         const extra_off = try ast.appendExtraU32(@intCast(names.items.len));
@@ -3432,6 +3432,17 @@ pub const Parser = struct {
         // follow `@` with no separating whitespace.  `@#{...}` (interp
         // glued to `@`) is allowed: the next token is `hash_lbrace` whose
         // span starts exactly at the end of the `@` token.
+        if (is_supports_at_rule and !self.is_indented_syntax) {
+            // `@supports {` has no condition.
+            var p = self.pos + 1;
+            while (p < self.tokens.len and (self.tokens[p].tag == .whitespace or self.tokens[p].tag == .newline or self.tokens[p].tag == .comment)) : (p += 1) {}
+            if (p < self.tokens.len and (self.tokens[p].tag == .lbrace or self.tokens[p].tag == .semicolon)) {
+                const saved = self.pos;
+                self.pos = p;
+                defer self.pos = saved;
+                return self.failExpectingHard("expected \"(\".");
+            }
+        }
         if (name_text.len == 0) {
             const next_idx = self.pos + 1;
             const allowed_glued_interp = next_idx < self.tokens.len and

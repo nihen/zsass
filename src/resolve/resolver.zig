@@ -8922,7 +8922,11 @@ fn resolveSelectorRuleData(ctx: *Ctx, sel_node: NodeIndex, span: Span) ResolveEr
         stripped_selector_owned = stripped;
         break :blk stripped;
     };
-    if (containsReferenceCombinator(text)) return error.SassError;
+    // `/bar/` combinators are no longer supported.
+    if (containsReferenceCombinator(text)) {
+        error_format.setContextMessage("expected selector.");
+        return error.SassError;
+    }
     if (in_plain_css_module) {
         const plain_css_is_top_level = ctx.plain_css_style_rule_depth == 0;
         validatePlainCssSelector(text, plain_css_is_top_level) catch return error.SassError;

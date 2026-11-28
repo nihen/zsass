@@ -364,6 +364,7 @@ pub fn resolveAtRootStmt(ctx: anytype, n: AstNode, span: Span, comptime deps: an
     if (selector_raw_text) |raw| {
         const trimmed = std.mem.trim(u8, raw, " \t\r\n");
         if (trimmed.len > 0 and selectorHasAtSign(trimmed) and !atRootSelectorLooksLikeQuery(trimmed)) {
+            error_format.setContextMessage("expected selector.");
             return error.SassError;
         }
     }

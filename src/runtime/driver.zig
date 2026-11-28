@@ -3018,16 +3018,16 @@ fn runEnd2EndWithBudget(
         var tw = TrackingWriter.init(&limited.interface);
         if (source_map) |*sm| {
             rule_ir.writeToWithSourceMap(&tw.writer, pool_ptr, sm, source_locations, opts.output_style, write_sm_opts) catch |err| {
-                cliErrPrint("zsass-check phase=writeTo-sm err={}\n", .{err});
+                if (error_format.verboseErrorsEnabled()) cliErrPrint("zsass-check phase=writeTo-sm err={}\n", .{err});
                 return err;
             };
             if (opts.embed_sources) sm.populateEmbedContents(allocator, module_path, source) catch |err| {
-                cliErrPrint("zsass-check phase=embed-sources err={}\n", .{err});
+                if (error_format.verboseErrorsEnabled()) cliErrPrint("zsass-check phase=embed-sources err={}\n", .{err});
                 return err;
             };
         } else {
             rule_ir.writeToWithSourceMap(&tw.writer, pool_ptr, null, source_locations, opts.output_style, write_sm_opts) catch |err| {
-                cliErrPrint("zsass-check phase=writeTo err={}\n", .{err});
+                if (error_format.verboseErrorsEnabled()) cliErrPrint("zsass-check phase=writeTo err={}\n", .{err});
                 return err;
             };
         }
@@ -3104,17 +3104,17 @@ fn runEnd2EndWithBudget(
         var tw = TrackingWriter.init(&limited.interface);
         if (source_map) |*sm| {
             rule_ir.writeToWithSourceMap(&tw.writer, pool_ptr, sm, source_locations, opts.output_style, write_sm_opts) catch |err| {
-                cliErrPrint("zsass-emit phase=writeTo-sm err={}\n", .{err});
+                if (error_format.verboseErrorsEnabled()) cliErrPrint("zsass-emit phase=writeTo-sm err={}\n", .{err});
                 return err;
             };
             if (opts.embed_sources) sm.populateEmbedContents(allocator, module_path, source) catch |err| {
-                cliErrPrint("zsass-emit phase=embed-sources err={}\n", .{err});
+                if (error_format.verboseErrorsEnabled()) cliErrPrint("zsass-emit phase=embed-sources err={}\n", .{err});
                 return err;
             };
             try appendSourceMapTrailer(&tw, allocator, sm, resolved_sm_mode, output_path, opts.source_map_file, opts.source_map_url);
         } else {
             rule_ir.writeToWithSourceMap(&tw.writer, pool_ptr, null, source_locations, opts.output_style, write_sm_opts) catch |err| {
-                cliErrPrint("zsass-emit phase=writeTo err={}\n", .{err});
+                if (error_format.verboseErrorsEnabled()) cliErrPrint("zsass-emit phase=writeTo err={}\n", .{err});
                 return err;
             };
             if (tw.bytes_written == 0 and !output_to_stdout) try tw.writeAll("\n");

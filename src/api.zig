@@ -594,7 +594,8 @@ test "api: compile with source map" {
 test "api: invalid @supports prelude errors" {
     const alloc = std.testing.allocator;
     const src = "@supports {@a}\n";
-    try std.testing.expectError(error.SassError, compileSourceToCss(alloc, src, "/tmp/in.scss", &.{}, .{}));
+    // A @supports with no condition does not parse.
+    try std.testing.expectError(error.HardSyntaxError, compileSourceToCss(alloc, src, "/tmp/in.scss", &.{}, .{}));
 }
 
 test "api: invalid @supports negation errors" {

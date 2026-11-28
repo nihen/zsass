@@ -8436,7 +8436,13 @@ pub const VM = struct {
         // Text the browser reads keeps its signs as written: calc(a -1).
         const opaque_list = self.calcSpaceListNeedsPassthrough(source_arg);
         if (!opaque_list and calc_utils.calcHasBadWhitespace(trimmed)) return error.SassError;
-        if (calcTextHasComplexNestedCalcAddend(trimmed)) return error.SassError;
+        if (calcTextComplexNestedCalcAddend(trimmed)) |number| {
+            var msg_buf: [256]u8 = undefined;
+            if (std.fmt.bufPrint(&msg_buf, "Number {s} isn't compatible with CSS calculations.", .{number})) |msg| {
+                error_format.setContextMessage(msg);
+            } else |_| {}
+            return error.SassError;
+        }
         // Values substituted for variables are numbers like any other; text
         // that came from interpolation is not checked.
         if (!source_interp_marked and calc_utils.recordCalcIncompatibleTermsMessage(self.allocator, trimmed)) return error.SassError;
@@ -8515,7 +8521,7 @@ pub const VM = struct {
 
         const flattened_calc_arg = try calc_utils.flattenNestedCalc(self.allocator, trimmed);
         defer if (!calc_utils.sameSliceStorage(flattened_calc_arg, trimmed)) self.allocator.free(flattened_calc_arg);
-        const parsed = calculation_mod.parseCalc(self.allocator, flattened_calc_arg) catch {
+        const parsed = calculation_mod.parseCalc(self.allocator, flattened_calc_arg) catch |parse_err| {
             // official Sass CLI treats unknown CSS functions inside calculation syntax as
             // opaque CSS and preserves the whole calculation, while Sass/user
             // functions that were resolved earlier still reach this point as
@@ -8525,6 +8531,8 @@ pub const VM = struct {
             if (calcTextContainsUnknownFunctionLike(trimmed)) {
                 return try self.preserveUnparsedCalcText(trimmed);
             }
+            // Two values with no operator between them.
+            if (parse_err == error.TrailingTokens and !source_interp_marked) error_format.setContextMessage("Missing math operator.");
             return error.SassError;
         };
         defer self.allocator.destroy(parsed);
@@ -8567,7 +8575,9 @@ pub const VM = struct {
         return Value.string(id, false);
     }
 
-    fn calcTextHasComplexNestedCalcAddend(text: []const u8) bool {
+    /// The `calc(...)` of a number with a compound unit added in `text`
+    /// (`1% + calc(2px * 1px)`), which no calculation can take.
+    fn calcTextComplexNestedCalcAddend(text: []const u8) ?[]const u8 {
         var depth: i32 = 0;
         var i: usize = 0;
         while (i < text.len) : (i += 1) {
@@ -8585,11 +8595,11 @@ pub const VM = struct {
             var j = i + 1;
             while (j < text.len and (text[j] == ' ' or text[j] == '\t' or text[j] == '\n' or text[j] == '\r')) : (j += 1) {}
             if (j + 5 <= text.len and std.ascii.eqlIgnoreCase(text[j .. j + 5], "calc(")) {
-                const end = findMatchingParenText(text, j + 4) orelse return true;
-                if (calcInnerLooksComplexUnit(text[j + 5 .. end])) return true;
+                const end = findMatchingParenText(text, j + 4) orelse return text[j..];
+                if (calcInnerLooksComplexUnit(text[j + 5 .. end])) return text[j .. end + 1];
             }
         }
-        return false;
+        return null;
     }
 
     fn calcTextContainsUnknownFunctionLike(text: []const u8) bool {
@@ -12081,9 +12091,13 @@ fn validateDynamicSelectorForScope(selector: []const u8, has_parent_context: boo
     if (!has_parent_context and selectorHasAmpersandWithSuffixLegacy(selector)) {
         return error.SassError;
     }
-    if (selectorHasAtSignLegacy(selector)) return error.SassError;
-    selector_helpers_mod.validateSelectorDelimiters(selector) catch return error.SassError;
-    selector_helpers_mod.validateSelectorParentheses(selector) catch return error.SassError;
+    if (selectorHasAtSignLegacy(selector) or
+        std.meta.isError(selector_helpers_mod.validateSelectorDelimiters(selector)) or
+        std.meta.isError(selector_helpers_mod.validateSelectorParentheses(selector)))
+    {
+        error_format.setContextMessage("expected selector.");
+        return error.SassError;
+    }
     selector_helpers_mod.validatePseudoClassArgs(selector) catch return error.SassError;
     try validateAmpersandPositionLegacy(selector);
 }
