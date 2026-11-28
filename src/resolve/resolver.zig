@@ -7108,12 +7108,10 @@ fn hasTopLevelCustomFunctionCall(text: []const u8) bool {
             ')' => {
                 if (depth > 0) depth -= 1;
             },
-            '-' => if (depth == 0 and i + 1 < text.len and text[i + 1] == '-' and
-                (i == 0 or !isCssIfIdentChar(text[i - 1])))
-            {
-                const end = scanCssIfIdentifier(text, i + 2);
-                if (end > i + 2 and end < text.len and text[end] == '(') return true;
-                i = end;
+            '-', '\\' => if (depth == 0 and (i == 0 or !isCssIfIdentChar(text[i - 1]))) {
+                const end = scanCssIfIdentifier(text, i);
+                if (end > i and end < text.len and text[end] == '(' and startsWithTwoHyphens(text[i..end])) return true;
+                i = @max(end, i + 1);
                 continue;
             },
             else => {},
@@ -7121,6 +7119,35 @@ fn hasTopLevelCustomFunctionCall(text: []const u8) bool {
         i += 1;
     }
     return false;
+}
+
+/// An identifier that starts with `--` once its escapes are read
+/// (`\2d -a`, `\-\-a`).
+fn startsWithTwoHyphens(ident: []const u8) bool {
+    var i: usize = 0;
+    var hyphens: usize = 0;
+    while (hyphens < 2 and i < ident.len) {
+        if (ident[i] == '-') {
+            i += 1;
+        } else if (ident[i] == '\\' and i + 1 < ident.len) {
+            i += 1;
+            var n: usize = 0;
+            var cp: u32 = 0;
+            while (i < ident.len and n < 6 and std.ascii.isHex(ident[i])) : (i += 1) {
+                cp = cp * 16 + (std.fmt.charToDigit(ident[i], 16) catch 0);
+                n += 1;
+            }
+            if (n == 0) {
+                if (ident[i] != '-') return false;
+                i += 1;
+            } else {
+                if (cp != '-') return false;
+                if (i < ident.len and (ident[i] == ' ' or ident[i] == '\t' or ident[i] == '\n')) i += 1;
+            }
+        } else return false;
+        hyphens += 1;
+    }
+    return hyphens == 2;
 }
 
 /// The end of the identifier characters and escapes from `start`.
