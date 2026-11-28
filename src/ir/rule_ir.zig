@@ -9940,7 +9940,14 @@ pub const RuleIR = struct {
             if (!has_extensions and shouldPreserveRawSelectorWithoutExtend(selector_text)) {
                 // Only in cases where there is no @extend + you want to keep the casing/quote of attribute selector
                 // selector_mod.toCss() Avoid normalization and prefer the original selector string.
-                if (selector_mod.hasInvalidIdentifierStart(selector_text)) {
+                if (selector_mod.invalidIdentifierStart(selector_text)) |where| {
+                    // A keyframe selector (`1\65 1%`) fails for its own reason.
+                    if (std.mem.indexOfScalar(u8, selector_text, '%') == null) {
+                        error_format.setContextMessage(switch (where) {
+                            .after_prefix => "Expected identifier.",
+                            .compound_start => "expected selector.",
+                        });
+                    }
                     return error.SassError;
                 }
                 try splitSelectorList(temp, selector_text, &merged);
@@ -9973,7 +9980,14 @@ pub const RuleIR = struct {
             var selector_list = selector_mod.parse(temp, selector_text) catch {
                 // Keep unresolved interpolation fallback, but propagate clearly
                 // invalid identifier starts (`#2`, `.3`, `1a`) as SassError.
-                if (selector_mod.hasInvalidIdentifierStart(selector_text)) {
+                if (selector_mod.invalidIdentifierStart(selector_text)) |where| {
+                    // A keyframe selector (`1\65 1%`) fails for its own reason.
+                    if (std.mem.indexOfScalar(u8, selector_text, '%') == null) {
+                        error_format.setContextMessage(switch (where) {
+                            .after_prefix => "Expected identifier.",
+                            .compound_start => "expected selector.",
+                        });
+                    }
                     return error.SassError;
                 }
                 try splitSelectorList(temp, selector_text, &merged);

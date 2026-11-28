@@ -11990,6 +11990,7 @@ fn validateAmpersandPositionLegacy(selector: []const u8) VMError!void {
                     if (std.ascii.isAlphanumeric(prev) or prev == '-' or prev == '_' or
                         prev == ')' or prev == ']' or prev == '*' or prev == '%')
                     {
+                        error_format.setContextMessage("\"&\" may only used at the beginning of a compound selector.");
                         return error.SassError;
                     }
                 }
@@ -12001,9 +12002,13 @@ fn validateAmpersandPositionLegacy(selector: []const u8) VMError!void {
 
 fn validateLiteralSelectorForScope(selector: []const u8, has_parent_context: bool) VMError!void {
     if (!has_parent_context and selectorHasAmpersandWithSuffixLegacy(selector)) {
+        error_format.setContextMessage("A top-level selector may not contain a parent selector with a suffix.");
         return error.SassError;
     }
-    if (selectorHasAtSignLegacy(selector)) return error.SassError;
+    if (selectorHasAtSignLegacy(selector)) {
+        error_format.setContextMessage("expected selector.");
+        return error.SassError;
+    }
     try validateAmpersandPositionLegacy(selector);
 }
 

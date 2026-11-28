@@ -212,6 +212,14 @@ pub fn resolveImportedFile(ctx: anytype, url: []const u8, span: Span, url_span: 
     var expanded_top: std.ArrayListUnmanaged(StmtIndex) = .empty;
     defer expanded_top.deinit(ctx.a);
     try deps.predeclareTopLevelCallables(ctx, child_raw);
+    const saved_root_scopes = ctx.file_root_scopes;
+    const saved_root_nested = ctx.file_root_nested_depth;
+    ctx.file_root_scopes = ctx.scopes.items.len;
+    ctx.file_root_nested_depth = ctx.nested_stmt_depth;
+    defer {
+        ctx.file_root_scopes = saved_root_scopes;
+        ctx.file_root_nested_depth = saved_root_nested;
+    }
     deps.resolveRootStmtSequence(ctx, child_raw, &expanded_top, true) catch |err| {
         if (error_format.verboseErrorsEnabled()) {
             deps.resolverStderrPrint("zsass resolver: inline @import resolve failed path={s} err={}\n", .{ resolved_path, err });

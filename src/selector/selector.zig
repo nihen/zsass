@@ -1044,6 +1044,15 @@ fn skipEscape(input: []const u8, i: usize) usize {
 /// Returns true if selector contains id/class/type tokens whose identifier
 /// body starts with a digit (`#2`, `.3`, `1a`), excluding keyframe percentages.
 pub fn hasInvalidIdentifierStart(selector: []const u8) bool {
+    return invalidIdentifierStart(selector) != null;
+}
+
+/// Where a selector has a name that may not start as it does: after `#` or
+/// `.` ("Expected identifier.") or at the start of a compound ("expected
+/// selector.").
+pub const InvalidIdentifierStart = enum { after_prefix, compound_start };
+
+pub fn invalidIdentifierStart(selector: []const u8) ?InvalidIdentifierStart {
     var i: usize = 0;
     var in_string: u8 = 0;
     var bracket_depth: u32 = 0;
@@ -1110,11 +1119,11 @@ pub fn hasInvalidIdentifierStart(selector: []const u8) bool {
 
         if (c == '#' or c == '.') {
             const next = if (i + 1 < selector.len) selector[i + 1] else 0;
-            if (std.ascii.isDigit(next)) return true;
+            if (std.ascii.isDigit(next)) return .after_prefix;
             if (c == '.') {
                 const ok = next == '_' or next == '-' or next == '\\' or
                     std.ascii.isAlphabetic(next) or next >= 0x80;
-                if (!ok) return true;
+                if (!ok) return .after_prefix;
             }
             at_compound_start = false;
             continue;
@@ -1148,13 +1157,13 @@ pub fn hasInvalidIdentifierStart(selector: []const u8) bool {
                 }
             }
 
-            return true;
+            return .compound_start;
         }
 
         at_compound_start = false;
     }
 
-    return false;
+    return null;
 }
 
 /// Check if a string is a valid CSS identifier (can be output unquoted)
