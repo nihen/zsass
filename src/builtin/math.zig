@@ -2690,9 +2690,14 @@ pub fn math_clamp(ctx: *BuiltinContext, args: []const Value, arg_names: []const 
 
     const bound = bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{ "min", "number", "max" }, 3) catch return error.SassError;
 
-    const min_raw = bound[0] orelse return error.SassError;
-    const number_raw = bound[1] orelse return error.SassError;
-    const max_raw = bound[2] orelse return error.SassError;
+    // Sums written with variables come as their text, as for min() and
+    // max(): clamp(0.1rem, $a + 1rem, 9rem) is evaluated.
+    const min_bound = bound[0] orelse return error.SassError;
+    const number_bound = bound[1] orelse return error.SassError;
+    const max_bound = bound[2] orelse return error.SassError;
+    const min_raw = (try coerceSimpleAddSubNumberExpression(ctx, min_bound)) orelse min_bound;
+    const number_raw = (try coerceSimpleAddSubNumberExpression(ctx, number_bound)) orelse number_bound;
+    const max_raw = (try coerceSimpleAddSubNumberExpression(ctx, max_bound)) orelse max_bound;
     if (try valueHasComplexCalculationText(ctx, min_raw) or
         try valueHasComplexCalculationText(ctx, number_raw) or
         try valueHasComplexCalculationText(ctx, max_raw))
