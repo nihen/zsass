@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- Syntax errors say what the parser expected, as the official CLI does
+  (`expected ")".`, "Expected identifier.", "Expected string.", "Nothing
+  may be indented beneath a @use rule.", and the like), where zsass said
+  "Invalid CSS syntax.".
+- Malformed `@media` and `@supports` conditions, misplaced parent
+  selectors (`pre&`), and malformed CSS `if()` conditions are reported as
+  the official CLI reports them.
+- `@use`, `@forward`, and a Sass `@import` where they are not allowed (in
+  a rule, mixin, function, or control directive) fail with "This at-rule
+  is not allowed here."; zsass loaded a nested `@use`. Two CSS `if()`
+  conditions with no operator between them are rejected.
 - `meta.inspect()` and the "Function not found" error escape a control
   character in a quoted string as CSS output does (`"a\a b"`), and
   `meta.load()` of a URL two files match lists them.
