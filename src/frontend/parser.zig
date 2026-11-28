@@ -30,8 +30,13 @@ const syntax_nesting_message = resource_budget.syntax_nesting_message;
 /// `Parser.failExpecting`.
 const SyntaxHint = struct { message: []const u8, start: u32, end: u32 };
 threadlocal var syntax_hint: ?SyntaxHint = null;
+/// Where the text being parsed starts in the file: an interpolation is
+/// parsed apart from the text around it.
+threadlocal var syntax_hint_offset: u32 = 0;
 
-fn noteSyntaxHint(message: []const u8, start: u32, end: u32) void {
+fn noteSyntaxHint(message: []const u8, rel_start: u32, rel_end: u32) void {
+    const start = rel_start + syntax_hint_offset;
+    const end = rel_end + syntax_hint_offset;
     if (syntax_hint) |h| {
         if (h.start > start) return;
     }
@@ -272,6 +277,7 @@ pub const Parser = struct {
     /// list once parsing is done.
     pub fn parse(self: *Parser) ParseError!Ast {
         syntax_hint = null;
+        syntax_hint_offset = 0;
         defer syntax_hint = null;
         // CLI-FIX-E Step 2b: When parse error occurs, record the span of the most recent token in thread-local.
         // Points to source_end for EOF token. If it is already set in a deep frame, it will not be overwritten.
@@ -7227,6 +7233,9 @@ pub const Parser = struct {
         defer sub.deinit();
 
         const nodes_before = ast.nodes.len;
+        const saved_offset = syntax_hint_offset;
+        syntax_hint_offset += byte_offset;
+        defer syntax_hint_offset = saved_offset;
         const result = try sub.parseExpression(ast);
         const nodes_after = ast.nodes.len;
 

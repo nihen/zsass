@@ -7073,14 +7073,75 @@ fn validateCssIfClauseText(alloc: std.mem.Allocator, text: []const u8) ResolveEr
     }
     // Two conditions with no operator between them run together only
     // through an arbitrary substitution.
-    if (hasTopLevelWhitespace(trimmed) and !runsTogetherInCssIf(trimmed)) return cssIfFail("expected \":\".");
+    if (hasTopLevelConditionGap(trimmed) and !runsTogetherInCssIf(trimmed)) return cssIfFail("expected \":\".");
     return true;
 }
 
-/// Text whose conditions may run together: an arbitrary substitution or
-/// an interpolation in it.
+/// Text whose conditions may run together: an arbitrary substitution, a
+/// CSS custom function (`--a()`), or an interpolation in it.
 fn runsTogetherInCssIf(text: []const u8) bool {
-    return hasTopLevelArbitrarySubstitution(text) or std.mem.indexOf(u8, text, "#{") != null;
+    if (hasTopLevelArbitrarySubstitution(text) or std.mem.indexOf(u8, text, "#{") != null) return true;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, text, i, "--")) |at| : (i = at + 2) {
+        if (at > 0 and isCssIfIdentChar(text[at - 1])) continue;
+        var end = at + 2;
+        while (end < text.len and isCssIfIdentChar(text[end])) : (end += 1) {}
+        if (end > at + 2 and end < text.len and text[end] == '(') return true;
+    }
+    return false;
+}
+
+/// Whitespace between two parts of a condition at the top level. A hex
+/// escape's terminating space and a comment are not such a gap.
+fn hasTopLevelConditionGap(text: []const u8) bool {
+    var depth: i32 = 0;
+    var in_string: u8 = 0;
+    var saw_part = false;
+    var gap = false;
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        if (in_string != 0) {
+            if (c == '\\' and i + 1 < text.len) i += 1 else if (c == in_string) in_string = 0;
+            i += 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '*') {
+            const close = std.mem.indexOfPos(u8, text, i + 2, "*/") orelse text.len;
+            i = @min(text.len, close + 2);
+            if (depth == 0 and saw_part) gap = true;
+            continue;
+        }
+        if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
+            if (depth == 0 and saw_part) gap = true;
+            i += 1;
+            continue;
+        }
+        if (depth == 0 and gap) return true;
+        saw_part = true;
+        switch (c) {
+            '\\' => {
+                // A hex escape takes up to six digits and one space.
+                i += 1;
+                var n: usize = 0;
+                while (i < text.len and n < 6 and std.ascii.isHex(text[i])) : (i += 1) n += 1;
+                if (n == 0) {
+                    i += 1;
+                } else if (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n')) {
+                    i += 1;
+                }
+                continue;
+            },
+            '"', '\'' => in_string = c,
+            '(' => depth += 1,
+            ')' => {
+                if (depth > 0) depth -= 1;
+            },
+            else => {},
+        }
+        i += 1;
+    }
+    return false;
 }
 
 fn hasTopLevelWhitespace(text: []const u8) bool {
