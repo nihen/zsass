@@ -6674,17 +6674,7 @@ pub const Parser = struct {
             // return a regular SyntaxError so the existing recovery
             // (raw declaration capture / outer-expression fallback)
             // continues to work.
-            .dot => {
-                if (self.pos + 2 < self.tokens.len and
-                    self.tokens[self.pos + 1].tag == .ident and
-                    self.tokens[self.pos + 2].tag == .lparen and
-                    self.tokens[self.pos + 1].span.start == tok.span.end and
-                    self.tokens[self.pos + 2].span.start == self.tokens[self.pos + 1].span.end)
-                {
-                    return error.HardSyntaxError;
-                }
-                return error.SyntaxError;
-            },
+            .dot => return self.failExpectingHard("Expected digit."),
             else => return self.failExpecting("Expected expression."),
         };
         return self.parseTrailingSchema(ast, head);
@@ -7975,8 +7965,9 @@ pub const Parser = struct {
                 }
 
                 // ns.name ... -- sub-ident after the dot.
-                if (after.tag == .ident) {
+                if (after.tag == .ident and after.span.start == self.tokens[dot_pos].span.end) {
                     const sub_text = after.slice(self.source);
+                    if (sub_text[0] == '-' or sub_text[0] == '_') return self.failExpectingHard("Private members can't be accessed from outside their modules.");
                     self.advance(); // consume sub ident
 
                     // ns.name(   ->   namespaced function call.
@@ -7986,41 +7977,16 @@ pub const Parser = struct {
                         return try self.parseFunctionCallBody(ast, name_id, ns_id, tok.span.start);
                     }
 
-                    // Plain `ns.name` without parens.  Two cases:
-                    //   * Inside a function-call argument list (e.g.
-                    //     `url(blah.css)`) -- emit a joined
-                    //     `expr_unquoted_ident` covering the full span
-                    //     so CSS-like values keep working.
-                    //   * At top-level value position -- this is a
-                    //     malformed Sass namespace reference (official Sass CLI
-                    //     reports `expected "("`). Hard error so the
-                    //     declaration text node path does not absorb it.
-                    if (self.call_arg_depth == 0) {
-                        return error.HardSyntaxError;
-                    }
-                    const joined = self.source[tok.span.start..after.span.end];
-                    const id = try self.intern_pool.intern(joined);
-                    return try ast.addNode(.{
-                        .tag = .expr_unquoted_ident,
-                        .flags = 0,
-                        .payload = @backingInt(id),
-                        .span_start = tok.span.start,
-                        .span_end = after.span.end,
-                    });
-                }
-
-                // ns. followed by something other than ident or dollar
-                // (e.g. `ns.()`, `ns..foo`, `ns. x`) -- clearly malformed
-                // Sass member syntax.  Hard error: "Expected identifier".
-                if (after.tag == .lparen or after.tag == .dot or
-                    after.tag == .whitespace or after.tag == .newline)
-                {
-                    return self.failExpectingHard("Expected identifier.");
+                    // Plain `ns.name` without parens is a member reference
+                    // missing its call, in an argument list too (`url()`
+                    // takes its contents as text before this).
+                    return self.failExpectingHard("expected \"(\".");
                 }
             }
 
-            // Lone dot after ident with nothing consumable after --
-            // backtrack so the dot is available to the caller.
+            // `ns.` followed by anything else (`ns.()`, `ns. x`, `ns.)`,
+            // `ns.#{x}`) is malformed member syntax.
+            if (self.tokens[dot_pos].span.start == tok.span.end) return self.failExpectingHard("Expected identifier.");
             self.pos = dot_pos;
         }
 
@@ -9941,7 +9907,7 @@ test "parseIdent: ns.name without parens is a HardSyntaxError at top level" {
     try std.testing.expectError(error.HardSyntaxError, parseOneExpr(alloc, &pool, "abc.def"));
 }
 
-test "parseIdent: ns.name inside function-call arg stays joined unquoted_ident" {
+test "parseIdent: ns.name inside function-call arg needs its call" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -9949,25 +9915,12 @@ test "parseIdent: ns.name inside function-call arg stays joined unquoted_ident" 
     var pool = try InternPool.init(alloc);
     defer pool.deinit(alloc);
 
-    // Inside a call-arg list (e.g. `url(blah.css)`) the parser cannot
-    // tell if this is a Sass namespace reference or a CSS-style joined
-    // identifier, so we fall back to a joined `expr_unquoted_ident`.
-    var ctx = try parseOneExpr(alloc, &pool, "url(blah.css)");
-    defer ctx.ast.deinit();
-
-    const n = ctx.ast.getNode(ctx.node);
-    try std.testing.expectEqual(AstTag.expr_func_call, n.tag);
-    // payload = extra_off  ->  [name_id, namespace_id, arg_count, arg0, ...]
-    const extra_off = n.payload;
-    const name_id: InternId = @fromBackingInt(@intCast(ctx.ast.getExtraU32(extra_off)));
-    try std.testing.expectEqualStrings("url", pool.get(name_id));
-    const arg_count = ctx.ast.getExtraU32(extra_off + 2);
-    try std.testing.expectEqual(@as(u32, 1), arg_count);
-    const arg_idx_raw = ctx.ast.getExtraU32(extra_off + 3);
-    const arg_node = ctx.ast.getNode(@fromBackingInt(@intCast(arg_idx_raw)));
-    try std.testing.expectEqual(AstTag.expr_unquoted_ident, arg_node.tag);
-    const arg_id: InternId = @fromBackingInt(@intCast(arg_node.payload));
-    try std.testing.expectEqualStrings("blah.css", pool.get(arg_id));
+    // A member reference is no CSS identifier in an argument list either;
+    // `url()` with its contents as text does not reach the expression
+    // parser.
+    try std.testing.expectError(error.HardSyntaxError, parseOneExpr(alloc, &pool, "f(blah.css)"));
+    try std.testing.expectError(error.HardSyntaxError, parseOneExpr(alloc, &pool, "f(blah.)"));
+    try std.testing.expectError(error.HardSyntaxError, parseOneExpr(alloc, &pool, ".blah"));
 }
 
 test "parseFuncCall: unterminated \u{2014} no closing paren \u{2192} SyntaxError" {
