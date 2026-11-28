@@ -8148,6 +8148,7 @@ pub const Parser = struct {
             std.ascii.eqlIgnoreCase(base_name, "calc") or
             std.ascii.eqlIgnoreCase(base_name, "element") or
             std.ascii.eqlIgnoreCase(base_name, "expression") or
+            std.ascii.eqlIgnoreCase(base_name, "type") or
             std.ascii.eqlIgnoreCase(base_name, "progid");
         const lowercase_name_len: usize = if (!isVendorPrefixedCssFunction(fn_name) and
             std.ascii.eqlIgnoreCase(base_name, "type"))
@@ -8191,7 +8192,8 @@ pub const Parser = struct {
         // `expression()`, `element()`, `type()`, and a vendor-prefixed
         // `calc()` take their contents as text in SassScript too.
         if (std.ascii.eqlIgnoreCase(base, "expression") or std.ascii.eqlIgnoreCase(base, "element")) return true;
-        const vendor_prefixed = isVendorPrefixedCssFunction(name);
+        // `--calc()` is a custom function, not a vendor prefix.
+        const vendor_prefixed = isVendorPrefixedCssFunction(name) and name[1] != '-';
         if (!vendor_prefixed and std.ascii.eqlIgnoreCase(base, "type")) return true;
         if (vendor_prefixed and std.ascii.eqlIgnoreCase(base, "calc")) return true;
         return has_interpolation and std.ascii.eqlIgnoreCase(base, "url");

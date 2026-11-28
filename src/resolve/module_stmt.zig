@@ -150,6 +150,7 @@ fn appendNamespaceTaken(ctx: anytype, namespace: []const u8, span: Span) Resolve
     const msg = try std.fmt.allocPrint(ctx.a, "There's already a module with namespace \"{s}\".", .{namespace});
     defer ctx.a.free(msg);
     const msg_id = try ctx.pool.intern(msg);
+    ctx.root_halted = true;
     const idx: StmtIndex = @intCast(ctx.prog.stmts.items.len);
     try ctx.prog.stmts.append(ctx.a, .{
         .kind = .static_error,

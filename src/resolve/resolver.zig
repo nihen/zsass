@@ -427,6 +427,9 @@ const Ctx = struct {
     ambiguous_star_mixins: std.StringHashMapUnmanaged(void) = .empty,
     star_functions: std.StringHashMapUnmanaged(CrossCallableTarget) = .empty,
     ambiguous_star_functions: std.StringHashMapUnmanaged(void) = .empty,
+    /// A root statement fails whenever it runs (a namespace already taken),
+    /// so the statements after it are not resolved.
+    root_halted: bool = false,
     /// True once a star-imported mixin key contains both `-` and `_`.
     /// While false, star mixin lookups can skip the rare O(map) identifierEq fallback.
     star_mixins_have_mixed_alias_keys: bool = false,
@@ -11432,7 +11435,7 @@ fn resolveRootStmtSequence(
     merge_import_forwards: bool,
 ) ResolveError!void {
     var i: usize = 0;
-    while (i < raw.len) {
+    while (i < raw.len and !ctx.root_halted) {
         const node: NodeIndex = @fromBackingInt(@intCast(raw[i]));
         const n = ctx.ast.getNode(node);
         if (n.tag != .stmt_import) {
@@ -11638,6 +11641,7 @@ const preamble_ctx_default_only = [_][]const u8{
     "slash_sim",
     "plain_css_validate_values",
     "mixin_accepts_content",
+    "root_halted",
 };
 
 const preamble_ctx_string_maps = .{
@@ -12105,6 +12109,7 @@ fn preambleBoundaryValid(
     if (ctx.calc_arg_allow_numberish_ident_literals or ctx.in_declaration_value) return false;
     if (!ctx.plain_css_validate_values) return false;
     if (ctx.mixin_accepts_content) return false;
+    if (ctx.root_halted) return false;
     if (ctx.prog.top_stmts.len != 0) return false;
     if (top_list.items.len == 0) return false;
     const last = top_list.items[top_list.items.len - 1];
