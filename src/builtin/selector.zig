@@ -468,7 +468,10 @@ pub fn selector_replace(ctx: *BuiltinContext, args: []const Value, arg_names: []
 pub fn selector_simple_selectors(ctx: *BuiltinContext, args: []const Value, arg_names: []const InternId) BuiltinError!Value {
     const bound = try bindNamedOrPositionalArgsStrict(ctx, args, arg_names, &.{"selector"}, 1);
     const selector_val = bound[0] orelse return reportMissingArgument("selector");
-    if (selector_val.kind() == .nil) return error.SassError;
+    if (selector_val.kind() == .nil) {
+        error_format.setContextMessage("$selector: null is not a valid selector: it must be a string,\na list of strings, or a list of lists of strings.");
+        return error.SassError;
+    }
 
     const selector_str = try selectorArgCssString(ctx, selector_val);
     defer ctx.allocator.free(selector_str);

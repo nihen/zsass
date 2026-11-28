@@ -1096,6 +1096,9 @@ fn lookupModuleStaticOrConfigSeedValue(loader: *const ModuleResolver, module_id:
 const ResolverEvalEnv = struct {
     ctx: *Ctx,
     allow_configurable_defaults: bool = false,
+    /// A failed built-in call keeps its message: the evaluation is the
+    /// value's, not a guess the run makes again.
+    keep_failure_message: bool = false,
     /// Set when the value is evaluated only here (a module configuration):
     /// the deprecations its built-in calls raise are reported, located at
     /// each call. Otherwise the VM evaluates the expression again and
@@ -1974,6 +1977,7 @@ fn parseWithConfigEntries(ctx: *Ctx, config_extra: ExtraIndex) ResolveError![]Wi
         var env: ResolverEvalEnv = .{
             .ctx = ctx,
             .allow_configurable_defaults = true,
+            .keep_failure_message = true,
             .canonical_literals = true,
             .deprecation_opts = if (ctx.loader) |loader| loader.deprecation_opts else null,
             .direct_value = expr_idx,
@@ -8301,6 +8305,16 @@ fn resolveCssIfValueExpr(ctx: *Ctx, text: []const u8, span: Span) ResolveError!E
 /// official CLI writes it when parsing: with positional arguments, the CSS
 /// `if()` that replaces it (`if(sass(c): a; else: b)`, without the `else`
 /// when it is `null`).
+const legacy_if_missing_condition = "Missing argument $condition.";
+const legacy_if_missing_if_true = "Missing argument $if-true.";
+
+/// An `if()` default argument whose arguments are missing fails when it is
+/// used; a fatal deprecation it raised stays.
+fn clearLegacyIfArgumentMessage() void {
+    const msg = error_format.currentContextMessage() orelse return;
+    if (std.mem.eql(u8, msg, legacy_if_missing_condition) or std.mem.eql(u8, msg, legacy_if_missing_if_true)) error_format.clearContextMessage();
+}
+
 fn warnLegacyIfFunction(ast: *const ast_flat.Ast, ctx: *Ctx, call_extra: ExtraIndex, arg_count: u32, span: Span) ResolveError!void {
     const loader = ctx.loader orelse return;
     const opts = loader.deprecation_opts orelse return;
@@ -8468,7 +8482,14 @@ fn resolveLegacyIfBuiltinExpr(
         return error.SassError;
     }
 
-    if (condition_expr == null or if_true_expr == null) return error.SassError;
+    if (condition_expr == null) {
+        error_format.setContextMessage(legacy_if_missing_condition);
+        return error.SassError;
+    }
+    if (if_true_expr == null) {
+        error_format.setContextMessage(legacy_if_missing_if_true);
+        return error.SassError;
+    }
 
     const else_expr = if (if_false_expr) |v|
         v
@@ -9583,7 +9604,10 @@ fn resolveDeclarationStmt(ctx: *Ctx, n: AstNode, span: Span, in_plain_css_module
             }
         }
     }
-    if (ctx.callable_decl_context == .function) return error.SassError;
+    if (ctx.callable_decl_context == .function) {
+        error_format.setContextMessage("@function rules may not contain declarations.");
+        return error.SassError;
+    }
     const pd = try resolveDeclPropData(ctx, prop_n, span);
     const saved_in_declaration_value = ctx.in_declaration_value;
     ctx.in_declaration_value = true;
@@ -10657,7 +10681,17 @@ fn resolveIncludeStmt(ctx: *Ctx, n: AstNode, span: Span) ResolveError!StmtIndex 
     const unescaped_name = try css_utils.unescapeSassIdentifier(ctx.a, raw_name_slice);
     defer if (unescaped_name.ptr != raw_name_slice.ptr) ctx.a.free(unescaped_name);
     const name_slice = unescaped_name;
-    if (isDoubleDashIdentifier(name_slice)) return error.Unsupported;
+    if (isDoubleDashIdentifier(name_slice)) {
+        // `ns.--a` is a private member.
+        // One no mixin is named (`__a` is) is undefined.
+        error_format.setContextMessage(if (namespace_id != .none)
+            "Private members can't be accessed from outside their modules."
+        else if (lookupIdentifierIdInsensitive(&ctx.prog.mixin_names, name_slice) != null)
+            "Sass @mixin names beginning with -- are forbidden for forward-compatibility with plain CSS mixins."
+        else
+            "Undefined mixin.");
+        return error.SassError;
+    }
     var callee_module = local_module_id_sentinel;
     // SAFETY: initialized before first read in this scope.
     var mid: MixinId = undefined;
@@ -11016,7 +11050,11 @@ fn resolvePendingCallableDefaults(ctx: *Ctx) ResolveError!void {
                     mixin.param_slots,
                     pending.param_index,
                 ) catch |err| switch (err) {
-                    error.SassError, error.UnknownVar => null,
+                    // A default that fails is reported when it is used.
+                    error.SassError, error.UnknownVar => blk: {
+                        clearLegacyIfArgumentMessage();
+                        break :blk null;
+                    },
                     else => return err,
                 };
                 mixin.defaults[param_idx] = de;
@@ -11034,7 +11072,11 @@ fn resolvePendingCallableDefaults(ctx: *Ctx) ResolveError!void {
                     func.param_slots,
                     pending.param_index,
                 ) catch |err| switch (err) {
-                    error.SassError, error.UnknownVar => null,
+                    // A default that fails is reported when it is used.
+                    error.SassError, error.UnknownVar => blk: {
+                        clearLegacyIfArgumentMessage();
+                        break :blk null;
+                    },
                     else => return err,
                 };
                 func.defaults[param_idx] = de;
@@ -13679,7 +13721,7 @@ test "resolver: custom css @function body keeps unknown var literal" {
 }
 
 test "resolver: include name starting with -- errors even with __ declaration" {
-    try std.testing.expectError(error.Unsupported, parseAndResolve(std.testing.allocator,
+    try std.testing.expectError(error.SassError, parseAndResolve(std.testing.allocator,
         \\@mixin __a() { b: c; }
         \\d { @include --a; }
     ));

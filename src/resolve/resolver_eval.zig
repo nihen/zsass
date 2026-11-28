@@ -184,6 +184,10 @@ fn evalLiteralColor(env: anytype, prog: anytype, payload: u32) Error!Value {
 fn evalBinary(env: anytype, prog: anytype, payload: u32, expr_idx: anytype) Error!Value {
     const b = prog.binary_exprs.items[payload];
     const lhs = try eval(env, prog, b.lhs);
+    // `or` and `and` give the operand that decides, evaluating the right
+    // only when it does.
+    if (b.op == .or_op and lhs.isTruthy()) return lhs;
+    if (b.op == .and_op and !lhs.isTruthy()) return lhs;
     const rhs = try eval(env, prog, b.rhs);
     return switch (b.op) {
         .add => try addValues(env, lhs, rhs),
@@ -218,8 +222,7 @@ fn evalBinary(env: anytype, prog: anytype, payload: u32, expr_idx: anytype) Erro
                 else => unreachable,
             };
         },
-        .and_op => if (lhs.isTruthy() and rhs.isTruthy()) Value.true_v else Value.false_v,
-        .or_op => if (lhs.isTruthy() or rhs.isTruthy()) Value.true_v else Value.false_v,
+        .and_op, .or_op => rhs,
     };
 }
 
@@ -411,11 +414,23 @@ fn evalBuiltinCall(env: anytype, prog: anytype, payload: u32) Error!Value {
         }
     }
 
+    // A message the call sets while failing belongs to the run, which makes
+    // the call again, unless this evaluation is the value's.
+    var saved_msg_buf: [512]u8 = undefined;
+    const saved_msg: ?[]const u8 = if (error_format.currentContextMessage()) |m| blk: {
+        const n = @min(m.len, saved_msg_buf.len);
+        @memcpy(saved_msg_buf[0..n], m[0..n]);
+        break :blk saved_msg_buf[0..n];
+    } else null;
+    const keep_failure_message = @hasField(@TypeOf(env.*), "keep_failure_message") and env.keep_failure_message;
     const result = builtin_mod.dispatch(&bctx, call.builtin_id, args, arg_names) catch |err| {
         // A deprecation made fatal is the compilation's error, at the call.
         if (err == error.FatalDeprecation and bctx.deprecation_opts != null) {
             if (call.span_start != std.math.maxInt(u32)) error_format.recordErrorSpan(call.span_start, call.span_end, 0);
             return error.SassError;
+        }
+        if (!keep_failure_message) {
+            if (saved_msg) |m| error_format.setContextMessage(m) else error_format.clearContextMessage();
         }
         return error.NonStaticExpr;
     };
